@@ -247,13 +247,13 @@ function Get-AVDTuneStorageProfileFolders {
 }
 
 function Get-AVDTuneStorageAclDiff {
-    <# The shown diff before the ACL is set: what is there, what the recommendation is, the findings. Returns @{ Sddl (found); Recommended (SDDL); Findings; Found; Expected; Hash (of the recommended SDDL, to confirm exactly this) } #>
-    param([Parameter(Mandatory)][string]$FoundSddl, [Parameter(Mandatory)][string]$UsersSid, [Parameter(Mandatory)][string]$AdminsSid)
+    <# The shown diff before the ACL is set: what is there, what the recommendation is, the findings. Returns @{ Sddl (found); Recommended (SDDL); Findings; Found; Expected; Hash (of account, share, recommended and found SDDL, to confirm exactly this), Account, Share } #>
+    param([Parameter(Mandatory)][string]$FoundSddl, [Parameter(Mandatory)][string]$UsersSid, [Parameter(Mandatory)][string]$AdminsSid, [Parameter(Mandatory)][string]$Account, [Parameter(Mandatory)][string]$Share)
     $rec = New-AVDTuneFSLogixRecommendedSddl -UsersSid $UsersSid -AdminsSid $AdminsSid
     $cmp = Compare-AVDTuneFSLogixAcl -Sddl $FoundSddl -UsersSids @($UsersSid) -AdminsSids @($AdminsSid)
     $sha = [Security.Cryptography.SHA256]::Create()
-    try { $hash = ([BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($rec + '|' + $FoundSddl))) -replace '-', '').Substring(0, 16) } finally { $sha.Dispose() }
-    [pscustomobject]@{ Sddl = $FoundSddl; Recommended = $rec; Findings = @($cmp.Findings); Found = @($cmp.Found); Expected = @((ConvertFrom-AVDTuneSddl $rec).Aces | ForEach-Object { Format-AVDTuneAce $_ }); Compliant = [bool]$cmp.Compliant; Hash = $hash }
+    try { $hash = ([BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($Account.ToLowerInvariant() + '|' + $Share.ToLowerInvariant() + '|' + $rec + '|' + $FoundSddl))) -replace '-', '').Substring(0, 16) } finally { $sha.Dispose() }
+    [pscustomobject]@{ Sddl = $FoundSddl; Recommended = $rec; Findings = @($cmp.Findings); Found = @($cmp.Found); Expected = @((ConvertFrom-AVDTuneSddl $rec).Aces | ForEach-Object { Format-AVDTuneAce $_ }); Compliant = [bool]$cmp.Compliant; Hash = $hash; Account = $Account; Share = $Share }
 }
 
 function Set-AVDTuneStorageRootAcl {
@@ -265,14 +265,16 @@ function Set-AVDTuneStorageRootAcl {
     [CmdletBinding()]
     param([Parameter(Mandatory)]$Files, [Parameter(Mandatory)][string]$Account, [Parameter(Mandatory)][string]$Share, [Parameter(Mandatory)][string]$Token, [Parameter(Mandatory)][string]$UsersSid, [Parameter(Mandatory)][string]$AdminsSid,
         [Parameter(Mandatory)][string]$ConfirmedHash, [string]$Root = (Get-AVDTuneRoot), [string]$User, [string]$SnapshotId)
+    if (-not (Test-AVDTuneWriteAllowed)) { return [pscustomobject]@{ Status = 'Failed'; Message = 'Read only: confirm a snapshot of today on the Overview first. Nothing was set.' } }
     $now = Get-AVDTuneStorageShareAcl -Files $Files -Account $Account -Share $Share -Token $Token
     if (-not $now.Ok) { return [pscustomobject]@{ Status = 'Failed'; Message = "The current ACL cannot be read, so nothing is set: $($now.Error)" } }
-    $diff = Get-AVDTuneStorageAclDiff -FoundSddl $now.Sddl -UsersSid $UsersSid -AdminsSid $AdminsSid
+    $diff = Get-AVDTuneStorageAclDiff -FoundSddl $now.Sddl -UsersSid $UsersSid -AdminsSid $AdminsSid -Account $Account -Share $Share
     if ($diff.Hash -ne $ConfirmedHash) { return [pscustomobject]@{ Status = 'Failed'; Message = 'The ACL on the share changed after the diff was shown (or the diff is not the confirmed one). Nothing was set: look at the new diff and confirm it again.' } }
     if ($diff.Compliant) { return [pscustomobject]@{ Status = 'Unchanged'; Message = 'The root already matches the recommendation.' } }
     $h = @{ 'x-ms-date' = [DateTime]::UtcNow.ToString('R', [Globalization.CultureInfo]::InvariantCulture); 'x-ms-file-permission' = $diff.Recommended; 'x-ms-file-permission-format' = 'sddl'
         'x-ms-file-attributes' = 'preserve'; 'x-ms-file-creation-time' = 'preserve'; 'x-ms-file-last-write-time' = 'preserve' }
     $r = Invoke-AVDTuneStorageFiles -Files $Files -Method PUT -Account $Account -Share $Share -Query 'restype=directory&comp=properties' -Token $Token -Headers $h
+    [void](Set-AVDTuneState -Root $Root -Values @{ LastChange = [DateTime]::UtcNow.ToString('o') })   # also a failed attempt may have changed part of it
     if ([int]$r.Status -lt 200 -or [int]$r.Status -ge 300) {
         $why = if ([int]$r.Status -in 401, 403) { 'The signed-in account lacks the role Storage File Data Privileged Contributor (or SMB Share Elevated Contributor does not apply to the REST call).' } else { "Azure answered $($r.Status)." }
         return [pscustomobject]@{ Status = 'Failed'; Message = "The ACL was not set. $why$(if ($r.Error) { ' (' + $r.Error + ')' })" }
@@ -455,7 +457,7 @@ function Invoke-AVDTuneStorageCheck {
                 else { Add (New-AVDTuneStRow 'st.acl.key' 5 'ACL through the account key' 'yellow' 'The ACL was read with the account key (fallback, confirmed for this run). The key was used in memory only and the mapping was removed; the change log says so.' 'Give the administrator Storage File Data Privileged Reader so the key is not needed.' -Source $aclSource -Verified $false) }
             }
             catch { Add (New-AVDTuneStRow 'st.acl.key' 5 'ACL through the account key' 'red' "The key fallback failed: $($_.Exception.Message)" '' -Source $aclSource -Verified $false) }
-            finally { $key = $null; try { & $F.KeyMapRemove "\\$($share.Host)\$($share.Share)" } catch { } }
+            finally { $key = $null; $keys = $null; try { & $F.KeyMapRemove "\\$($share.Host)\$($share.Share)" } catch { } }
         }
         else { Add (New-AVDTuneStRow 'st.acl.key' 5 'ACL through the account key' 'info' 'The account key is not used: it gives full access and is only a fallback, after you confirm it for this run.' -Source $aclSource -Verified $false) }
     }
@@ -467,7 +469,7 @@ function Invoke-AVDTuneStorageCheck {
             else {
                 $worst = if (@($cmp.Findings | Where-Object Status -eq 'red').Count -gt 0) { 'red' } else { 'yellow' }
                 Add (New-AVDTuneStRow 'st.acl.root' 5 'NTFS rights of the share root' $worst (($cmp.Findings | ForEach-Object { $_.Text }) -join ' ') $(if ($UsersSids.Count -gt 0 -and $AdminsSids.Count -gt 0) { 'Set the recommended ACL (shown as a diff first, only after your confirmation).' } else { 'Name the users and administrators group (domain information) to get the diff.' }) -Source $aclSource -Verified $false -Note $aclNote)
-                if ($UsersSids.Count -gt 0 -and $AdminsSids.Count -gt 0) { $ctx.AclDiff = Get-AVDTuneStorageAclDiff -FoundSddl $sddl -UsersSid $UsersSids[0] -AdminsSid $AdminsSids[0] }
+                if ($UsersSids.Count -gt 0 -and $AdminsSids.Count -gt 0) { $ctx.AclDiff = Get-AVDTuneStorageAclDiff -FoundSddl $sddl -UsersSid $UsersSids[0] -AdminsSid $AdminsSids[0] -Account $share.Account -Share $share.Share }
             }
             if ($StorageToken -and $Files -and -not $ctx.KeyUsed -and $UsersSids.Count -gt 0) {
                 $broadFolders = New-Object System.Collections.ArrayList
@@ -492,9 +494,9 @@ function Invoke-AVDTuneStorageCheck {
         try {
             $t = & $F.ShareTestAsUser $first $TestUser $TestPassword $DomainController
             $failed = @($t.Steps | Where-Object { -not $_.Ok })
-            if ($t.LogonFailed) { Add (New-AVDTuneStRow 'st.access' 6 'Access test as a domain user' 'red' "The logon of $TestUser failed: $($t.Error)" 'Check the account name, the password and that the domain controller is reachable.' -Source $aclSource -Verified $false) }
-            elseif ($failed.Count -eq 0) { Add (New-AVDTuneStRow 'st.access' 6 'Access test as a domain user' 'green' "As $TestUser (Kerberos, new credentials for the network only): create folder, write, read, delete worked. This proves Kerberos, share permission and NTFS together." -Source $aclSource -Verified $false -Note 'The VHDX test as that user is not done (frx runs as the administrator): see the function test.') }
-            else { Add (New-AVDTuneStRow 'st.access' 6 'Access test as a domain user' 'red' "As $TestUser the step '$($failed[0].Name)' failed: $($failed[0].Error)" 'Check the share level role, the NTFS rights and the Kerberos setup (SPN, ticket encryption).' -Source $aclSource -Verified $false) }
+            if ($t.LogonFailed) { Add (New-AVDTuneStRow 'st.access' 6 'Access test as a domain user' 'red' "The logon of $TestUser failed: $($t.Error)" 'Check the account name and that the domain controller is reachable (the password is only checked when the share is accessed).' -Source $aclSource -Verified $false) }
+            elseif ($failed.Count -eq 0) { Add (New-AVDTuneStRow 'st.access' 6 'Access test as a domain user' 'green' "As $TestUser (Kerberos, new credentials for the network only): create folder, write, read, delete worked. This proves Kerberos, share permission and NTFS together. Windows takes the password for these network-only credentials without checking it: it was only checked when the share was accessed." -Source $aclSource -Verified $false -Note 'The VHDX test as that user is not done (frx runs as the administrator): see the function test.') }
+            else { Add (New-AVDTuneStRow 'st.access' 6 'Access test as a domain user' 'red' "As $TestUser the step '$($failed[0].Name)' failed: $($failed[0].Error)" 'Check the share level role, the NTFS rights and the Kerberos setup (SPN, ticket encryption); a wrong password also shows up here, not at the logon.' -Source $aclSource -Verified $false) }
         }
         catch { Add (New-AVDTuneStRow 'st.access' 6 'Access test as a domain user' 'red' "The test could not run: $($_.Exception.Message)" '' -Source $aclSource -Verified $false) }
     }

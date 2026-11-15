@@ -210,21 +210,34 @@ try {
     $setE = New-Env -FilesSeed @{ Acls = @{ '' = 'O:BAG:DUD:PAI(A;OICI;FA;;;WD)(A;OICI;FA;;;BA)' }; Folders = @() }
     $diff = (Invoke-Check $setE).AclDiff
     Test-Check 'the diff names what is there and what is expected' ($diff.Found.Count -ge 1 -and $diff.Expected.Count -eq 4 -and @($diff.Findings | Where-Object Status -eq 'red').Count -ge 1) $null
+    $gateHash = (Get-AVDTuneStorageAclDiff -FoundSddl 'O:BAG:DUD:PAI(A;OICI;FA;;;WD)(A;OICI;FA;;;BA)' -UsersSid $usersSid -AdminsSid $adminsSid -Account 'storageaccount' -Share 'profiles').Hash
+    $closed = Set-AVDTuneStorageRootAcl -Files $setE.Files -Account 'storageaccount' -Share 'profiles' -Token $stTok -UsersSid $usersSid -AdminsSid $adminsSid -ConfirmedHash $gateHash -Root $tmp -User 'admin1' -SnapshotId 'snap'
+    Test-Check 'setting the ACL without the write gate: refused, nothing set (counter-test L3)' ($closed.Status -eq 'Failed' -and $closed.Message -like '*Read only*' -and $setE.Files.Store.Puts.Count -eq 0) $closed.Message
+    Open-AVDTuneWriteGate -SnapshotId 'snap-check' -ConfirmedBy 'Check Runner'
     $call = { param($E, $Hash) Set-AVDTuneStorageRootAcl -Files $E.Files -Account 'storageaccount' -Share 'profiles' -Token $stTok -UsersSid $usersSid -AdminsSid $adminsSid -ConfirmedHash $Hash -Root $tmp -User 'admin1' -SnapshotId 'snap' }
     Test-Check 'setting needs the confirmed hash (a mandatory parameter); a wrong hash sets nothing' ((Test-Throws { Set-AVDTuneStorageRootAcl -Files $setE.Files -Account 'storageaccount' -Share 'profiles' -Token $stTok -UsersSid $usersSid -AdminsSid $adminsSid }) -and (& $call $setE 'deadbeefdeadbeef').Status -eq 'Failed' -and $setE.Files.Store.Puts.Count -eq 0) $null
     $changed = New-Env -FilesSeed @{ Acls = @{ '' = 'O:BAG:DUD:PAI(A;OICI;FA;;;WD)(A;OICI;FA;;;BA)' }; Folders = @(); ChangeOnRead = 'O:BAG:DUD:PAI(A;OICI;FA;;;BA)' }
     [void](Get-AVDTuneStorageShareAcl -Files $changed.Files -Account 'storageaccount' -Share 'profiles' -Token $stTok)
-    $diff2 = Get-AVDTuneStorageAclDiff -FoundSddl 'O:BAG:DUD:PAI(A;OICI;FA;;;WD)(A;OICI;FA;;;BA)' -UsersSid $usersSid -AdminsSid $adminsSid
+    $diff2 = Get-AVDTuneStorageAclDiff -FoundSddl 'O:BAG:DUD:PAI(A;OICI;FA;;;WD)(A;OICI;FA;;;BA)' -UsersSid $usersSid -AdminsSid $adminsSid -Account 'storageaccount' -Share 'profiles'
     $rc = & $call $changed $diff2.Hash
     Test-Check 'the ACL changed after the diff was shown: nothing is set, the administrator must look again' ($rc.Status -eq 'Failed' -and $rc.Message -like '*changed after the diff*' -and $changed.Files.Store.Puts.Count -eq 0) $null
     $ok = & $call $setE $diff.Hash
     Test-Check 'confirmed diff: the recommended SDDL is set once, attributes and times preserved, the root now matches' ($ok.Status -eq 'Changed' -and $setE.Files.Store.Puts.Count -eq 1 -and $setE.Files.Store.Puts[0].Sddl -eq $goodSddl -and $setE.Files.Store.Puts[0].Attributes -eq 'preserve' -and $setE.Files.Store.Puts[0].Created -eq 'preserve' -and (Get-Row (Invoke-Check $setE) 'st.acl.root').Status -eq 'green') $ok.Message
     Test-Check 'the change is in the change log (no SDDL text in it)' ((@(Get-AVDTuneChangeLog -Root $tmp | Where-Object { $_.Component -eq 'Storage ACL' }).Count -eq 1) -and (@(Get-AVDTuneChangeLog -Root $tmp | Where-Object { $_.Component -eq 'Storage ACL' })[0].Text -notmatch 'O:BA')) $null
-    $same = & $call $setE (Get-AVDTuneStorageAclDiff -FoundSddl $goodSddl -UsersSid $usersSid -AdminsSid $adminsSid).Hash
+    $same = & $call $setE (Get-AVDTuneStorageAclDiff -FoundSddl $goodSddl -UsersSid $usersSid -AdminsSid $adminsSid -Account 'storageaccount' -Share 'profiles').Hash
     Test-Check 'an ACL that already matches: Unchanged, no second write' ($same.Status -eq 'Unchanged' -and $setE.Files.Store.Puts.Count -eq 1) $null
     $pf = New-Env -FilesSeed @{ Acls = @{ '' = 'O:BAG:DUD:PAI(A;OICI;FA;;;WD)' }; Folders = @(); PutForbidden = $true }
-    $rp = & $call $pf (Get-AVDTuneStorageAclDiff -FoundSddl 'O:BAG:DUD:PAI(A;OICI;FA;;;WD)' -UsersSid $usersSid -AdminsSid $adminsSid).Hash
+    $rp = & $call $pf (Get-AVDTuneStorageAclDiff -FoundSddl 'O:BAG:DUD:PAI(A;OICI;FA;;;WD)' -UsersSid $usersSid -AdminsSid $adminsSid -Account 'storageaccount' -Share 'profiles').Hash
     Test-Check 'the role to change the ACL is missing (403 on the PUT): Failed with the role named' ($rp.Status -eq 'Failed' -and $rp.Message -like '*Privileged Contributor*') $rp.Message
+    $otherShare = Get-AVDTuneStorageAclDiff -FoundSddl 'O:BAG:DUD:PAI(A;OICI;FA;;;WD)(A;OICI;FA;;;BA)' -UsersSid $usersSid -AdminsSid $adminsSid -Account 'storageaccount' -Share 'other'
+    $otherAcct = Get-AVDTuneStorageAclDiff -FoundSddl 'O:BAG:DUD:PAI(A;OICI;FA;;;WD)(A;OICI;FA;;;BA)' -UsersSid $usersSid -AdminsSid $adminsSid -Account 'otheraccount' -Share 'profiles'
+    Test-Check 'the hash covers account and share: another share or account gives another hash, the diff names the share it was made for (counter-test L3)' ($otherShare.Hash -ne $diff.Hash -and $otherAcct.Hash -ne $diff.Hash -and $diff.Account -eq 'storageaccount' -and $diff.Share -eq 'profiles') $null
+    $wrongShare = New-Env -FilesSeed @{ Acls = @{ '' = 'O:BAG:DUD:PAI(A;OICI;FA;;;WD)(A;OICI;FA;;;BA)' }; Folders = @() }
+    $rw = Set-AVDTuneStorageRootAcl -Files $wrongShare.Files -Account 'storageaccount' -Share 'other' -Token $stTok -UsersSid $usersSid -AdminsSid $adminsSid -ConfirmedHash $diff.Hash -Root $tmp -User 'admin1' -SnapshotId 'snap'
+    Test-Check 'a hash confirmed for one share does not set another share (counter-test L3)' ($rw.Status -eq 'Failed' -and $wrongShare.Files.Store.Puts.Count -eq 0) $rw.Message
+    Test-Check 'a set ACL (or attempt) sets LastChange (checklist: every write)' ($null -ne (Get-AVDTuneState $tmp).LastChange) $null
+    $srcSt = Get-Content -LiteralPath (Join-Path $repo 'Modules\AVDTune.Storage.psm1') -Raw
+    Test-Check 'the key list is cleared in finally, like the key (counter-test L1)' ($srcSt -match 'finally \{ \$key = \$null; \$keys = \$null;') $null
     $rr = & $call (New-Env -FilesSeed @{ Forbidden = $true }) 'x'
     Test-Check 'the current ACL cannot be read: nothing is set' ($rr.Status -eq 'Failed' -and $rr.Message -like '*nothing is set*') $null
 
@@ -235,6 +248,9 @@ try {
     $lg = Invoke-Check (New-Env -FslSeed @{ AsUser = @{ LogonFailed = $true; Error = 'Windows error 1326'; Steps = @() } }) @{ TestUser = 'EXAMPLE\t'; TestPassword = $sec }
     $sf = Invoke-Check (New-Env -FslSeed @{ AsUser = @{ LogonFailed = $false; Error = ''; Steps = @(@{ Name = 'create folder'; Ok = $false; Error = 'Access is denied' }) } }) @{ TestUser = 'EXAMPLE\t'; TestPassword = $sec }
     Test-Check 'logon of the test user fails: red; a step fails (share permission or NTFS): red naming the step' ((Get-Row $lg 'st.access').Status -eq 'red' -and (Get-Row $lg 'st.access').Reason -like '*1326*' -and (Get-Row $sf 'st.access').Status -eq 'red' -and (Get-Row $sf 'st.access').Reason -like '*create folder*') $null
+
+    $okU = Invoke-Check (New-Env) @{ TestUser = 'EXAMPLE\t'; TestPassword = $sec }
+    Test-Check 'the green access test says the password is only checked when the share is accessed (counter-test L2)' ((Get-Row $okU 'st.access').Status -eq 'green' -and (Get-Row $okU 'st.access').Reason -like '*password*only checked when the share was accessed*') (Get-Row $okU 'st.access').Reason
 
     # ---------------------------------------------------------------- storing
     $savedKey = Save-AVDTuneStorageCheckRun -Root $tmp -Result $kr2 -User 'admin1' -SnapshotId 'snap'

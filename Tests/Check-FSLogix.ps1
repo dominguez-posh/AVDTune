@@ -135,11 +135,38 @@ try {
     [void](Save-AVDTuneRedirections -Machine $mr -F $rf -Root $tmp -Xml $xml2 -User 'admin1' -SnapshotId 'snap-check')
     [void](Undo-AVDTuneRedirections -Machine $mr -F $rf -Root $tmp -User 'admin1' -SnapshotId 'snap-check')
     Test-Check 'undo puts the previous file content back' ($rf.Store.Files["$share\redirections.xml"] -ceq $xml) $null
+    $rfNew = New-AVDTuneFakeFSLogix; $mrNew = New-Master
+    [void](Save-AVDTuneRedirections -Machine $mrNew -F $rfNew -Root $tmp -Xml $xml -Folder $share -User 'admin1' -SnapshotId 'snap-check')
+    [void](Undo-AVDTuneRedirections -Machine $mrNew -F $rfNew -Root $tmp -User 'admin1' -SnapshotId 'snap-check')
+    Test-Check 'undo of a first save deletes the file instead of leaving an empty one (counter-test L5)' (-not $rfNew.Store.Files.ContainsKey("$share\redirections.xml") -and @($rfNew.Log | Where-Object { $_ -like "DeleteFile $share\redirections.xml" }).Count -eq 1) ($rfNew.Log -join '|')
+    $rUndo = Join-Path $tmp 'config\redirections-undo.json'
+    [void](Save-AVDTuneRedirections -Machine $mrNew -F $rfNew -Root $tmp -Xml $xml -Folder $share -User 'admin1' -SnapshotId 'snap-check')
+    $firstR = [IO.File]::ReadAllText($rUndo)
+    [void](Save-AVDTuneRedirections -Machine $mrNew -F $rfNew -Root $tmp -Xml ($xml -replace 'Contoso', 'Fabrikam') -Folder $share -User 'admin1' -SnapshotId 'snap-check')
+    Test-Check 'a second save keeps the first redirections undo record under a versioned name (counter-test L5)' (@(Get-ChildItem (Join-Path $tmp 'config') -Filter 'redirections-undo.*.json' | Where-Object { [IO.File]::ReadAllText($_.FullName) -ceq $firstR }).Count -ge 1) $null
+    # L4: '..' and local folders that users can change
+    $real = New-AVDTuneFSLogixAdapter
+    $userDir = Join-Path $tmp 'userdir'; [void](New-Item -ItemType Directory -Path $userDir -Force)
+    Test-Check 'RedirXMLSourceFolder with .. is refused by the validation (counter-test L4)' ((Test-AVDTuneFSLogixValue $by['Profile:RedirXMLSourceFolder'] 'C:\Windows\..\Users\x') -like '*..*' -and (Test-AVDTuneFSLogixValue $by['Profile:RedirXMLSourceFolder'] "$share\..\other") -like '*..*')
+    Test-Check 'the real adapter refuses .. and a local folder that users can change, for read, write and delete (counter-test L4)' ((Get-ThrownText { & $real.WriteText 'C:\Windows\..\Users\x\redirections.xml' 'x' }) -like "*'..'*" -and (Get-ThrownText { & $real.WriteText (Join-Path $userDir 'redirections.xml') 'x' }) -like '*users*' -and (Get-ThrownText { & $real.ReadText (Join-Path $userDir 'redirections.xml') }) -like '*users*' -and (Get-ThrownText { & $real.DeleteFile (Join-Path $userDir 'redirections.xml') }) -like '*users*' -and -not (Test-Path -LiteralPath (Join-Path $userDir 'redirections.xml'))) $null
+    Test-Check 'a UNC target is not blocked by that check (the share is the administrator''s choice)' ($null -eq (Get-ThrownText { Assert-AVDTuneRedirectionsPath "$share\redirections.xml" })) $null
+    # M3: DOMAIN\user with the real parser
+    $ln1 = Split-AVDTuneLogonName 'EXAMPLE\alice'; $ln2 = Split-AVDTuneLogonName 'alice@example.test'; $ln3 = Split-AVDTuneLogonName 'alice'
+    Test-Check 'DOMAIN\user, user@domain and a plain name are split by the real parser (counter-test M3)' ($ln1.Domain -eq 'EXAMPLE' -and $ln1.Name -eq 'alice' -and $ln2.Domain -eq 'example.test' -and $ln2.Name -eq 'alice' -and $ln3.Domain -eq '' -and $ln3.Name -eq 'alice') "$($ln1.Domain)|$($ln1.Name)"
+    $srcFsl = Get-Content -LiteralPath (Join-Path $repo 'Modules\AVDTune.FSLogix.psm1') -Raw
+    Test-Check 'the adapter uses that parser; the user is disposed (counter-test L2/M3)' ($srcFsl -match 'Split-AVDTuneLogonName \$User' -and $srcFsl -match '\$id\.Dispose\(\)') $null
+    # L2/L3 in the page: password and key confirmation cleared after an error too; the share of the diff is set, behind the gate
+    $srcPage = Get-Content -LiteralPath (Join-Path $repo 'AVDTune-FSLogix.ps1') -Raw
+    Test-Check 'page: the password field is cleared before the error return (counter-test L2)' ($srcPage -match "(?s)if \(\`$job\.Kind -eq 'Storage'\) \{ \`$ui\.PwdFslPassword\.Clear\(\).{0,200}if \(\`$err -or -not \`$result\)") $null
+    Test-Check 'page: the ACL is set on the share of the diff, after the write gate check, before the confirmation (counter-test L3)' ($srcPage -match '(?s)BtnFslAclSet \{.{0,900}Assert-FslWrite.{0,900}Confirm-Action' -and $srcPage -match 'Account = \[string\]\$d\.Account; Share = \[string\]\$d\.Share' -and $srcPage -notmatch 'Split-AVDTuneUncShare \(@\(Get-AVDTuneFSLogixLocations') $null
 
     # ---------------------------------------------------------------- Defender
     $dl = Get-AVDTuneFSLogixDefenderList -VhdLocations @($share)
     $paths = @($dl.Items | Where-Object Kind -eq 'Path' | ForEach-Object Value); $procs = @($dl.Items | Where-Object Kind -eq 'Process' | ForEach-Object Value)
-    Test-Check 'Defender list: the two processes of Microsoft Learn' (($procs -join ',') -eq 'frxsvc.exe,frxccds.exe') $null
+    $apps = 'C:\Program Files\FSLogix\Apps'
+    Test-Check 'Defender list: the two processes of Microsoft Learn, only with the full path, no frxccd.exe, no bare name (counter-test M1)' (($procs -join ',') -eq "$apps\frxsvc.exe,$apps\frxccds.exe" -and -not (@($dl.Items | Where-Object { $_.Kind -eq 'Process' -and $_.Value -notlike 'C:\Program Files\FSLogix\Apps\*' }).Count) -and -not (@($dl.Items | Where-Object { $_.Value -like '*frxccd.exe' }).Count)) ($procs -join ',')
+    Test-Check 'Defender list: nothing beyond Learn''s list (folders: Apps, ProgramData\FSLogix with Cache and Proxy, Users, both Temp; drivers; shares); what Learn names with %username% or %TEMP% is Verified=false (counter-test M2)' (-not (@($dl.Items | Where-Object { $_.Kind -eq 'Path' -and $_.Value -notlike '\\*' -and $_.Value -notlike 'C:\Program Files\FSLogix\Apps\*' -and $_.Value -notlike 'C:\ProgramData\FSLogix\*' -and $_.Value -notlike 'C:\Users\*\AppData\Local\FSLogix\' -and $_.Value -notlike 'C:\Users\*\AppData\Local\Temp\*\*.VHD*' -and $_.Value -notlike 'C:\Windows\Temp\*\*.VHD*' }).Count) -and -not (@($dl.Items | Where-Object { $_.Value -like 'C:\Users\*' -and $_.Verified }).Count)) $dl.Items.Count
+    Test-Check 'Defender list: every folder users can write to carries a visible risk text (Risk and Note), the install folder none (counter-test M2)' (-not (@($dl.Items | Where-Object { ($_.Value -like 'C:\ProgramData\FSLogix*' -or $_.Value -like 'C:\Users\*' -or $_.Value -like 'C:\Windows\Temp\*' -or $_.Value -like "$share*") -and (-not $_.Risk -or $_.Note -notlike 'RISK:*') }).Count) -and -not (@($dl.Items | Where-Object { $_.Value -like 'C:\Program Files\*' -and $_.Risk }).Count)) $null
     Test-Check 'Defender list: the three drivers, the folders, Cloud Cache cache and proxy' (-not (@('frxdrv.sys', 'frxdrvvt.sys', 'frxccd.sys' | Where-Object { $d = $_; -not (@($paths | Where-Object { $_ -like "*\$d" }).Count) }).Count) -and $paths -contains 'C:\Program Files\FSLogix\Apps\' -and $paths -contains 'C:\ProgramData\FSLogix\' -and $paths -contains 'C:\ProgramData\FSLogix\Cache\*' -and $paths -contains 'C:\ProgramData\FSLogix\Proxy\*' -and $paths -contains 'C:\Windows\Temp\*\*.VHDX') $null
     Test-Check 'Defender list: share patterns for VHD and VHDX with lock, meta, metadata' (-not (@('VHD', 'VHDX' | ForEach-Object { $e = $_; '', '.lock', '.meta', '.metadata' | ForEach-Object { "$share\*\*.$e$_" } } | Where-Object { $_ -notin $paths }).Count)) $null
     Test-Check 'Defender list: registry keys and mount points are named as not Defender types; every item has the Learn page as source' ($dl.NotDefender.Count -eq 3 -and -not (@($dl.Items | Where-Object { $_.Source -ne 'https://learn.microsoft.com/en-us/fslogix/overview-prerequisites' }).Count)) $null
@@ -150,10 +177,18 @@ try {
     Test-Check 'Defender writes without the gate are refused (gate is open in this run: close it for the check)' ((& { Close-AVDTuneWriteGate; $r = Test-Throws { Set-AVDTuneFSLogixDefender -Machine $m -F $fd -Root $tmp -VhdLocations @($share) }; Open-AVDTuneWriteGate -SnapshotId 'snap-check' -ConfirmedBy 'Check Runner'; $r }) -and $fd.Store.Defender.Paths.Count -eq 0) $null
     $sd = Set-AVDTuneFSLogixDefender -Machine $m -F $fd -Root $tmp -VhdLocations @($share) -User 'admin1' -SnapshotId 'snap-check'
     $ds2 = Get-AVDTuneFSLogixDefenderState -F $fd -VhdLocations @($share)
-    Test-Check 'apply: every exclusion present afterwards, the run is Changed' ($sd.Results[0].Status -eq 'Changed' -and @($ds2.Items | Where-Object { -not $_.Present }).Count -eq 0 -and $fd.Store.Defender.Processes -contains 'frxsvc.exe') $null
+    Test-Check 'apply: every exclusion present afterwards, the run is Changed' ($sd.Results[0].Status -eq 'Changed' -and @($ds2.Items | Where-Object { -not $_.Present }).Count -eq 0 -and $fd.Store.Defender.Processes -contains 'C:\Program Files\FSLogix\Apps\frxsvc.exe' -and $fd.Store.Defender.Processes -notcontains 'frxsvc.exe') $null
     Test-Check 'idempotent: a second apply adds nothing' ((Set-AVDTuneFSLogixDefender -Machine $m -F $fd -Root $tmp -VhdLocations @($share) -User a -SnapshotId s).Results[0].Status -eq 'Unchanged') $null
     [void](Undo-AVDTuneFSLogixDefender -Machine $m -F $fd -Root $tmp -User 'admin1' -SnapshotId 'snap-check')
     Test-Check 'undo removes exactly what was added' (@($fd.Store.Defender.Paths).Count -eq 0 -and @($fd.Store.Defender.Processes).Count -eq 0) $null
+    $dUndo = Join-Path $tmp 'config\fslogix-defender-undo.json'
+    $fdTwo = New-AVDTuneFakeFSLogix
+    [void](Set-AVDTuneFSLogixDefender -Machine $m -F $fdTwo -Root $tmp -User a -SnapshotId s)
+    $firstUndo = [IO.File]::ReadAllText($dUndo)
+    [void](Set-AVDTuneFSLogixDefender -Machine $m -F $fdTwo -Root $tmp -VhdLocations @($share) -User a -SnapshotId s)
+    $archived = @(Get-ChildItem (Join-Path $tmp 'config') -Filter 'fslogix-defender-undo.*.json' | Where-Object { [IO.File]::ReadAllText($_.FullName) -ceq $firstUndo })
+    Test-Check 'a second Defender change keeps the first undo record under a versioned name instead of overwriting it (counter-test L5)' ($archived.Count -eq 1 -and [IO.File]::ReadAllText($dUndo) -cne $firstUndo) $null
+    [void](Undo-AVDTuneFSLogixDefender -Machine $m -F $fdTwo -Root $tmp -User a -SnapshotId s)
     $fdPre = New-AVDTuneFakeFSLogix -Seed @{ Defender = @{ Paths = @('D:\own'); Processes = @() } }
     [void](Set-AVDTuneFSLogixDefender -Machine $m -F $fdPre -Root $tmp -User a -SnapshotId s); [void](Undo-AVDTuneFSLogixDefender -Machine $m -F $fdPre -Root $tmp -User a -SnapshotId s)
     Test-Check 'an exclusion the administrator had before stays after undo' ($fdPre.Store.Defender.Paths -contains 'D:\own') $null

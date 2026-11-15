@@ -97,6 +97,7 @@ function Test-AVDTuneFSLogixValue {
             if ($Setting.Name -eq 'VolumeType') { if ($v -notin 'vhd', 'vhdx') { return 'VolumeType must be vhd or vhdx.' }; return '' }
             if ($Setting.Name -eq 'RedirXMLSourceFolder') {
                 if ($v -match '\.xml$') { return 'Enter the folder only, not the file name.' }
+                if (@($v -split '[\\/]') -contains '..') { return "The folder must not contain '..'." }
                 if (-not ((Test-AVDTuneFSLogixUncPath $v) -or $v -match '^[A-Za-z]:\\[^<>:"|?*\x00-\x1F]*[^\\\s]$')) { return 'The folder must be a UNC path (\\server\share) or a local path (C:\folder).' }
             }
             ''
@@ -360,6 +361,27 @@ function Test-AVDTuneRedirectionsXml {
     [pscustomobject]@{ Ok = ($problems.Count -eq 0); Problems = @($problems); Excludes = @($ex); Includes = @($inc); ExcludeCommonFolders = $common }
 }
 
+function Write-AVDTuneUndoFile {
+    <# Writes an undo record; an older one is kept under a versioned name (the first record holds the state before AVDTune touched anything), never overwritten. #>
+    param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][string]$Text)
+    if (Test-Path -LiteralPath $Path) {
+        $old = [IO.File]::ReadAllText($Path)
+        $arch = [IO.Path]::ChangeExtension($Path, ([datetime]::UtcNow.ToString('yyyyMMddHHmmssfff') + '-' + [guid]::NewGuid().ToString('N').Substring(0, 6) + '.json'))
+        Write-AVDTuneFile $arch $old
+    }
+    Write-AVDTuneFile $Path $Text
+}
+
+function Assert-AVDTuneRedirectionsPath {
+    <# A redirections.xml path: no '..', and a local path only where the file and every folder above it are admin-only (a share is the administrator's choice). #>
+    param([Parameter(Mandatory)][string]$Path)
+    if (@($Path -split '[\\/]') -contains '..') { throw "The path $Path contains '..'." }
+    if ($Path -like '\\*') { return }
+    if ($Path -notmatch '^[A-Za-z]:\\') { throw "The path $Path is neither a UNC nor a local drive path." }
+    $dir = Split-Path $Path -Parent
+    if (-not (Test-AVDTuneAdminOnlyPath -Path $dir -Base ([IO.Path]::GetPathRoot($dir)))) { throw "The local folder $dir can be changed by users (or is not readable): redirections.xml is only written to a folder that only administrators can change." }
+}
+
 function Get-AVDTuneRedirectionsTarget {
     <# Where redirections.xml is written: <RedirXMLSourceFolder>\redirections.xml; $null when the setting is not there. #>
     param([Parameter(Mandatory)]$Machine)
@@ -386,7 +408,7 @@ function Save-AVDTuneRedirections {
     $test = { param($m) $cur = & $F.ReadText $target; @{ Compliant = ($null -ne $cur -and $cur -ceq $Xml); State = $(if ($null -eq $cur) { 'absent' } else { "$($cur.Length) characters" }) } }.GetNewClosure()
     $apply = { param($m) & $F.WriteText $target $Xml }.GetNewClosure()
     [void]$steps.Add((New-AVDTuneStep -Id 'fslogix.redirections.file' -Section FSLogix -Title "redirections.xml ($($v.Excludes.Count) excludes, $($v.Includes.Count) includes)" -Why 'Keeps stateless cache folders out of the profile container.' -SourceUrl "$script:Learn/concepts-redirections-xml" -Test $test -Apply $apply))
-    if (-not $WhatIf -and (Test-AVDTuneWriteAllowed)) { Write-AVDTuneFile (Join-Path $Root 'config\redirections-undo.json') ([ordered]@{ Target = $target; Before = $before } | ConvertTo-Json) }
+    if (-not $WhatIf -and (Test-AVDTuneWriteAllowed)) { Write-AVDTuneUndoFile (Join-Path $Root 'config\redirections-undo.json') ([ordered]@{ Target = $target; Before = $before } | ConvertTo-Json) }
     Invoke-AVDTune -Plan ([pscustomobject]@{ Name = 'FSLogix redirections'; Steps = @($steps | ForEach-Object { $_.Id }) }) -Catalog @($steps) -Machine $Machine -Root $Root -User $User -SnapshotId $SnapshotId -WhatIf:$WhatIf
 }
 
@@ -397,7 +419,7 @@ function Undo-AVDTuneRedirections {
     if (-not $u) { throw 'There is nothing to undo: no redirections.xml change was recorded.' }
     $target = [string]$u.Target; $before = Get-AVDTuneProp $u 'Before'
     $test = { param($m) $cur = & $F.ReadText $target; @{ Compliant = ($cur -ceq $before -or ($null -eq $cur -and $null -eq $before)); State = '' } }.GetNewClosure()
-    $apply = { param($m) if ($null -eq $before) { & $F.WriteText $target '' } else { & $F.WriteText $target $before } }.GetNewClosure()
+    $apply = { param($m) if ($null -eq $before) { & $F.DeleteFile $target } else { & $F.WriteText $target $before } }.GetNewClosure()
     $step = New-AVDTuneStep -Id 'fslogix.redirections.undo' -Section FSLogix -Title 'Undo: redirections.xml' -Test $test -Apply $apply
     Invoke-AVDTune -Plan ([pscustomobject]@{ Name = 'FSLogix redirections undo'; Steps = @($step.Id) }) -Catalog @($step) -Machine $Machine -Root $Root -User $User -SnapshotId $SnapshotId
 }
@@ -405,6 +427,17 @@ function Undo-AVDTuneRedirections {
 #endregion
 
 #region Defender exclusions
+
+function Split-AVDTuneLogonName {
+    <# DOMAIN\user or user@domain into Domain and Name (a plain name has no domain). Length limited. #>
+    param([string]$User)
+    $domain = ''; $name = [string]$User
+    if ($name.Length -le 256) {
+        if ($name -match '^([^\\]+)\\(.+)$') { $domain = $Matches[1]; $name = $Matches[2] }
+        elseif ($name -match '^(.+)@([^@]+)$') { $name = $Matches[1]; $domain = $Matches[2] }
+    }
+    [pscustomobject]@{ Domain = $domain; Name = $name }
+}
 
 function Get-AVDTuneFSLogixDefenderList {
     <#
@@ -416,21 +449,23 @@ function Get-AVDTuneFSLogixDefenderList {
     param([string[]]$VhdLocations = @())
     $src = "$script:Learn/overview-prerequisites"
     $items = New-Object System.Collections.ArrayList
-    $add = { param($k, $v, $why, $ok, $note) [void]$items.Add([pscustomobject]@{ Kind = $k; Value = $v; Reason = $why; Verified = $ok; Source = $src; Note = $note }) }
-    foreach ($p in 'frxsvc.exe', 'frxccds.exe') { & $add 'Process' $p 'FSLogix service or Cloud Cache process' $true '' }
+    $risk1 = 'Users can write here: a file placed in this folder would not be scanned.'
+    $add = { param($k, $v, $why, $ok, $note, $risk) [void]$items.Add([pscustomobject]@{ Kind = $k; Value = $v; Reason = $why; Verified = $ok; Source = $src; Note = $(if ($risk) { "RISK: $risk $note".Trim() } else { $note }); Risk = [string]$risk }) }
+    # processes only with the full path (a bare name would exclude any process of that name from anywhere); frxccd.exe is not on Learn's list and is not added
+    foreach ($p in 'frxsvc.exe', 'frxccds.exe') { & $add 'Process' "C:\Program Files\FSLogix\Apps\$p" 'FSLogix service or Cloud Cache process (Learn names the file, AVDTune gives the full path)' $true 'Learn lists the file name only; the full path is the install folder of FSLogix.' '' }
     foreach ($d in 'frxdrv.sys', 'frxdrvvt.sys', 'frxccd.sys') { & $add 'Path' "C:\Program Files\FSLogix\Apps\$d" 'FSLogix filter driver' $true 'Learn lists the driver files; Defender excludes them as paths.' }
     & $add 'Path' 'C:\Program Files\FSLogix\Apps\' 'FSLogix binaries and utilities' $true ''
-    & $add 'Path' 'C:\ProgramData\FSLogix\' 'FSLogix configuration and logs' $true ''
-    & $add 'Path' 'C:\Users\*\AppData\Local\FSLogix\' 'Per-user FSLogix data (Learn: C:\Users\%username%\AppData\Local\FSLogix\)' $false 'Learn names %username%; Defender takes a wildcard for the user folder.'
-    & $add 'Path' 'C:\ProgramData\FSLogix\Cache\*' 'Cloud Cache cache files' $true ''
-    & $add 'Path' 'C:\ProgramData\FSLogix\Proxy\*' 'Cloud Cache proxy files' $true ''
+    & $add 'Path' 'C:\ProgramData\FSLogix\' 'FSLogix configuration and logs' $true '' $risk1
+    & $add 'Path' 'C:\Users\*\AppData\Local\FSLogix\' 'Per-user FSLogix data (Learn: C:\Users\%username%\AppData\Local\FSLogix\)' $false 'Learn names %username%; Defender takes a wildcard for the user folder (AVDTune''s own mapping: the folder of every user).' 'Every user can write to their own folder.'
+    & $add 'Path' 'C:\ProgramData\FSLogix\Cache\*' 'Cloud Cache cache files' $true '' $risk1
+    & $add 'Path' 'C:\ProgramData\FSLogix\Proxy\*' 'Cloud Cache proxy files' $true '' $risk1
     foreach ($ext in 'VHD', 'VHDX') {
-        & $add 'Path' "C:\Users\*\AppData\Local\Temp\*\*.$ext" "User temp $ext files (difference disks); Learn: %TEMP%\*\*.$ext" $false 'Learn names %TEMP% (the user temp path); mapped to a wildcard for every user.'
-        & $add 'Path' "C:\Windows\Temp\*\*.$ext" "System temp $ext files; Learn: %WINDIR%\TEMP\*\*.$ext" $true ''
+        & $add 'Path' "C:\Users\*\AppData\Local\Temp\*\*.$ext" "User temp $ext files (difference disks); Learn: %TEMP%\*\*.$ext" $false 'Learn names %TEMP% (the user temp path); mapped to a wildcard for every user.' 'Every user can write to their own temp folder.'
+        & $add 'Path' "C:\Windows\Temp\*\*.$ext" "System temp $ext files; Learn: %WINDIR%\TEMP\*\*.$ext" $true '' 'Users can create folders in the system temp folder: a file there would not be scanned.'
     }
     foreach ($loc in @($VhdLocations | Where-Object { $_ })) {
         $base = ([string]$loc).TrimEnd('\')
-        foreach ($ext in 'VHD', 'VHDX') { foreach ($suffix in '', '.lock', '.meta', '.metadata') { & $add 'Path' "$base\*\*.$ext$suffix" "Containers on the share $base" $true 'Learn: \\{SMB or UNC path}\*\*.VHD(X) with .lock, .meta, .metadata.' } }
+        foreach ($ext in 'VHD', 'VHDX') { foreach ($suffix in '', '.lock', '.meta', '.metadata') { & $add 'Path' "$base\*\*.$ext$suffix" "Containers on the share $base" $true 'Learn: \\{SMB or UNC path}\*\*.VHD(X) with .lock, .meta, .metadata.' 'Users write their own container here: a .vhd(x) file they put there would not be scanned.' } }
     }
     [pscustomobject]@{
         Items = @($items)
@@ -467,7 +502,7 @@ function Set-AVDTuneFSLogixDefender {
     $test = { param($m) $s = Get-AVDTuneFSLogixDefenderState -F $F -VhdLocations $VhdLocations; $open = @($s.Items | Where-Object { -not $_.Present }); @{ Compliant = ($open.Count -eq 0); State = "$(@($s.Items).Count - $open.Count) of $(@($s.Items).Count) present" } }.GetNewClosure()
     $apply = { param($m) foreach ($i in $todo) { & $F.DefenderAdd $i.Kind $i.Value } }.GetNewClosure()
     $step = New-AVDTuneStep -Id 'fslogix.defender.exclusions' -Section FSLogix -Title "FSLogix Defender exclusions ($($todo.Count) to add)" -Why 'Microsoft asks to exclude FSLogix from antivirus scanning; scanning causes slow logons and locked containers.' -SourceUrl $state.Source -Test $test -Apply $apply
-    if (-not $WhatIf -and $todo.Count -gt 0 -and (Test-AVDTuneWriteAllowed)) { Write-AVDTuneFile (Join-Path $Root 'config\fslogix-defender-undo.json') ([ordered]@{ Added = $undoList } | ConvertTo-Json -Depth 4) }
+    if (-not $WhatIf -and $todo.Count -gt 0 -and (Test-AVDTuneWriteAllowed)) { Write-AVDTuneUndoFile (Join-Path $Root 'config\fslogix-defender-undo.json') ([ordered]@{ Added = $undoList } | ConvertTo-Json -Depth 4) }
     Invoke-AVDTune -Plan ([pscustomobject]@{ Name = 'FSLogix Defender exclusions'; Steps = @($step.Id) }) -Catalog @($step) -Machine $Machine -Root $Root -User $User -SnapshotId $SnapshotId -WhatIf:$WhatIf
 }
 
@@ -915,9 +950,10 @@ function New-AVDTuneFSLogixAdapter {
         [pscustomobject]@{ Valid = ($s.Status -eq 'Valid'); Status = [string]$s.Status; Subject = $(if ($s.SignerCertificate) { [string]$s.SignerCertificate.Subject } else { '' }); Issuer = $(if ($s.SignerCertificate) { [string]$s.SignerCertificate.Issuer } else { '' }); OriginalFilename = $orig }
     }
     $a.RemoveFolder = { param($Dir) Remove-AVDTuneFolderNoFollowSafe $Dir }
-    $a.ReadText = { param($Path) if (Test-Path -LiteralPath $Path -PathType Leaf) { [IO.File]::ReadAllText($Path) } else { $null } }
+    $a.ReadText = { param($Path) Assert-AVDTuneRedirectionsPath $Path; if (Test-Path -LiteralPath $Path -PathType Leaf) { [IO.File]::ReadAllText($Path) } else { $null } }
     $a.WriteText = {
         param($Path, $Text)
+        Assert-AVDTuneRedirectionsPath $Path
         $dir = Split-Path $Path -Parent
         if (-not (Test-Path -LiteralPath $dir)) { throw "The folder $dir does not exist." }
         $tmp = "$Path.avdtune.tmp"
@@ -925,7 +961,7 @@ function New-AVDTuneFSLogixAdapter {
         if (Test-Path -LiteralPath $Path) { [IO.File]::Delete($Path) }
         [IO.File]::Move($tmp, $Path)
     }
-    $a.DeleteFile = { param($Path) if (Test-Path -LiteralPath $Path) { [IO.File]::Delete($Path) } }
+    $a.DeleteFile = { param($Path) Assert-AVDTuneRedirectionsPath $Path; if (Test-Path -LiteralPath $Path) { [IO.File]::Delete($Path) } }
     $a.Dns = { param($H) try { @{ Ok = $true; Addresses = @([Net.Dns]::GetHostAddresses($H) | ForEach-Object { $_.IPAddressToString }); Error = '' } } catch { @{ Ok = $false; Addresses = @(); Error = $_.Exception.Message } } }
     $a.Tcp = {
         param($H, $Port)
@@ -972,12 +1008,12 @@ function New-AVDTuneFSLogixAdapter {
 [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)] public static extern bool LogonUser(string user, string domain, IntPtr password, int logonType, int provider, out IntPtr token);
 [DllImport("kernel32.dll", SetLastError = true)] public static extern bool CloseHandle(IntPtr handle);
 "@ }
-        $domain = ''; $name = $User
-        if ($User -match '^([^\]+)\(.+)$') { $domain = $Matches[1]; $name = $Matches[2] } elseif ($User -match '^(.+)@(.+)$') { $name = $Matches[1]; $domain = $Matches[2] }
+        $ln = Split-AVDTuneLogonName $User; $domain = $ln.Domain; $name = $ln.Name
         $bstr = [Runtime.InteropServices.Marshal]::SecureStringToGlobalAllocUnicode($Password); $token = [IntPtr]::Zero
         try { $ok = [AVDTune.Logon]::LogonUser($name, $domain, $bstr, 9, 3, [ref]$token); $err = [Runtime.InteropServices.Marshal]::GetLastWin32Error() }
         finally { [Runtime.InteropServices.Marshal]::ZeroFreeGlobalAllocUnicode($bstr) }
         if (-not $ok) { return @{ LogonFailed = $true; Error = "Windows error $err"; Steps = @() } }
+        $id = $null
         try {
             $steps = New-Object System.Collections.ArrayList
             $dir = Join-Path $Unc ('avdtune-test-' + [guid]::NewGuid().ToString('N').Substring(0, 12)); $file = Join-Path $dir 'test.txt'
@@ -989,9 +1025,10 @@ function New-AVDTuneFSLogixAdapter {
                         [void](& $try 'delete folder' { [IO.Directory]::Delete($dir) })
                     }
                 }.GetNewClosure())
-            @{ LogonFailed = $false; Error = ''; Steps = @($steps) }
+            # LogonType 9 (new credentials, network only) accepts any password here: it is only checked when the share is accessed
+            @{ LogonFailed = $false; Error = ''; Steps = @($steps); PasswordCheckedAtAccess = $true }
         }
-        finally { [void][AVDTune.Logon]::CloseHandle($token) }
+        finally { if ($id) { $id.Dispose() }; [void][AVDTune.Logon]::CloseHandle($token) }
     }
     $a.KerberosTickets = { try { @((& (Join-Path (Get-AVDTuneSystemFolder System) 'klist.exe') 2>$null) | Where-Object { $_ -match 'cifs/' }) } catch { @() } }
     $a.DefenderGet = { try { $p = Get-MpPreference -ErrorAction Stop; @{ Paths = @($p.ExclusionPath | Where-Object { $_ -and $_ -notmatch 'Administrators' }); Processes = @($p.ExclusionProcess | Where-Object { $_ -and $_ -notmatch 'Administrators' }) } } catch { $null } }
@@ -1014,7 +1051,7 @@ function Remove-AVDTuneFolderNoFollowSafe([string]$Dir) { Remove-AVDTuneFolderNo
 Export-ModuleMember -Function Get-AVDTuneFSLogixSettingCatalog, Test-AVDTuneFSLogixUncPath, Test-AVDTuneFSLogixValue, Get-AVDTuneFSLogixInfo, Get-AVDTuneFSLogixSettingsState,
     New-AVDTuneFSLogixRegStep, Get-AVDTuneFSLogixGroupMembers, Get-AVDTuneFSLogixUndoPath, Set-AVDTuneFSLogixSettings, Undo-AVDTuneFSLogixSettings, Get-AVDTuneFSLogixLastChange, Test-AVDTuneSid, Get-AVDTuneFSLogixGroups,
     Get-AVDTuneFSLogixGroupChoices, Set-AVDTuneFSLogixGroupMember, Get-AVDTuneRedirectionTemplate, Test-AVDTuneRedirectionPath, New-AVDTuneRedirectionsXml,
-    Test-AVDTuneRedirectionsXml, Get-AVDTuneRedirectionsTarget, Save-AVDTuneRedirections, Undo-AVDTuneRedirections, Get-AVDTuneFSLogixDefenderList,
+    Test-AVDTuneRedirectionsXml, Get-AVDTuneRedirectionsTarget, Assert-AVDTuneRedirectionsPath, Write-AVDTuneUndoFile, Split-AVDTuneLogonName, Save-AVDTuneRedirections, Undo-AVDTuneRedirections, Get-AVDTuneFSLogixDefenderList,
     Get-AVDTuneFSLogixDefenderState, Set-AVDTuneFSLogixDefender, Undo-AVDTuneFSLogixDefender, Get-AVDTuneFSLogixLatest, Invoke-AVDTuneFSLogixInstall, Invoke-AVDTuneFSLogixInstallRecorded,
     ConvertFrom-AVDTuneSddl, New-AVDTuneFSLogixRecommendedSddl, Compare-AVDTuneFSLogixAcl, Get-AVDTuneFSLogixLocations, Format-AVDTuneAce, Invoke-AVDTuneFSLogixTest,
     Invoke-AVDTuneFSLogixVhdxTest, Save-AVDTuneFSLogixTestRun, Get-AVDTuneFSLogixTestRecord, New-AVDTuneFSLogixAdapter

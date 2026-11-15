@@ -233,14 +233,14 @@ function Update-FslDefender {
         foreach ($w in 100, 80, '*') { $c = New-Object System.Windows.Controls.ColumnDefinition; $c.Width = $w; [void]$g.ColumnDefinitions.Add($c) }
         $pill = New-FslPillBlock $(if ($i.Present) { 'green' } else { 'yellow' }) $(if ($i.Present) { 'Set' } else { 'Missing' })
         $kind = New-Object System.Windows.Controls.TextBlock; $kind.Text = $i.Kind; $kind.VerticalAlignment = 'Center'; $kind.SetValue([System.Windows.Controls.Grid]::ColumnProperty, 1); Set-Brush $kind ([System.Windows.Controls.TextBlock]::ForegroundProperty) 'MutedText'
-        $val = New-Object System.Windows.Controls.TextBlock; $val.Text = $i.Value; $val.FontFamily = 'Cascadia Mono, Consolas'; $val.FontSize = 12; $val.TextWrapping = 'Wrap'; $val.VerticalAlignment = 'Center'; $val.SetValue([System.Windows.Controls.Grid]::ColumnProperty, 2)
+        $val = New-Object System.Windows.Controls.TextBlock; $val.Text = $i.Value + $(if ($i.Risk) { "   [risk: $($i.Risk)]" }); $val.FontFamily = 'Cascadia Mono, Consolas'; $val.FontSize = 12; $val.TextWrapping = 'Wrap'; $val.VerticalAlignment = 'Center'; $val.SetValue([System.Windows.Controls.Grid]::ColumnProperty, 2)
         foreach ($e in $pill, $kind, $val) { $e.ToolTip = "$($i.Reason)`r`nSource: $($i.Source)`r`nStated on Microsoft Learn: $(if ($i.Verified) { 'yes' } else { 'no' })$(if ($i.Note) { "`r`n" + $i.Note })"; [void]$g.Children.Add($e) }
         [void]$ui.PanelFslDefender.Children.Add($g)
     }
 }
 Add-Click $ui.BtnFslDefAdd {
     Assert-FslWrite
-    if (-not (Confirm-Action 'Add the missing FSLogix exclusions to Microsoft Defender Antivirus on this master?' 'Defender exclusions')) { return }
+    if (-not (Confirm-Action 'Add the missing FSLogix exclusions to Microsoft Defender Antivirus on this master? Some are folders that users can write to (marked [risk] in the list): files there are not scanned.' 'Defender exclusions')) { return }
     $run = Set-AVDTuneFSLogixDefender -Machine $script:Machine -F (Get-FslAdapter) -Root $script:StateRoot -VhdLocations @(Get-AVDTuneFSLogixLocations -Machine $script:Machine) -User (Get-FslUser) -SnapshotId (Get-FslGateSnapshot)
     Show-FslRun $run 'Defender exclusions'; Update-FslDefender
 }
@@ -383,6 +383,7 @@ function Complete-FslJob {
         finally { $job.PS.Dispose() }
     }
     Set-FslBusy $false
+    if ($job.Kind -eq 'Storage') { $ui.PwdFslPassword.Clear(); $ui.ChkFslKey.IsChecked = $false }   # the password and the key confirmation are for one run, also after an error
     if ($err -or -not $result) { $ui.TxtFslState.Text = "The $($job.Kind.ToLower()) failed: $err"; Show-Error $ui.TxtFslState.Text; Update-FslView; return }
     switch ($job.Kind) {
         'Install' {
@@ -434,13 +435,16 @@ Add-Click $ui.BtnFslAclSet {
     if (-not $r -or -not $r.AclDiff) { throw 'Run the storage check first: it shows the diff.' }
     $sids = Get-FslSids
     if ($sids.Users.Count -eq 0 -or $sids.Admins.Count -eq 0) { throw 'Name the users group and the administrators group.' }
+    Assert-FslWrite
     if ($r.KeyUsed) { throw 'The ACL was read with the account key; setting it needs the token path (role Storage File Data Privileged Contributor).' }
-    if (-not (Confirm-Action "Set the recommended ACL on the root of the share of $($r.Account)? The diff above is what changes (the ACL is read again first; if it changed since, nothing is set)." 'NTFS ACL')) { return }
-    $share = Split-AVDTuneUncShare (@(Get-AVDTuneFSLogixLocations -Machine $script:Machine)[0])
+    if (-not (Confirm-Action "Set the recommended ACL on the root of the share $($r.AclDiff.Share) of $($r.AclDiff.Account)? The diff above is what changes (the ACL is read again first; if it changed since, nothing is set)." 'NTFS ACL')) { return }
+    $d = $r.AclDiff
+    $share = [pscustomobject]@{ Account = [string]$d.Account; Share = [string]$d.Share }   # the share the check looked at and the administrator saw, not the first location again
+    if (-not $share.Account -or -not $share.Share) { throw 'The diff does not name the share: run the storage check again.' }
     $files = if ($script:TestMode) { $script:FslFake.Files } else { New-AVDTuneFilesAdapter }
     $token = if ($script:TestMode) { 'fake-storage-token' } else { '' }
     if (-not $token) { throw 'No token for Azure Storage: the sign-in of AVDTune does not request that audience yet (issue 11).' }
-    $res = Set-AVDTuneStorageRootAcl -Files $files -Account $share.Account -Share $share.Share -Token $token -UsersSid $sids.Users[0] -AdminsSid $sids.Admins[0] -ConfirmedHash $r.AclDiff.Hash -Root $script:StateRoot -User (Get-FslUser) -SnapshotId (Get-FslGateSnapshot)
+    $res = Set-AVDTuneStorageRootAcl -Files $files -Account $share.Account -Share $share.Share -Token $token -UsersSid $sids.Users[0] -AdminsSid $sids.Admins[0] -ConfirmedHash $d.Hash -Root $script:StateRoot -User (Get-FslUser) -SnapshotId (Get-FslGateSnapshot)
     $ui.TxtFslState.Text = "NTFS ACL: $($res.Status). $($res.Message)"; Show-Toast $ui.TxtFslState.Text
     [void](Add-AVDTuneProtocolNote -Protocol $script:Protocol -Group 'fslogix' -Subject 'NTFS ACL of the share root' -Note "$($res.Status). $($res.Message)"); Save-Protocol
 }
