@@ -23,6 +23,12 @@ function Save-SmokeShot([string]$Name) {
     $fs = [IO.File]::Create((Join-Path $script:SmokeOut "shot-$Name.png"))
     try { $enc.Save($fs) } finally { $fs.Dispose() }
 }
+function Get-SmokeBounds($Element) { $Element.TransformToAncestor($window).TransformBounds((New-Object System.Windows.Rect(0, 0, $Element.ActualWidth, $Element.ActualHeight))) }
+function Test-HeadClear($Subtitle, $Buttons) {
+    # The intro text of a page must not reach under or against the buttons of the head: below them, or at least 16 px to the left
+    $s = Get-SmokeBounds $Subtitle; $b = Get-SmokeBounds $Buttons
+    ($s.Top -ge $b.Bottom) -or ($s.Bottom -le $b.Top) -or ($s.Right + 16 -le $b.Left)
+}
 function Get-ThemeColor([string]$Key) { ([System.Windows.Application]::Current.Resources.MergedDictionaries[0][$Key]).Color.ToString() }
 function Find-Text($Parent, [string]$Text) {
     # True when a TextBlock with this text is below $Parent
@@ -73,12 +79,23 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         foreach ($page in $script:PageTable) {
             Show-Page $page.Key
             $window.UpdateLayout()
-            $placeholder = $page.Key -notin 'Overview', 'Protocol'
+            $placeholder = $page.Key -notin 'Overview', 'Protocol', 'Updates', 'UpdateBlock'
             $ok = ($script:CurrentPage -eq $page.Key -and $ui["Nav$($page.Key)"].IsChecked -and $ui.PagePlaceholder.Visibility -eq (ConvertTo-Vis $placeholder))
             if ($placeholder) { $ok = $ok -and $ui.TxtPhTitle.Text -eq $page.Title -and $ui.TxtPhPhase.Text -eq "Planned for phase $($page.Phase)" -and $ui.TxtPhText.Text.Length -gt 40 }
             Test-Smoke "page $($page.Key) shows" $ok $null
-            if ($page.Key -in 'Updates', 'Seal') { Save-SmokeShot ('{0:00}-page-{1}-dark' -f $index, $page.Key.ToLower()); $index++ }
+            if ($page.Key -in 'Updates', 'UpdateBlock', 'Seal') { Save-SmokeShot ('{0:00}-page-{1}-dark' -f $index, $page.Key.ToLower()); $index++ }
         }
+        Test-Smoke 'last page is "Cleanup and finish" (the master is never sysprepped)' ((($script:PageTable | Where-Object Key -eq 'Seal').Title -eq 'Cleanup and finish') -and -not (Find-Text $ui.NavList 'Cleanup and seal') -and (Find-Text $ui.NavList 'Cleanup and finish') -and $ui.TxtPhText.Text -like '*never sysprepped*') $ui.TxtPhText.Text
+        $keepWidth = $window.Width
+        foreach ($width in 1280, 960) {
+            $window.Width = $width
+            foreach ($head in @(@('Overview', 'TxtOverviewSubtitle', 'PanelOverviewHead'), @('Updates', 'TxtUpdSubtitle', 'PanelUpdHead'), @('UpdateBlock', 'TxtBlockSubtitle', 'PanelBlockHead'), @('Protocol', 'TxtProtocolSubtitle', 'PanelProtocolHead'))) {
+                Show-Page $head[0]; $window.UpdateLayout()
+                Test-Smoke "page $($head[0]) at $width px: the intro text does not run under the buttons" (Test-HeadClear $ui[$head[1]] $ui[$head[2]]) "$(Get-SmokeBounds $ui[$head[1]]) / $(Get-SmokeBounds $ui[$head[2]])"
+            }
+            if ($width -eq 960) { Show-Page 'Updates'; Save-SmokeShot '06-page-updates-narrow' }
+        }
+        $window.Width = $keepWidth
         Show-Page 'Overview'
         $ui.BtnTheme.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
         Test-Smoke 'switch back to light' ($script:Settings.Theme -eq 'Light' -and (Get-ThemeColor 'WindowBackground') -eq '#FFF3F3F3' -and $window.Background.Color.ToString() -eq '#FFF3F3F3') $null
@@ -133,7 +150,7 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         if (-not $script:Overview) { return $false }
         Test-Smoke 'Refresh reads the machine again (background)' ($script:Overview.ComputerName -eq 'GM-TEST01' -and $script:Overview.ImageVersion -eq (Get-AVDTuneState $script:StateRoot).ImageVersion) $null
         # nothing was written outside the test root: the real state folder was not created or changed by this run
-        Test-Smoke 'every fake write stayed in memory (no registry value written)' ($script:Machine.Log.Count -eq 0) ($script:Machine.Log -join '; ')
+        Test-Smoke 'every fake write stayed in memory (no registry value written)' (@($script:Machine.Log | Where-Object { $_ -notlike 'Run *' }).Count -eq 0) ($script:Machine.Log -join '; ')
         Save-SmokeShot '09-overview-light-final'
         $true } }
 
@@ -270,6 +287,92 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         $ok = (Invoke-AVDTuneStep -Step (New-AVDTuneStep -Id 'setup.smoke' -Section Setup -Title 'x' -Test { $true } -Apply { }) -Machine $script:Machine -Mode Apply).Status
         Test-Smoke 'the engine accepts a change after the confirmation' ($ok -eq 'Unchanged') $ok
         $true } }
+    @{ Name = 'updates page'; Do = {
+        # the page is read only until the gate is open (it is open here: the start sequence ran). Search runs in a background runspace with the fake adapter.
+        if (-not $script:UpdStep) {
+            $script:UpdStep = 1
+            $script:Machine.Store.Registry['hklm:\software\fslogix\apps|installversion'] = '2.9.8884.27471'
+            $script:Machine.Store.Registry['hklm:\software\wow6432node\microsoft\edgeupdate\clients\{56eb18f8-b008-4cbd-b6d2-8c97fe7e9062}|pv'] = '130.0.1'
+            $script:Machine.Store.Registry['hklm:\softwareslogixpps|installversion'] = '2.9.8884.27471'
+            $script:Machine.Store.Registry['hklm:\software\wow6432node\microsoft\edgeupdate\clients\{56eb18f8-b008-4cbd-b6d2-8c97fe7e9062}|pv'] = '130.0.1'
+            Show-Page 'Updates'; $window.UpdateLayout()
+            Test-Smoke 'Updates page: own page (no placeholder), buttons, empty list hint' ($ui.PageUpdates.Visibility -eq 'Visible' -and $ui.PagePlaceholder.Visibility -eq 'Collapsed' -and $ui.TxtUpdState.Text -like 'Nothing searched*') $ui.TxtUpdState.Text
+            $ui.BtnUpdScan.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
+            # closing while an operation runs would end the process before the maintenance mode restores the block: the window stays open
+            $window.Close()
+            Test-Smoke 'closing during an update operation is refused with a hint, the window closes after it' ($window.IsVisible -and $script:UpdJob -and $script:CloseWhenDone -and $script:LastToast -like '*closes by itself when it is done*') $script:LastToast
+            $script:CloseWhenDone = $false   # the smoke goes on
+            $sessionEnd = [pscustomobject]@{ Cancel = $false }
+            Invoke-SessionEnding $sessionEnd
+            Test-Smoke 'log off or shut down during an update operation is held back, Windows shows the reason' ($sessionEnd.Cancel -and (Get-ShutdownBlockReason) -like 'AVDTune is running an update operation*') (Get-ShutdownBlockReason)
+            return $false
+        }
+        if ($script:UpdJob) { return $false }
+        $sessionIdle = [pscustomobject]@{ Cancel = $false }; Invoke-SessionEnding $sessionIdle
+        Test-Smoke 'after the operation log off is not held back and the reason is gone' (-not $sessionIdle.Cancel -and -not (Get-ShutdownBlockReason)) (Get-ShutdownBlockReason)
+        $window.UpdateLayout()
+        $ids = @($script:UpdItems | ForEach-Object Id)
+        Test-Smoke 'search: Windows (driver excluded), M365, Edge, Teams, OneDrive, FSLogix detect-only, Defender, winget and choco apps' ($ids -contains 'windows:u1' -and (@($script:UpdItems | Where-Object Id -eq 'windows:u3')[0].Status -eq 'Excluded') -and $ids -contains 'm365' -and $ids -contains 'edge' -and $ids -contains 'teams' -and $ids -contains 'onedrive' -and (@($script:UpdItems | Where-Object Id -eq 'fslogix')[0].Status -eq 'DetectOnly') -and $ids -contains 'defender' -and $ids -contains 'winget:7zip.7zip' -and $ids -contains 'choco:git') (@($script:UpdItems | ForEach-Object { "$($_.Id)=$($_.Status)" }) -join ',')
+        Test-Smoke 'list shows group headings, rows and the Microsoft Update note' ((Find-Text $ui.PanelUpdItems 'Windows') -and (Find-Text $ui.PanelUpdItems 'Software') -and $ui.PanelUpdItems.Children.Count -ge 12 -and $ui.TxtUpdNotes.Text -like '*Microsoft Update*') $ui.PanelUpdItems.Children.Count
+        Save-SmokeShot '30-updates-list'
+        $true } }
+    @{ Name = 'updates run'; Do = {
+        if ($script:OverviewJob) { return $false }   # the fake machine is not thread safe: never change it while the overview job reads it
+        if (-not $script:UpdRunStep) {
+            $script:UpdRunStep = 1
+            [void](Set-AVDTuneUpdateBlock -Machine $script:Machine -Root $script:StateRoot -Mode On -User 'smoke')
+            $script:UpdChecked['windows:u1'] = $true
+            $ui.BtnUpdSelected.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
+            Test-Smoke 'update selected: the confirmation says the block is lifted for the run' ($script:ConfirmAsked -like '*update block is lifted*') $script:ConfirmAsked
+            return $false
+        }
+        if ($script:UpdJob) { return $false }   # the run, then the new search
+        $window.UpdateLayout()
+        $state = Get-AVDTuneState $script:StateRoot
+        Test-Smoke 'run done: LastUpdate set, block restored (record closed), history has rows' ($state.LastUpdate -and $state.Maintenance.Phase -eq 'restored' -and -not (Get-AVDTuneMaintenanceCrash -Root $script:StateRoot) -and $ui.PanelUpdHistory.Children.Count -ge 1) "$($state.Maintenance.Phase) / $($ui.TxtUpdState.Text)"
+        Test-Smoke 'the run is in the protocol and the change log' (@($script:Protocol.Actions | Where-Object { $_.Category -eq 'update' }).Count -ge 1 -and @(Get-AVDTuneChangeLog -Root $script:StateRoot | Where-Object { $_.ChangeType -eq 'Updated' }).Count -ge 1) $null
+        Save-SmokeShot '31-updates-history'
+        $script:UpdLastRun = [pscustomobject]@{ Results = @([pscustomobject]@{ Status = 'Failed'; Repair = $true; Id = 'x' }) }
+        Update-UpdatesView; $window.UpdateLayout()
+        Test-Smoke 'a failed update with a repairable cause offers DISM and sfc' ($ui.BoxUpdRepair.Visibility -eq 'Visible') $null
+        Save-SmokeShot '32-updates-repair-offer'
+        $script:UpdLastRun = $null; Update-UpdatesView
+        $true } }
+    @{ Name = 'update block page'; Do = {
+        if ($script:OverviewJob) { return $false }   # the fake machine is not thread safe: never change it while the overview job reads it
+        if (-not $script:BlkStep) {
+            $script:BlkStep = 1
+            Show-Page 'UpdateBlock'; $window.UpdateLayout()
+            Test-Smoke 'Update block page: status Blocked, settings listed by product' ($ui.TxtBlockPill.Text -eq 'Blocked' -and $ui.PanelBlockItems.Children.Count -ge 10 -and (Find-Text $ui.PanelBlockItems 'Edge') -and $ui.BoxBlockCrash.Visibility -eq 'Collapsed') $ui.TxtBlockPill.Text
+            Save-SmokeShot '33-update-block-on'
+            & $script:Machine.RegRemove 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU' 'NoAutoUpdate'
+            Update-UpdateBlockView; $window.UpdateLayout()
+            Test-Smoke 'reset from outside: status Partly and the missing group is named' ($ui.TxtBlockPill.Text -eq 'Partly' -and $ui.TxtBlockSummary.Text -like '*Missing: Windows*') $ui.TxtBlockSummary.Text
+            Save-SmokeShot '34-update-block-partial'
+            $ui.BtnBlockOn.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
+            return $false
+        }
+        if ($script:UpdJob) { return $false }
+        if ($script:BlkStep -eq 1) {
+            $script:BlkStep = 2
+            Test-Smoke 'switch on again from the page: back to Blocked' ($ui.TxtBlockPill.Text -eq 'Blocked') $ui.TxtBlockPill.Text
+            $null = Start-AVDTuneMaintenance -Machine $script:Machine -Root $script:StateRoot -User 'smoke'
+            Update-UpdateBlockView; $window.UpdateLayout()
+            Test-Smoke 'interrupted maintenance mode: the page says so and offers the repair' ($ui.BoxBlockCrash.Visibility -eq 'Visible' -and $ui.TxtBlockPill.Text -eq 'Interrupted' -and $ui.TxtBlockCrash.Text -like '*did not end properly*') $ui.TxtBlockPill.Text
+            Save-SmokeShot '35-update-block-crash'
+            $ui.BtnBlockRepair.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
+            return $false
+        }
+        Test-Smoke 'repair from the page: block back, no record Active, change log entry' ($ui.TxtBlockPill.Text -eq 'Blocked' -and -not (Get-AVDTuneMaintenanceCrash -Root $script:StateRoot) -and @(Get-AVDTuneChangeLog -Root $script:StateRoot | Where-Object { $_.Text -like '*did not end properly*' }).Count -eq 1) $ui.TxtBlockPill.Text
+        $true } }
+    @{ Name = 'overview shows the block'; Do = {
+        if (-not $script:OvStep) { $script:OvStep = 1; Show-Page 'Overview'; Start-OverviewRefresh; return $false }
+        if ($script:OverviewJob) { return $false }
+        $window.UpdateLayout()
+        $h = @($script:Overview.Health | Where-Object { $_.Id -eq 'updateblock' })[0]
+        Test-Smoke 'Overview health: Update block for users is ok with the number of settings' ($h.Status -eq 'ok' -and $h.Detail -like 'On: *settings*' -and (Find-Text $ui.PanelHealth 'Update block for users')) $h.Detail
+        Save-SmokeShot '36-overview-block'
+        $true } }
     @{ Name = 'start: sign-out and dark'; Do = {
         Open-Stage 'SignIn'; $window.UpdateLayout()
         $ui.BtnStageAction2.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
@@ -283,7 +386,28 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         Close-Stage
         $ui.BtnTheme.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
         $true } }
+    @{ Name = 'close after the operation'; Do = {
+        # last step: closing during a search is held back and the window closes by itself when the search is done (the Closed handler below records it)
+        if (-not $script:CloseStepStarted) {
+            $script:CloseStepStarted = Get-Date
+            Show-Page 'Updates'
+            Start-UpdJob 'Scan' $null
+            $window.Close()
+            Test-Smoke 'closing during the search is held back' ($window.IsVisible -and $script:CloseWhenDone) $null
+            $script:SmokeAwaitAutoClose = $true
+            $script:SmokeResults | Set-Content (Join-Path $script:SmokeOut 'results.txt')
+            return $false
+        }
+        if (((Get-Date) - $script:CloseStepStarted).TotalSeconds -lt 60) { return $false }
+        $script:SmokeAwaitAutoClose = $false; $script:CloseWhenDone = $false
+        Test-Smoke 'the window closes by itself after the operation' $false 'still open after 60 s'
+        $true } }
 )
+$window.Add_Closed({
+    if (-not $script:SmokeAwaitAutoClose) { return }
+    Test-Smoke 'the window closes by itself after the operation' (-not $script:UpdJob) $null
+    $script:SmokeResults | Set-Content (Join-Path $script:SmokeOut 'results.txt')
+})
 
 $script:SmokeTimer = New-Object System.Windows.Threading.DispatcherTimer
 $script:SmokeTimer.Interval = [TimeSpan]::FromMilliseconds(400)
@@ -297,7 +421,7 @@ $script:SmokeTimer.Add_Tick({
         }
         $step = $script:SmokeSteps[0]
         try { $done = & $step.Do $step }
-        catch { Test-Smoke "step '$($step.Name)'" $false "$($_.Exception.Message) @ $($_.InvocationInfo.ScriptLineNumber)"; $done = $true }
+        catch { Test-Smoke "step '$($step.Name)'" $false "$($_.Exception.Message) @ $($_.InvocationInfo.ScriptLineNumber) $($_.ScriptStackTrace -replace "s+", " ")"; $done = $true }
         if ($done) { $script:SmokeSteps.RemoveAt(0) }
     }
     catch {

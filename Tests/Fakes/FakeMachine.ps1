@@ -3,13 +3,13 @@
 # Dot-source this file, then: $m = New-AVDTuneFakeMachine [-Seed @{ ... }]
 # Seed keys (all optional): Registry (hashtable 'path|name' -> value), Keys (array of registry keys that exist), Services (array of
 # @{ Name; Status; StartType }), Tasks (array of @{ Path; Name; Enabled }), Imds (object or $null), Native (hashtable 'file args' -> @{ ExitCode; Output }),
-# ComputerName, Now (datetime, fixed clock).
+# ComputerName, Now (datetime, fixed clock). $m.Store.FailWrites = @('part of a key|name') makes RegSet throw for matching values (error path checks).
 
 function New-AVDTuneFakeMachine {
     param([hashtable]$Seed = @{})
     $store = @{
         Registry = @{}; Keys = @{}; Services = @{}; Tasks = @{}; Native = @{}; Log = (New-Object System.Collections.ArrayList)
-        ComputerName = $(if ($Seed.ComputerName) { $Seed.ComputerName } else { 'GM-TEST01' }); Now = $Seed.Now; Imds = $null
+        ComputerName = $(if ($Seed.ComputerName) { $Seed.ComputerName } else { 'GM-TEST01' }); Now = $Seed.Now; Imds = $null; FailWrites = @()
     }
     $win = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion'
     $office = 'HKLM:\SOFTWARE\Microsoft\Office\ClickToRun\Configuration'
@@ -50,6 +50,7 @@ function New-AVDTuneFakeMachine {
     $m.RegSet = {
         param($Path, $Name, $Value, $Type)
         $k = (([string]$Path) + '|' + ([string]$Name)).ToLowerInvariant()
+        foreach ($bad in @($store.FailWrites)) { if ($bad -and $k -like "*$($bad.ToLowerInvariant())*") { throw "fake: write refused for $Path|$Name" } }
         $store.Registry[$k] = $Value; [void]$store.Log.Add("RegSet $Path|$Name=$Value ($Type)")
     }.GetNewClosure()
     $m.RegRemove = {
@@ -65,12 +66,13 @@ function New-AVDTuneFakeMachine {
     $m.ServiceStop = { param($Name) $store.Services[([string]$Name).ToLowerInvariant()].Status = 'Stopped'; [void]$store.Log.Add("ServiceStop $Name") }.GetNewClosure()
     $m.ServiceStart = { param($Name) $store.Services[([string]$Name).ToLowerInvariant()].Status = 'Running'; [void]$store.Log.Add("ServiceStart $Name") }.GetNewClosure()
     $m.TaskGet = { param($Path, $Name) $k = (([string]$Path) + ([string]$Name)).ToLowerInvariant(); if ($store.Tasks.ContainsKey($k)) { $store.Tasks[$k] } else { $null } }.GetNewClosure()
+    $m.TaskList = { param($Path) @($store.Tasks.Values | Where-Object { $_.Path -eq $Path } | ForEach-Object { $_.Name }) }.GetNewClosure()
     $m.TaskSetEnabled = {
         param($Path, $Name, $Enabled)
         $store.Tasks[(([string]$Path) + ([string]$Name)).ToLowerInvariant()].Enabled = [bool]$Enabled; [void]$store.Log.Add("TaskSetEnabled $Path$Name=$Enabled")
     }.GetNewClosure()
     $m.Run = {
-        param($File, [string[]]$Arguments)
+        param($File, [string[]]$Arguments, [int]$TimeoutSeconds = 120)
         $key = (@($File) + @($Arguments)) -join ' '
         [void]$store.Log.Add("Run $key")
         if ($store.Native.ContainsKey($key)) { [pscustomobject]$store.Native[$key] } else { [pscustomobject]@{ ExitCode = 1; Output = "fake: no answer for $key" } }

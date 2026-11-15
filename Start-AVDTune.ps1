@@ -26,7 +26,7 @@ Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, Sys
 $script:AppRoot = $PSScriptRoot
 $script:ToolVersion = '0.1.0'
 Import-Module (Join-Path $PSScriptRoot 'Modules\AVDTune.psm1') -Force
-foreach ($part in 'Trust', 'Session', 'Snapshot', 'Directory', 'Start') { Import-Module (Join-Path $PSScriptRoot "Modules\AVDTune.$part.psm1") -Force }
+foreach ($part in 'Trust', 'Session', 'Snapshot', 'Directory', 'Start', 'UpdateBlock', 'Updates') { Import-Module (Join-Path $PSScriptRoot "Modules\AVDTune.$part.psm1") -Force }
 . (Join-Path $PSScriptRoot 'AVDTune-Theme.ps1')
 
 # ---------------------------------------------------------------- test mode, elevation, one instance
@@ -55,6 +55,8 @@ if ($script:TestMode) {
 else { $script:Machine = New-AVDTuneMachine }
 # The state folder is checked before it is trusted (owner, explicit rules, links; repaired when possible, Modules\AVDTune.psm1)
 try { [void](Initialize-AVDTuneState -Root $script:StateRoot) } catch { Stop-WithMessage $_.Exception.Message }
+# Staging folders of a Teams update that a crash left behind (Modules\AVDTune.Updates.psm1); after the check, links are never followed
+try { [void](Clear-AVDTuneStageFolder -Root $script:StateRoot) } catch { }
 $script:WorkRoot = $script:StateRoot
 . (Join-Path $PSScriptRoot 'AVDTune-Protocol.ps1')
 
@@ -135,7 +137,7 @@ function Confirm-Action([string]$Text, [string]$Title = 'AVDTune') {
 $script:PageTable = @(
     @{ Key = 'Overview'; Title = 'Overview'; Glyph = 0xE80F }
     @{ Key = 'Setup'; Title = 'Setup'; Glyph = 0xE7C3; Phase = 6; Text = 'Guided first setup in a fixed order: language and region for all users, Office, VDI components, optimizations, software and user experience. Each block shows what is done and what is left.' }
-    @{ Key = 'Updates'; Title = 'Updates'; Glyph = 0xE895; Phase = 2; Text = 'One list for everything: Windows (without drivers and previews by default, with an exclude list), Microsoft 365 Apps, Edge, Teams, OneDrive, FSLogix, Defender signatures, and the apps from winget, Chocolatey and the library. Update all or per item, with history. Runs in maintenance mode only.' }
+    @{ Key = 'Updates'; Title = 'Updates'; Glyph = 0xE895; Phase = 2 }
     @{ Key = 'Software'; Title = 'Software'; Glyph = 0xE71D; Phase = 4; Text = 'Packages of the PackTune library and the winget and Chocolatey catalog: install, update and remove, and detection of what is already on the master.' }
     @{ Key = 'Office'; Title = 'Office'; Glyph = 0xE8A5; Phase = 6; Text = 'Office Deployment Tool configuration (channel, 64 bit, languages, excluded apps, shared computer licensing, updates off), preview of configuration.xml, install, update and remove, build info.' }
     @{ Key = 'Optimization'; Title = 'Optimization'; Glyph = 0xE9D9; Phase = 6; Text = 'Optimizations for multi-session hosts: AppX, services, tasks and autologgers, visual effects, power plan, widgets and consumer features off, browser settings, Storage Sense, telemetry, hibernation, defrag. Each step with its reason and source.' }
@@ -143,9 +145,9 @@ $script:PageTable = @(
     @{ Key = 'AppMasking'; Title = 'App Masking'; Glyph = 0xE7B3; Phase = 3; Text = 'FSLogix hiding rules for icons and apps, with groups from the domain or Microsoft Entra ID.' }
     @{ Key = 'VdiComponents'; Title = 'VDI components'; Glyph = 0xE7F4; Phase = 6; Text = 'Defender onboarding for non-persistent VDI, new Teams for VDI, multimedia redirection, RDP Shortpath, time zone redirection and OneDrive per machine.' }
     @{ Key = 'UserExperience'; Title = 'User experience'; Glyph = 0xE771; Phase = 6; Text = 'Wallpaper, watermark, Start and taskbar layout and default apps for new profiles, public desktop shortcuts and web apps with App Masking rules per group.' }
-    @{ Key = 'UpdateBlock'; Title = 'Update block'; Glyph = 0xE72E; Phase = 2; Text = 'Everything that offers or runs updates is hidden and switched off for users. Maintenance mode lifts the block for the administrator only and restores it afterwards.' }
+    @{ Key = 'UpdateBlock'; Title = 'Update block'; Glyph = 0xE72E; Phase = 2 }
     @{ Key = 'Benchmark'; Title = 'Benchmark'; Glyph = 0xE9D2; Phase = 5; Text = 'Measures CPU, memory, disk and GPU per image version and compares versions.' }
-    @{ Key = 'Seal'; Title = 'Cleanup and seal'; Glyph = 0xE74D; Phase = 7; Text = 'The last button of a version: a checklist that must be green (no pending restart, update block on, FSLogix test passed, no AVD agent, no join, no tokens), cleanup, a snapshot reminder and sysprep with a typed confirmation.' }
+    @{ Key = 'Seal'; Title = 'Cleanup and finish'; Glyph = 0xE74D; Phase = 7; Text = 'The last button of a version, Finish: the health check must be green or acknowledged and the benchmark done; cleanup that keeps the master usable; tokens, sign-in caches and local step images removed; a pending restart first; the change log of the version closed and sent to SharePoint; then log off or shut down. The master is never sysprepped: the image is made by your imaging tool afterwards (sysprep only as an expert option without one).' }
     @{ Key = 'Protocol'; Title = 'Protocol and change log'; Glyph = 0xE8A5 }
 )
 $script:PageKeys = @($script:PageTable | ForEach-Object { $_.Key })
@@ -177,9 +179,11 @@ foreach ($page in $script:PageTable) {
 
 function Show-Page([string]$Key) {
     $script:CurrentPage = $Key
-    $isPlaceholder = $Key -notin 'Overview', 'Protocol'
+    $isPlaceholder = $Key -notin 'Overview', 'Protocol', 'Updates', 'UpdateBlock'
     $ui.PageOverview.Visibility = ConvertTo-Vis ($Key -eq 'Overview')
     $ui.PageProtocol.Visibility = ConvertTo-Vis ($Key -eq 'Protocol')
+    $ui.PageUpdates.Visibility = ConvertTo-Vis ($Key -eq 'Updates')
+    $ui.PageUpdateBlock.Visibility = ConvertTo-Vis ($Key -eq 'UpdateBlock')
     $ui.PagePlaceholder.Visibility = ConvertTo-Vis $isPlaceholder
     $ui["Nav$Key"].IsChecked = $true
     Update-ReadOnlyBanner
@@ -191,6 +195,8 @@ function Show-Page([string]$Key) {
     }
     elseif ($Key -eq 'Overview') { Update-OverviewView; Update-StartView }
     elseif ($Key -eq 'Protocol') { Update-ProtocolView }
+    elseif ($Key -eq 'Updates') { Update-UpdatesView }
+    elseif ($Key -eq 'UpdateBlock') { Update-UpdateBlockView }
 }
 
 # ---------------------------------------------------------------- Overview
@@ -260,12 +266,13 @@ function Start-OverviewRefresh {
     $ui.TxtOverviewState.Text = 'Reading the machine ...'
     $ps = [powershell]::Create()
     [void]$ps.AddScript({
-            param($Module, $FakeScript, $Root)
+            param($Module, $FakeScript, $Root, $SharedMachine)
             $ErrorActionPreference = 'Stop'
             Import-Module $Module -Force
-            if ($FakeScript) { . $FakeScript; $m = New-AVDTuneFakeMachine } else { $m = New-AVDTuneMachine }
-            Get-AVDTuneOverview -Machine $m -Root $Root
-        }).AddArgument((Join-Path $script:AppRoot 'Modules\AVDTune.psm1')).AddArgument($(if ($script:TestMode) { $env:AVDTUNE_FAKE } else { '' })).AddArgument($script:StateRoot)
+            Import-Module (Join-Path (Split-Path $Module -Parent) 'AVDTune.UpdateBlock.psm1') -Force
+            if ($FakeScript) { . $FakeScript; $m = $SharedMachine; if (-not $m) { $m = New-AVDTuneFakeMachine } } else { $m = New-AVDTuneMachine }
+            Get-AVDTuneOverview -Machine $m -Root $Root -UpdateBlock (Get-AVDTuneUpdateBlockStatus $m)
+        }).AddArgument((Join-Path $script:AppRoot 'Modules\AVDTune.psm1')).AddArgument($(if ($script:TestMode) { $env:AVDTUNE_FAKE } else { '' })).AddArgument($script:StateRoot).AddArgument($(if ($script:TestMode) { $script:Machine } else { $null }))
     $script:OverviewJob = @{ PS = $ps; Handle = $ps.BeginInvoke() }
 }
 function Complete-OverviewRefresh {
@@ -399,6 +406,7 @@ Add-Click $ui.BtnProtocolCopy {
 }
 
 . (Join-Path $PSScriptRoot 'AVDTune-Start.ps1')
+. (Join-Path $PSScriptRoot 'AVDTune-Updates.ps1')
 
 # ---------------------------------------------------------------- theme switch
 function Update-ThemeButton { $ui.BtnTheme.Content = [string][char]$(if ($script:Settings.Theme -eq 'Dark') { 0xE706 } else { 0xE708 }) }
@@ -424,7 +432,53 @@ Add-Click $ui.BtnMinimize { $window.WindowState = 'Minimized' }
 Add-Click $ui.BtnMaximize { $window.WindowState = if ($window.WindowState -eq 'Maximized') { 'Normal' } else { 'Maximized' } }
 Add-Click $ui.BtnClose { $window.Close() }
 
+# Closing during an update operation would end the process in the middle of it: the finally block of the maintenance mode would not run and the
+# update block would stay lifted. So the window stays open; it closes by itself when the operation is done (Complete-UpdJob).
+$script:CloseWhenDone = $false
+$window.Add_Closing({
+    param($src, $e)
+    if (-not $script:UpdJob) { return }
+    $e.Cancel = $true
+    $script:CloseWhenDone = $true
+    $what = if ($script:UpdJob.Kind -eq 'Scan') { 'The update search is still running' } else { 'An update operation is still running' }
+    Show-Toast "$what. AVDTune closes by itself when it is done (the update block is restored first)."
+})
+
+# Log off or shut down during an update operation would end it the same way: Windows is asked to wait (SessionEnding is cancelled) and shows
+# the reason (ShutdownBlockReasonCreate) while an operation runs. Start-UpdJob and Complete-UpdJob switch the reason on and off.
+if (-not ('AVDTune.ShutdownBlock' -as [type])) {
+    Add-Type -Namespace AVDTune -Name ShutdownBlock -MemberDefinition @'
+[DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern bool ShutdownBlockReasonCreate(IntPtr hWnd, string reason);
+[DllImport("user32.dll")] public static extern bool ShutdownBlockReasonDestroy(IntPtr hWnd);
+[DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern bool ShutdownBlockReasonQuery(IntPtr hWnd, System.Text.StringBuilder buffer, ref uint size);
+'@
+}
+$script:ShutdownReason = 'AVDTune is running an update operation. Wait until it is done: the update block for users is restored at the end.'
+function Get-WindowHandle { (New-Object System.Windows.Interop.WindowInteropHelper $window).Handle }
+function Set-ShutdownBlock([bool]$On) {
+    try {
+        $h = Get-WindowHandle
+        if ($h -eq [IntPtr]::Zero) { return }
+        if ($On) { [void][AVDTune.ShutdownBlock]::ShutdownBlockReasonCreate($h, $script:ShutdownReason) } else { [void][AVDTune.ShutdownBlock]::ShutdownBlockReasonDestroy($h) }
+    }
+    catch { }
+}
+function Get-ShutdownBlockReason {
+    $h = Get-WindowHandle
+    $sb = New-Object System.Text.StringBuilder 1024
+    [uint32]$size = 1024
+    if ($h -ne [IntPtr]::Zero -and [AVDTune.ShutdownBlock]::ShutdownBlockReasonQuery($h, $sb, [ref]$size)) { $sb.ToString() } else { '' }
+}
+function Invoke-SessionEnding($EventArgs) {
+    if (-not $script:UpdJob) { return }
+    $EventArgs.Cancel = $true
+    Show-Toast 'Log off or shut down was held back: an update operation is still running. Try again when it is done.'
+}
+$script:SessionEndingHandler = [System.Windows.SessionEndingCancelEventHandler]{ param($src, $e) Invoke-SessionEnding $e }
+[System.Windows.Application]::Current.add_SessionEnding($script:SessionEndingHandler)
+
 $window.Add_Closed({
+    try { [System.Windows.Application]::Current.remove_SessionEnding($script:SessionEndingHandler) } catch { }   # a handler left on the application keeps the process from ending
     $script:Timer.Stop()
     try { $script:SnapTimer.Stop() } catch { }
     try { if ($script:StartContext.Session) { Disconnect-AVDTuneSession $script:StartContext.Session } } catch { }   # tokens leave the memory with the window
@@ -448,6 +502,8 @@ Show-Page 'Overview'
 if (-not (Get-AVDTuneEnvironment $script:StateRoot)) { try { Open-Stage 'Environment' } catch { Show-Error $_.Exception.Message } }
 $script:Timer.Start()
 Start-OverviewRefresh
+# A maintenance mode that never ended (closed or crashed in the middle) is reported at once; the repair is on the Update block page
+if (Get-AVDTuneMaintenanceCrash -Root $script:StateRoot) { Show-Toast 'The last maintenance mode did not end properly: the update block may be lifted. Open Update block and repair it.' }
 # Test hook: AVDTUNE_SMOKE names a script that drives the window off-screen and renders every page (only in test mode).
 if ($env:AVDTUNE_SMOKE -and $script:TestMode) { . $env:AVDTUNE_SMOKE }
 $window.Show()
