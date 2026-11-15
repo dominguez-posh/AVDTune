@@ -4,7 +4,7 @@
     AVDTune - Golden Master management for Azure Virtual Desktop. Graphical interface (WPF) in the look of PackTune.
 .DESCRIPTION
     Runs locally and elevated on the Golden Master. This is the shell of phase 1: own title bar, navigation, light and dark theme,
-    Overview (image identity, source image, builds, health), protocol of the session and change log per image version. The other
+    Overview (image identity, source image, builds, health, readiness analysis), protocol of the session and change log per image version. The other
     pages are placeholders until their phase (docs\plans\avdtune.md, section 11).
     State lives in C:\ProgramData\AVDTune (Modules\AVDTune.psm1). One instance at a time (mutex Global\AVDTune).
     Test hooks (all only honoured together, so they cannot be used to run the real tool unelevated):
@@ -26,7 +26,7 @@ Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, Sys
 $script:AppRoot = $PSScriptRoot
 $script:ToolVersion = '0.1.0'
 Import-Module (Join-Path $PSScriptRoot 'Modules\AVDTune.psm1') -Force
-foreach ($part in 'Trust', 'Session', 'Snapshot', 'Directory', 'Start', 'UpdateBlock', 'Updates') { Import-Module (Join-Path $PSScriptRoot "Modules\AVDTune.$part.psm1") -Force }
+foreach ($part in 'Trust', 'Session', 'Snapshot', 'Directory', 'Start', 'UpdateBlock', 'Updates', 'Readiness') { Import-Module (Join-Path $PSScriptRoot "Modules\AVDTune.$part.psm1") -Force }
 . (Join-Path $PSScriptRoot 'AVDTune-Theme.ps1')
 
 # ---------------------------------------------------------------- test mode, elevation, one instance
@@ -193,7 +193,7 @@ function Show-Page([string]$Key) {
         $ui.TxtPhPhase.Text = "Planned for phase $($page.Phase)"
         $ui.TxtPhText.Text = $page.Text
     }
-    elseif ($Key -eq 'Overview') { Update-OverviewView; Update-StartView }
+    elseif ($Key -eq 'Overview') { Update-OverviewView; Update-StartView; Update-ReadyView }
     elseif ($Key -eq 'Protocol') { Update-ProtocolView }
     elseif ($Key -eq 'Updates') { Update-UpdatesView }
     elseif ($Key -eq 'UpdateBlock') { Update-UpdateBlockView }
@@ -361,7 +361,7 @@ $ui.CmbProtocolLanguage.Add_SelectionChanged({
         Save-UiSettings
         if ($script:CurrentPage -eq 'Protocol') { Update-ProtocolView }
     })
-$ui.CmbNoteCategory.ItemsSource = @('Windows', 'Office', 'Software', 'Optimization', 'FSLogix', 'VDI', 'User experience', 'Update block', 'Benchmark', 'Seal', 'Other')
+$ui.CmbNoteCategory.ItemsSource = @('Windows', 'Office', 'Software', 'Optimization', 'FSLogix', 'VDI', 'User experience', 'Update block', 'Benchmark', 'Finish', 'Other')
 $ui.CmbNoteCategory.SelectedIndex = 10
 $ui.CmbNoteType.ItemsSource = @('Note', 'Added', 'Changed', 'Updated', 'Removed')
 $ui.CmbNoteType.SelectedIndex = 0
@@ -407,6 +407,8 @@ Add-Click $ui.BtnProtocolCopy {
 
 . (Join-Path $PSScriptRoot 'AVDTune-Start.ps1')
 . (Join-Path $PSScriptRoot 'AVDTune-Updates.ps1')
+$script:ReadyFakeArm = $(if ($script:TestMode) { $script:Services.Arm } else { $null })
+. (Join-Path $PSScriptRoot 'AVDTune-Readiness.ps1')
 
 # ---------------------------------------------------------------- theme switch
 function Update-ThemeButton { $ui.BtnTheme.Content = [string][char]$(if ($script:Settings.Theme -eq 'Dark') { 0xE706 } else { 0xE708 }) }
@@ -483,6 +485,7 @@ $window.Add_Closed({
     try { $script:SnapTimer.Stop() } catch { }
     try { if ($script:StartContext.Session) { Disconnect-AVDTuneSession $script:StartContext.Session } } catch { }   # tokens leave the memory with the window
     if ($script:OverviewJob) { try { [void]$script:OverviewJob.PS.BeginStop($null, $null) } catch { } }
+    if ($script:ReadyJob) { try { [void]$script:ReadyJob.PS.BeginStop($null, $null) } catch { } }
     try { if ($script:MutexOwned) { $script:Mutex.ReleaseMutex() } } catch { }
     [System.Windows.Application]::Current.Shutdown()
 })
@@ -502,6 +505,7 @@ Show-Page 'Overview'
 if (-not (Get-AVDTuneEnvironment $script:StateRoot)) { try { Open-Stage 'Environment' } catch { Show-Error $_.Exception.Message } }
 $script:Timer.Start()
 Start-OverviewRefresh
+Start-ReadyJob 'Start' ''   # the readiness analysis runs at every start (read only; Azure checks need the sign-in and run again after it)
 # A maintenance mode that never ended (closed or crashed in the middle) is reported at once; the repair is on the Update block page
 if (Get-AVDTuneMaintenanceCrash -Root $script:StateRoot) { Show-Toast 'The last maintenance mode did not end properly: the update block may be lifted. Open Update block and repair it.' }
 # Test hook: AVDTUNE_SMOKE names a script that drives the window off-screen and renders every page (only in test mode).

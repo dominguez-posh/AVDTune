@@ -75,10 +75,10 @@ function Get-AVDTuneVmIdentity {
     $disk = Get-AVDTuneProp (Get-AVDTuneProp $c 'storageProfile') 'osDisk'
     $diskName = [string](Get-AVDTuneProp $disk 'name')
     $diskId = [string](Get-AVDTuneProp (Get-AVDTuneProp $disk 'managedDisk') 'id')
-    if ($sub -notmatch '^[0-9a-fA-F-]{36}$' -or -not $rg -or -not $vm) { return (& $none 'The instance metadata has no subscription, resource group or VM name.') }
+    if ($sub -notmatch '^[0-9a-fA-F-]{36}$' -or $rg -notmatch '^[A-Za-z0-9._()-]+$' -or $vm -notmatch '^[A-Za-z0-9._()-]+$') { return (& $none 'The instance metadata has no valid subscription, resource group or VM name (letters, digits and . _ ( ) - only).') }
     if (-not $diskName) { return (& $none 'The instance metadata has no OS disk.') }
     if (-not $diskId) { return (& $none 'The OS disk is not a managed disk; AVDTune can only snapshot managed disks.') }
-    if ($diskId -notmatch '^/subscriptions/[0-9a-fA-F-]{36}/resourceGroups/[^/]+/providers/Microsoft\.Compute/disks/[^/]+$') { return (& $none 'The OS disk ID of the instance metadata has an unexpected form.') }
+    if ($diskId -notmatch '^/subscriptions/[0-9a-fA-F-]{36}/resourceGroups/[A-Za-z0-9._()-]+/providers/Microsoft\.Compute/disks/[A-Za-z0-9._()-]+$') { return (& $none 'The OS disk ID of the instance metadata has an unexpected form.') }
     [pscustomobject]@{
         Available = $true; Problem = ''; SubscriptionId = $sub; ResourceGroup = $rg; VmName = $vm; VmId = [string](Get-AVDTuneProp $c 'vmId')
         Location = [string](Get-AVDTuneProp $c 'location'); OsDiskName = $diskName; OsDiskId = $diskId
@@ -304,7 +304,7 @@ function New-AVDTuneArmAdapter {
     $adapter = [ordered]@{ Kind = 'Real' }
     $adapter.Invoke = {
         param($Method, $Path, $Token, $Body)
-        if ($Path -notmatch '^/subscriptions/[0-9a-fA-F-]{36}/' -or $Path -match '\.\.' -or $Path -match '[\s\x00-\x1F]') { return [pscustomobject]@{ Status = 0; Body = $null; Error = 'Refused: not an ARM resource path.' } }
+        if ($Path -notmatch '^/subscriptions/[0-9a-fA-F-]{36}/' -or $Path -match '\.\.' -or $Path -match '#' -or [regex]::Matches($Path, '\?').Count -gt 1 -or $Path -match '[\s\x00-\x1F]') { return [pscustomobject]@{ Status = 0; Body = $null; Error = 'Refused: not an ARM resource path.' } }
         # .NET Framework 4.x may still offer TLS 1.0/1.1 by default: TLS 1.2 is asked for explicitly (added, never removed: TLS 1.3 stays when the system has it)
         [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
         try {

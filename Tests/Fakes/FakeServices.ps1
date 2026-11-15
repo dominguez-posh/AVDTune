@@ -62,15 +62,17 @@ function New-AVDTuneFakeAuth {
 }
 
 # ------------------------------------------------------------------ Azure Resource Manager
-# Seed: VmName, ResourceGroup, Snapshots (array of @{ Name; Created (datetime, local); Tags; State })
-# Switches in .Store: Offline, ReadForbidden, WriteForbidden, DiskMissing, PollsUntilReady (GETs of a new snapshot that say Creating), CreateFails, Unauthorized
+# Seed: VmName, ResourceGroup, Snapshots (array of @{ Name; Created (datetime, local); Tags; State }), and for the readiness analysis Vm (hashtable: VmSize, DiskControllerType (omitted when empty), SecurityType, SecureBoot, VTpm,
+#   HyperV, ImageRefId, Nics = array of @{ Name; AccelNet }) and Galleries (hashtable image definition name -> @{ Features = array of @{ name; value }; Architecture; HyperV })\n# Switches in .Store: Offline, ReadForbidden, WriteForbidden, DiskMissing, PollsUntilReady (GETs of a new snapshot that say Creating), CreateFails, Unauthorized, VmForbidden, NicForbidden, GalleryForbidden
 function New-AVDTuneFakeArm {
     param([hashtable]$Seed = @{})
     $rg = if ($Seed.ResourceGroup) { $Seed.ResourceGroup } else { 'rg-example' }
     $vm = if ($Seed.VmName) { $Seed.VmName } else { 'gm-test01' }
+    $subId = $script:FakeSubscription
     $diskId = "/subscriptions/$script:FakeSubscription/resourceGroups/$rg/providers/Microsoft.Compute/disks/$vm`_osdisk"
     $store = @{ Offline = $false; ReadForbidden = $false; WriteForbidden = $false; DiskMissing = $false; PollsUntilReady = 1; CreateFails = $false; Unauthorized = $false
-        DiskId = $diskId; ResourceGroup = $rg; Snapshots = @{}; Polls = @{}; Log = (New-Object System.Collections.ArrayList); LastPut = $null; Location = 'westeurope'; NextLinkPage = $false; EvilLink = $false }
+        DiskId = $diskId; ResourceGroup = $rg; Snapshots = @{}; Polls = @{}; Log = (New-Object System.Collections.ArrayList); LastPut = $null; Location = 'westeurope'; NextLinkPage = $false; EvilLink = $false
+        VmForbidden = $false; NicForbidden = $false; GalleryForbidden = $false; VmSeed = $(if ($Seed.Vm) { $Seed.Vm } else { @{} }); Galleries = $(if ($Seed.Galleries) { $Seed.Galleries } else { @{} }) }
     foreach ($s in @($Seed.Snapshots)) {
         if (-not $s) { continue }
         $id = "/subscriptions/$script:FakeSubscription/resourceGroups/$rg/providers/Microsoft.Compute/snapshots/$($s.Name)"
@@ -91,6 +93,35 @@ function New-AVDTuneFakeArm {
             if ($store.ReadForbidden) { return [pscustomobject]@{ Status = 403; Body = (ConvertTo-FakeJson @{ error = @{ code = 'AuthorizationFailed'; message = 'does not have authorization to perform action' } }); Error = '' } }
             if ($store.DiskMissing) { return [pscustomobject]@{ Status = 404; Body = $null; Error = 'not found' } }
             return [pscustomobject]@{ Status = 200; Body = (ConvertTo-FakeJson @{ id = $store.DiskId; name = "$vm`_osdisk"; location = $store.Location }); Error = '' }
+        }
+        if ($Method -eq 'GET' -and $lower -eq "/subscriptions/$subId/resourcegroups/$rg/providers/microsoft.compute/virtualmachines/$vm".ToLowerInvariant()) {
+            if ($store.ReadForbidden -or $store.VmForbidden) { return [pscustomobject]@{ Status = 403; Body = (ConvertTo-FakeJson @{ error = @{ code = 'AuthorizationFailed'; message = 'does not have authorization to perform action Microsoft.Compute/virtualMachines/read' } }); Error = '' } }
+            $s = $store.VmSeed
+            $nics = @(if ($s.Nics) { $s.Nics } else { @(@{ Name = 'nic1'; AccelNet = $true }) })
+            $storage = @{ imageReference = @{ id = $(if ($s.ImageRefId) { $s.ImageRefId } else { '' }) } }
+            if ($s.ContainsKey('DiskControllerType')) { if ($s.DiskControllerType) { $storage.diskControllerType = $s.DiskControllerType } } else { $storage.diskControllerType = 'NVMe' }
+            $security = @{ securityType = $(if ($s.ContainsKey('SecurityType')) { $s.SecurityType } else { 'TrustedLaunch' }); uefiSettings = @{ secureBootEnabled = $(if ($s.ContainsKey('SecureBoot')) { $s.SecureBoot } else { $true }); vTpmEnabled = $(if ($s.ContainsKey('VTpm')) { $s.VTpm } else { $true }) } }
+            $body = @{ id = $p; name = $vm; location = $store.Location; properties = @{
+                    hardwareProfile = @{ vmSize = $(if ($s.VmSize) { $s.VmSize } else { 'Standard_D4s_v6' }) }; storageProfile = $storage; securityProfile = $security
+                    networkProfile = @{ networkInterfaces = @($nics | ForEach-Object { @{ id = "/subscriptions/$subId/resourceGroups/$rg/providers/Microsoft.Network/networkInterfaces/$($_.Name)" } }) }
+                    extended = @{ instanceView = @{ hyperVGeneration = $(if ($s.HyperV) { $s.HyperV } else { 'V2' }) } } } }
+            return [pscustomobject]@{ Status = 200; Body = (ConvertTo-FakeJson $body); Error = '' }
+        }
+        if ($Method -eq 'GET' -and $lower -like '*/providers/microsoft.network/networkinterfaces/*') {
+            if ($store.ReadForbidden -or $store.NicForbidden) { return [pscustomobject]@{ Status = 403; Body = $null; Error = 'forbidden' } }
+            $nicName = $p.Substring($p.LastIndexOf('/') + 1)
+            $s = $store.VmSeed
+            $nics = @(if ($s.Nics) { $s.Nics } else { @(@{ Name = 'nic1'; AccelNet = $true }) })
+            $hit = @($nics | Where-Object { $_.Name -eq $nicName })
+            if ($hit.Count -eq 0) { return [pscustomobject]@{ Status = 404; Body = $null; Error = 'not found' } }
+            return [pscustomobject]@{ Status = 200; Body = (ConvertTo-FakeJson @{ id = $p; name = $nicName; properties = @{ enableAcceleratedNetworking = [bool]$hit[0].AccelNet } }); Error = '' }
+        }
+        if ($Method -eq 'GET' -and $lower -like '*/providers/microsoft.compute/galleries/*/images/*') {
+            if ($store.ReadForbidden -or $store.GalleryForbidden) { return [pscustomobject]@{ Status = 403; Body = $null; Error = 'forbidden' } }
+            $defName = $p.Substring($p.LastIndexOf('/') + 1)
+            if (-not $store.Galleries.ContainsKey($defName)) { return [pscustomobject]@{ Status = 404; Body = $null; Error = 'not found' } }
+            $g = $store.Galleries[$defName]
+            return [pscustomobject]@{ Status = 200; Body = (ConvertTo-FakeJson @{ id = $p; name = $defName; properties = @{ features = @($g.Features); architecture = $(if ($g.Architecture) { $g.Architecture } else { 'x64' }); hyperVGeneration = $(if ($g.HyperV) { $g.HyperV } else { 'V2' }); osType = 'Windows' } }); Error = '' }
         }
         if ($Method -eq 'GET' -and $lower -like '*/providers/microsoft.compute/snapshots') {
             if ($store.ReadForbidden) { return [pscustomobject]@{ Status = 403; Body = $null; Error = 'forbidden' } }

@@ -1,0 +1,683 @@
+{
+  "Schema": 1,
+  "Stand": "2026-11-15",
+  "About": "Criteria of the readiness and image hygiene analysis (docs/plans/avdtune.md, section 2a). Each criterion has a source (Microsoft Learn) and the date it was read. Verified=false means: no Learn page states it, the value is AVDTune's own choice or a common Windows convention. Keep current with every release: new VM sizes come often.",
+  "Criteria": {
+    "hw.vm-size": { "Title": "VM size and family", "Source": "https://learn.microsoft.com/en-us/azure/virtual-machines/sizes/lifecycle/sizes-v6-v7-modernization-overview", "Stand": "2026-11-15", "Verified": true, "Note": "The family list below is read from the Learn series pages (processor, local storage, network interfaces)." },
+    "hw.disk-controller": { "Title": "Disk controller of the VM", "Source": "https://learn.microsoft.com/en-us/azure/virtual-machines/enable-nvme-faqs", "Stand": "2026-11-15", "Verified": true, "Note": "Learn: the newer generations (Da/Ea/Fav6 and newer) typically support only NVMe, most v6 and v7 sizes are NVMe-only; the controller type is fixed when a VM is created (storageProfile.diskControllerType). Learn does not list NVMe-only per family." },
+    "hw.stornvme": { "Title": "Windows NVMe driver (stornvme) starts at boot", "Source": "https://learn.microsoft.com/en-us/azure/virtual-machines/nvme-linux", "Stand": "2026-11-15", "Verified": true, "Note": "Learn: the conversion script with -FixOperatingSystemSettings runs 'sc.exe config stornvme start=boot' on Windows. That Start=0 is the registry value of 'boot' is the Windows service convention and not stated on that page." },
+    "hw.nvme-timeout": { "Title": "NVMe I/O timeout (IoTimeoutValue)", "Source": "https://learn.microsoft.com/en-us/azure/virtual-machines/enable-nvme-interface", "Stand": "2026-11-15", "Verified": true, "Note": "Learn: default OS-level NVMe I/O timeout is 240 seconds, registry value IoTimeoutValue under HKLM\\SYSTEM\\CurrentControlSet\\Services\\stornvme\\Parameters; some older images have 30 seconds." },
+    "hw.mana": { "Title": "Microsoft Azure Network Adapter (MANA) driver", "Source": "https://learn.microsoft.com/en-us/azure/virtual-network/accelerated-networking-mana-windows", "Stand": "2026-11-15", "Verified": true, "Note": "Learn: adapter 'Microsoft Azure Network Adapter' in Get-NetAdapter, PCI device VEN_1414&DEV_00BA; PCI device without adapter means the driver is missing (download: https://aka.ms/manawindowsdrivers). On hardware without MANA the driver in the image cannot be seen from inside the VM: that part is not verifiable here." },
+    "hw.accelnet": { "Title": "Accelerated Networking on the NIC", "Source": "https://learn.microsoft.com/en-us/azure/virtual-network/accelerated-networking-mana-windows", "Stand": "2026-11-15", "Verified": true, "Note": "Learn lists Accelerated Networking as Required for the Dsv6 series; other series pages were not read one by one." },
+    "hw.pagefile-d": { "Title": "Page file on D:", "Source": "https://learn.microsoft.com/en-us/azure/virtual-machines/azure-vms-no-temp-disk", "Stand": "2026-11-15", "Verified": true, "Note": "Learn: images that depend on the resource disk, or have a pagefile or swapfile on the local temp disk, do not work on sizes without a local temp disk. The system-managed form '?:' is not flagged." },
+    "hw.temp-env-d": { "Title": "TEMP and TMP on D:", "Source": "https://learn.microsoft.com/en-us/azure/virtual-machines/sizes/lifecycle/sizes-v6-v7-modernization-assess", "Stand": "2026-11-15", "Verified": true, "Note": "Learn: review temporary and local disk use; the local NVMe disk is raw and re-created on every stop/deallocate, D: can be lost. That a TEMP path on D: then breaks is derived from this." },
+    "hw.fslogix-d": { "Title": "FSLogix local cache on D:", "Source": "https://learn.microsoft.com/en-us/fslogix/reference-configuration-settings", "Stand": "2026-11-15", "Verified": true, "Note": "Learn names CacheDirectory, WriteCacheDirectory and ProxyDirectory (Cloud Cache) under HKLM\\SOFTWARE\\FSLogix\\Profiles; that D: breaks follows from the raw or missing temp disk." },
+    "hw.firmware": { "Title": "Generation 2 (UEFI)", "Source": "https://learn.microsoft.com/en-us/azure/virtual-machines/enable-nvme-faqs", "Stand": "2026-11-15", "Verified": true, "Note": "Learn: no NVMe on Generation 1, the v6 and v7 series need Generation 2 (UEFI). Reading UEFI from the guest (registry PEFirmwareType=2) is a Windows convention, not stated on Learn." },
+    "hw.securestart": { "Title": "Secure Boot and vTPM (Trusted Launch)", "Source": "https://learn.microsoft.com/en-us/azure/virtual-machines/trusted-launch", "Stand": "2026-11-15", "Verified": true, "Note": "Learn recommends Trusted Launch for Generation 2. The guest registry markers (SecureBoot\\State, Win32_Tpm) are Windows conventions, not stated on Learn." },
+    "hw.arch": { "Title": "Processor architecture", "Source": "https://learn.microsoft.com/en-us/azure/virtual-machines/sizes/general-purpose/dpsv6-series", "Stand": "2026-11-15", "Verified": true, "Note": "Arm64 families (Dps/Dpl/Dpds/Dplds v6, Eps/Epds v6) need an Arm64 image." },
+    "hw.gallery": { "Title": "Image definition in the Azure Compute Gallery", "Source": "https://learn.microsoft.com/en-us/azure/virtual-machines/shared-image-galleries", "Stand": "2026-11-15", "Verified": true, "Note": "Learn lists the features DiskControllerType (SCSI, NVMe), SecurityType (TrustedLaunchSupported, TrustedLaunch, TrustedLaunchAndConfidentialVmSupported, Standard) and IsAcceleratedNetworkSupported; the NVMe FAQ writes DiskControllerTypes. AVDTune accepts both spellings. Architecture and hyperVGeneration are properties of the definition." },
+    "hw.families": { "Title": "VM families this master can run on", "Source": "https://learn.microsoft.com/en-us/azure/virtual-machines/sizes/lifecycle/sizes-v6-v7-modernization-overview", "Stand": "2026-11-15", "Verified": true, "Note": "Local disk only on d-suffixed sizes and presented as NVMe (raw, unformatted). Per family only what the series pages state is kept: processor, local storage, network interfaces. NVMe-only per family is not stated and not claimed." },
+    "hy.windows-support": { "Title": "Windows build in support", "Source": "https://learn.microsoft.com/en-us/windows/release-health/windows11-release-information", "Stand": "2026-11-15", "Verified": true, "Note": "End of updates for Enterprise and Enterprise multi-session from the release information page." },
+    "hy.lcu-age": { "Title": "Age of the last cumulative update", "Source": "https://learn.microsoft.com/en-us/windows/release-health/windows11-release-information", "Stand": "2026-11-15", "Verified": false, "Note": "Microsoft sets no age limit; the yellow and red thresholds below are AVDTune's own. The newest known build per version is from the release information page." },
+    "hy.avd-agent": { "Title": "AVD agent and boot loader not installed", "Source": "https://learn.microsoft.com/en-us/azure/virtual-desktop/set-up-golden-image", "Stand": "2026-11-15", "Verified": true, "Note": "Learn: do not join the golden image VM to a host pool by deploying the Azure Virtual Desktop Agent." },
+    "hy.reg-token": { "Title": "No host pool registration token", "Source": "https://learn.microsoft.com/en-us/azure/virtual-desktop/troubleshoot-agent", "Stand": "2026-11-15", "Verified": true, "Note": "Learn names HKLM\\SOFTWARE\\RDInfraAgent with IsRegistered and RegistrationToken." },
+    "hy.join": { "Title": "Not joined to a domain or Microsoft Entra ID", "Source": "https://learn.microsoft.com/en-us/azure/virtual-desktop/set-up-golden-image", "Stand": "2026-11-15", "Verified": true, "Note": "Learn: remove the VM from the domain before running sysprep." },
+    "hy.bitlocker": { "Title": "BitLocker off", "Source": "https://learn.microsoft.com/en-us/azure/virtual-desktop/set-up-golden-image", "Stand": "2026-11-15", "Verified": false, "Note": "No Learn page was found that states BitLocker must be off on a golden image; kept from the user's process (plan section 2a), so a finding is yellow, not red." },
+    "hy.reboot": { "Title": "No restart waiting", "Source": "https://learn.microsoft.com/en-us/azure/virtual-desktop/set-up-golden-image", "Stand": "2026-11-15", "Verified": false, "Note": "The registry markers (Component Based Servicing RebootPending, Windows Update RebootRequired, PendingFileRenameOperations, SystemSetupInProgress) are common Windows servicing markers; no Learn page lists them." },
+    "hy.update-block": { "Title": "Update block for users", "Source": "https://learn.microsoft.com/en-us/windows/deployment/update/waas-wu-settings", "Stand": "2026-11-15", "Verified": true, "Note": "From the Update block page (#6), whose settings carry their own Learn sources." },
+    "hy.defender-onboarding": { "Title": "Defender for Endpoint not onboarded on the master", "Source": "https://learn.microsoft.com/en-us/defender-endpoint/configure-endpoints-vdi", "Stand": "2026-11-15", "Verified": true, "Note": "Learn: do not onboard the primary image; cloning an onboarded image duplicates senseGuid (HKLM\\SOFTWARE\\Microsoft\\Windows Advanced Threat Protection)." },
+    "hy.language": { "Title": "Installed display languages", "Source": "https://learn.microsoft.com/en-us/azure/virtual-desktop/windows-11-language-packs", "Stand": "2026-11-15", "Verified": true, "Note": "Information only: AVDTune does not know which languages the users need yet (Setup page, later phase)." },
+    "hy.vm-agent": { "Title": "Azure VM agent", "Source": "https://learn.microsoft.com/en-us/azure/virtual-machines/extensions/agent-windows", "Stand": "2026-11-15", "Verified": true, "Note": "Learn: the process WindowsAzureGuestAgent.exe; without the agent some Azure services (backup, security) cannot be used. Whether the agent is current is not checked." },
+    "hy.leftovers": { "Title": "Leftovers of earlier scripts", "Source": "https://learn.microsoft.com/en-us/azure/virtual-desktop/set-up-golden-image", "Stand": "2026-11-15", "Verified": false, "Note": "AVDTune's own list (tasks, VBS starters in ProgramData, driver export folders); no Learn page lists them. Edit LeftoverTaskPatterns and LeftoverPaths below." }
+  },
+  "Windows": {
+    "Builds": [
+      { "Build": "26300", "Version": "26H2", "EndOfUpdates": "2029-10-09", "Latest": "26300.9974" },
+      { "Build": "28000", "Version": "26H1", "EndOfUpdates": "2029-03-13", "Latest": "28000.3501" },
+      { "Build": "26200", "Version": "25H2", "EndOfUpdates": "2028-10-10", "Latest": "26200.9974" },
+      { "Build": "26100", "Version": "24H2", "EndOfUpdates": "2027-10-12", "Latest": "26100.9974" },
+      { "Build": "22631", "Version": "23H2", "EndOfUpdates": "ended", "Latest": "22631.7714" },
+      { "Build": "22621", "Version": "22H2", "EndOfUpdates": "ended", "Latest": "22621.6060" },
+      { "Build": "22000", "Version": "21H2", "EndOfUpdates": "ended", "Latest": "22000.3260" }
+    ],
+    "WarnDaysBeforeEnd": 180
+  },
+  "Thresholds": { "LcuYellowDays": 45, "LcuRedDays": 120 },
+  "Hygiene": {
+    "LeftoverTaskPatterns": [ "PilotOverlay", "Overlay", "^(GM|Golden)[-_ ]?(Master)?[-_ ]?(Setup|Prep|Logon|Startup)" ],
+    "LeftoverPaths": [ "C:\\Drivers", "C:\\DriverBackup", "C:\\DriverExport", "C:\\ExportedDrivers", "C:\\ProgramData\\DriverExport" ],
+    "LeftoverStarterFolder": "C:\\ProgramData",
+    "LeftoverStarterFilter": "*.vbs"
+  },
+  "Families": [
+      {
+          "Name":  "Dadsv6",
+          "SizePattern":  "^Standard_D\\d+ads_v6$",
+          "Generation":  "v6",
+          "Arch":  "x64",
+          "Cpu":  "AMD EPYC 9004 (Genoa) [x86-64]",
+          "TempDisk":  "NVMe",
+          "Network":  [
+                          "NetVSC",
+                          "ConnectX"
+                      ]
+      },
+      {
+          "Name":  "Dadsv7",
+          "SizePattern":  "^Standard_D\\d+ads_v7$",
+          "Generation":  "v7",
+          "Arch":  "x64",
+          "Cpu":  "AMD EPYC 9005 (Turin) [x86-64]",
+          "TempDisk":  "NVMe",
+          "Network":  [
+                          "NetVSC",
+                          "MANA"
+                      ]
+      },
+      {
+          "Name":  "Daldsv6",
+          "SizePattern":  "^Standard_D\\d+alds_v6$",
+          "Generation":  "v6",
+          "Arch":  "x64",
+          "Cpu":  "AMD EPYC 9004 (Genoa) [x86-64]",
+          "TempDisk":  "NVMe",
+          "Network":  [
+                          "NetVSC",
+                          "ConnectX"
+                      ]
+      },
+      {
+          "Name":  "Daldsv7",
+          "SizePattern":  "^Standard_D\\d+alds_v7$",
+          "Generation":  "v7",
+          "Arch":  "x64",
+          "Cpu":  "AMD EPYC 9005 (Turin) [x86-64]",
+          "TempDisk":  "NVMe",
+          "Network":  [
+                          "NetVSC",
+                          "MANA"
+                      ]
+      },
+      {
+          "Name":  "Dalsv6",
+          "SizePattern":  "^Standard_D\\d+als_v6$",
+          "Generation":  "v6",
+          "Arch":  "x64",
+          "Cpu":  "AMD EPYC 9004 (Genoa) [x86-64]",
+          "TempDisk":  "None",
+          "Network":  [
+                          "NetVSC",
+                          "ConnectX"
+                      ]
+      },
+      {
+          "Name":  "Dalsv7",
+          "SizePattern":  "^Standard_D\\d+als_v7$",
+          "Generation":  "v7",
+          "Arch":  "x64",
+          "Cpu":  "AMD EPYC 9005 (Turin) [x86-64]",
+          "TempDisk":  "None",
+          "Network":  [
+                          "NetVSC",
+                          "MANA"
+                      ]
+      },
+      {
+          "Name":  "Dasv6",
+          "SizePattern":  "^Standard_D\\d+as_v6$",
+          "Generation":  "v6",
+          "Arch":  "x64",
+          "Cpu":  "AMD EPYC 9004 (Genoa) [x86-64]",
+          "TempDisk":  "None",
+          "Network":  [
+                          "NetVSC",
+                          "ConnectX"
+                      ]
+      },
+      {
+          "Name":  "Dasv7",
+          "SizePattern":  "^Standard_D\\d+as_v7$",
+          "Generation":  "v7",
+          "Arch":  "x64",
+          "Cpu":  "AMD EPYC 9005 (Turin) [x86-64]",
+          "TempDisk":  "None",
+          "Network":  [
+                          "NetVSC",
+                          "MANA"
+                      ]
+      },
+      {
+          "Name":  "Dcadsv6",
+          "SizePattern":  "^Standard_DC\\d+ads_v6$",
+          "Generation":  "v6",
+          "Arch":  "x64",
+          "Cpu":  "AMD EPYC 9004 (Genoa) [x86-64]",
+          "TempDisk":  "NVMe",
+          "Network":  [
+                          "NetVSC",
+                          "ConnectX"
+                      ]
+      },
+      {
+          "Name":  "Dcasv6",
+          "SizePattern":  "^Standard_DC\\d+as_v6$",
+          "Generation":  "v6",
+          "Arch":  "x64",
+          "Cpu":  "AMD EPYC 9004 (Genoa) [x86-64]",
+          "TempDisk":  "None",
+          "Network":  [
+                          "NetVSC",
+                          "ConnectX"
+                      ]
+      },
+      {
+          "Name":  "Dcesv6",
+          "SizePattern":  "^Standard_DC\\d+es_v6$",
+          "Generation":  "v6",
+          "Arch":  "x64",
+          "Cpu":  "Intel Xeon Platinum 8573C (Emerald Rapids) [x86-64]",
+          "TempDisk":  "None",
+          "Network":  [
+                          "NetVSC",
+                          "MANA"
+                      ]
+      },
+      {
+          "Name":  "Ddsv6",
+          "SizePattern":  "^Standard_D\\d+ds_v6$",
+          "Generation":  "v6",
+          "Arch":  "x64",
+          "Cpu":  "Intel Xeon Platinum 8573C (Emerald Rapids) [x86-64]",
+          "TempDisk":  "NVMe",
+          "Network":  [
+                          "NetVSC",
+                          "MANA"
+                      ]
+      },
+      {
+          "Name":  "Ddsv7",
+          "SizePattern":  "^Standard_D\\d+ds_v7$",
+          "Generation":  "v7",
+          "Arch":  "x64",
+          "Cpu":  "Intel Xeon 6 6973PC (Granite Rapids) [x86-64]",
+          "TempDisk":  "NVMe",
+          "Network":  [
+                          "NetVSC",
+                          "MANA"
+                      ]
+      },
+      {
+          "Name":  "Dldsv6",
+          "SizePattern":  "^Standard_D\\d+lds_v6$",
+          "Generation":  "v6",
+          "Arch":  "x64",
+          "Cpu":  "Intel Xeon Platinum 8573C (Emerald Rapids) [x86-64]",
+          "TempDisk":  "NVMe",
+          "Network":  [
+                          "NetVSC",
+                          "MANA"
+                      ]
+      },
+      {
+          "Name":  "Dldsv7",
+          "SizePattern":  "^Standard_D\\d+lds_v7$",
+          "Generation":  "v7",
+          "Arch":  "x64",
+          "Cpu":  "Intel Xeon 6 6973PC (Granite Rapids) [x86-64]",
+          "TempDisk":  "NVMe",
+          "Network":  [
+                          "NetVSC",
+                          "MANA"
+                      ]
+      },
+      {
+          "Name":  "Dlsv6",
+          "SizePattern":  "^Standard_D\\d+ls_v6$",
+          "Generation":  "v6",
+          "Arch":  "x64",
+          "Cpu":  "Intel Xeon Platinum 8573C (Emerald Rapids) [x86-64]",
+          "TempDisk":  "None",
+          "Network":  [
+                          "NetVSC",
+                          "MANA"
+                      ]
+      },
+      {
+          "Name":  "Dlsv7",
+          "SizePattern":  "^Standard_D\\d+ls_v7$",
+          "Generation":  "v7",
+          "Arch":  "x64",
+          "Cpu":  "Intel Xeon 6 6973PC (Granite Rapids) [x86-64]",
+          "TempDisk":  "None",
+          "Network":  [
+                          "NetVSC",
+                          "MANA"
+                      ]
+      },
+      {
+          "Name":  "Dndsv6",
+          "SizePattern":  "^Standard_D\\d+nds_v6$",
+          "Generation":  "v6",
+          "Arch":  "x64",
+          "Cpu":  "Intel Xeon Platinum 8573C (Emerald Rapids) [x86-64]",
+          "TempDisk":  "NVMe",
+          "Network":  [
+                          "NetVSC",
+                          "MANA"
+                      ]
+      },
+      {
+          "Name":  "Dnldsv6",
+          "SizePattern":  "^Standard_D\\d+nlds_v6$",
+          "Generation":  "v6",
+          "Arch":  "x64",
+          "Cpu":  "Intel Xeon Platinum 8573C (Emerald Rapids) [x86-64]",
+          "TempDisk":  "NVMe",
+          "Network":  [
+                          "NetVSC"
+                      ]
+      },
+      {
+          "Name":  "Dnlsv6",
+          "SizePattern":  "^Standard_D\\d+nls_v6$",
+          "Generation":  "v6",
+          "Arch":  "x64",
+          "Cpu":  "Intel Xeon Platinum 8573C (Emerald Rapids) [x86-64]",
+          "TempDisk":  "None",
+          "Network":  [
+                          "NetVSC",
+                          "MANA"
+                      ]
+      },
+      {
+          "Name":  "Dnsv6",
+          "SizePattern":  "^Standard_D\\d+ns_v6$",
+          "Generation":  "v6",
+          "Arch":  "x64",
+          "Cpu":  "Intel Xeon Platinum 8573C (Emerald Rapids) [x86-64]",
+          "TempDisk":  "None",
+          "Network":  [
+                          "NetVSC",
+                          "MANA"
+                      ]
+      },
+      {
+          "Name":  "Dpdsv6",
+          "SizePattern":  "^Standard_D\\d+pds_v6$",
+          "Generation":  "v6",
+          "Arch":  "Arm64",
+          "Cpu":  "Azure Cobalt 100 [Arm64]",
+          "TempDisk":  "NVMe",
+          "Network":  [
+                          "NetVSC",
+                          "ConnectX",
+                          "MANA"
+                      ]
+      },
+      {
+          "Name":  "Dpldsv6",
+          "SizePattern":  "^Standard_D\\d+plds_v6$",
+          "Generation":  "v6",
+          "Arch":  "Arm64",
+          "Cpu":  "Azure Cobalt 100 [Arm64]",
+          "TempDisk":  "NVMe",
+          "Network":  [
+                          "NetVSC",
+                          "ConnectX",
+                          "MANA"
+                      ]
+      },
+      {
+          "Name":  "Dplsv6",
+          "SizePattern":  "^Standard_D\\d+pls_v6$",
+          "Generation":  "v6",
+          "Arch":  "Arm64",
+          "Cpu":  "Azure Cobalt 100 [Arm64]",
+          "TempDisk":  "None",
+          "Network":  [
+                          "NetVSC",
+                          "ConnectX",
+                          "MANA"
+                      ]
+      },
+      {
+          "Name":  "Dpsv6",
+          "SizePattern":  "^Standard_D\\d+ps_v6$",
+          "Generation":  "v6",
+          "Arch":  "Arm64",
+          "Cpu":  "Azure Cobalt 100 [Arm64]",
+          "TempDisk":  "None",
+          "Network":  [
+                          "NetVSC",
+                          "ConnectX",
+                          "MANA"
+                      ]
+      },
+      {
+          "Name":  "Dsv6",
+          "SizePattern":  "^Standard_D\\d+s_v6$",
+          "Generation":  "v6",
+          "Arch":  "x64",
+          "Cpu":  "Intel Xeon Platinum 8573C (Emerald Rapids) [x86-64]",
+          "TempDisk":  "None",
+          "Network":  [
+                          "NetVSC",
+                          "MANA"
+                      ]
+      },
+      {
+          "Name":  "Dsv7",
+          "SizePattern":  "^Standard_D\\d+s_v7$",
+          "Generation":  "v7",
+          "Arch":  "x64",
+          "Cpu":  "Intel Xeon 6 6973PC (Granite Rapids) [x86-64]",
+          "TempDisk":  "None",
+          "Network":  [
+                          "NetVSC",
+                          "MANA"
+                      ]
+      },
+      {
+          "Name":  "Eadsv6",
+          "SizePattern":  "^Standard_E\\d+ads_v6$",
+          "Generation":  "v6",
+          "Arch":  "x64",
+          "Cpu":  "AMD EPYC 9004 (Genoa) [x86-64]",
+          "TempDisk":  "NVMe",
+          "Network":  [
+                          "NetVSC",
+                          "ConnectX"
+                      ]
+      },
+      {
+          "Name":  "Eadsv7",
+          "SizePattern":  "^Standard_E\\d+ads_v7$",
+          "Generation":  "v7",
+          "Arch":  "x64",
+          "Cpu":  "AMD EPYC 9005 (Turin) [x86-64]",
+          "TempDisk":  "NVMe",
+          "Network":  [
+                          "NetVSC",
+                          "MANA"
+                      ]
+      },
+      {
+          "Name":  "Easv6",
+          "SizePattern":  "^Standard_E\\d+as_v6$",
+          "Generation":  "v6",
+          "Arch":  "x64",
+          "Cpu":  "AMD EPYC 9004 (Genoa) [x86-64]",
+          "TempDisk":  "None",
+          "Network":  [
+                          "NetVSC",
+                          "ConnectX"
+                      ]
+      },
+      {
+          "Name":  "Easv7",
+          "SizePattern":  "^Standard_E\\d+as_v7$",
+          "Generation":  "v7",
+          "Arch":  "x64",
+          "Cpu":  "AMD EPYC 9005 (Turin) [x86-64]",
+          "TempDisk":  "None",
+          "Network":  [
+                          "NetVSC",
+                          "MANA"
+                      ]
+      },
+      {
+          "Name":  "Ebdsv6",
+          "SizePattern":  "^Standard_E\\d+bds_v6$",
+          "Generation":  "v6",
+          "Arch":  "x64",
+          "Cpu":  "Intel Xeon Platinum 8573C (Emerald Rapids) [x86-64]",
+          "TempDisk":  "NVMe",
+          "Network":  [
+                          "NetVSC",
+                          "MANA"
+                      ]
+      },
+      {
+          "Name":  "Ebsv6",
+          "SizePattern":  "^Standard_E\\d+bs_v6$",
+          "Generation":  "v6",
+          "Arch":  "x64",
+          "Cpu":  "Intel Xeon Platinum 8573C (Emerald Rapids) [x86-64]",
+          "TempDisk":  "None",
+          "Network":  [
+                          "NetVSC",
+                          "MANA"
+                      ]
+      },
+      {
+          "Name":  "Ecadsv6",
+          "SizePattern":  "^Standard_EC\\d+ads_v6$",
+          "Generation":  "v6",
+          "Arch":  "x64",
+          "Cpu":  "AMD EPYC 9004 (Genoa) [x86-64]",
+          "TempDisk":  "NVMe",
+          "Network":  [
+                          "NetVSC",
+                          "ConnectX"
+                      ]
+      },
+      {
+          "Name":  "Ecasv6",
+          "SizePattern":  "^Standard_EC\\d+as_v6$",
+          "Generation":  "v6",
+          "Arch":  "x64",
+          "Cpu":  "AMD EPYC 9004 (Genoa) [x86-64]",
+          "TempDisk":  "None",
+          "Network":  [
+                          "NetVSC",
+                          "ConnectX"
+                      ]
+      },
+      {
+          "Name":  "Edsv6",
+          "SizePattern":  "^Standard_E\\d+ds_v6$",
+          "Generation":  "v6",
+          "Arch":  "x64",
+          "Cpu":  "Intel Xeon Platinum 8573C (Emerald Rapids) [x86-64]",
+          "TempDisk":  "NVMe",
+          "Network":  [
+                          "NetVSC",
+                          "MANA"
+                      ]
+      },
+      {
+          "Name":  "Edsv7",
+          "SizePattern":  "^Standard_E\\d+ds_v7$",
+          "Generation":  "v7",
+          "Arch":  "x64",
+          "Cpu":  "Intel@ Xeon 6 6973P-C (Granite Rapids) [x86-64]",
+          "TempDisk":  "NVMe",
+          "Network":  [
+                          "NetVSC",
+                          "MANA"
+                      ]
+      },
+      {
+          "Name":  "Endsv6",
+          "SizePattern":  "^Standard_E\\d+nds_v6$",
+          "Generation":  "v6",
+          "Arch":  "x64",
+          "Cpu":  "Intel Xeon Platinum 8573C (Emerald Rapids) [x86-64]",
+          "TempDisk":  "NVMe",
+          "Network":  [
+                          "NetVSC",
+                          "MANA"
+                      ]
+      },
+      {
+          "Name":  "Ensv6",
+          "SizePattern":  "^Standard_E\\d+ns_v6$",
+          "Generation":  "v6",
+          "Arch":  "x64",
+          "Cpu":  "Intel Xeon Platinum 8573C (Emerald Rapids) [x86-64]",
+          "TempDisk":  "None",
+          "Network":  [
+                          "NetVSC",
+                          "MANA"
+                      ]
+      },
+      {
+          "Name":  "Epdsv6",
+          "SizePattern":  "^Standard_E\\d+pds_v6$",
+          "Generation":  "v6",
+          "Arch":  "Arm64",
+          "Cpu":  "Azure Cobalt 100 [ARM-64]",
+          "TempDisk":  "NVMe",
+          "Network":  [
+                          "NetVSC",
+                          "ConnectX",
+                          "MANA"
+                      ]
+      },
+      {
+          "Name":  "Epsv6",
+          "SizePattern":  "^Standard_E\\d+ps_v6$",
+          "Generation":  "v6",
+          "Arch":  "Arm64",
+          "Cpu":  "Azure Cobalt 100 [ARM-64]",
+          "TempDisk":  "None",
+          "Network":  [
+                          "NetVSC",
+                          "ConnectX",
+                          "MANA"
+                      ]
+      },
+      {
+          "Name":  "Esv6",
+          "SizePattern":  "^Standard_E\\d+s_v6$",
+          "Generation":  "v6",
+          "Arch":  "x64",
+          "Cpu":  "Intel Xeon Platinum 8573C (Emerald Rapids) [x86-64]",
+          "TempDisk":  "None",
+          "Network":  [
+                          "NetVSC",
+                          "MANA"
+                      ]
+      },
+      {
+          "Name":  "Esv7",
+          "SizePattern":  "^Standard_E\\d+s_v7$",
+          "Generation":  "v7",
+          "Arch":  "x64",
+          "Cpu":  "Intel@ Xeon 6 processor 6973P-C(Granite Rapids) [x86-64]",
+          "TempDisk":  "None",
+          "Network":  [
+                          "NetVSC",
+                          "MANA"
+                      ]
+      },
+      {
+          "Name":  "Fadsv7",
+          "SizePattern":  "^Standard_F\\d+ads_v7$",
+          "Generation":  "v7",
+          "Arch":  "x64",
+          "Cpu":  "AMD EPYC 9005 (Turin) [x86-64]",
+          "TempDisk":  "NVMe",
+          "Network":  [
+                          "NetVSC",
+                          "MANA"
+                      ]
+      },
+      {
+          "Name":  "Faldsv7",
+          "SizePattern":  "^Standard_F\\d+alds_v7$",
+          "Generation":  "v7",
+          "Arch":  "x64",
+          "Cpu":  "AMD EPYC 9005 (Turin)  [x86-64]",
+          "TempDisk":  "NVMe",
+          "Network":  [
+                          "NetVSC",
+                          "MANA"
+                      ]
+      },
+      {
+          "Name":  "Falsv6",
+          "SizePattern":  "^Standard_F\\d+als_v6$",
+          "Generation":  "v6",
+          "Arch":  "x64",
+          "Cpu":  "AMD EPYC 9004 (Genoa) [x86-64]",
+          "TempDisk":  "None",
+          "Network":  [
+                          "NetVSC",
+                          "ConnectX"
+                      ]
+      },
+      {
+          "Name":  "Falsv7",
+          "SizePattern":  "^Standard_F\\d+als_v7$",
+          "Generation":  "v7",
+          "Arch":  "x64",
+          "Cpu":  "AMD EPYC 9005 (Turin) [x86-64]",
+          "TempDisk":  "None",
+          "Network":  [
+                          "NetVSC",
+                          "MANA"
+                      ]
+      },
+      {
+          "Name":  "Famdsv7",
+          "SizePattern":  "^Standard_F\\d+amds_v7$",
+          "Generation":  "v7",
+          "Arch":  "x64",
+          "Cpu":  "AMD EPYC 9005 (Turin)  [x86-64]",
+          "TempDisk":  "NVMe",
+          "Network":  [
+                          "NetVSC",
+                          "MANA"
+                      ]
+      },
+      {
+          "Name":  "Famsv6",
+          "SizePattern":  "^Standard_F\\d+ams_v6$",
+          "Generation":  "v6",
+          "Arch":  "x64",
+          "Cpu":  "AMD EPYC 9004 (Genoa) [x86-64]",
+          "TempDisk":  "None",
+          "Network":  [
+                          "NetVSC",
+                          "ConnectX"
+                      ]
+      },
+      {
+          "Name":  "Famsv7",
+          "SizePattern":  "^Standard_F\\d+ams_v7$",
+          "Generation":  "v7",
+          "Arch":  "x64",
+          "Cpu":  "AMD EPYC 9005 (Turin) [x86-64]",
+          "TempDisk":  "None",
+          "Network":  [
+                          "NetVSC",
+                          "MANA"
+                      ]
+      },
+      {
+          "Name":  "Fasv6",
+          "SizePattern":  "^Standard_F\\d+as_v6$",
+          "Generation":  "v6",
+          "Arch":  "x64",
+          "Cpu":  "AMD EPYC 9004 (Genoa) [x86-64]",
+          "TempDisk":  "None",
+          "Network":  [
+                          "NetVSC",
+                          "ConnectX"
+                      ]
+      },
+      {
+          "Name":  "Fasv7",
+          "SizePattern":  "^Standard_F\\d+as_v7$",
+          "Generation":  "v7",
+          "Arch":  "x64",
+          "Cpu":  "AMD EPYC 9005 (Turin) [x86-64]",
+          "TempDisk":  "None",
+          "Network":  [
+                          "NetVSC",
+                          "MANA"
+                      ]
+      }
+  ]
+}

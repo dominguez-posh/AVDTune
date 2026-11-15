@@ -13,7 +13,7 @@
     DeviceManagementApps.Read.All and Sites.Selected; the separation is by resource (Graph versus Azure Resource Manager), not by scope.
     A token with a scope beyond what AVDTune asks for on its resource is kept but named in Warnings (session info, protocol).
     Nothing here is written to disk: access and refresh tokens are SecureStrings in this process. Disconnect-AVDTuneSession removes them
-    and the temporary profiles of the sign-in window (PackTuneSignIn-* in %TEMP%); Test-AVDTuneSessionClear proves both (before seal).
+    and the temporary profiles of the sign-in window (PackTuneSignIn-* in %TEMP%); Test-AVDTuneSessionClear proves both (before Finish).
 
     The identity provider is an adapter ($Auth): SignIn and Refresh script blocks. New-AVDTuneAuthAdapter is the real one,
     Tests\Fakes\FakeServices.ps1 has the fake. Without changes to the shared module (nothing here edits Shared\).
@@ -227,7 +227,7 @@ function Disconnect-AVDTuneSession {
 }
 
 function Test-AVDTuneSessionClear {
-    # True when no token is held and no profile of the sign-in window is left (checked before seal / "Abschliessen")
+    # True when no token is held and no profile of the sign-in window is left (checked before Finish / "Abschliessen")
     param([Parameter(Mandatory)]$Session)
     ($Session.Tokens.Count -eq 0) -and ($null -eq $Session.Refresh) -and (-not $Session.Connected) -and (@(Get-AVDTuneSignInLeftovers -TempRoot $Session.TempRoot).Count -eq 0)
 }

@@ -97,7 +97,7 @@ try {
     $lockedFile = Join-Path $planted 'Cookies'; [IO.File]::WriteAllText($lockedFile, 'x')
     $lock = [IO.File]::Open($lockedFile, 'Open', 'Read', 'None')
     Disconnect-AVDTuneSession $sl
-    Test-Check 'a profile that is still locked stays and Test-AVDTuneSessionClear says so (final check before seal)' ((Test-Path $planted) -and -not (Test-AVDTuneSessionClear $sl)) $null
+    Test-Check 'a profile that is still locked stays and Test-AVDTuneSessionClear says so (final check before Finish)' ((Test-Path $planted) -and -not (Test-AVDTuneSessionClear $sl)) $null
     $releaser = [powershell]::Create(); [void]$releaser.AddScript({ param($h) Start-Sleep -Milliseconds 700; $h.Dispose() }).AddArgument($lock); $rh = $releaser.BeginInvoke()
     $left = @(Remove-AVDTuneSignInLeftovers -TempRoot $signTemp -Tries 20 -DelayMilliseconds 200)
     [void]$releaser.EndInvoke($rh); $releaser.Dispose()
@@ -258,6 +258,13 @@ try {
     # the real ARM adapter refuses foreign paths without a network call
     $realArm = New-AVDTuneArmAdapter
     Test-Check 'real ARM adapter refuses a path outside /subscriptions and path tricks' ((& $realArm.Invoke GET '/tenants?api-version=1' 't' $null).Status -eq 0 -and (& $realArm.Invoke GET '/subscriptions/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee/../x' 't' $null).Status -eq 0) $null
+    $sub0 = '/subscriptions/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee/resourceGroups/rg/providers/Microsoft.Compute/virtualMachines/vm1'
+    Test-Check 'real ARM adapter refuses a fragment (#) and a second question mark (no network call)' ((& $realArm.Invoke GET "$sub0#x" 't' $null).Status -eq 0 -and (& $realArm.Invoke GET "$sub0?api-version=1?x=2" 't' $null).Status -eq 0 -and (& $realArm.Invoke GET "$sub0#x" 't' $null).Error -like 'Refused*' -and (& $realArm.Invoke GET "$sub0?a=1?b=2" 't' $null).Error -like 'Refused*') $null
+    foreach ($badName in @('rg/../x', 'rg?x', 'rg#x', 'rg 1', 'r%2fg')) {
+        $evil = Get-AVDTuneVmIdentity (New-AVDTuneFakeMachine -Seed @{ Imds = [pscustomobject]@{ compute = [pscustomobject]@{ name = 'vm1'; resourceGroupName = $badName; subscriptionId = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'; storageProfile = [pscustomobject]@{ osDisk = [pscustomobject]@{ name = 'd'; managedDisk = [pscustomobject]@{ id = '/subscriptions/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee/resourceGroups/rg/providers/Microsoft.Compute/disks/d' } } } } } })
+        $evilVm = Get-AVDTuneVmIdentity (New-AVDTuneFakeMachine -Seed @{ Imds = [pscustomobject]@{ compute = [pscustomobject]@{ name = $badName; resourceGroupName = 'rg'; subscriptionId = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'; storageProfile = [pscustomobject]@{ osDisk = [pscustomobject]@{ name = 'd'; managedDisk = [pscustomobject]@{ id = '/subscriptions/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee/resourceGroups/rg/providers/Microsoft.Compute/disks/d' } } } } } })
+        Test-Check "instance metadata with the odd name '$badName' as resource group or VM name is refused" (-not $evil.Available -and -not $evilVm.Available) $null
+    }
     $armCode = [IO.File]::ReadAllText((Join-Path $repo 'Modules\AVDTune.Snapshot.psm1'))
     $armBlock = $armCode.Substring($armCode.IndexOf('function New-AVDTuneArmAdapter'))
     Test-Check 'real ARM adapter asks for TLS 1.2 explicitly before the request (finding: TLS)' ($armBlock -match 'SecurityProtocol -bor \[Net\.SecurityProtocolType\]::Tls12' -and $armBlock.IndexOf('Tls12') -lt $armBlock.IndexOf('HttpWebRequest]::Create')) $null

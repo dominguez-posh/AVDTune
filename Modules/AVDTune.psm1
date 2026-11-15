@@ -137,6 +137,47 @@ function New-AVDTuneMachine {
         }
         catch { $null }
     }
+    # Read-only members of the readiness analysis (docs\plans\avdtune.md, section 2a)
+    $m.RegSubKeys = {
+        param($Path)
+        if (-not (Test-Path -LiteralPath $Path)) { return @() }
+        @(Get-ChildItem -LiteralPath $Path -ErrorAction SilentlyContinue | ForEach-Object { $_.PSChildName })
+    }
+    $m.PathExists = { param($Path) Test-Path -LiteralPath $Path }
+    $m.DirList = {
+        # Names of the files and folders directly in a folder; empty when the folder is not there
+        param($Path, $Filter = '*')
+        if (-not (Test-Path -LiteralPath $Path)) { return @() }
+        @(Get-ChildItem -LiteralPath $Path -Filter $Filter -Force -ErrorAction SilentlyContinue | ForEach-Object { $_.Name })
+    }
+    $m.Hotfixes = {
+        # Installed updates with the date: @{ Id; InstalledOn } (InstalledOn can be $null)
+        @(Get-CimInstance -ClassName Win32_QuickFixEngineering -ErrorAction Stop | ForEach-Object {
+                $on = $null; if ($_.InstalledOn) { try { $on = [datetime]$_.InstalledOn } catch { } }
+                [pscustomobject]@{ Id = [string]$_.HotFixID; InstalledOn = $on }
+            })
+    }
+    $m.NetAdapters = {
+        @(Get-NetAdapter -ErrorAction Stop | ForEach-Object { [pscustomobject]@{ Name = $_.Name; Description = $_.InterfaceDescription; Status = [string]$_.Status } })
+    }
+    $m.PnpPresent = {
+        # True when a present PnP device has an instance ID that matches the regular expression
+        param($Pattern)
+        $found = @(Get-PnpDevice -PresentOnly -ErrorAction Stop | Where-Object { $_.InstanceId -match $Pattern })
+        $found.Count -gt 0
+    }
+    $m.OsArchitecture = {
+        $a = if ($env:PROCESSOR_ARCHITEW6432) { $env:PROCESSOR_ARCHITEW6432 } else { $env:PROCESSOR_ARCHITECTURE }
+        [string]$a
+    }
+    $m.TpmPresent = {
+        # $true / $false, $null when the TPM provider cannot be asked
+        try {
+            $t = @(Get-CimInstance -Namespace 'root\cimv2\Security\MicrosoftTpm' -ClassName Win32_Tpm -ErrorAction Stop)
+            ($t.Count -gt 0 -and [bool]$t[0].IsEnabled_InitialValue)
+        }
+        catch { $null }
+    }
     [pscustomobject]$m
 }
 
@@ -396,7 +437,7 @@ function Get-AVDTuneNextImageVersion {
 }
 
 function Start-AVDTuneImageVersion {
-    # "Start new version": raises the version, clears the seal, keeps the list of versions with their start time
+    # "Start new version": raises the version, clears the finished mark, keeps the list of versions with their start time
     param([string]$Root = (Get-AVDTuneRoot), [datetime]$Date = (Get-Date), [string]$User)
     $version = Get-AVDTuneNextImageVersion -Root $Root -Date $Date
     $state = Get-AVDTuneState $Root
@@ -431,7 +472,7 @@ function Get-AVDTuneLastChange {
     <#
         When AVDTune last changed the master (Apply or Undo that changed something), as a local [datetime], or $null when it never did.
         The newest of: state.json LastChange, the end of every run record with a Changed/Reverted result, every automatic change log
-        entry (Source Step) except the snapshot confirmations themselves.
+        entry (Source Step) except the snapshot confirmations and the readiness analyses and confirmations (analysis is no change; a fix has the category "Readiness fix").
     #>
     param([string]$Root = (Get-AVDTuneRoot))
     $times = New-Object System.Collections.ArrayList
@@ -442,7 +483,7 @@ function Get-AVDTuneLastChange {
         if (-not $run -or (Get-AVDTuneProp $run 'WhatIf')) { continue }
         if (@(@(Get-AVDTuneProp $run 'Results') | Where-Object { $_ -and $_.Status -in 'Changed', 'Reverted' }).Count -gt 0) { & $parse (Get-AVDTuneProp $run 'Ended') }
     }
-    foreach ($e in @(Get-AVDTuneChangeLog -Root $Root)) { if ($e.Source -eq 'Step' -and $e.Category -ne 'Snapshot') { & $parse $e.At } }
+    foreach ($e in @(Get-AVDTuneChangeLog -Root $Root)) { if ($e.Source -eq 'Step' -and $e.Category -notin 'Snapshot', 'Readiness') { & $parse $e.At } }
     if ($times.Count -eq 0) { return $null }
     (@($times | Sort-Object)[-1]).ToLocalTime()
 }
@@ -835,7 +876,7 @@ function Get-AVDTuneSourceImage {
 function Get-AVDTuneHealth {
     <#
         Health checks of the Overview. Status: ok, warn, bad, info. "Must not be" items (AVD agent, join) are bad when present:
-        a master with an agent or a join cannot be sealed.
+        a master with an agent or a join cannot be finished.
     #>
     param([Parameter(Mandatory)]$Machine, [Parameter(Mandatory)]$State, $UpdateBlock)
     $rows = New-Object System.Collections.ArrayList
@@ -857,17 +898,17 @@ function Get-AVDTuneHealth {
         $expected = [string]$State.UpdateBlock
         if ($UpdateBlock.State -eq 'On') { Add-Health 'updateblock' 'Update block for users' 'ok' ('On: ' + $UpdateBlock.Compliant + ' of ' + $UpdateBlock.Applicable + ' settings are in place, users see and run no updates.') }
         elseif ($expected -eq 'On') { Add-Health 'updateblock' 'Update block for users' 'bad' ('Changed from outside: only ' + $UpdateBlock.Compliant + ' of ' + $UpdateBlock.Applicable + ' settings are in place (' + $UpdateBlock.Missing + '). Switch the block on again.') }
-        elseif ($UpdateBlock.State -eq 'Partial') { Add-Health 'updateblock' 'Update block for users' 'warn' ('Partly on: ' + $UpdateBlock.Compliant + ' of ' + $UpdateBlock.Applicable + ' settings. Switch the block on before seal.') }
-        else { Add-Health 'updateblock' 'Update block for users' 'warn' 'Off: users can see and run updates. Switch the block on before seal.' }
+        elseif ($UpdateBlock.State -eq 'Partial') { Add-Health 'updateblock' 'Update block for users' 'warn' ('Partly on: ' + $UpdateBlock.Compliant + ' of ' + $UpdateBlock.Applicable + ' settings. Switch the block on before Finish.') }
+        else { Add-Health 'updateblock' 'Update block for users' 'warn' 'Off: users can see and run updates. Switch the block on before Finish.' }
     }
     else {
         switch ([string]$State.UpdateBlock) {
             'On' { Add-Health 'updateblock' 'Update block for users' 'ok' 'On: users see and run no updates (maintenance mode off).' }
-            'Off' { Add-Health 'updateblock' 'Update block for users' 'warn' 'Off: maintenance mode, updates are possible. Switch the block on before seal.' }
+            'Off' { Add-Health 'updateblock' 'Update block for users' 'warn' 'Off: maintenance mode, updates are possible. Switch the block on before Finish.' }
             default { Add-Health 'updateblock' 'Update block for users' 'info' 'Not set up yet.' }
         }
     }
-    if ($State.Sealed) { Add-Health 'sealed' 'Seal' 'info' 'Sealed: the master is ready for capture.' } else { Add-Health 'sealed' 'Seal' 'info' 'Not sealed.' }
+    if ($State.Sealed) { Add-Health 'sealed' 'Finish' 'info' 'Finished: the master is ready for capture.' } else { Add-Health 'sealed' 'Finish' 'info' 'Not finished.' }
 
     $agent = @('RDAgentBootLoader', 'RDAgent' | Where-Object { & $Machine.ServiceGet $_ })
     $agentKey = & $Machine.RegKeyExists 'HKLM:\SOFTWARE\Microsoft\RDInfraAgent'

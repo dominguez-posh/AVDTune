@@ -114,7 +114,7 @@ function Resolve-AVDTuneEnvironmentPlan {
         'AdDs' { [void]$notes.Add('Azure Files with AD DS.') }
         'EntraDs' { [void]$notes.Add('Azure Files with Microsoft Entra Domain Services.') }
     }
-    if ($Answers.Profiles -eq 'None') { [void]$notes.Add('Without FSLogix the FSLogix pages are hidden and the seal checklist has no FSLogix test.') }
+    if ($Answers.Profiles -eq 'None') { [void]$notes.Add('Without FSLogix the FSLogix pages are hidden and the Finish checklist has no FSLogix test.') }
     [pscustomobject]@{ UsesDc = $usesDc; AzureFilesAuth = $auth; AzureFilesAuthChoices = $choices; HiddenPages = $hidden; Notes = @($notes) }
 }
 

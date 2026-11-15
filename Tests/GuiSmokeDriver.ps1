@@ -317,7 +317,7 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         Save-SmokeShot '30-updates-list'
         $true } }
     @{ Name = 'updates run'; Do = {
-        if ($script:OverviewJob) { return $false }   # the fake machine is not thread safe: never change it while the overview job reads it
+        if ($script:OverviewJob -or $script:ReadyJob) { return $false }   # the fake machine is not thread safe: never change it while the overview job reads it
         if (-not $script:UpdRunStep) {
             $script:UpdRunStep = 1
             [void](Set-AVDTuneUpdateBlock -Machine $script:Machine -Root $script:StateRoot -Mode On -User 'smoke')
@@ -339,7 +339,7 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         $script:UpdLastRun = $null; Update-UpdatesView
         $true } }
     @{ Name = 'update block page'; Do = {
-        if ($script:OverviewJob) { return $false }   # the fake machine is not thread safe: never change it while the overview job reads it
+        if ($script:OverviewJob -or $script:ReadyJob) { return $false }   # the fake machine is not thread safe: never change it while the overview job reads it
         if (-not $script:BlkStep) {
             $script:BlkStep = 1
             Show-Page 'UpdateBlock'; $window.UpdateLayout()
@@ -373,10 +373,104 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         Test-Smoke 'Overview health: Update block for users is ok with the number of settings' ($h.Status -eq 'ok' -and $h.Detail -like 'On: *settings*' -and (Find-Text $ui.PanelHealth 'Update block for users')) $h.Detail
         Save-SmokeShot '36-overview-block'
         $true } }
+    @{ Name = 'readiness: first analysis'; Do = {
+        if ($script:OverviewJob -or $script:ReadyJob -or $script:ReadyQueued -or $script:UpdJob) { return $false }   # the fake machine is not thread safe
+        $defId = '/subscriptions/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee/resourceGroups/rg-example/providers/Microsoft.Compute/galleries/gal1/images/def1'
+        $script:ReadyFakeArm.Store.Galleries['def1'] = @{ Features = @(@{ name = 'SecurityType'; value = 'TrustedLaunchSupported' }); Architecture = 'x64'; HyperV = 'V2' }
+        $script:ReadyFakeArm.Store.VmSeed['DiskControllerType'] = 'SCSI'
+        $reg = $script:Machine.Store.Registry
+        $reg['hklm:\system\currentcontrolset\services\stornvme|start'] = 3
+        $reg['hklm:\system\currentcontrolset\control\session manager\memory management|pagingfiles'] = @('D:\pagefile.sys 0 0')
+        $script:Machine.Store.Native['sc.exe config stornvme start=boot'] = @{ ExitCode = 0; Output = '[SC] ChangeServiceConfig SUCCESS'; Registry = @{ 'HKLM:\SYSTEM\CurrentControlSet\Services\stornvme|Start' = 0 } }
+        Write-AVDTuneFile $script:ReadySettingsPath ([ordered]@{ GalleryImageId = $defId } | ConvertTo-Json)
+        Show-Page 'Overview'
+        $script:ReadyKindUsed = Get-ReadyKind
+        $script:ReadyWritesBefore = @($script:Machine.Log | Where-Object { $_ -notlike 'Run *' }).Count; $script:ReadyArmBefore = $script:ReadyFakeArm.Log.Count
+        $ui.BtnReadyRun.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
+        Test-Smoke 'Run analysis: the pill says Running and the button waits' ($script:ReadyJob -and -not $ui.BtnReadyRun.IsEnabled -and $ui.TxtReadyPill.Text -eq 'Running') $ui.TxtReadyPill.Text
+        $true } }
+    @{ Name = 'readiness: first result'; Do = {
+        if ($script:ReadyJob -or $script:ReadyQueued) { return $false }
+        Show-Page 'Overview'; $window.UpdateLayout()
+        $r = $script:Ready
+        $state = Get-AVDTuneState $script:StateRoot
+        $rows = @{}; foreach ($x in $r.Rows) { $rows[$x.Id] = $x }
+        Test-Smoke 'the first analysis is the Erstanalyse and ends red (stornvme, page file on D:, gallery definition without NVMe)' ($script:ReadyKindUsed -eq 'Erstanalyse' -and $r.Overall -eq 'red' -and $rows['hw.stornvme'].Status -eq 'red' -and $rows['hw.pagefile-d'].Status -eq 'red' -and $rows['hw.gallery'].Status -eq 'red') (($r.Rows | Where-Object Status -eq 'red' | ForEach-Object Id) -join ',')
+        Test-Smoke 'Azure was read through the sign-in: VM on SCSI is yellow, accelerated networking on is green' ($r.Arm.Ok -and $rows['hw.disk-controller'].Status -eq 'yellow' -and $rows['hw.accelnet'].Status -eq 'green') $r.Arm.Problem
+        Test-Smoke 'the card shows the red pill, the counts and the criteria date' ($ui.TxtReadyPill.Text -eq 'Red' -and $ui.TxtReadySummary.Text -like '*red*yellow*not checkable*green*Criteria of 2026-11-15*Azure was read*') $ui.TxtReadySummary.Text
+        Test-Smoke 'rows are grouped (Hardware generation, Image hygiene), one row per check' ($ui.PanelReadyRows.Children.Count -ge 28 -and (Find-Text $ui.PanelReadyRows 'Hardware generation') -and (Find-Text $ui.PanelReadyRows 'Image hygiene') -and (Find-Text $ui.PanelReadyRows 'Windows NVMe driver (stornvme) starts at boot')) $ui.PanelReadyRows.Children.Count
+        Test-Smoke 'the family list says what is ready, what needs fixes and what is not possible (Arm64)' ($ui.TxtReadyFamilies.Text -like '*After fixing the items above*Ddsv6*Not possible with this master (6): 6 x needs an Arm64 image*') $ui.TxtReadyFamilies.Text
+        Test-Smoke 'Finish is locked and says why' ($ui.TxtReadyGate.Text -like 'Finish: locked*red item(s)*') $ui.TxtReadyGate.Text
+        $rec = $state.Readiness
+        $log = @(Get-AVDTuneChangeLog -Root $script:StateRoot | Where-Object { $_.Category -eq 'Readiness' })
+        Test-Smoke 'the result is stored: run record (Erstanalyse), state.json and a change log entry; the start run wrote none' (@(Get-AVDTuneRun -Root $script:StateRoot | Where-Object { $_.PSObject.Properties['Kind'] -and $_.Kind -eq 'Erstanalyse' }).Count -eq 1 -and $rec.Kind -eq 'Erstanalyse' -and $rec.Overall -eq 'red' -and $log.Count -eq 1 -and $log[0].Text -like 'Erstanalyse: overall red*') ($log | ForEach-Object Text)
+        Test-Smoke 'nothing in the analysis wrote to the machine or to Azure' (@($script:Machine.Log | Where-Object { $_ -notlike 'Run *' }).Count -eq $script:ReadyWritesBefore -and $script:ReadyFakeArm.Log.Count -gt $script:ReadyArmBefore -and -not (@($script:ReadyFakeArm.Log | Select-Object -Skip $script:ReadyArmBefore | Where-Object { $_ -notlike 'GET *' }))) (($script:Machine.Log | Where-Object { $_ -notlike 'Run *' }) -join '; ')
+        $ui.BoxReady.BringIntoView(); $window.UpdateLayout()
+        Save-SmokeShot '40-readiness-red-light'
+        $ui.BtnReadyMore_hw_stornvme.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
+        $window.UpdateLayout()
+        Test-Smoke 'Details shows what was found, what to do, the Learn source with its date and whether Learn states it' ($ui.TxtReadyDetail_hw_stornvme.Text -like '*Found: 3*What to do:*Source: https://learn.microsoft.com/*(read 2026-11-15)*Learn states this criterion.*') $ui.TxtReadyDetail_hw_stornvme.Text
+        $ui.BtnReadyMore_hy_bitlocker.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
+        $window.UpdateLayout()
+        Test-Smoke 'a criterion that Learn does not state says so' ($ui.TxtReadyDetail_hy_bitlocker.Text -like '*NOT verified on Microsoft Learn.*') $ui.TxtReadyDetail_hy_bitlocker.Text
+        $ui.BoxReady.BringIntoView(); $window.UpdateLayout()
+        Save-SmokeShot '41-readiness-details-light'
+        $true } }
+    @{ Name = 'readiness: fix'; Do = {
+        if ($script:OverviewJob -or $script:ReadyJob -or $script:ReadyQueued) { return $false }
+        if (-not $script:ReadyFixStarted) {
+            $script:ReadyFixStarted = $true
+            Test-Smoke 'a row with a fix offers the button, enabled because the snapshot is confirmed' ($ui.BtnReadyFix_hw_stornvme -and $ui.BtnReadyFix_hw_stornvme.IsEnabled -and -not $ui.BtnReadyFix_hw_pagefile_d) $null
+            $script:ConfirmAsked = ''
+            $ui.BtnReadyFix_hw_stornvme.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
+            Test-Smoke 'Fix asks first and says it takes effect after the next restart' ($script:ConfirmAsked -like '*NVMe driver*next restart*' -and $script:ReadyJob) $script:ConfirmAsked
+            return $false
+        }
+        $window.UpdateLayout()
+        $reg = $script:Machine.Store.Registry['hklm:\system\currentcontrolset\services\stornvme|start']
+        $entry = @(Get-AVDTuneChangeLog -Root $script:StateRoot | Where-Object { $_.Category -eq 'Readiness fix' })
+        Test-Smoke 'the fix ran with the documented command, the value is 0, the change log and the protocol have it' ($reg -eq 0 -and (@($script:Machine.Log | Where-Object { $_ -eq 'Run sc.exe config stornvme start=boot' }).Count -eq 1) -and $entry.Count -eq 1 -and $entry[0].Text -like '*restart needed*' -and @($script:Protocol.Actions | Where-Object { $_.Subject -eq 'Readiness fix' }).Count -eq 1) ($entry | ForEach-Object Text)
+        $rows = @{}; foreach ($x in $script:Ready.Rows) { $rows[$x.Id] = $x }
+        Test-Smoke 'the analysis ran again by itself: stornvme is green now, the page file is still red' ($rows['hw.stornvme'].Status -eq 'green' -and $rows['hw.pagefile-d'].Status -eq 'red') $rows['hw.stornvme'].Status
+        Test-Smoke 'Finish is still locked (red left)' ($ui.TxtReadyGate.Text -like 'Finish: locked*') $ui.TxtReadyGate.Text
+        $true } }
+    @{ Name = 'readiness: confirm by name'; Do = {
+        if ($script:OverviewJob -or $script:ReadyJob -or $script:ReadyQueued) { return $false }
+        if (-not $script:ReadyConfStarted) {
+            $script:ReadyConfStarted = $true
+            $script:Machine.Store.Registry['hklm:\system\currentcontrolset\control\session manager\memory management|pagingfiles'] = @('C:\pagefile.sys 0 0')
+            $script:ReadyFakeArm.Store.Galleries['def1'] = @{ Features = @(@{ name = 'DiskControllerTypes'; value = 'SCSI, NVMe' }, @{ name = 'SecurityType'; value = 'TrustedLaunchSupported' }, @{ name = 'IsAcceleratedNetworkSupported'; value = 'True' }); Architecture = 'x64'; HyperV = 'V2' }
+            $ui.BtnReadyRun.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
+            return $false
+        }
+        $window.UpdateLayout()
+        $r = $script:Ready
+        $rec = (Get-AVDTuneState $script:StateRoot).Readiness
+        Test-Smoke 'second run is the Healthcheck: nothing red, yellow and not checkable left, overall yellow' ($rec.Kind -eq 'Healthcheck' -and $r.Overall -eq 'yellow' -and $r.Counts.Red -eq 0 -and $r.Counts.Yellow -ge 1 -and $ui.TxtReadyPill.Text -eq 'Yellow') (($r.Rows | Where-Object { $_.Status -in 'red', 'yellow', 'unknown' } | ForEach-Object { "$($_.Id)=$($_.Status)" }) -join ',')
+        Test-Smoke 'the confirmation box is there and names the open items; Finish is locked for them' ($ui.PanelReadyAck.Visibility -eq 'Visible' -and $ui.TxtReadyAckHint.Text -like '*hw.disk-controller*' -and $ui.TxtReadyGate.Text -like 'Finish: locked*not confirmed by name*') "$($ui.TxtReadyAckHint.Text) / $($ui.TxtReadyGate.Text)"
+        $ui.BoxReady.BringIntoView(); $window.UpdateLayout()
+        Save-SmokeShot '42-readiness-yellow-light'
+        $ui.TxtReadyAck.Text = 'ok'
+        $ui.BtnReadyAck.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
+        Test-Smoke 'a general ok is refused and names what is missing' ($script:LastToast -like '*Type the name of every open item*Missing*' -and $ui.TxtReadyGate.Text -like 'Finish: locked*') $script:LastToast
+        $ui.TxtReadyAck.Text = (@($rec.OpenIds) -join ' ')
+        $ui.BtnReadyAck.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
+        $window.UpdateLayout()
+        $g = Get-AVDTuneFinishReadiness -Root $script:StateRoot
+        Test-Smoke 'every open item named: Finish is allowed, who confirmed it is stored, the protocol and the change log have it' ($g.Allowed -and $ui.TxtReadyGate.Text -like 'Finish: allowed*' -and $ui.PanelReadyAck.Visibility -eq 'Collapsed' -and (Get-AVDTuneState $script:StateRoot).Readiness.AcknowledgedBy -eq $env:USERNAME -and @($script:Protocol.Actions | Where-Object { $_.Subject -like 'Readiness: open items confirmed' }).Count -eq 1 -and @(Get-AVDTuneChangeLog -Root $script:StateRoot | Where-Object Component -eq 'Confirmation').Count -eq 1) $ui.TxtReadyGate.Text
+        $wasLight = ($script:Settings.Theme -eq 'Light')
+        if ($wasLight) { $ui.BtnTheme.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent))) }
+        $window.UpdateLayout(); $ui.BoxReady.BringIntoView(); $window.UpdateLayout(); $ui.BoxReady.BringIntoView(); $window.UpdateLayout()
+        Save-SmokeShot '43-readiness-confirmed-dark'
+        if ($wasLight) { $ui.BtnTheme.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent))) }
+        [void](Add-AVDTuneChangeLogEntry -Root $script:StateRoot -Version (Get-AVDTuneState $script:StateRoot).ImageVersion -Category 'Updates' -ChangeType Updated -Text 'smoke change' -User 'smoke' -Source Step)
+        Update-ReadyView
+        Test-Smoke 'a change after the check locks Finish again' ($ui.TxtReadyGate.Text -like 'Finish: locked*changed after the check*') $ui.TxtReadyGate.Text
+        $true } }
     @{ Name = 'start: sign-out and dark'; Do = {
         Open-Stage 'SignIn'; $window.UpdateLayout()
         $ui.BtnStageAction2.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
-        Test-Smoke 'sign out removes every token from memory (checked as before seal)' (Test-AVDTuneSessionClear $script:StartContext.Session) $null
+        Test-Smoke 'sign out removes every token from memory (checked before Finish)' (Test-AVDTuneSessionClear $script:StartContext.Session) $null
         $allFiles = (Get-ChildItem $script:StateRoot -Recurse -File | ForEach-Object { [IO.File]::ReadAllText($_.FullName) }) -join "`n"
         Test-Smoke 'no token, refresh token or password in any file of the state folder' ($allFiles -notmatch 'eyJ[A-Za-z0-9_-]{10,}' -and $allFiles -notmatch 'fake-refresh' -and $allFiles -notmatch 'Not-A-Real-Password') $null
         Test-Smoke 'every service of the start sequence was a fake (no real adapter in test mode)' ($script:Services.Auth.Kind -eq 'Fake' -and $script:Services.Arm.Kind -eq 'Fake' -and $script:Services.Ldap.Kind -eq 'Fake') $null
@@ -385,6 +479,22 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         Save-SmokeShot '23-start-questions-dark'
         Close-Stage
         $ui.BtnTheme.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
+        $true } }
+    @{ Name = 'readiness: signed out'; Do = {
+        if ($script:OverviewJob -or $script:ReadyJob -or $script:ReadyQueued) { return $false }
+        if (-not $script:ReadyOutStarted) {
+            $script:ReadyOutStarted = $true
+            Show-Page 'Overview'
+            Test-Smoke 'signed out: no Azure token for the analysis' (-not $script:StartContext.Session.Connected -and (Get-ReadyToken).Token -eq '' -and (Get-ReadyToken).Reason -like 'Not signed in*') $null
+            $ui.BtnReadyRun.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
+            return $false
+        }
+        $window.UpdateLayout()
+        $rows = @{}; foreach ($x in $script:Ready.Rows) { $rows[$x.Id] = $x }
+        Test-Smoke 'without the sign-in the Azure checks are not checkable, with the reason; the others still ran' (-not $script:Ready.Arm.Ok -and $rows['hw.disk-controller'].Status -eq 'unknown' -and $rows['hw.disk-controller'].Reason -like 'Not checkable: Not signed in*' -and $rows['hw.accelnet'].Status -eq 'unknown' -and $rows['hw.gallery'].Status -eq 'unknown' -and $rows['hw.stornvme'].Status -eq 'green') $rows['hw.disk-controller'].Reason
+        Test-Smoke 'the card says Azure was not read and why' ($ui.TxtReadySummary.Text -like '*Azure was not read: Not signed in*') $ui.TxtReadySummary.Text
+        $ui.BoxReady.BringIntoView(); $window.UpdateLayout()
+        Save-SmokeShot '44-readiness-signed-out-light'
         $true } }
     @{ Name = 'close after the operation'; Do = {
         # last step: closing during a search is held back and the window closes by itself when the search is done (the Closed handler below records it)
