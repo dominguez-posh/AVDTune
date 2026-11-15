@@ -6,8 +6,7 @@
 
 $script:MaskFake = $null
 if ($script:TestMode) {
-    $fakeDir = Split-Path $env:AVDTUNE_FAKE -Parent
-    . (Join-Path $fakeDir 'FakeMasking.ps1')
+    . (Get-TestScript 'FakeMasking.ps1')
     $script:MaskFake = @{ M = (New-AVDTuneFakeMasking -Seed @{ Desktop = @(
                     @{ Name = 'Contoso App.lnk'; Target = 'C:\Apps\app.exe'; IsShortcut = $true }, @{ Name = 'Notes.lnk'; Target = 'C:\Apps\notes.exe'; IsShortcut = $true }) }); Ldap = (New-AVDTuneFakeMaskingLdap) }
 }
