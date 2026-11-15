@@ -8,7 +8,7 @@ $script:SwJob = $null
 $script:SwInstalled = @(); $script:SwManaged = @(); $script:SwResults = @(); $script:SwLibrary = $null; $script:SwLibraryError = ''; $script:SwNotes = @()
 $script:SwScanned = $false
 $script:SwLastRun = $null
-$script:SwFakeDir = $(if ($script:TestMode) { Split-Path $env:AVDTUNE_FAKE -Parent } else { '' })
+$script:SwFakeDir = $(if ($script:TestMode) { [string]$script:TestInfo.FakeDir } else { '' })
 $script:SwFakeNative = @{
     '*winget.exe search --query *' = @{ ExitCode = 0; Output = "Name   Id         Version Source`r`n--------------------------------`r`n7-Zip  7zip.7zip  24.08   winget`r`n" }
     '*choco.exe search *' = @{ ExitCode = 0; Output = 'git|2.45.0' }
