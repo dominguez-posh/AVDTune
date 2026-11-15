@@ -184,6 +184,77 @@ function ConvertFrom-AVDTuneDiskspdXml {
 
 #endregion
 
+#region child processes (issue #19)
+
+$script:Limits = @{ BenchMs = 600000; DiskspdMs = 900000 }      # timeouts; the checks lower them in module scope
+$script:CleanEnvPattern = '(?i)^(DOTNET_|COREHOST_|CORECLR_|COMPlus_|COR_)'
+
+function Initialize-AVDTuneBenchJob {
+    if ('AVDTuneBenchNative.Job' -as [type]) { return }
+    Add-Type -TypeDefinition @"
+using System; using System.ComponentModel; using System.Runtime.InteropServices;
+namespace AVDTuneBenchNative {
+  public static class Job {
+    [StructLayout(LayoutKind.Sequential)] struct BasicLimit { public long PerProcessUserTimeLimit, PerJobUserTimeLimit; public uint LimitFlags; public UIntPtr MinWs, MaxWs; public uint ActiveProcessLimit; public UIntPtr Affinity; public uint PriorityClass, SchedulingClass; }
+    [StructLayout(LayoutKind.Sequential)] struct IoCounters { public ulong a, b, c, d, e, f; }
+    [StructLayout(LayoutKind.Sequential)] struct ExtendedLimit { public BasicLimit Basic; public IoCounters Io; public UIntPtr ProcessMemory, JobMemory, PeakProcess, PeakJob; }
+    [DllImport("kernel32.dll", SetLastError = true)] static extern IntPtr CreateJobObject(IntPtr attributes, string name);
+    [DllImport("kernel32.dll", SetLastError = true)] static extern bool SetInformationJobObject(IntPtr job, int infoClass, ref ExtendedLimit info, int length);
+    [DllImport("kernel32.dll", SetLastError = true)] static extern bool AssignProcessToJobObject(IntPtr job, IntPtr process);
+    [DllImport("kernel32.dll", SetLastError = true)] static extern bool TerminateJobObject(IntPtr job, uint exitCode);
+    [DllImport("kernel32.dll", SetLastError = true)] static extern bool CloseHandle(IntPtr handle);
+    // a job whose processes are all ended when the last handle is closed (also when AVDTune itself dies)
+    public static IntPtr Create() {
+      IntPtr j = CreateJobObject(IntPtr.Zero, null); if (j == IntPtr.Zero) throw new Win32Exception();
+      ExtendedLimit l = new ExtendedLimit(); l.Basic.LimitFlags = 0x2000;   // JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+      if (!SetInformationJobObject(j, 9, ref l, Marshal.SizeOf(typeof(ExtendedLimit)))) { int e = Marshal.GetLastWin32Error(); CloseHandle(j); throw new Win32Exception(e); }
+      return j;
+    }
+    public static void Assign(IntPtr job, IntPtr process) { if (!AssignProcessToJobObject(job, process)) throw new Win32Exception(); }
+    public static void Terminate(IntPtr job) { TerminateJobObject(job, 0xFFFFFFFF); }
+    public static void Close(IntPtr job) { CloseHandle(job); }
+  }
+}
+"@
+}
+
+function Invoke-AVDTuneChildProcess {
+    <#
+        Starts a program and waits for it: no window, output read asynchronously (stdout and stderr, so neither pipe can fill up and block it), a timeout, and the process in a
+        job object (kill on close): on a timeout, or when this function ends, the whole tree is ended. -CleanEnvironment gives the child a clean environment: no DOTNET_,
+        COREHOST_, CORECLR_, COMPlus_ or COR_ variables (startup hooks, profilers, other runtimes), PATH only System32, TEMP and TMP in -TempDir (administrators only).
+        Returns ExitCode, Output, Error, TimedOut.
+    #>
+    param([Parameter(Mandatory)][string]$FileName, [string]$Arguments = '', [int]$TimeoutMs = 600000, [switch]$CleanEnvironment, [string]$TempDir, [scriptblock]$AfterStart)
+    Initialize-AVDTuneBenchJob
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = $FileName; $psi.Arguments = $Arguments
+    $psi.UseShellExecute = $false; $psi.RedirectStandardOutput = $true; $psi.RedirectStandardError = $true; $psi.CreateNoWindow = $true
+    if ($CleanEnvironment) {
+        foreach ($k in @($psi.EnvironmentVariables.Keys | ForEach-Object { [string]$_ })) { if ($k -match $script:CleanEnvPattern) { $psi.EnvironmentVariables.Remove($k) } }
+        $psi.EnvironmentVariables['PATH'] = [Environment]::GetFolderPath('System')
+        if ($TempDir) { [void][IO.Directory]::CreateDirectory($TempDir); $psi.EnvironmentVariables['TEMP'] = $TempDir; $psi.EnvironmentVariables['TMP'] = $TempDir }
+    }
+    $job = [AVDTuneBenchNative.Job]::Create()
+    $p = $null
+    try {
+        $p = [System.Diagnostics.Process]::Start($psi)
+        if ($AfterStart) { & $AfterStart }   # e.g. release the hold on the verified file: only after the process has been created from it
+        try { [AVDTuneBenchNative.Job]::Assign($job, $p.Handle) } catch { try { $p.Kill() } catch { }; throw }
+        $outTask = $p.StandardOutput.ReadToEndAsync(); $errTask = $p.StandardError.ReadToEndAsync()
+        $timedOut = -not $p.WaitForExit($TimeoutMs)
+        if ($timedOut) { [AVDTuneBenchNative.Job]::Terminate($job); [void]$p.WaitForExit(10000) }
+        else { [void]$p.WaitForExit() }
+        [void]$outTask.Wait(10000); [void]$errTask.Wait(10000)
+        [pscustomobject]@{ ExitCode = $(if ($timedOut) { -1 } else { $p.ExitCode }); Output = $(if ($outTask.IsCompleted) { $outTask.Result } else { '' }); Error = $(if ($errTask.IsCompleted) { $errTask.Result } else { '' }); TimedOut = $timedOut }
+    }
+    finally {
+        [AVDTuneBenchNative.Job]::Terminate($job); [AVDTuneBenchNative.Job]::Close($job)   # nothing of the tree outlives the call
+        if ($p) { $p.Dispose() }
+    }
+}
+
+#endregion
 #region adapter (real)
 
 function New-AVDTuneBenchAdapter {
@@ -201,6 +272,7 @@ function New-AVDTuneBenchAdapter {
     if (-not $StateRoot) { $StateRoot = Get-AVDTuneRoot }
     if (($PSBoundParameters.ContainsKey('AppRoot') -or $PSBoundParameters.ContainsKey('Manifest') -or $PSBoundParameters.ContainsKey('StateRoot') -or $PSBoundParameters.ContainsKey('InstallRoot')) -and -not $env:AVDTUNE_FAKE) { throw 'The measure program is always the one of the release this copy runs from (the parameters are for the checks).' }
     $engineState = @{ Problem = '' }
+    $limits = $script:Limits
     $b = [ordered]@{ Kind = 'Real' }
     $b.Elevated = { Test-AVDTuneElevated }
     $b.OtherSessions = {
@@ -268,18 +340,14 @@ function New-AVDTuneBenchAdapter {
         if ($Command -notmatch '^[a-z]+$') { throw "Invalid command '$Command'." }
         # checked against the release manifest right before this start, and held open (no write, delete or rename) until the process has started
         $verified = Open-AVDTuneVerifiedBenchExe -AppRoot $AppRoot -InstallRoot $InstallRoot -StateRoot $StateRoot -Manifest $Manifest
-        $psi = New-Object System.Diagnostics.ProcessStartInfo
-        $psi.FileName = $verified.Path
-        $psi.Arguments = (@($Command) + @($Arguments) | ForEach-Object { ConvertTo-AVDTuneArgument ([string]$_) }) -join ' '
-        $psi.UseShellExecute = $false; $psi.RedirectStandardOutput = $true; $psi.RedirectStandardError = $true; $psi.CreateNoWindow = $true
-        try { $p = [System.Diagnostics.Process]::Start($psi) } finally { $verified.Stream.Dispose() }
-        try {
-            $out = $p.StandardOutput.ReadToEnd(); $err = $p.StandardError.ReadToEnd()
-            [void]$p.WaitForExit(600000)
-            if ($p.ExitCode -ne 0) { throw "AVDTune.Bench $Command failed (exit $($p.ExitCode)): $($err.Trim())" }
-        }
-        finally { $p.Dispose() }
-        $out | ConvertFrom-Json
+        $cmdLine = (@($Command) + @($Arguments) | ForEach-Object { ConvertTo-AVDTuneArgument ([string]$_) }) -join ' '
+        # clean environment, TEMP in an administrators-only folder, timeout with the whole tree ended, kill on close; the hold on the file ends when the process has started
+        $stream = $verified.Stream; $hold = { $stream.Dispose() }.GetNewClosure()
+        try { $r = Invoke-AVDTuneChildProcess -FileName $verified.Path -Arguments $cmdLine -TimeoutMs $limits.BenchMs -CleanEnvironment -TempDir (Join-Path $StateRoot 'temp\bench') -AfterStart $hold }
+        finally { $stream.Dispose() }
+        if ($r.TimedOut) { throw "AVDTune.Bench $Command did not finish in time and was ended with everything it had started." }
+        if ($r.ExitCode -ne 0) { throw "AVDTune.Bench $Command failed (exit $($r.ExitCode)): $($r.Error.Trim())" }
+        $r.Output | ConvertFrom-Json
     }.GetNewClosure()
     $b.Download = {
         param([string]$Url, [string]$Path)
@@ -302,17 +370,9 @@ function New-AVDTuneBenchAdapter {
     }
     $b.DiskspdRun = {
         param([string]$Exe, [string[]]$Arguments)
-        $psi = New-Object System.Diagnostics.ProcessStartInfo
-        $psi.FileName = $Exe
-        $psi.Arguments = ($Arguments | ForEach-Object { ConvertTo-AVDTuneArgument ([string]$_) }) -join ' '
-        $psi.UseShellExecute = $false; $psi.RedirectStandardOutput = $true; $psi.RedirectStandardError = $true; $psi.CreateNoWindow = $true
-        $p = [System.Diagnostics.Process]::Start($psi)
-        try {
-            $out = $p.StandardOutput.ReadToEnd(); $err = $p.StandardError.ReadToEnd()
-            [void]$p.WaitForExit(900000)
-            [pscustomobject]@{ ExitCode = $p.ExitCode; Output = $out; Error = $err }
-        }
-        finally { $p.Dispose() }
+        $r = Invoke-AVDTuneChildProcess -FileName $Exe -Arguments (($Arguments | ForEach-Object { ConvertTo-AVDTuneArgument ([string]$_) }) -join ' ') -TimeoutMs $limits.DiskspdMs -CleanEnvironment -TempDir (Join-Path $StateRoot 'temp\bench')
+        if ($r.TimedOut) { throw 'diskspd did not finish in time and was ended with everything it had started.' }
+        [pscustomobject]@{ ExitCode = $r.ExitCode; Output = $r.Output; Error = $r.Error }
     }
     $b.RestoreTaskRegister = {
         # A SYSTEM task at start-up that runs the restore script from the protected state folder (never a script of the application folder)
@@ -1099,7 +1159,7 @@ function Get-AVDTuneBenchmarkSummaryText {
 
 #endregion
 
-Export-ModuleMember -Function Get-AVDTuneBenchRound, Get-AVDTuneBenchmarkConfig, Get-AVDTuneBenchmarkReference, Get-AVDTuneBenchCategoryKey, Get-AVDTuneBenchMedian, Get-AVDTuneBenchCv, Get-AVDTuneBenchIndex,
+Export-ModuleMember -Function Get-AVDTuneBenchRound, Get-AVDTuneBenchmarkConfig, Invoke-AVDTuneChildProcess, Get-AVDTuneBenchmarkReference, Get-AVDTuneBenchCategoryKey, Get-AVDTuneBenchMedian, Get-AVDTuneBenchCv, Get-AVDTuneBenchIndex,
     Get-AVDTuneBenchGeometricMean, Get-AVDTuneBenchWeightedGeometricMean, Get-AVDTuneBenchPercentile, Get-AVDTuneBenchmarkScores, ConvertFrom-AVDTuneDiskspdXml, New-AVDTuneBenchAdapter,
     Get-AVDTuneDiskspd, Test-AVDTuneBenchmarkPreconditions, Wait-AVDTuneUpdateIdle, Get-AVDTuneBenchmarkJournalPath, Get-AVDTuneBenchmarkRestoreScriptPath, New-AVDTuneBenchmarkRestoreScript,
     Start-AVDTuneBenchmarkQuiet, Stop-AVDTuneBenchmarkQuiet, Get-AVDTuneBenchmarkCrash, Repair-AVDTuneBenchmarkCrash, Test-AVDTuneBenchmarkClean, Get-AVDTuneBenchRestoreAction, Remove-AVDTuneDiskspdCache, Invoke-AVDTuneBenchDisk, Invoke-AVDTuneBenchNetwork,

@@ -113,7 +113,7 @@ function Assert-AVDTuneManifest {
     $zip = Get-AVDTuneProp $Manifest 'Zip'
     Need ($null -ne $zip) 'no ZIP entry.'
     Need (([string](Get-AVDTuneProp $zip 'Name')) -ceq "AVDTune-$v.zip") 'bad ZIP name.'
-    Need (([string](Get-AVDTuneProp $zip 'Sha256')) -match '^[0-9a-f]{64}$') 'bad ZIP hash.'
+    Need (([string](Get-AVDTuneProp $zip 'Sha256')) -cmatch '^[0-9a-f]{64}\z') 'bad ZIP hash.'
     $zs = [int64](Get-AVDTuneProp $zip 'Size')
     Need ($zs -gt 0 -and $zs -le $script:MaxZipBytes) 'bad ZIP size.'
     $files = @(Get-AVDTuneProp $Manifest 'Files')
@@ -127,7 +127,7 @@ function Assert-AVDTuneManifest {
         $sz = [int64](Get-AVDTuneProp $f 'Size')
         Need ($sz -ge 0 -and $sz -le $script:MaxZipBytes) "bad size of '$p'."
         $total += $sz
-        Need (([string](Get-AVDTuneProp $f 'Sha256')) -match '^[0-9a-f]{64}$') "bad hash of '$p'."
+        Need (([string](Get-AVDTuneProp $f 'Sha256')) -cmatch '^[0-9a-f]{64}\z') "bad hash of '$p'."
     }
     Need ($total -le 400MB) 'the files are too large together.'
     Need ($seen.ContainsKey('start-avdtune.ps1') -and $seen.ContainsKey('version')) 'Start-AVDTune.ps1 or VERSION is missing in the list.'
@@ -138,7 +138,7 @@ function Assert-AVDTuneManifest {
         Need ($bp -ceq $script:BenchExePath) 'bad path of the measure program.'
         Need ($byPath.ContainsKey($bp.ToLowerInvariant())) 'the measure program is not in the file list.'
         $bf = $byPath[$bp.ToLowerInvariant()]
-        Need (([string](Get-AVDTuneProp $bench 'Sha256')) -match '^[0-9a-f]{64}$') 'bad hash of the measure program.'
+        Need (([string](Get-AVDTuneProp $bench 'Sha256')) -cmatch '^[0-9a-f]{64}\z') 'bad hash of the measure program.'
         Need (([string](Get-AVDTuneProp $bench 'Sha256')) -ceq ([string](Get-AVDTuneProp $bf 'Sha256')) -and [int64](Get-AVDTuneProp $bench 'Size') -eq [int64](Get-AVDTuneProp $bf 'Size')) 'the measure program entry differs from its entry in the file list.'
     }
     $Manifest
@@ -523,6 +523,10 @@ function Open-AVDTuneVerifiedBenchExe {
             $problems = @(Get-AVDTuneChainAclProblems -Path $full -InstallRoot $info.InstallRoot)
             if ($problems.Count -gt 0) { throw "AVDTune.Bench.exe is not in a protected folder ($($problems[0])). It is not started." }
         }
+        # nothing but the exe next to it (no DLL to side-load); checked while the exe is held, so the folder cannot be refilled between check and start
+        $binDir = New-Object IO.DirectoryInfo (Split-Path $full -Parent)
+        $others = @($binDir.GetFileSystemInfos() | Where-Object { $_.Name -ine (Split-Path $full -Leaf) } | ForEach-Object Name)
+        if ($others.Count -gt 0) { throw "The folder of AVDTune.Bench.exe holds more than the exe ($($others -join ', ')). It is not started." }
         if ($stream.Length -ne [int64]$entry.Size) { throw "AVDTune.Bench.exe does not have the size in the release manifest of version $($info.Version) ($($stream.Length) instead of $($entry.Size) bytes). It is not started." }
         $sha = [Security.Cryptography.SHA256]::Create()
         try { $hash = ([BitConverter]::ToString($sha.ComputeHash($stream)) -replace '-', '').ToLowerInvariant() } finally { $sha.Dispose() }

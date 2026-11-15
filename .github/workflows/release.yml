@@ -56,7 +56,7 @@ jobs:
       # actions/setup-dotnet v4.3.1 (the measure program is built with the .NET 10 SDK, Bench\AVDTune.Bench.csproj)
       - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9
         with:
-          dotnet-version: '10.0.x'
+          global-json-file: Bench/global.json   # exact SDK version, no roll forward
 
       - name: Build the measure program AVDTune.Bench.exe (unit tests first; the exe is never committed, issue #19)
         shell: powershell

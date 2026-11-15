@@ -268,7 +268,16 @@ try {
     try {
         $inst = Join-Path $tmp 'install'; $app = Join-Path $inst '0.5.0'; $exeDir = Join-Path $app 'Bench\bin'; $exe = Join-Path $exeDir 'AVDTune.Bench.exe'
         $stand = Join-Path $tmp 'stand-in.exe'   # a tiny console program that prints JSON like the measure program does
-        Add-Type -TypeDefinition 'public static class StandIn { public static int Main(string[] a) { System.Console.Out.Write("{\"ok\":1}"); return 0; } }' -OutputType ConsoleApplication -OutputAssembly $stand
+        $standSrc = @"
+using System; using System.Threading;
+public static class StandIn { public static int Main(string[] a) {
+  if (a.Length > 1 && a[0] == "env") { Console.Out.Write("{\"v\":\"" + (Environment.GetEnvironmentVariable(a[1]) ?? "<none>").Replace("\\", "\\\\") + "\"}"); return 0; }
+  if (a.Length > 0 && a[0] == "hang") { var c = System.Diagnostics.Process.Start(System.Reflection.Assembly.GetExecutingAssembly().Location, "sleep"); Console.Out.Write("child:" + c.Id + "\n"); Console.Out.Flush(); Thread.Sleep(600000); return 0; }
+  if (a.Length > 0 && a[0] == "sleep") { Thread.Sleep(600000); return 0; }
+  if (a.Length > 0 && a[0] == "noisy") { for (int i = 0; i < 20000; i++) Console.Error.WriteLine("0123456789012345678901234567890123456789"); Console.Out.Write("{\"ok\":2}"); return 0; }
+  Console.Out.Write("{\"ok\":1}"); return 0; } }
+"@
+        Add-Type -TypeDefinition $standSrc -OutputType ConsoleApplication -OutputAssembly $stand
         New-Item -ItemType Directory -Path $exeDir -Force | Out-Null
         Copy-Item -LiteralPath $stand -Destination $exe
         [IO.File]::WriteAllText((Join-Path $app 'VERSION'), '0.5.0'); [IO.File]::WriteAllText((Join-Path $app 'Start-AVDTune.ps1'), '# stand-in')
@@ -322,6 +331,37 @@ try {
         [IO.File]::WriteAllBytes($exe, $orig)
         Test-Check 'measure program: a changed file (same size, other size) is refused, and nothing stays open afterwards' ($m1 -like '*does not match the SHA256*' -and $m2 -like '*size*not started*' -and (& { [IO.File]::AppendAllText($exe, ''); $true }) -eq $true) "$m1 | $m2"
 
+        # child process of the measure program (issue #19): clean environment, TEMP in an administrators-only folder, async pipes, timeout ends the tree, extra files stop the start
+        $env:DOTNET_AVDTUNE_TEST = 'evil'; $env:COMPlus_AVDTUNE_TEST = 'evil'; $env:AVDTUNE_KEEP_ME = 'kept'
+        try {
+            $e1 = & $realAdapter.RunBench 'env' @('DOTNET_AVDTUNE_TEST'); $e2 = & $realAdapter.RunBench 'env' @('COMPlus_AVDTUNE_TEST'); $e3 = & $realAdapter.RunBench 'env' @('AVDTUNE_KEEP_ME')
+            Test-Check 'child process: DOTNET_ and COMPlus_ variables are not in the environment of the measure program, other variables are' ($e1.v -eq '<none>' -and $e2.v -eq '<none>' -and $e3.v -eq 'kept') "$($e1.v) $($e2.v) $($e3.v)"
+        }
+        finally { Remove-Item Env:\DOTNET_AVDTUNE_TEST, Env:\COMPlus_AVDTUNE_TEST, Env:\AVDTUNE_KEEP_ME -ErrorAction SilentlyContinue }
+        $pv = (& $realAdapter.RunBench 'env' @('PATH')).v; $tv = (& $realAdapter.RunBench 'env' @('TEMP')).v; $tm = (& $realAdapter.RunBench 'env' @('TMP')).v
+        Test-Check 'child process: PATH is System32 only, TEMP and TMP are the folder below the state folder' ($pv -ieq (Join-Path $env:SystemRoot 'System32') -and $tv -ieq (Join-Path $tmp 'temp\bench') -and $tm -ieq $tv -and (Test-Path -LiteralPath $tv)) "$pv | $tv | $tm"
+        $noisy = & $realAdapter.RunBench 'noisy' @()
+        Test-Check 'child process: a program that writes a lot to stderr does not block (stderr is read at the same time)' ($noisy.ok -eq 2) $null
+        $mod = Get-Module AVDTune.Benchmark
+        & $mod { $script:Limits.BenchMs = 3000 }
+        try {
+            $sw = [Diagnostics.Stopwatch]::StartNew()
+            $hm = Get-ThrownText { & $realAdapter.RunBench 'hang' @() }
+            $sw.Stop()
+        }
+        finally { & $mod { $script:Limits.BenchMs = 600000 } }
+        Test-Check 'child process: a program that hangs is ended after the timeout with a clear message' ($hm -like '*did not finish in time*' -and $sw.Elapsed.TotalSeconds -lt 30) "$hm $($sw.Elapsed.TotalSeconds)"
+        $hr = & $mod { Invoke-AVDTuneChildProcess -FileName $args[0] -Arguments 'hang' -TimeoutMs 2000 } $exe
+        $childId = [int](([regex]::Match($hr.Output, 'child:(\d+)')).Groups[1].Value)
+        Start-Sleep -Milliseconds 500
+        Test-Check 'child process: on a timeout the whole tree is ended, also the process it started' ($hr.TimedOut -and $childId -gt 0 -and $null -eq (Get-Process -Id $childId -ErrorAction SilentlyContinue)) ($hr | Out-String)
+        $extra = Join-Path $exeDir 'evil.dll'; [IO.File]::WriteAllBytes($extra, [byte[]](1, 2, 3))
+        $msg = Get-ThrownText { Open-AVDTuneVerifiedBenchExe -AppRoot $app -InstallRoot $inst -StateRoot $tmp -Manifest $okManifest }
+        Remove-Item -LiteralPath $extra -Force
+        Test-Check 'measure program: an extra DLL next to the exe stops the start' ($msg -like '*holds more than the exe*evil.dll*not started*') $msg
+        $okAgain = Open-AVDTuneVerifiedBenchExe -AppRoot $app -InstallRoot $inst -StateRoot $tmp -Manifest $okManifest; $okAgain.Stream.Dispose()
+        $bad64 = New-BenchManifest ($goodHash.ToUpperInvariant())
+        Test-Check 'manifest validation: an upper-case or longer hash is not a hash' ((Get-ThrownText { Assert-AVDTuneManifest $bad64 '0.5.0' }) -like '*bad hash*' -and (Get-ThrownText { Assert-AVDTuneManifest (New-BenchManifest ($goodHash + "`n")) '0.5.0' }) -like '*bad hash*') $null
         # no manifest entry
         $noEntry = New-BenchManifest $goodHash $false
         $msg = Get-ThrownText { Open-AVDTuneVerifiedBenchExe -AppRoot $app -InstallRoot $inst -StateRoot $tmp -Manifest $noEntry }

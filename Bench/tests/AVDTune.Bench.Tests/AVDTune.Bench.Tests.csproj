@@ -8,6 +8,7 @@
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <InvariantGlobalization>true</InvariantGlobalization>
     <NoWarn>CA1416</NoWarn>
+    <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
     <StartupObject>AVDTune.Bench.Tests.TestMain</StartupObject>
   </PropertyGroup>
   <ItemGroup>
