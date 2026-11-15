@@ -16,7 +16,7 @@ $script:PendingSnapshot = $null
 # ---------------------------------------------------------------- services
 function Get-StartAuth {
     if ($script:TestMode) { return $script:Services.Auth }
-    New-AVDTuneAuthAdapter -Owner $window -CacheFolder (Join-Path $script:StateRoot 'WebView2') -TrustFile (Get-AVDTuneWebView2TrustFile $script:StateRoot) -Log {
+    New-AVDTuneAuthAdapter -Owner $window -CacheFolder (Join-Path $script:StateRoot 'WebView2') -Log {
         param($Text, $Level) if ($Level -eq 'Warning') { Add-StartProtocol 'Warning: sign-in window' $Text } }
 }
 # Where the sign-in window leaves its temporary profiles: the temp folder of this user (a folder of the test state in test mode)

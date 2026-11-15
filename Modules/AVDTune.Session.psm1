@@ -264,29 +264,22 @@ function New-AVDTuneAuthAdapter {
         The real identity provider: the normal Microsoft sign-in of the shared module (Invoke-PackTuneBrowserSignIn: embedded window, the
         administrator signs in himself; no Keevault, nothing filled in) and its refresh-token exchange (Request-PackTuneToken). Only these
         shared functions (and the log sink) are imported. Before the window loads the WebView2 DLLs, Assert-AVDTuneWebView2Cache checks the
-        cache folder; afterwards Register-AVDTuneWebView2Cache records the checked files. Not used by the checks (they use the fake).
+        cache folder for foreign entries (the shared module checks signature and pinned hashes itself). Not used by the checks (they use the fake).
     #>
-    param([object]$Owner, [Parameter(Mandatory)][string]$CacheFolder, [string]$TrustFile, [scriptblock]$Log)
+    param([object]$Owner, [Parameter(Mandatory)][string]$CacheFolder, [scriptblock]$Log)
     $shared = Join-Path (Split-Path $PSScriptRoot -Parent) 'Shared\Modules\PackTune.SignIn.psm1'
     Import-Module $shared -Force -Function Invoke-PackTuneBrowserSignIn, Request-PackTuneToken, Set-PackTuneSignInLog
     if ($Log) { Set-PackTuneSignInLog -Sink $Log }
-    if (-not $TrustFile) { $TrustFile = Join-Path (Split-Path $CacheFolder -Parent) 'config\webview2-trust.json' }
-    $script:RealSignIn = @{ Owner = $Owner; CacheFolder = $CacheFolder; TrustFile = $TrustFile; Log = $Log }
+    $script:RealSignIn = @{ Owner = $Owner; CacheFolder = $CacheFolder; Log = $Log }
     $adapter = [ordered]@{ Kind = 'Real' }
     # No closures: the blocks run in this module and see the imported shared functions and $script:RealSignIn
     $adapter.SignIn = {
         param($TenantId, $ClientId, $Scopes)
         $c = $script:RealSignIn
-        $check = Assert-AVDTuneWebView2Cache -Folder $c.CacheFolder -TrustFile $c.TrustFile
-        if ($check.Status -eq 'Reset' -and $c.Log) { & $c.Log ('The WebView2 files were not trusted and are loaded again: ' + ($check.Problems -join '; ')) 'Warning' }
-        try {
-            Invoke-PackTuneBrowserSignIn -TenantID $TenantId -ClientID $ClientId -CacheFolder $c.CacheFolder -Scopes $Scopes -Owner $c.Owner -Prompt select_account `
-                -Title 'Sign in to Microsoft 365 and Azure (AVDTune)' -Hint 'Sign in with the account that manages this Golden Master. AVDTune keeps the tokens in memory only.'
-        }
-        finally {
-            $reg = Register-AVDTuneWebView2Cache -Folder $c.CacheFolder -TrustFile $c.TrustFile
-            if ($reg.Status -eq 'Reset' -and $c.Log) { & $c.Log ('The WebView2 files failed the check after the sign-in and were deleted: ' + ($reg.Problems -join '; ')) 'Warning' }
-        }
+        $check = Assert-AVDTuneWebView2Cache -Folder $c.CacheFolder
+        if ($check.Status -eq 'Reset' -and $c.Log) { & $c.Log ('The WebView2 folder had unexpected content and was deleted, the pinned SDK is downloaded again: ' + ($check.Problems -join '; ')) 'Warning' }
+        Invoke-PackTuneBrowserSignIn -TenantID $TenantId -ClientID $ClientId -CacheFolder $c.CacheFolder -Scopes $Scopes -Owner $c.Owner -Prompt select_account `
+            -Title 'Sign in to Microsoft 365 and Azure (AVDTune)' -Hint 'Sign in with the account that manages this Golden Master. AVDTune keeps the tokens in memory only.'
     }
     $adapter.Refresh = {
         param($TenantId, $ClientId, $RefreshToken, $Scopes)
