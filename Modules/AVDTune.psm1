@@ -106,20 +106,25 @@ function New-AVDTuneMachine {
         if (-not $t) { return $null }
         [pscustomobject]@{ Path = $t.TaskPath; Name = $t.TaskName; Enabled = ($t.State -ne 'Disabled') }
     }
+    $m.TaskList = {
+        # Names of the tasks directly in a folder (for tasks whose name carries a GUID, like the Edge update tasks)
+        param($Path)
+        @(Get-ScheduledTask -TaskPath $Path -ErrorAction SilentlyContinue | ForEach-Object { $_.TaskName })
+    }
     $m.TaskSetEnabled = {
         param($Path, $Name, $Enabled)
         if ($Enabled) { Enable-ScheduledTask -TaskPath $Path -TaskName $Name | Out-Null } else { Disable-ScheduledTask -TaskPath $Path -TaskName $Name | Out-Null }
     }
     $m.Run = {
         # File and arguments are separate; the command line is built here with quoting per argument, never from free text
-        param($File, [string[]]$Arguments)
+        param($File, [string[]]$Arguments, [int]$TimeoutSeconds = 120)
         $psi = New-Object System.Diagnostics.ProcessStartInfo
         $psi.FileName = $File
         $psi.Arguments = (@($Arguments | ForEach-Object { ConvertTo-AVDTuneArgument ([string]$_) }) -join ' ')
         $psi.UseShellExecute = $false; $psi.CreateNoWindow = $true; $psi.RedirectStandardOutput = $true; $psi.RedirectStandardError = $true
         $p = [System.Diagnostics.Process]::Start($psi)
         $out = $p.StandardOutput.ReadToEndAsync(); $err = $p.StandardError.ReadToEndAsync()
-        if (-not $p.WaitForExit(120000)) { try { $p.Kill() } catch { }; return [pscustomobject]@{ ExitCode = -1; Output = 'timeout' } }
+        if (-not $p.WaitForExit($TimeoutSeconds * 1000)) { try { $p.Kill() } catch { }; return [pscustomobject]@{ ExitCode = -1; Output = 'timeout' } }
         [pscustomobject]@{ ExitCode = $p.ExitCode; Output = ($out.Result + $err.Result) }
     }
     $m.Imds = {
@@ -832,7 +837,7 @@ function Get-AVDTuneHealth {
         Health checks of the Overview. Status: ok, warn, bad, info. "Must not be" items (AVD agent, join) are bad when present:
         a master with an agent or a join cannot be sealed.
     #>
-    param([Parameter(Mandatory)]$Machine, [Parameter(Mandatory)]$State)
+    param([Parameter(Mandatory)]$Machine, [Parameter(Mandatory)]$State, $UpdateBlock)
     $rows = New-Object System.Collections.ArrayList
     function Add-Health($Id, $Title, $Status, $Detail) { [void]$rows.Add([pscustomobject]@{ Id = $Id; Title = $Title; Status = $Status; Detail = $Detail }) }
 
@@ -843,10 +848,24 @@ function Get-AVDTuneHealth {
     if ($rename -and @($rename).Count -gt 0) { [void]$pending.Add('file operations') }
     if ($pending.Count -gt 0) { Add-Health 'reboot' 'Restart pending' 'warn' ('Waiting for a restart: ' + ($pending -join ', ') + '.') } else { Add-Health 'reboot' 'Restart pending' 'ok' 'No restart is waiting.' }
 
-    switch ([string]$State.UpdateBlock) {
-        'On' { Add-Health 'updateblock' 'Update block for users' 'ok' 'On: users see and run no updates (maintenance mode off).' }
-        'Off' { Add-Health 'updateblock' 'Update block for users' 'warn' 'Off: maintenance mode, updates are possible. Switch the block on before seal.' }
-        default { Add-Health 'updateblock' 'Update block for users' 'info' 'Not set up yet (phase 2).' }
+    # UpdateBlock is the live status of Get-AVDTuneUpdateBlockStatus (AVDTune.UpdateBlock.psm1) when the caller has it, else only what the state remembers
+    $maint = Get-AVDTuneProp $State 'Maintenance'
+    if ($maint -and (Get-AVDTuneProp $maint 'Active')) {
+        Add-Health 'updateblock' 'Update block for users' 'bad' 'Maintenance mode was interrupted: the update block is lifted or only partly back. Repair it on the Update block page.'
+    }
+    elseif ($UpdateBlock) {
+        $expected = [string]$State.UpdateBlock
+        if ($UpdateBlock.State -eq 'On') { Add-Health 'updateblock' 'Update block for users' 'ok' ('On: ' + $UpdateBlock.Compliant + ' of ' + $UpdateBlock.Applicable + ' settings are in place, users see and run no updates.') }
+        elseif ($expected -eq 'On') { Add-Health 'updateblock' 'Update block for users' 'bad' ('Changed from outside: only ' + $UpdateBlock.Compliant + ' of ' + $UpdateBlock.Applicable + ' settings are in place (' + $UpdateBlock.Missing + '). Switch the block on again.') }
+        elseif ($UpdateBlock.State -eq 'Partial') { Add-Health 'updateblock' 'Update block for users' 'warn' ('Partly on: ' + $UpdateBlock.Compliant + ' of ' + $UpdateBlock.Applicable + ' settings. Switch the block on before seal.') }
+        else { Add-Health 'updateblock' 'Update block for users' 'warn' 'Off: users can see and run updates. Switch the block on before seal.' }
+    }
+    else {
+        switch ([string]$State.UpdateBlock) {
+            'On' { Add-Health 'updateblock' 'Update block for users' 'ok' 'On: users see and run no updates (maintenance mode off).' }
+            'Off' { Add-Health 'updateblock' 'Update block for users' 'warn' 'Off: maintenance mode, updates are possible. Switch the block on before seal.' }
+            default { Add-Health 'updateblock' 'Update block for users' 'info' 'Not set up yet.' }
+        }
     }
     if ($State.Sealed) { Add-Health 'sealed' 'Seal' 'info' 'Sealed: the master is ready for capture.' } else { Add-Health 'sealed' 'Seal' 'info' 'Not sealed.' }
 
@@ -870,7 +889,7 @@ function Get-AVDTuneHealth {
 
 function Get-AVDTuneOverview {
     # Everything the Overview page shows, from the machine adapter and the state
-    param([Parameter(Mandatory)]$Machine, [string]$Root = (Get-AVDTuneRoot))
+    param([Parameter(Mandatory)]$Machine, [string]$Root = (Get-AVDTuneRoot), $UpdateBlock)
     $state = Get-AVDTuneState $Root
     $source = Get-AVDTuneSourceImage $Machine
     [pscustomobject]@{
@@ -881,8 +900,8 @@ function Get-AVDTuneOverview {
         Office = Get-AVDTuneOfficeInfo $Machine
         LastUpdate = $(if ($state.LastUpdate) { [string]$state.LastUpdate } else { '' })
         LastBenchmark = $(if ($state.LastBenchmark) { [string]$state.LastBenchmark } else { '' })
-        Health = @(Get-AVDTuneHealth $Machine $state)
-        UpdateBlock = [string]$state.UpdateBlock
+        Health = @(Get-AVDTuneHealth $Machine $state $UpdateBlock)
+        UpdateBlock = $(if ($UpdateBlock) { [string]$UpdateBlock.State } else { [string]$state.UpdateBlock })
         Sealed = [bool]$state.Sealed
     }
 }
@@ -894,4 +913,4 @@ Export-ModuleMember -Function Get-AVDTuneProp, Test-AVDTuneElevated, Get-AVDTune
     Add-AVDTuneRun, Get-AVDTuneRun, Get-AVDTuneLastChange, New-AVDTuneStep, Invoke-AVDTuneStep, New-AVDTuneStepFromData, Get-AVDTuneStepCatalog, Invoke-AVDTune,
     Add-AVDTuneChangeLogEntry, Get-AVDTuneChangeLog, Get-AVDTuneChangeLogVersions, ConvertTo-AVDTuneChangeLogDocument, Export-AVDTuneChangeLog,
     Get-AVDTuneWindowsInfo, Get-AVDTuneOfficeInfo, Get-AVDTuneSourceImage, Get-AVDTuneHealth, Get-AVDTuneOverview, Write-AVDTuneFile, Read-AVDTuneJson,
-    Open-AVDTuneWriteGate, Close-AVDTuneWriteGate, Get-AVDTuneWriteGate, Test-AVDTuneWriteAllowed, Remove-AVDTuneControlCharacters
+    Open-AVDTuneWriteGate, Close-AVDTuneWriteGate, Get-AVDTuneWriteGate, Test-AVDTuneWriteAllowed, Remove-AVDTuneControlCharacters, ConvertTo-AVDTuneTestResult
