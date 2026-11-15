@@ -37,6 +37,77 @@ function Test-AVDTuneElevated {
     (New-Object Security.Principal.WindowsPrincipal $identity).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 }
 
+function Test-AVDTuneUnderPath([string]$Path, [string]$Folder) {
+    $f = [IO.Path]::GetFullPath($Folder).TrimEnd('\') + '\'
+    [IO.Path]::GetFullPath($Path).StartsWith($f, [StringComparison]::OrdinalIgnoreCase)
+}
+
+function Resolve-AVDTuneTestScript {
+    <#
+        The one gate for a test script that is dot-sourced (fake machine, fake services, ...): the resolved path must be a file below <AppRoot>\Tests, and no part of
+        the path from Tests down may be a link. Returns the full path or $null.
+    #>
+    param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][string]$AppRoot)
+    try {
+        $tests = Join-Path ([IO.Path]::GetFullPath($AppRoot).TrimEnd('\')) 'Tests'
+        $full = [IO.Path]::GetFullPath($Path)
+        if (-not (Test-AVDTuneUnderPath $full $tests)) { return $null }
+        if (-not [IO.File]::Exists($full)) { return $null }
+        $cur = $tests
+        $parts = @($full.Substring($tests.Length).Trim('\').Split([char]92))
+        if ([IO.File]::GetAttributes($cur) -band [IO.FileAttributes]::ReparsePoint) { return $null }
+        foreach ($p in $parts) {
+            $cur = Join-Path $cur $p
+            if ([IO.File]::GetAttributes($cur) -band [IO.FileAttributes]::ReparsePoint) { return $null }
+        }
+        $full
+    } catch { $null }
+}
+
+$script:TestModeWarned = @{}
+function Test-AVDTuneTestMode {
+    <#
+        The one decision about the test mode (AVDTUNE_FAKE + AVDTUNE_ROOT). The test mode skips the elevation check and dot-sources a script, so an environment
+        variable set by someone else (HKCU\Environment is read by an elevated process started from the same user's session) must never switch it on:
+          - not an installed copy and not below Program Files,
+          - both variables come from the process environment only: the User and Machine values are empty,
+          - the fake script is a file below <AppRoot>\Tests (resolved path, no links).
+        EnvReader: scriptblock (name, scope) for the User/Machine environment, injectable for checks. Returns Enabled, FakeScript, FakeDir, Reason.
+        Without any variable it is quiet; a refused request writes a warning (once per reason) and the normal start follows.
+    #>
+    [CmdletBinding()]
+    param([string]$AppRoot = (Split-Path $PSScriptRoot -Parent), [scriptblock]$EnvReader = { param($n, $s) [Environment]::GetEnvironmentVariable($n, $s) })
+    $fake = [string]$env:AVDTUNE_FAKE; $root = [string]$env:AVDTUNE_ROOT
+    $result = { param($ok, $why, $script) [pscustomobject]@{ Enabled = $ok; FakeScript = $script; FakeDir = $(if ($script) { Split-Path $script -Parent } else { '' }); Reason = $why } }
+    if (-not $fake -and -not $root) { return (& $result $false '' $null) }
+    $why = ''; $script = $null
+    if (-not $fake) { $why = 'AVDTUNE_ROOT is ignored without AVDTUNE_FAKE (test mode only)' }
+    elseif (-not $root) { $why = 'AVDTUNE_FAKE is ignored without AVDTUNE_ROOT (test mode only)' }
+    else {
+        $app = [IO.Path]::GetFullPath($AppRoot).TrimEnd('\')
+        $pf = @([Environment]::GetFolderPath('ProgramFiles'), [Environment]::GetFolderPath('ProgramFilesX86')) | Where-Object { $_ }
+        $installed = $false
+        foreach ($p in $pf) { if (Test-AVDTuneUnderPath $app $p) { $installed = $true } }
+        if (-not $installed -and (Get-Command Get-AVDTuneInstallInfo -ErrorAction SilentlyContinue)) {
+            try { if ((Get-AVDTuneInstallInfo -AppRoot $app -InstallRoot (Join-Path ([Environment]::GetFolderPath('ProgramFiles')) 'AVDTune')).Mode -eq 'Installed') { $installed = $true } } catch { $installed = $true }
+        }
+        $fromEnv = $false
+        foreach ($n in 'AVDTUNE_FAKE', 'AVDTUNE_ROOT') { foreach ($s in 'User', 'Machine') { if ([string](& $EnvReader $n $s)) { $fromEnv = $true } } }
+        if ($installed) { $why = 'AVDTUNE_FAKE/AVDTUNE_ROOT are ignored in an installed copy' }
+        elseif ($fromEnv) { $why = 'AVDTUNE_FAKE/AVDTUNE_ROOT are ignored because they are set in the user or machine environment, not only in this process' }
+        else {
+            $script = Resolve-AVDTuneTestScript -Path $fake -AppRoot $app
+            if (-not $script) { $why = 'AVDTUNE_FAKE is ignored: it is not a file below the Tests folder of this copy' }
+        }
+    }
+    if ($why) {
+        $script = $null
+
+        if (-not $script:TestModeWarned[$why]) { $script:TestModeWarned[$why] = $true; Write-Warning "$why; normal start." }
+    }
+    & $result (-not $why) $why $script
+}
+
 $script:RootWarned = $false
 function Get-AVDTuneRoot {
     [CmdletBinding()] param()
@@ -44,8 +115,8 @@ function Get-AVDTuneRoot {
     # environment variable set by someone else cannot move the state (and the WebView2 DLLs) of the elevated tool to a folder he controls.
     $default = Join-Path ([Environment]::GetFolderPath('CommonApplicationData')) 'AVDTune'
     if ($env:AVDTUNE_ROOT) {
-        if ($env:AVDTUNE_FAKE) { return $env:AVDTUNE_ROOT }
-        if (-not $script:RootWarned) { $script:RootWarned = $true; Write-Warning "AVDTUNE_ROOT is ignored without AVDTUNE_FAKE (test mode only); the state stays in $default." }
+        if ((Test-AVDTuneTestMode).Enabled) { return $env:AVDTUNE_ROOT }
+        if (-not $env:AVDTUNE_FAKE -and -not $script:RootWarned) { $script:RootWarned = $true; Write-Warning "AVDTUNE_ROOT is ignored without AVDTUNE_FAKE (test mode only); the state stays in $default." }
     }
     $default
 }
@@ -1127,7 +1198,7 @@ function Get-AVDTuneOverview {
 
 #endregion
 
-Export-ModuleMember -Function Get-AVDTuneProp, Test-AVDTuneElevated, Get-AVDTuneRoot, Test-AVDTuneDefaultRoot, ConvertTo-AVDTuneArgument, New-AVDTuneMachine, Invoke-AVDTuneMachine,
+Export-ModuleMember -Function Get-AVDTuneProp, Test-AVDTuneElevated, Get-AVDTuneRoot, Test-AVDTuneDefaultRoot, Test-AVDTuneTestMode, Resolve-AVDTuneTestScript, ConvertTo-AVDTuneArgument, New-AVDTuneMachine, Invoke-AVDTuneMachine,
     New-AVDTuneStateSecurity, Initialize-AVDTuneState, Read-AVDTuneAclInfo, Get-AVDTuneStateSecurityProblems, Move-AVDTuneStateToQuarantine, New-AVDTuneProtectedFolder, Assert-AVDTuneStateSecurity, Get-AVDTuneStateSecurityReport, Get-AVDTuneState, Set-AVDTuneState, Test-AVDTuneImageVersion, Get-AVDTuneNextImageVersion, Start-AVDTuneImageVersion,
     Add-AVDTuneRun, Get-AVDTuneRun, Get-AVDTuneLastChange, New-AVDTuneStep, Invoke-AVDTuneStep, New-AVDTuneStepFromData, Get-AVDTuneStepCatalog, Invoke-AVDTune,
     Add-AVDTuneChangeLogEntry, Get-AVDTuneChangeLog, Get-AVDTuneChangeLogVersions, ConvertTo-AVDTuneChangeLogDocument, Export-AVDTuneChangeLog,

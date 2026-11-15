@@ -37,6 +37,38 @@ try {
     $env:AVDTUNE_FAKE = Join-Path $PSScriptRoot 'Fakes\FakeMachine.ps1'
     Test-Check 'AVDTUNE_ROOT overrides the root' ((Get-AVDTuneRoot) -eq $tmp) $null
 
+    # ---------------------------------------------------------------- test mode gate (issue 23)
+    $emptyEnv = { param($n, $s) $null }
+    $tm = Test-AVDTuneTestMode -AppRoot $repo -EnvReader $emptyEnv
+    Test-Check 'test mode: process variables in a checkout enable it, fake script resolved below Tests' ($tm.Enabled -and $tm.FakeScript -like (Join-Path $repo 'Tests\*') -and $tm.FakeDir -eq (Join-Path $repo 'Tests\Fakes')) ($tm | Out-String)
+    $userEnv = { param($n, $s) if ($s -eq 'User') { 'x' } else { $null } }
+    $tm = Test-AVDTuneTestMode -AppRoot $repo -EnvReader $userEnv -WarningAction SilentlyContinue
+    Test-Check 'attack: variable also in the User environment (HKCU) gives no test mode and no fake script' (-not $tm.Enabled -and -not $tm.FakeScript) $tm.Reason
+    $machEnv = { param($n, $s) if ($s -eq 'Machine') { 'x' } else { $null } }
+    $tm = Test-AVDTuneTestMode -AppRoot $repo -EnvReader $machEnv -WarningAction SilentlyContinue
+    Test-Check 'attack: variable also in the Machine environment gives no test mode' (-not $tm.Enabled -and -not $tm.FakeScript) $tm.Reason
+    $instRoot = Join-Path ([Environment]::GetFolderPath('ProgramFiles')) 'AVDTune\0.9.0'
+    $tm = Test-AVDTuneTestMode -AppRoot $instRoot -EnvReader $emptyEnv -WarningAction SilentlyContinue
+    Test-Check 'attack: installed path (Program Files) with the variables gives no test mode and no fake script' (-not $tm.Enabled -and -not $tm.FakeScript) $tm.Reason
+    $savedFake = $env:AVDTUNE_FAKE
+    New-Item -ItemType Directory -Path $tmp -Force | Out-Null
+    $env:AVDTUNE_FAKE = Join-Path $tmp 'FakeMachine.ps1'; Set-Content -LiteralPath $env:AVDTUNE_FAKE -Value '# evil'
+    $tm = Test-AVDTuneTestMode -AppRoot $repo -EnvReader $emptyEnv -WarningAction SilentlyContinue
+    Test-Check 'attack: fake script outside Tests\ is refused (no dot-source)' (-not $tm.Enabled -and -not $tm.FakeScript -and (Get-AVDTuneRoot -WarningAction SilentlyContinue) -eq $realRoot) $tm.Reason
+    $env:AVDTUNE_FAKE = Join-Path $repo 'Tests\..\Start-AVDTune.ps1'
+    $tm = Test-AVDTuneTestMode -AppRoot $repo -EnvReader $emptyEnv -WarningAction SilentlyContinue
+    Test-Check 'attack: a dot-dot path out of Tests\ is refused' (-not $tm.Enabled) $tm.Reason
+    $env:AVDTUNE_FAKE = $savedFake
+    $link = Join-Path $repo 'Tests\Fakes\_link_check'
+    $linkOk = $false
+    try { New-Item -ItemType Junction -Path $link -Target $tmp | Out-Null; $linkOk = $true } catch { }
+    if ($linkOk) {
+        try {
+            $r = Resolve-AVDTuneTestScript -Path (Join-Path $link 'FakeMachine.ps1') -AppRoot $repo
+            Test-Check 'attack: a link below Tests\ is refused' ($null -eq $r) $r
+        } finally { [IO.Directory]::Delete($link) }
+    }
+
     # ---------------------------------------------------------------- state
     [void](Initialize-AVDTuneState -Root $tmp)
     Test-Check 'state folders exist' ((@('runs', 'protocols', 'config', 'benchmark', 'logs') | Where-Object { -not (Test-Path (Join-Path $tmp $_)) }).Count -eq 0) $null

@@ -7,8 +7,7 @@
 
 $script:FslFake = $null
 if ($script:TestMode) {
-    $fakeDir = Split-Path $env:AVDTUNE_FAKE -Parent
-    . (Join-Path $fakeDir 'FakeFSLogix.ps1'); . (Join-Path $fakeDir 'FakeStorage.ps1')
+    . (Get-TestScript 'FakeFSLogix.ps1'); . (Get-TestScript 'FakeStorage.ps1')
     $script:FslFake = @{ F = (New-AVDTuneFakeFSLogix); Arm = (New-AVDTuneFakeStorageArm); Files = (New-AVDTuneFakeFiles); Ldap = (New-AVDTuneFakeStorageLdap) }
 }
 $script:FslJob = $null

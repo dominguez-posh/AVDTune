@@ -10,6 +10,7 @@
     Test hooks (all only honoured together, so they cannot be used to run the real tool unelevated):
       AVDTUNE_FAKE   script that defines New-AVDTuneFakeMachine (Tests\Fakes\FakeMachine.ps1): no real machine access
       AVDTUNE_ROOT   state folder other than ProgramData (ignored with a warning without AVDTUNE_FAKE)
+      Both count only when set in the process environment (not in the User or Machine environment), outside an installed copy, with the fake script below Tests (Test-AVDTuneTestMode).
       AVDTUNE_SMOKE  script that drives the window off-screen (Tests\GuiSmokeDriver.ps1)
 .PARAMETER HideConsole
     Hides the console window of this process.
@@ -33,7 +34,15 @@ Import-Module (Join-Path $PSScriptRoot 'Modules\AVDTune.Release.psm1') -Force
 # ---------------------------------------------------------------- test mode, elevation, one instance
 $script:StateRoot = Get-AVDTuneRoot
 # Test mode needs the fake machine AND a state folder that is not the real one: nothing real can be touched
-$script:TestMode = [bool]($env:AVDTUNE_FAKE -and $env:AVDTUNE_ROOT -and -not (Test-AVDTuneDefaultRoot $script:StateRoot))
+# One decision for the whole process (Modules\AVDTune.psm1): process-only variables, not installed, fake script below Tests\; otherwise a warning and the normal start
+$script:TestInfo = Test-AVDTuneTestMode -AppRoot $script:AppRoot
+$script:TestMode = [bool]($script:TestInfo.Enabled -and -not (Test-AVDTuneDefaultRoot $script:StateRoot))
+function Get-TestScript([string]$Name) {
+    # A script of the test mode next to the fake machine, through the same gate (below Tests\, no links)
+    $p = Resolve-AVDTuneTestScript -Path (Join-Path $script:TestInfo.FakeDir $Name) -AppRoot $script:AppRoot
+    if (-not $p) { throw "Test script $Name is not a file below the Tests folder of this copy." }
+    $p
+}
 function Stop-WithMessage([string]$Text) {
     # In test mode never a dialog: it would appear on the developer's desktop and block an unattended run
     if ($script:TestMode) { [Console]::Error.WriteLine("AVDTune: $Text"); exit 1 }
@@ -56,9 +65,9 @@ try { $script:MutexOwned = $script:Mutex.WaitOne(0) } catch [System.Threading.Ab
 if (-not $script:MutexOwned) { Stop-WithMessage 'AVDTune is already running on this computer (one instance at a time).' }
 
 if ($script:TestMode) {
-    . $env:AVDTUNE_FAKE; $script:Machine = New-AVDTuneFakeMachine
+    . $script:TestInfo.FakeScript; $script:Machine = New-AVDTuneFakeMachine
     # sign-in, Azure Resource Manager and LDAP are fakes in test mode (Tests\Fakes\FakeServices.ps1 next to the fake machine): no real sign-in, tenant or domain controller
-    . (Join-Path (Split-Path $env:AVDTUNE_FAKE -Parent) 'FakeServices.ps1')
+    . (Get-TestScript 'FakeServices.ps1')
     $script:Services = @{ Auth = (New-AVDTuneFakeAuth); Arm = (New-AVDTuneFakeArm); Ldap = (New-AVDTuneFakeLdap) }
 }
 else { $script:Machine = New-AVDTuneMachine }
@@ -288,7 +297,7 @@ function Start-OverviewRefresh {
             Import-Module (Join-Path (Split-Path $Module -Parent) 'AVDTune.UpdateBlock.psm1') -Force
             if ($FakeScript) { . $FakeScript; $m = $SharedMachine; if (-not $m) { $m = New-AVDTuneFakeMachine } } else { $m = New-AVDTuneMachine }
             Get-AVDTuneOverview -Machine $m -Root $Root -UpdateBlock (Get-AVDTuneUpdateBlockStatus $m)
-        }).AddArgument((Join-Path $script:AppRoot 'Modules\AVDTune.psm1')).AddArgument($(if ($script:TestMode) { $env:AVDTUNE_FAKE } else { '' })).AddArgument($script:StateRoot).AddArgument($(if ($script:TestMode) { $script:Machine } else { $null }))
+        }).AddArgument((Join-Path $script:AppRoot 'Modules\AVDTune.psm1')).AddArgument($(if ($script:TestMode) { $script:TestInfo.FakeScript } else { '' })).AddArgument($script:StateRoot).AddArgument($(if ($script:TestMode) { $script:Machine } else { $null }))
     $task = Start-AVDTuneUiTask -Kind 'overview' -Title 'Reading the machine' -Step 'Reading Windows, Office, source image and health checks' -Retry @{ Command = 'Start-OverviewRefresh'; Arguments = @() }
     $script:OverviewJob = @{ PS = $ps; Handle = $ps.BeginInvoke(); Task = $task }
 }
