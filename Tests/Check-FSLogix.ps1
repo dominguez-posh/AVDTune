@@ -192,6 +192,14 @@ try {
     $fdPre = New-AVDTuneFakeFSLogix -Seed @{ Defender = @{ Paths = @('D:\own'); Processes = @() } }
     [void](Set-AVDTuneFSLogixDefender -Machine $m -F $fdPre -Root $tmp -User a -SnapshotId s); [void](Undo-AVDTuneFSLogixDefender -Machine $m -F $fdPre -Root $tmp -User a -SnapshotId s)
     Test-Check 'an exclusion the administrator had before stays after undo' ($fdPre.Store.Defender.Paths -contains 'D:\own') $null
+    $fdSk = New-AVDTuneFakeFSLogix
+    $skipOne = 'C:\ProgramData\FSLogix\'
+    $sdSk = Set-AVDTuneFSLogixDefender -Machine $m -F $fdSk -Root $tmp -VhdLocations @($share) -User 'admin1' -SnapshotId 'snap-check' -Skip @($skipOne.ToUpperInvariant())
+    $skUndo = Read-AVDTuneJson (Join-Path $tmp 'config\fslogix-defender-undo.json')
+    $skLog = @(Get-AVDTuneChangeLog -Root $tmp | Where-Object { $_.Component -eq 'fslogix.defender.exclusions' } | Select-Object -Last 1)
+    Test-Check 'a deselected Defender exclusion is not set, not in the undo list, and the change log names it; the rest is set and the run is Changed, not Failed (counter-test)' ($sdSk.Results[0].Status -eq 'Changed' -and $fdSk.Store.Defender.Paths -notcontains $skipOne -and @($fdSk.Store.Defender.Paths).Count -gt 0 -and @($skUndo.Added | Where-Object { $_.Value -eq $skipOne }).Count -eq 0 -and @($skUndo.Added).Count -eq (@($fdSk.Store.Defender.Paths).Count + @($fdSk.Store.Defender.Processes).Count) -and $skLog.Count -eq 1 -and $skLog[0].Text -like "*deselected and not set*$skipOne*") (($sdSk.Results | ForEach-Object { "$($_.Status) $($_.Message)" }) -join ' | ')
+    Test-Check 'all missing exclusions deselected: nothing is set, the run is Unchanged' ((Set-AVDTuneFSLogixDefender -Machine $m -F (New-AVDTuneFakeFSLogix) -Root $tmp -VhdLocations @($share) -User a -SnapshotId s -Skip @((Get-AVDTuneFSLogixDefenderList -VhdLocations @($share)).Items | ForEach-Object { $_.Value })).Results[0].Status -eq 'Unchanged') $null
+    [void](Undo-AVDTuneFSLogixDefender -Machine $m -F $fdSk -Root $tmp -User 'admin1' -SnapshotId 'snap-check')
     $fdNo = New-AVDTuneFakeFSLogix -Seed @{ Defender = $null }
     Test-Check 'Defender not readable (policy, other AV): state says so, apply refuses and changes nothing' (-not (Get-AVDTuneFSLogixDefenderState -F $fdNo).Readable -and (Get-ThrownText { Set-AVDTuneFSLogixDefender -Machine $m -F $fdNo -Root $tmp }) -like '*cannot be read*') $null
 

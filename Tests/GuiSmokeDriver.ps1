@@ -734,6 +734,13 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         $ui.TxtFslRedirXml.Text = $good
         $ui.BtnFslRedirSave.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
         Test-Smoke 'redirections.xml saved to the folder, the folder is in the registry' ($script:FslFake.F.Store.Files['\\storageaccount.file.core.windows.net\profiles\redirections.xml'] -ceq $good -and (& $script:Machine.RegGet 'HKLM:\SOFTWARE\FSLogix\Profiles' 'RedirXMLSourceFolder') -eq '\\storageaccount.file.core.windows.net\profiles') $null
+        # Defender: one exclusion unticked (a folder with a risk note) is not set; ticking it again and adding sets it
+        $defKey = 'C:\Users\*\AppData\Local\FSLogix\'
+        $defRow = @($ui.PanelFslDefender.Children | Where-Object { $_.Children[0].Tag -eq $defKey })
+        $defRow[0].Children[0].IsChecked = $false
+        $ui.BtnFslDefAdd.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
+        Test-Smoke 'Defender: the unticked exclusion is not set (still Missing and unticked after the list is drawn again), the others are' ($defRow.Count -eq 1 -and $script:ConfirmAsked -like '*1 are unticked*' -and $script:FslFake.F.Store.Defender.Paths -notcontains $defKey -and $script:FslFake.F.Store.Defender.Processes -contains 'C:\Program Files\FSLogix\Apps\frxccds.exe' -and @($ui.PanelFslDefender.Children | Where-Object { $_.Children[0].Tag -eq $defKey -and $_.Children[0].IsChecked -eq $false -and $_.Children[0].IsEnabled }).Count -eq 1) "$($script:ConfirmAsked) / $($defRow.Count)"
+        @($ui.PanelFslDefender.Children | Where-Object { $_.Children[0].Tag -eq $defKey })[0].Children[0].IsChecked = $true
         # Defender
         $ui.BtnFslDefAdd.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
         Test-Smoke 'Defender: the missing exclusions are added, the list says all are set' ($ui.TxtFslDefState.Text -like '* of * exclusions are set.*' -and @((Get-AVDTuneFSLogixDefenderState -F $script:FslFake.F -VhdLocations @('\\storageaccount.file.core.windows.net\profiles')).Items | Where-Object { -not $_.Present }).Count -eq 0 -and $script:FslFake.F.Store.Defender.Processes -contains 'C:\Program Files\FSLogix\Apps\frxccds.exe') $ui.TxtFslDefState.Text

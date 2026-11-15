@@ -494,14 +494,16 @@ function Get-AVDTuneFSLogixDefenderState {
 function Set-AVDTuneFSLogixDefender {
     <# Adds the missing Defender exclusions (one step, Undo removes exactly the ones that were added). Needs the write gate unless -WhatIf. #>
     [CmdletBinding()]
-    param([Parameter(Mandatory)]$Machine, [Parameter(Mandatory)]$F, [string]$Root = (Get-AVDTuneRoot), [string[]]$VhdLocations = @(), [string]$User, [string]$SnapshotId, [switch]$WhatIf)
+    param([Parameter(Mandatory)]$Machine, [Parameter(Mandatory)]$F, [string]$Root = (Get-AVDTuneRoot), [string[]]$VhdLocations = @(), [string]$User, [string]$SnapshotId, [string[]]$Skip = @(), [switch]$WhatIf)
     $state = Get-AVDTuneFSLogixDefenderState -F $F -VhdLocations $VhdLocations
     if (-not $state.Readable) { throw 'The Defender exclusions cannot be read here (another antivirus, or Defender is managed by a policy that hides them). Nothing was changed.' }
-    $todo = @($state.Items | Where-Object { -not $_.Present })
+    $skipSet = @(@($Skip) | Where-Object { $_ } | ForEach-Object { ([string]$_).ToLowerInvariant() })   # deselected by the administrator: not set, not in the undo list
+    $skipped = @($state.Items | Where-Object { -not $_.Present -and $skipSet -contains $_.Value.ToLowerInvariant() })
+    $todo = @($state.Items | Where-Object { -not $_.Present -and $skipSet -notcontains $_.Value.ToLowerInvariant() })
     $undoList = @($todo | ForEach-Object { [ordered]@{ Kind = $_.Kind; Value = $_.Value } })
-    $test = { param($m) $s = Get-AVDTuneFSLogixDefenderState -F $F -VhdLocations $VhdLocations; $open = @($s.Items | Where-Object { -not $_.Present }); @{ Compliant = ($open.Count -eq 0); State = "$(@($s.Items).Count - $open.Count) of $(@($s.Items).Count) present" } }.GetNewClosure()
+    $test = { param($m) $s = Get-AVDTuneFSLogixDefenderState -F $F -VhdLocations $VhdLocations; $open = @($s.Items | Where-Object { -not $_.Present -and $skipSet -notcontains $_.Value.ToLowerInvariant() }); @{ Compliant = ($open.Count -eq 0); State = "$(@($s.Items).Count - $open.Count - $skipped.Count) of $(@($s.Items).Count) present$(if ($skipped.Count -gt 0) { ", $($skipped.Count) deselected" })" } }.GetNewClosure()
     $apply = { param($m) foreach ($i in $todo) { & $F.DefenderAdd $i.Kind $i.Value } }.GetNewClosure()
-    $step = New-AVDTuneStep -Id 'fslogix.defender.exclusions' -Section FSLogix -Title "FSLogix Defender exclusions ($($todo.Count) to add)" -Why 'Microsoft asks to exclude FSLogix from antivirus scanning; scanning causes slow logons and locked containers.' -SourceUrl $state.Source -Test $test -Apply $apply
+    $step = New-AVDTuneStep -Id 'fslogix.defender.exclusions' -Section FSLogix -Title "FSLogix Defender exclusions ($($todo.Count) to add$(if ($skipped.Count -gt 0) { ", $($skipped.Count) deselected and not set: " + (($skipped | ForEach-Object { $_.Value }) -join '; ') }))" -Why 'Microsoft asks to exclude FSLogix from antivirus scanning; scanning causes slow logons and locked containers.' -SourceUrl $state.Source -Test $test -Apply $apply
     if (-not $WhatIf -and $todo.Count -gt 0 -and (Test-AVDTuneWriteAllowed)) { Write-AVDTuneUndoFile (Join-Path $Root 'config\fslogix-defender-undo.json') ([ordered]@{ Added = $undoList } | ConvertTo-Json -Depth 4) }
     Invoke-AVDTune -Plan ([pscustomobject]@{ Name = 'FSLogix Defender exclusions'; Steps = @($step.Id) }) -Catalog @($step) -Machine $Machine -Root $Root -User $User -SnapshotId $SnapshotId -WhatIf:$WhatIf
 }

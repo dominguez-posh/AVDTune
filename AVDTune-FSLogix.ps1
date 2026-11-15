@@ -13,6 +13,7 @@ if ($script:TestMode) {
 }
 $script:FslJob = $null
 $script:FslInputs = @{}
+$script:FslDefOff = @{}   # Defender exclusions the administrator switched off (lower case value), kept while the list is drawn again
 $script:FslTest = $null
 $script:FslStorage = $null
 $script:FslTemplateBoxes = @{}
@@ -230,18 +231,27 @@ function Update-FslDefender {
     $ui.TxtFslDefState.Text = "$(@($s.Items).Count - $open) of $(@($s.Items).Count) exclusions are set.$(if (@($s.NotDefender).Count -gt 0) { ' Not Defender types (other tools): ' + ((@($s.NotDefender) | ForEach-Object { $_.Value }) -join '; ') + '.' })"
     foreach ($i in $s.Items) {
         $g = New-Object System.Windows.Controls.Grid; $g.Margin = '0,2,0,2'
-        foreach ($w in 100, 80, '*') { $c = New-Object System.Windows.Controls.ColumnDefinition; $c.Width = $w; [void]$g.ColumnDefinitions.Add($c) }
+        foreach ($w in 30, 100, 80, '*') { $c = New-Object System.Windows.Controls.ColumnDefinition; $c.Width = $w; [void]$g.ColumnDefinitions.Add($c) }
+        # one checkbox per exclusion (default on): what is switched off is not set and not in the undo list. A set exclusion cannot be switched off here (Undo removes the ones AVDTune added).
+        $chk = New-Object System.Windows.Controls.CheckBox; $chk.VerticalAlignment = 'Center'; $chk.Tag = [string]$i.Value
+        $chk.IsChecked = (-not $i.Present -and -not $script:FslDefOff.ContainsKey(([string]$i.Value).ToLowerInvariant())) -or [bool]$i.Present; $chk.IsEnabled = -not $i.Present
+        [System.Windows.Automation.AutomationProperties]::SetName($chk, "Set this exclusion: $($i.Value)")
+        $chk.Add_Checked({ param($src, $e) try { $script:FslDefOff.Remove(([string]$src.Tag).ToLowerInvariant()) } catch { } })
+        $chk.Add_Unchecked({ param($src, $e) try { $script:FslDefOff[([string]$src.Tag).ToLowerInvariant()] = $true } catch { } })
         $pill = New-FslPillBlock $(if ($i.Present) { 'green' } else { 'yellow' }) $(if ($i.Present) { 'Set' } else { 'Missing' })
-        $kind = New-Object System.Windows.Controls.TextBlock; $kind.Text = $i.Kind; $kind.VerticalAlignment = 'Center'; $kind.SetValue([System.Windows.Controls.Grid]::ColumnProperty, 1); Set-Brush $kind ([System.Windows.Controls.TextBlock]::ForegroundProperty) 'MutedText'
-        $val = New-Object System.Windows.Controls.TextBlock; $val.Text = $i.Value + $(if ($i.Risk) { "   [risk: $($i.Risk)]" }); $val.FontFamily = 'Cascadia Mono, Consolas'; $val.FontSize = 12; $val.TextWrapping = 'Wrap'; $val.VerticalAlignment = 'Center'; $val.SetValue([System.Windows.Controls.Grid]::ColumnProperty, 2)
+        $pill.SetValue([System.Windows.Controls.Grid]::ColumnProperty, 1)
+        $kind = New-Object System.Windows.Controls.TextBlock; $kind.Text = $i.Kind; $kind.VerticalAlignment = 'Center'; $kind.SetValue([System.Windows.Controls.Grid]::ColumnProperty, 2); Set-Brush $kind ([System.Windows.Controls.TextBlock]::ForegroundProperty) 'MutedText'
+        $val = New-Object System.Windows.Controls.TextBlock; $val.Text = $i.Value + $(if ($i.Risk) { "   [risk: $($i.Risk)]" }); $val.FontFamily = 'Cascadia Mono, Consolas'; $val.FontSize = 12; $val.TextWrapping = 'Wrap'; $val.VerticalAlignment = 'Center'; $val.SetValue([System.Windows.Controls.Grid]::ColumnProperty, 3)
+        [void]$g.Children.Add($chk)
         foreach ($e in $pill, $kind, $val) { $e.ToolTip = "$($i.Reason)`r`nSource: $($i.Source)`r`nStated on Microsoft Learn: $(if ($i.Verified) { 'yes' } else { 'no' })$(if ($i.Note) { "`r`n" + $i.Note })"; [void]$g.Children.Add($e) }
         [void]$ui.PanelFslDefender.Children.Add($g)
     }
 }
 Add-Click $ui.BtnFslDefAdd {
     Assert-FslWrite
-    if (-not (Confirm-Action 'Add the missing FSLogix exclusions to Microsoft Defender Antivirus on this master? Some are folders that users can write to (marked [risk] in the list): files there are not scanned.' 'Defender exclusions')) { return }
-    $run = Set-AVDTuneFSLogixDefender -Machine $script:Machine -F (Get-FslAdapter) -Root $script:StateRoot -VhdLocations @(Get-AVDTuneFSLogixLocations -Machine $script:Machine) -User (Get-FslUser) -SnapshotId (Get-FslGateSnapshot)
+    $off = @($script:FslDefOff.Keys)
+    if (-not (Confirm-Action "Add the checked, missing FSLogix exclusions to Microsoft Defender Antivirus on this master? Some are folders that users can write to (marked [risk] in the list): files there are not scanned. Untick an exclusion to leave it out.$(if ($off.Count -gt 0) { " $($off.Count) are unticked and will not be set." })" 'Defender exclusions')) { return }
+    $run = Set-AVDTuneFSLogixDefender -Machine $script:Machine -F (Get-FslAdapter) -Root $script:StateRoot -VhdLocations @(Get-AVDTuneFSLogixLocations -Machine $script:Machine) -User (Get-FslUser) -SnapshotId (Get-FslGateSnapshot) -Skip $off
     Show-FslRun $run 'Defender exclusions'; Update-FslDefender
 }
 Add-Click $ui.BtnFslDefUndo {
