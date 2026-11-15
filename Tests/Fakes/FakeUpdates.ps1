@@ -2,21 +2,36 @@
 # No Windows Update call, no process, no mutex. Everything asked is in .Log. Switches live in .Store.
 #   Wua = list of @{ Id; Title; Kbs; IsDriver; SizeMB; Reboot }, WuaSearchFails (hresult), WuaResults = hashtable id -> array of @{ Ok; ResultCode; HResult; RebootRequired } (one per attempt),
 #   MicrosoftUpdate (registered), RegisterFails, Native = hashtable 'file arg arg' -> @{ ExitCode; Output } (or an array, one per call), Tools = names that exist,
-#   LockError (text: the lock cannot be taken), Defender, DefenderFails, Appx = hashtable name -> version, Signature = @{ Valid; Subject }
+#   LockError (text: the lock cannot be taken), Defender, DefenderFails, Appx = hashtable name -> version,
+#   Signatures = hashtable file name -> @{ Valid; Subject; Issuer; OriginalFilename } (otherwise the right publisher of each tool: Microsoft, choco Chocolatey),
+#   Missing = full paths that do not exist. Stage/Unstage (copy of a tool into a private folder) only log.
 function New-AVDTuneFakeUpdates {
     param([hashtable]$Seed = @{})
     $s = @{ Wua = @(); WuaSearchFails = $null; WuaResults = @{}; MicrosoftUpdate = $false; RegisterFails = $false; Native = @{}; Tools = @('winget.exe', 'choco.exe', 'teamsbootstrapper.exe')
         LockError = ''; LockHeld = $false; Defender = @{ Version = '1.400.1.0'; LastUpdated = [datetime]'2026-11-15T01:00:00' }; DefenderFails = $false
-        Appx = @{ MSTeams = '25000.1.1.0' }; Signature = @{ Valid = $true; Subject = 'CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond' }
+        Appx = @{ MSTeams = '25000.1.1.0' }; Signatures = @{}; Missing = @()
         Files = @{ OneDrive = '25.100.0' }; Log = (New-Object System.Collections.ArrayList); Calls = @{} }
     foreach ($e in $Seed.GetEnumerator()) { $s[$e.Key] = $e.Value }
     $u = [ordered]@{ Kind = 'Fake'; Store = $s; Log = $s.Log }
     $u.Sleep = { param($Seconds) }.GetNewClosure()
-    $u.Path = { param($Name) switch ($Name) { 'C2R' { 'C:\fake\OfficeC2RClient.exe' } 'EdgeUpdate' { 'C:\fake\MicrosoftEdgeUpdate.exe' } default { "C:\fake\$Name.exe" } } }
+    $u.Path = { param($Name) switch ($Name) { 'C2R' { 'C:\fake\OfficeC2RClient.exe' } 'EdgeUpdate' { 'C:\fake\MicrosoftEdgeUpdate.exe' } 'Dism' { 'C:\fake\System32\Dism.exe' } 'Sfc' { 'C:\fake\System32\sfc.exe' } default { "C:\fake\$Name.exe" } } }
+    $u.Exists = { param($Path) [bool]$Path -and $Path -notin $s.Missing }.GetNewClosure()
     $u.FileVersion = { param($Path) $n = [IO.Path]::GetFileNameWithoutExtension($Path); if ($s.Files.ContainsKey($n)) { $s.Files[$n] } else { $null } }.GetNewClosure()
     $u.AppxVersion = { param($Name) if ($s.Appx.ContainsKey($Name)) { $s.Appx[$Name] } else { $null } }.GetNewClosure()
     $u.FindTool = { param($Name, $Extra) if ($Name -in $s.Tools) { "C:\fake\$Name" } else { $null } }.GetNewClosure()
-    $u.VerifySignature = { param($Path) [pscustomobject]@{ Valid = $s.Signature.Valid; Status = $(if ($s.Signature.Valid) { 'Valid' } else { 'NotSigned' }); Subject = $s.Signature.Subject } }.GetNewClosure()
+    $u.VerifySignature = {
+        param($Path)
+        $leaf = Split-Path $Path -Leaf
+        [void]$s.Log.Add("VerifySignature $Path")
+        $sig = if ($s.Signatures.ContainsKey($leaf)) { $s.Signatures[$leaf] } elseif ($leaf -eq 'choco.exe') {
+            @{ Valid = $true; Subject = 'CN="Chocolatey Software, Inc", O="Chocolatey Software, Inc", L=Topeka, S=Kansas, C=US'; Issuer = 'CN=DigiCert Trusted G4 Code Signing RSA4096 SHA384 2021 CA1, O="DigiCert, Inc.", C=US' }
+        }
+        else { @{ Valid = $true; Subject = 'CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US'; Issuer = 'CN=Microsoft Code Signing PCA 2024, O=Microsoft Corporation, C=US' } }
+        [pscustomobject]@{ Valid = [bool]$sig.Valid; Status = $(if ($sig.Valid) { 'Valid' } else { 'NotSigned' }); Subject = [string]$sig.Subject; Issuer = [string]$sig['Issuer']
+            OriginalFilename = $(if ($sig.ContainsKey('OriginalFilename')) { [string]$sig.OriginalFilename } else { $leaf }); ProductName = '' }
+    }.GetNewClosure()
+    $u.Stage = { param($Path, $Root) [void]$s.Log.Add("Stage $Path"); 'C:\fake\staged\' + (Split-Path $Path -Leaf) }.GetNewClosure()
+    $u.Unstage = { param($Path) [void]$s.Log.Add("Unstage $Path") }.GetNewClosure()
     $u.Run = {
         param($File, [string[]]$Arguments, [int]$TimeoutSeconds = 600)
         if (-not $s.LockHeld -and ($File -like '*winget*' -or $File -like '*choco*') -and $Arguments[0] -in 'upgrade', 'outdated') { [void]$s.Log.Add("UNLOCKED $File") }

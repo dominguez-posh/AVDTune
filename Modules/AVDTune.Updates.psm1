@@ -183,6 +183,83 @@ function Invoke-AVDTuneLocked {
 
 #endregion
 
+#region trusted tools
+
+# Every native tool AVDTune starts elevated: who must have signed it and the original file name it must carry (VersionInfo; '.mui' is ignored).
+$script:ToolTrust = @{
+    'winget.exe' = 'Microsoft'; 'teamsbootstrapper.exe' = 'Microsoft'; 'OfficeC2RClient.exe' = 'Microsoft'; 'MicrosoftEdgeUpdate.exe' = 'Microsoft'
+    'Dism.exe' = 'Microsoft'; 'sfc.exe' = 'Microsoft'; 'choco.exe' = 'Chocolatey'
+}
+
+function Get-AVDTuneDnPart([string]$Dn, [string]$Key) {
+    # One part of a distinguished name, quotes removed: Get-AVDTuneDnPart 'CN=x, O="A, Inc"' 'O' -> 'A, Inc'
+    $m = [regex]::Match([string]$Dn, '(?:^|,)\s*' + [regex]::Escape($Key) + '=(?:"(?<q>[^"]*)"|(?<v>[^,]*))')
+    if (-not $m.Success) { return '' }
+    if ($m.Groups['q'].Success) { $m.Groups['q'].Value } else { $m.Groups['v'].Value.Trim() }
+}
+
+function Test-AVDTuneToolTrust {
+    <#
+        Pure: is this signature (from the adapter's VerifySignature: Valid, Status, Subject, Issuer, OriginalFilename) the one of the named tool?
+        Microsoft: subject O and CN exactly Microsoft Corporation (or Microsoft Windows for Windows files), issued by a Microsoft code signing or
+        Windows production CA. Chocolatey: subject O and CN exactly Chocolatey Software, Inc, issued by a DigiCert code signing CA.
+        Returns @{ Ok; Reason }.
+    #>
+    param($Signature, [Parameter(Mandatory)][string]$Name)
+    $leaf = Split-Path $Name -Leaf
+    $publisher = $null
+    foreach ($k in $script:ToolTrust.Keys) { if ($k -eq $leaf) { $publisher = $script:ToolTrust[$k] } }
+    if (-not $publisher) { return @{ Ok = $false; Reason = "$leaf is not a known tool" } }
+    if (-not $Signature -or -not $Signature.Valid) { return @{ Ok = $false; Reason = "$leaf has no valid signature ($(if ($Signature) { $Signature.Status } else { 'none' }))" } }
+    $sO = Get-AVDTuneDnPart $Signature.Subject 'O'; $sCN = Get-AVDTuneDnPart $Signature.Subject 'CN'
+    $iO = Get-AVDTuneDnPart (Get-AVDTuneProp $Signature 'Issuer') 'O'; $iCN = Get-AVDTuneDnPart (Get-AVDTuneProp $Signature 'Issuer') 'CN'
+    $ok = switch ($publisher) {
+        'Microsoft' { $sO -ceq 'Microsoft Corporation' -and $sCN -cin 'Microsoft Corporation', 'Microsoft Windows' -and $iO -ceq 'Microsoft Corporation' -and $iCN -cmatch '^Microsoft (Windows )?(Code Signing|Production) PCA( |$)' }
+        'Chocolatey' { $sO -ceq 'Chocolatey Software, Inc' -and $sCN -ceq 'Chocolatey Software, Inc' -and $iO -ceq 'DigiCert, Inc.' -and $iCN -cmatch '^DigiCert .*Code Signing' }
+    }
+    if (-not $ok) { return @{ Ok = $false; Reason = "$leaf is not signed by $publisher (signer '$($Signature.Subject)', issuer '$(Get-AVDTuneProp $Signature 'Issuer')')" } }
+    $orig = ([string](Get-AVDTuneProp $Signature 'OriginalFilename')) -replace '(?i)\.mui$', ''
+    if ($orig -ne $leaf) { return @{ Ok = $false; Reason = "$leaf carries the original file name '$orig'" } }
+    @{ Ok = $true; Reason = '' }
+}
+
+function Test-AVDTuneAdminOnlyAcl {
+    <#
+        Pure: only SYSTEM, Administrators and TrustedInstaller own the object and may write, delete or change its permissions. $Rules are
+        @{ Sid; Allow; Rights (int); InheritOnly }. Read and execute for others is fine.
+    #>
+    param([string]$Owner, [object[]]$Rules)
+    $admin = @('S-1-5-18', 'S-1-5-32-544', 'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464')
+    if ($Owner -notin $admin) { return $false }
+    $write = 0x2 -bor 0x4 -bor 0x40 -bor 0x10000 -bor 0x40000 -bor 0x80000 -bor 0x40000000 -bor 0x10000000   # data, append, delete child, delete, DAC, owner, generic write/all
+    foreach ($r in @($Rules)) {
+        if (-not $r -or -not $r.Allow -or $r.InheritOnly -or $r.Sid -in $admin) { continue }
+        if (([int64]$r.Rights -band $write) -ne 0) { return $false }
+    }
+    $true
+}
+
+function Resolve-AVDTuneTool {
+    <#
+        Finds a native tool and checks it before it is started elevated: only fixed admin-only places (the adapter's FindTool or Path, no PATH),
+        and the signature of the tool's publisher (Test-AVDTuneToolTrust). -Stage copies it into a private folder first and checks the copy
+        (the file that runs is the file that was checked); the caller removes it with $U.Unstage. Returns @{ Path; Code (ToolMissing | BadSignature); Error; Staged }.
+    #>
+    param([Parameter(Mandatory)]$U, [Parameter(Mandatory)][string]$Name, [string]$PathName, [string]$ExtraFolder, [string]$Root, [switch]$Stage)
+    $path = if ($PathName) { & $U.Path $PathName } else { & $U.FindTool $Name $ExtraFolder }
+    if (-not $path -or -not (& $U.Exists $path)) { return @{ Path = $null; Code = 'ToolMissing'; Error = "$Name was not found."; Staged = $false } }
+    $staged = $false
+    if ($Stage) { $path = & $U.Stage $path $Root; $staged = $true }
+    $trust = Test-AVDTuneToolTrust -Signature (& $U.VerifySignature $path) -Name $Name
+    if (-not $trust.Ok) {
+        if ($staged) { & $U.Unstage $path }
+        return @{ Path = $null; Code = 'BadSignature'; Error = "$($trust.Reason): it is not started."; Staged = $false }
+    }
+    @{ Path = $path; Code = ''; Error = ''; Staged = $staged }
+}
+
+#endregion
+
 #region the list
 
 function New-AVDTuneUpdateItem {
@@ -268,10 +345,10 @@ function Get-AVDTuneUpdateList {
 
     # ---- winget and Chocolatey (inside the lock)
     Say 'Reading winget and Chocolatey ...'
-    $winget = & $U.FindTool 'winget.exe'
-    $choco = & $U.FindTool 'choco.exe'
-    if (-not $winget) { [void]$notes.Add('winget was not found: no winget apps are listed.') }
-    if (-not $choco) { [void]$notes.Add('Chocolatey was not found: no Chocolatey apps are listed.') }
+    $tw = Resolve-AVDTuneTool -U $U -Name 'winget.exe'; $winget = $tw.Path
+    $tc = Resolve-AVDTuneTool -U $U -Name 'choco.exe'; $choco = $tc.Path
+    if (-not $winget) { [void]$notes.Add($(if ($tw.Code -eq 'BadSignature') { "winget is not used: $($tw.Error)" } else { 'winget was not found: no winget apps are listed.' })) }
+    if (-not $choco) { [void]$notes.Add($(if ($tc.Code -eq 'BadSignature') { "Chocolatey is not used: $($tc.Error)" } else { 'Chocolatey was not found: no Chocolatey apps are listed.' })) }
     if ($winget -or $choco) {
         $got = Invoke-AVDTuneLocked -U $U -Script {
             $r = @{}
@@ -340,7 +417,9 @@ function Update-AVDTuneNativeItem {
     switch ($kind) {
         'm365' {
             $before = [string](Get-AVDTuneOfficeInfo $Machine).Build
-            $r = & $U.Run (& $U.Path 'C2R') @('/update', 'user', 'displaylevel=false', 'forceappshutdown=true') 600
+            $t = Resolve-AVDTuneTool -U $U -Name 'OfficeC2RClient.exe' -PathName 'C2R'
+            if (-not $t.Path) { return & $new 'Failed' $t.Error $t.Code '' $false 'Repair or reinstall Microsoft 365 Apps (Office page).' }
+            $r = & $U.Run $t.Path @('/update', 'user', 'displaylevel=false', 'forceappshutdown=true') 600
             if ($r.ExitCode -ne 0) { return & $new 'Failed' "OfficeC2RClient returned $($r.ExitCode). $($r.Output)".Trim() $r.ExitCode '' $false 'Check that Office is installed and the CDN is reachable (Office page).' }
             # the update runs in the background service: wait for a new build, up to the limit
             $tries = 0
@@ -351,7 +430,9 @@ function Update-AVDTuneNativeItem {
         'edge' {
             $key = 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{56EB18F8-B008-4CBD-B6D2-8C97FE7E9062}'
             $before = [string](& $Machine.RegGet $key 'pv')
-            $r = & $U.Run (& $U.Path 'EdgeUpdate') @('/ua', '/installsource', 'scheduler') 600
+            $t = Resolve-AVDTuneTool -U $U -Name 'MicrosoftEdgeUpdate.exe' -PathName 'EdgeUpdate'
+            if (-not $t.Path) { return & $new 'Failed' $t.Error $t.Code '' $false 'Repair Microsoft Edge (Software page or the Edge installer).' }
+            $r = & $U.Run $t.Path @('/ua', '/installsource', 'scheduler') 600
             if ($r.ExitCode -ne 0) { return & $new 'Failed' "Edge Update returned $($r.ExitCode). $($r.Output)".Trim() $r.ExitCode '' $false 'Check that the Edge update policies and tasks are lifted (maintenance mode) and the network is reachable.' }
             $tries = 0
             do { & $U.Sleep 10; $now = [string](& $Machine.RegGet $key 'pv'); $tries++ } while ($now -eq $before -and $tries -lt 12)
@@ -359,12 +440,14 @@ function Update-AVDTuneNativeItem {
             return & $new 'Unchanged' 'No newer version appeared (up to date).' '' $before $false ''
         }
         'teams' {
-            $tool = & $U.FindTool 'teamsbootstrapper.exe' (Join-Path $Root 'config\tools')
-            if (-not $tool) { return & $new 'Failed' 'teamsbootstrapper.exe was not found.' 'ToolMissing' '' $false "Download it from Microsoft (Teams bulk install page) into $(Join-Path $Root 'config\tools'); AVDTune checks the signature before it runs it." }
-            $sig = & $U.VerifySignature $tool
-            if (-not $sig.Valid -or [string]$sig.Subject -notmatch 'O=Microsoft Corporation') { return & $new 'Failed' "teamsbootstrapper.exe is not signed by Microsoft Corporation (signature: $($sig.Status))." 'BadSignature' '' $false 'Download the file again from Microsoft.' }
+            # only from config\tools; it runs as a copy in a private folder that is checked right before it starts (no swap between check and start)
+            $tools = Join-Path $Root 'config\tools'
+            if (-not (& $U.FindTool 'teamsbootstrapper.exe' $tools)) { return & $new 'Failed' 'teamsbootstrapper.exe was not found.' 'ToolMissing' '' $false "Download it from Microsoft (Teams bulk install page) into ${tools}; AVDTune checks the signature before it runs it." }
+            $t = Resolve-AVDTuneTool -U $U -Name 'teamsbootstrapper.exe' -ExtraFolder $tools -Root $Root -Stage
+            if (-not $t.Path) { return & $new 'Failed' "teamsbootstrapper.exe is not signed by Microsoft Corporation ($($t.Error))" $t.Code '' $false 'Download the file again from Microsoft.' }
             $before = [string](& $U.AppxVersion 'MSTeams')
-            $r = & $U.Run $tool @('-p') 900
+            try { $r = & $U.Run $t.Path @('-p') 900 }
+            finally { & $U.Unstage $t.Path }
             if ($r.ExitCode -ne 0) { return & $new 'Failed' "teamsbootstrapper returned $($r.ExitCode). $($r.Output)".Trim() $r.ExitCode '' $false 'See the HRESULT list in the Teams bulk install article.' }
             $now = [string](& $U.AppxVersion 'MSTeams')
             if ($now -ne $before) { return & $new 'Changed' "Updated from $before to $now." '' $now $false '' }
@@ -383,8 +466,9 @@ function Update-AVDTuneNativeItem {
             $source = $kind; $pkg = ''
             if ($kind -eq 'onedrive') { $source = 'winget'; $pkg = 'Microsoft.OneDrive' } else { $pkg = ($Item.Id -split ':', 2)[1] }
             if ($pkg -notmatch '^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$') { return & $new 'Failed' 'The package id is not valid.' 'BadId' '' $false '' }
-            $tool = & $U.FindTool $(if ($source -eq 'winget') { 'winget.exe' } else { 'choco.exe' })
-            if (-not $tool) { return & $new 'Failed' "$source was not found." 'ToolMissing' '' $false '' }
+            $t = Resolve-AVDTuneTool -U $U -Name $(if ($source -eq 'winget') { 'winget.exe' } else { 'choco.exe' })
+            if (-not $t.Path) { return & $new 'Failed' $(if ($t.Code -eq 'ToolMissing') { "$source was not found." } else { $t.Error }) $t.Code '' $false '' }
+            $tool = $t.Path
             $cmdArgs = if ($source -eq 'winget') { @('upgrade', '--id', $pkg, '--exact', '--source', 'winget', '--silent', '--accept-package-agreements', '--accept-source-agreements', '--disable-interactivity') + $(if ($kind -eq 'onedrive') { @('--scope', 'machine') } else { @() }) } else { @('upgrade', $pkg, '-y', '--no-progress') }
             $got = Invoke-AVDTuneLocked -U $U -Script { & $U.Run $tool $cmdArgs 3600 }
             if (-not $got.Ok) { return & $new 'Failed' "Not started: $($got.Error)" 'Lock' '' $false 'Wait until the other winget or Chocolatey operation is done, then try again.' }
@@ -472,7 +556,8 @@ function Invoke-AVDTuneRepair {
     $title = if ($Kind -eq 'Dism') { 'DISM /Online /Cleanup-Image /RestoreHealth' } else { 'sfc /scannow' }
     if ($Progress) { & $Progress "Running $title (this takes a while) ..." }
     $started = & $Machine.Now
-    $r = if ($Kind -eq 'Dism') { & $U.Run 'DISM.exe' @('/Online', '/Cleanup-Image', '/RestoreHealth') 7200 } else { & $U.Run 'sfc.exe' @('/scannow') 7200 }
+    $t = Resolve-AVDTuneTool -U $U -Name $(if ($Kind -eq 'Dism') { 'Dism.exe' } else { 'sfc.exe' }) -PathName $Kind
+    $r = if (-not $t.Path) { [pscustomobject]@{ ExitCode = -1; Output = $t.Error } } elseif ($Kind -eq 'Dism') { & $U.Run $t.Path @('/Online', '/Cleanup-Image', '/RestoreHealth') 7200 } else { & $U.Run $t.Path @('/scannow') 7200 }
     $ok = ($r.ExitCode -eq 0)
     $msg = if ($ok) { 'Finished without errors.' } else { "Exit code $($r.ExitCode). $(([string]$r.Output).Trim() -replace '\s+', ' ')" }
     if ($msg.Length -gt 300) { $msg = $msg.Substring(0, 297) + '...' }
@@ -508,6 +593,64 @@ function Get-AVDTuneUpdateHistory {
 
 #region the real adapter
 
+function Get-AVDTuneSystemFolder {
+    # Fixed system folders from Windows itself, never from environment variables (a user can set those in HKCU\Environment)
+    param([Parameter(Mandatory)][ValidateSet('Windows', 'System', 'ProgramFiles', 'ProgramFilesX86', 'CommonProgramFiles', 'ProgramData')][string]$Name)
+    $special = switch ($Name) {
+        'Windows' { 'Windows' } 'System' { 'System' } 'ProgramFiles' { 'ProgramFiles' } 'ProgramFilesX86' { 'ProgramFilesX86' }
+        'CommonProgramFiles' { 'CommonProgramFiles' } 'ProgramData' { 'CommonApplicationData' }
+    }
+    $path = [Environment]::GetFolderPath([Environment+SpecialFolder]$special)
+    if (-not $path) { throw "The system folder $Name is not known." }
+    $path
+}
+
+function Get-AVDTuneChocolateyRoot {
+    # The machine value of ChocolateyInstall (HKLM, admins only), never the process environment; otherwise the default under ProgramData
+    $v = $null
+    try { $v = [string](Get-ItemProperty -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Environment' -Name ChocolateyInstall -ErrorAction Stop).ChocolateyInstall } catch { }
+    if ($v -and $v -notmatch '%' -and [IO.Path]::IsPathRooted($v)) { return $v.TrimEnd('\') }
+    Join-Path (Get-AVDTuneSystemFolder ProgramData) 'chocolatey'
+}
+
+function Select-AVDTuneNewestPackageFolder {
+    # Pure: the folder name of the newest package version, by [version] (Microsoft.DesktopAppInstaller_1.29.380.0_x64__8wekyb3d8bbwe), not by text
+    param([string[]]$Names)
+    $best = $null; $bestVersion = $null
+    foreach ($n in @($Names)) {
+        $parts = ([string]$n) -split '_'
+        if ($parts.Count -lt 2) { continue }
+        $v = $null
+        if (-not [version]::TryParse($parts[1], [ref]$v)) { continue }
+        if (-not $bestVersion -or $v -gt $bestVersion) { $best = $n; $bestVersion = $v }
+    }
+    $best
+}
+
+function Test-AVDTuneAdminOnlyPath {
+    <#
+        Reads the permissions of $Path and of every folder above it up to (not including) $Base: each must be owned and writable only by
+        SYSTEM, Administrators or TrustedInstaller (Test-AVDTuneAdminOnlyAcl). Without $Base only the file is checked. Unreadable = not admin-only.
+    #>
+    param([Parameter(Mandatory)][string]$Path, [string]$Base)
+    $stop = if ($Base) { [IO.Path]::GetFullPath($Base).TrimEnd('\') } else { $null }
+    $item = [IO.Path]::GetFullPath($Path)
+    while ($item) {
+        if ($stop -and $item.TrimEnd('\') -ieq $stop) { break }
+        try { $acl = Get-Acl -LiteralPath $item -ErrorAction Stop } catch { return $false }
+        $rules = @(foreach ($r in $acl.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier])) {
+                @{ Sid = $r.IdentityReference.Value; Allow = ($r.AccessControlType -eq 'Allow'); Rights = [int64]$r.FileSystemRights.value__; InheritOnly = (($r.PropagationFlags -band [System.Security.AccessControl.PropagationFlags]::InheritOnly) -ne 0) }
+            })
+        $owner = ''; try { $owner = $acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value } catch { }
+        if (-not (Test-AVDTuneAdminOnlyAcl -Owner $owner -Rules $rules)) { return $false }
+        if (-not $stop) { break }
+        $parent = [IO.Path]::GetDirectoryName($item)
+        if (-not $parent -or $parent -eq $item) { return $false }   # reached the root without meeting $Base
+        $item = $parent
+    }
+    $true
+}
+
 function New-AVDTuneUpdateAdapter {
     <#
         The real update adapter. Reads work everywhere; WuaRegisterMicrosoftUpdate, WuaInstall, Run, DefenderUpdate change the system and are only used by a run
@@ -518,14 +661,18 @@ function New-AVDTuneUpdateAdapter {
     $u = [ordered]@{ Kind = 'Real'; State = $state }
     $u.Sleep = { param($Seconds) Start-Sleep -Seconds $Seconds }
     $u.Path = {
+        # full paths in fixed system folders (Get-AVDTuneSystemFolder), never from environment variables or PATH
         param($Name)
         switch ($Name) {
-            'C2R' { Join-Path ${env:CommonProgramFiles} 'Microsoft Shared\ClickToRun\OfficeC2RClient.exe' }
-            'EdgeUpdate' { Join-Path ${env:ProgramFiles(x86)} 'Microsoft\EdgeUpdate\MicrosoftEdgeUpdate.exe' }
-            'OneDrive' { Join-Path $env:ProgramFiles 'Microsoft OneDrive\OneDrive.exe' }
+            'C2R' { Join-Path (Get-AVDTuneSystemFolder CommonProgramFiles) 'Microsoft Shared\ClickToRun\OfficeC2RClient.exe' }
+            'EdgeUpdate' { Join-Path (Get-AVDTuneSystemFolder ProgramFilesX86) 'Microsoft\EdgeUpdate\MicrosoftEdgeUpdate.exe' }
+            'OneDrive' { Join-Path (Get-AVDTuneSystemFolder ProgramFiles) 'Microsoft OneDrive\OneDrive.exe' }
+            'Dism' { Join-Path (Get-AVDTuneSystemFolder System) 'Dism.exe' }
+            'Sfc' { Join-Path (Get-AVDTuneSystemFolder System) 'sfc.exe' }
             default { throw "Unknown path name $Name" }
         }
     }
+    $u.Exists = { param($Path) [bool]($Path -and (Test-Path -LiteralPath $Path -PathType Leaf)) }
     $u.FileVersion = {
         param($Path)
         if ($Path -and (Test-Path -LiteralPath $Path)) { [string](Get-Item -LiteralPath $Path).VersionInfo.ProductVersion } else { $null }
@@ -536,20 +683,58 @@ function New-AVDTuneUpdateAdapter {
         if ($p.Count -gt 0) { [string]$p[0].Version } else { $null }
     }
     $u.FindTool = {
+        <#
+            Only fixed places whose file and folders are writable by administrators only (Test-AVDTuneAdminOnlyPath): $ExtraFolder (config\tools),
+            winget in WindowsApps (newest DesktopAppInstaller by version), choco in the machine's Chocolatey folder. No PATH, no environment variables.
+        #>
         param($Name, $ExtraFolder)
-        if ($ExtraFolder) { $p = Join-Path $ExtraFolder $Name; if (Test-Path -LiteralPath $p) { return $p } }
+        $candidates = @()
+        if ($ExtraFolder) { $candidates += @{ Path = (Join-Path $ExtraFolder $Name); Base = (Split-Path $ExtraFolder -Parent) } }
         if ($Name -eq 'winget.exe') {
-            $hit = @(Get-ChildItem -Path (Join-Path $env:ProgramFiles 'WindowsApps\Microsoft.DesktopAppInstaller_*_8wekyb3d8bbwe\winget.exe') -ErrorAction SilentlyContinue | Sort-Object FullName -Descending | Select-Object -First 1)
-            if ($hit.Count -gt 0) { return $hit[0].FullName }
+            $apps = Join-Path (Get-AVDTuneSystemFolder ProgramFiles) 'WindowsApps'
+            $dirs = @(Get-ChildItem -LiteralPath $apps -Directory -Filter 'Microsoft.DesktopAppInstaller_*_8wekyb3d8bbwe' -ErrorAction SilentlyContinue | Where-Object { Test-Path -LiteralPath (Join-Path $_.FullName 'winget.exe') -PathType Leaf } | ForEach-Object Name)
+            $newest = Select-AVDTuneNewestPackageFolder $dirs
+            if ($newest) { $candidates += @{ Path = (Join-Path (Join-Path $apps $newest) 'winget.exe'); Base = $apps } }
         }
-        if ($Name -eq 'choco.exe' -and $env:ChocolateyInstall) { $p = Join-Path $env:ChocolateyInstall 'bin\choco.exe'; if (Test-Path -LiteralPath $p) { return $p } }
-        $c = Get-Command $Name -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
-        if ($c) { $c.Source } else { $null }
+        if ($Name -eq 'choco.exe') {
+            $croot = Get-AVDTuneChocolateyRoot
+            $candidates += @{ Path = (Join-Path $croot 'bin\choco.exe'); Base = (Split-Path $croot -Parent) }
+        }
+        foreach ($c in $candidates) {
+            if ((Test-Path -LiteralPath $c.Path -PathType Leaf) -and (Test-AVDTuneAdminOnlyPath -Path $c.Path -Base $c.Base)) { return $c.Path }
+        }
+        $null
     }
     $u.VerifySignature = {
         param($Path)
         $s = Get-AuthenticodeSignature -LiteralPath $Path
-        [pscustomobject]@{ Valid = ($s.Status -eq 'Valid'); Status = [string]$s.Status; Subject = $(if ($s.SignerCertificate) { [string]$s.SignerCertificate.Subject } else { '' }) }
+        $orig = ''; $product = ''
+        try { $vi = (Get-Item -LiteralPath $Path).VersionInfo; $orig = [string]$vi.OriginalFilename; $product = [string]$vi.ProductName } catch { }
+        [pscustomobject]@{
+            Valid = ($s.Status -eq 'Valid'); Status = [string]$s.Status
+            Subject = $(if ($s.SignerCertificate) { [string]$s.SignerCertificate.Subject } else { '' })
+            Issuer = $(if ($s.SignerCertificate) { [string]$s.SignerCertificate.Issuer } else { '' })
+            OriginalFilename = $orig; ProductName = $product
+        }
+    }
+    $u.Stage = {
+        # A copy of the tool in a new folder under <root>\temp that only SYSTEM, Administrators and this user can change; the copy is checked and run
+        param($Path, $Root)
+        $dir = Join-Path (Join-Path $Root 'temp') ([guid]::NewGuid().ToString('N'))
+        $sec = New-Object System.Security.AccessControl.DirectorySecurity
+        $sec.SetAccessRuleProtection($true, $false)
+        foreach ($sid in @('S-1-5-18', 'S-1-5-32-544', [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value)) {
+            $sec.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule((New-Object System.Security.Principal.SecurityIdentifier $sid), 'FullControl', 'ContainerInherit, ObjectInherit', 'None', 'Allow')))
+        }
+        [void][IO.Directory]::CreateDirectory($dir, $sec)
+        $copy = Join-Path $dir (Split-Path $Path -Leaf)
+        [IO.File]::Copy($Path, $copy)
+        $copy
+    }
+    $u.Unstage = {
+        param($Path)
+        $dir = Split-Path $Path -Parent
+        if ((Split-Path $dir -Leaf) -match '^[0-9a-f]{32}$' -and (Split-Path (Split-Path $dir -Parent) -Leaf) -eq 'temp') { Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue }
     }
     $u.Run = {
         param($File, [string[]]$Arguments, [int]$TimeoutSeconds = 600)
@@ -655,5 +840,6 @@ function New-AVDTuneUpdateAdapter {
 #endregion
 
 Export-ModuleMember -Function Get-AVDTuneUpdateSettings, Set-AVDTuneUpdateSettings, ConvertTo-AVDTuneKbList, Resolve-AVDTuneWuaError, Resolve-AVDTuneSoftwareError,
-    ConvertFrom-AVDTuneWingetUpgrade, ConvertFrom-AVDTuneChocoOutdated, Invoke-AVDTuneLocked, Get-AVDTuneUpdateList, Invoke-AVDTuneUpdateRun, Invoke-AVDTuneRepair,
+    ConvertFrom-AVDTuneWingetUpgrade, ConvertFrom-AVDTuneChocoOutdated, Invoke-AVDTuneLocked, Test-AVDTuneToolTrust, Test-AVDTuneAdminOnlyAcl, Test-AVDTuneAdminOnlyPath,
+    Select-AVDTuneNewestPackageFolder, Get-AVDTuneSystemFolder, Resolve-AVDTuneTool, Get-AVDTuneUpdateList, Invoke-AVDTuneUpdateRun, Invoke-AVDTuneRepair,
     Get-AVDTuneUpdateHistory, New-AVDTuneUpdateAdapter

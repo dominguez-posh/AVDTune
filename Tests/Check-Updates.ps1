@@ -33,8 +33,8 @@ $native = @{
     '*MicrosoftEdgeUpdate*' = @{ ExitCode = 0; Output = '' }
     '* upgrade --id *' = @{ ExitCode = 0; Output = 'ok' }
     '* upgrade git *' = @{ ExitCode = 0; Output = 'ok' }
-    'DISM.exe *' = @{ ExitCode = 0; Output = 'The restore operation completed successfully.' }
-    'sfc.exe *' = @{ ExitCode = 0; Output = 'Windows Resource Protection did not find any integrity violations.' }
+    '*\Dism.exe *' = @{ ExitCode = 0; Output = 'The restore operation completed successfully.' }
+    '*\sfc.exe *' = @{ ExitCode = 0; Output = 'Windows Resource Protection did not find any integrity violations.' }
 }
 $wua = @(
     @{ Id = 'u1'; Title = '2026-11 Cumulative Update for Windows 11 (KB5050001)'; Kbs = @('5050001'); IsDriver = $false; SizeMB = 600; Reboot = $true }
@@ -138,8 +138,8 @@ try {
     Test-Check 'the failure is in the change log (Note with code) and the block is back' (@(Get-AVDTuneChangeLog -Root $tmp | Where-Object { $_.Text -like '*FAILED (0x80073712)*' }).Count -eq 1 -and (Get-AVDTuneUpdateBlockStatus $y.M).State -eq 'On') $null
     $d = Invoke-AVDTuneRepair -Machine $y.M -U $y.U -Root $tmp -Kind Dism -User 'admin1' -SnapshotId 'snap-check'
     $sf = Invoke-AVDTuneRepair -Machine $y.M -U $y.U -Root $tmp -Kind Sfc -User 'admin1'
-    Test-Check 'repair: DISM /RestoreHealth and sfc /scannow with exact arguments, results and change log' ($d.Status -eq 'Changed' -and $sf.Status -eq 'Changed' -and @($y.U.Log | Where-Object { $_ -eq 'Run DISM.exe /Online /Cleanup-Image /RestoreHealth' }).Count -eq 1 -and @($y.U.Log | Where-Object { $_ -eq 'Run sfc.exe /scannow' }).Count -eq 1 -and @(Get-AVDTuneChangeLog -Root $tmp | Where-Object { $_.Component -eq 'Repair' }).Count -eq 2) $null
-    $y.U.Store.Native['DISM.exe *'] = @{ ExitCode = 1726; Output = 'The remote procedure call failed.' }
+    Test-Check 'repair: DISM /RestoreHealth and sfc /scannow with exact arguments, results and change log' ($d.Status -eq 'Changed' -and $sf.Status -eq 'Changed' -and @($y.U.Log | Where-Object { $_ -eq 'Run C:\fake\System32\Dism.exe /Online /Cleanup-Image /RestoreHealth' }).Count -eq 1 -and @($y.U.Log | Where-Object { $_ -eq 'Run C:\fake\System32\sfc.exe /scannow' }).Count -eq 1 -and @(Get-AVDTuneChangeLog -Root $tmp | Where-Object { $_.Component -eq 'Repair' }).Count -eq 2) $null
+    $y.U.Store.Native['*\Dism.exe *'] = @{ ExitCode = 1726; Output = 'The remote procedure call failed.' }
     $df = Invoke-AVDTuneRepair -Machine $y.M -U $y.U -Root $tmp -Kind Dism
     Test-Check 'a failing repair is reported with its exit code' ($df.Status -eq 'Failed' -and $df.Message -like '*1726*') $df.Message
     Close-AVDTuneWriteGate
@@ -147,7 +147,7 @@ try {
     Open-AVDTuneWriteGate -SnapshotId 'snap-check' -ConfirmedBy 'Check Runner'
 
     # ---------------------------------------------------------------- other failures
-    $z = New-Env -UExtra @{ Defender = @{ Version = '1.0'; LastUpdated = [datetime]'2020-01-01' }; RegisterFails = $true; DefenderFails = $true; Signature = @{ Valid = $false; Subject = 'CN=Someone' }
+    $z = New-Env -UExtra @{ Defender = @{ Version = '1.0'; LastUpdated = [datetime]'2020-01-01' }; RegisterFails = $true; DefenderFails = $true; Signatures = @{ 'teamsbootstrapper.exe' = @{ Valid = $true; Subject = 'CN=Microsoft Corporation, O=Microsoft Corporation Evil Ltd, C=US'; Issuer = 'CN=Microsoft Code Signing PCA 2024, O=Microsoft Corporation, C=US' } }
             Native = @{ '*OfficeC2RClient*' = @{ ExitCode = 17002; Output = 'failed' }; '* upgrade --id *' = @{ ExitCode = -1978335215; Output = 'hash' }; '* upgrade git *' = @{ ExitCode = 1618; Output = '' }; '*MicrosoftEdgeUpdate*' = @{ ExitCode = 0; Output = '' }; '* upgrade --source *' = @{ ExitCode = 0; Output = '' }; '* outdated *' = @{ ExitCode = 0; Output = '' } } }
     [void](Set-AVDTuneUpdateBlock -Machine $z.M -Root $tmp -Mode On -User 'admin1')
     $zl = Get-AVDTuneUpdateList -Machine $z.M -U $z.U -Root $tmp
@@ -158,7 +158,7 @@ try {
     $q = @{}; foreach ($i in $zr.Results) { $q[$i.Id] = $i }
     Test-Check 'Microsoft Update cannot be registered: reported, the Windows updates still run' ($q['windows:microsoft-update'].Status -eq 'Failed' -and $q['windows:u1'].Status -eq 'Changed') $null
     Test-Check 'M365 with an error code: Failed with the code' ($q['m365'].Status -eq 'Failed' -and $q['m365'].Code -eq '17002') $null
-    Test-Check 'Teams: a file that is not signed by Microsoft is never run' ($q['teams'].Status -eq 'Failed' -and $q['teams'].Code -eq 'BadSignature' -and @($z.U.Log | Where-Object { $_ -like '*teamsbootstrapper*' }).Count -eq 0) $q['teams'].Message
+    Test-Check 'Teams: a file signed by "O=Microsoft Corporation Evil Ltd" is never run, the checked copy is removed' ($q['teams'].Status -eq 'Failed' -and $q['teams'].Code -eq 'BadSignature' -and @($z.U.Log | Where-Object { $_ -like 'Run *teamsbootstrapper*' }).Count -eq 0 -and @($z.U.Log | Where-Object { $_ -like 'Unstage *teamsbootstrapper*' }).Count -eq 1) $q['teams'].Message
     Test-Check 'Defender offline: Failed with the reason' ($q['defender'].Status -eq 'Failed' -and $q['defender'].Message -like '*offline*') $null
     Test-Check 'winget hash mismatch and choco 1618 get readable texts' ($q['winget:7zip.7zip'].Message -like '*hash*' -and $q['choco:git'].Message -like '*Another installation*') "$($q['winget:7zip.7zip'].Message) | $($q['choco:git'].Message)"
     Test-Check 'after all that failing the block is back on' ((Get-AVDTuneUpdateBlockStatus $z.M).State -eq 'On' -and -not (Get-AVDTuneMaintenanceCrash -Root $tmp)) $null
@@ -175,6 +175,76 @@ try {
     $kr = Invoke-AVDTuneUpdateRun -Machine $k.M -U $k.U -Root $tmp -Items @($list.Items | Where-Object { $_.Id -eq 'windows:u1' }) -User 'admin1'
     Test-Check 'an exception inside an item is a Failed result, the run goes on and the block is restored' ($kr.Results[-1].Status -eq 'Failed' -and $kr.Results[-1].Code -eq 'Exception' -and (Get-AVDTuneUpdateBlockStatus $k.M).State -eq 'On') $null
 
+    # ---------------------------------------------------------------- trusted tools (security review of #6)
+    $ms = 'CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US'; $msCa = 'CN=Microsoft Code Signing PCA 2024, O=Microsoft Corporation, C=US'
+    $sig = { param($Subject, $Issuer, $Orig, $Valid = $true) [pscustomobject]@{ Valid = $Valid; Status = $(if ($Valid) { 'Valid' } else { 'HashMismatch' }); Subject = $Subject; Issuer = $Issuer; OriginalFilename = $Orig } }
+    $trustCases = @(
+        @{ N = 'Microsoft winget'; Name = 'winget.exe'; S = (& $sig $ms $msCa 'winget.exe'); Ok = $true }
+        @{ N = 'Windows Dism (.mui name, production CA)'; Name = 'Dism.exe'; S = (& $sig 'CN=Microsoft Windows, O=Microsoft Corporation, L=Redmond, C=US' 'CN=Microsoft Windows Production PCA 2026 RSA2048-SHA256, O=Microsoft Corporation, C=US' 'DISM.EXE.MUI'); Ok = $true }
+        @{ N = 'Chocolatey choco'; Name = 'choco.exe'; S = (& $sig 'CN="Chocolatey Software, Inc", O="Chocolatey Software, Inc", L=Topeka, C=US' 'CN=DigiCert Trusted G4 Code Signing RSA4096 SHA384 2021 CA1, O="DigiCert, Inc.", C=US' 'choco.exe'); Ok = $true }
+        @{ N = 'O=Microsoft Corporation Evil Ltd'; Name = 'teamsbootstrapper.exe'; S = (& $sig 'CN=Microsoft Corporation, O=Microsoft Corporation Evil Ltd, C=US' $msCa 'teamsbootstrapper.exe'); Ok = $false }
+        @{ N = 'O= only inside another part'; Name = 'teamsbootstrapper.exe'; S = (& $sig 'CN=Evil, OU=O=Microsoft Corporation, O=Evil' $msCa 'teamsbootstrapper.exe'); Ok = $false }
+        @{ N = 'issuer that is not a Microsoft CA'; Name = 'winget.exe'; S = (& $sig $ms 'CN=Microsoft Code Signing PCA 2024, O=Evil CA, C=US' 'winget.exe'); Ok = $false }
+        @{ N = 'other original file name (a signed Microsoft tool renamed)'; Name = 'teamsbootstrapper.exe'; S = (& $sig $ms $msCa 'cmd.exe'); Ok = $false }
+        @{ N = 'choco.exe signed by Microsoft'; Name = 'choco.exe'; S = (& $sig $ms $msCa 'choco.exe'); Ok = $false }
+        @{ N = 'not valid'; Name = 'winget.exe'; S = (& $sig $ms $msCa 'winget.exe' $false); Ok = $false }
+        @{ N = 'unknown tool'; Name = 'evil.exe'; S = (& $sig $ms $msCa 'evil.exe'); Ok = $false })
+    $wrong = @($trustCases | Where-Object { (Test-AVDTuneToolTrust -Signature $_.S -Name $_.Name).Ok -ne $_.Ok } | ForEach-Object N)
+    Test-Check 'tool signatures: publisher O and CN exact, issuer a CA of the publisher, original file name; everything else refused' ($wrong.Count -eq 0) ($wrong -join ', ')
+
+    $t = New-Env
+    [void](Set-AVDTuneUpdateBlock -Machine $t.M -Root $tmp -Mode On -User 'admin1')
+    $tr = Invoke-AVDTuneUpdateRun -Machine $t.M -U $t.U -Root $tmp -Items @([pscustomobject]@{ Id = 'teams'; Group = 'Teams'; Title = 'Teams'; Installed = '1'; Kb = ''; Selectable = $true }) -User 'admin1'
+    $tl = @($t.U.Log | Where-Object { $_ -like '*teamsbootstrapper*' })
+    Test-Check 'Teams runs as a checked copy: stage, check the copy, run the copy, remove it' ($tr.Results[-1].Status -ne 'Failed' -and ($tl -join '|') -eq 'Stage C:\fake\teamsbootstrapper.exe|VerifySignature C:\fake\staged\teamsbootstrapper.exe|Run C:\fake\staged\teamsbootstrapper.exe -p|Unstage C:\fake\staged\teamsbootstrapper.exe') ($tl -join '|')
+    $bw = New-Env -UExtra @{ Signatures = @{ 'winget.exe' = @{ Valid = $true; Subject = 'CN=Someone, O=Someone'; Issuer = 'CN=Someone CA' } } }
+    $bl = Get-AVDTuneUpdateList -Machine $bw.M -U $bw.U -Root $tmp
+    Test-Check 'a winget.exe that is not signed by Microsoft is not used: note, no winget call, Chocolatey still read' (@($bl.Notes | Where-Object { $_ -like 'winget is not used*not signed by Microsoft*' }).Count -eq 1 -and @($bw.U.Log | Where-Object { $_ -like 'Run *winget*' }).Count -eq 0 -and @($bw.U.Log | Where-Object { $_ -like 'Run *choco.exe outdated*' }).Count -eq 1) ($bl.Notes -join ' | ')
+    $mo = New-Env -UExtra @{ Signatures = @{ 'OfficeC2RClient.exe' = @{ Valid = $false; Subject = '' } } }
+    [void](Set-AVDTuneUpdateBlock -Machine $mo.M -Root $tmp -Mode On -User 'admin1')
+    $mr = Invoke-AVDTuneUpdateRun -Machine $mo.M -U $mo.U -Root $tmp -Items @([pscustomobject]@{ Id = 'm365'; Group = 'Microsoft 365 Apps'; Title = 'Microsoft 365 Apps'; Installed = '1'; Kb = ''; Selectable = $true }) -User 'admin1'
+    Test-Check 'an OfficeC2RClient.exe without a valid signature is not started' ($mr.Results[-1].Status -eq 'Failed' -and $mr.Results[-1].Code -eq 'BadSignature' -and @($mo.U.Log | Where-Object { $_ -like 'Run *OfficeC2RClient*' }).Count -eq 0) $mr.Results[-1].Message
+
+    $folders = @('Microsoft.DesktopAppInstaller_1.9.25200.0_x64__8wekyb3d8bbwe', 'Microsoft.DesktopAppInstaller_1.29.380.0_x64__8wekyb3d8bbwe', 'Microsoft.DesktopAppInstaller_1.3.2091.0_x64__8wekyb3d8bbwe', 'Microsoft.DesktopAppInstaller_bad_x64__8wekyb3d8bbwe')
+    $newest = Select-AVDTuneNewestPackageFolder $folders
+    Test-Check 'winget: the newest DesktopAppInstaller by version (1.29 over 1.9 and 1.3), not by text' ($newest -eq $folders[1]) $newest
+
+    $adm = 'S-1-5-32-544'; $usr = 'S-1-5-32-545'
+    $aclCases = @(
+        @{ N = 'admins full, users read and execute'; O = $adm; R = @(@{ Sid = $adm; Allow = $true; Rights = 0x1f01ff; InheritOnly = $false }, @{ Sid = $usr; Allow = $true; Rights = 0x1200a9; InheritOnly = $false }); Ok = $true }
+        @{ N = 'creator owner generic all (inherit only)'; O = 'S-1-5-18'; R = @(@{ Sid = 'S-1-3-0'; Allow = $true; Rights = 0x10000000; InheritOnly = $true }); Ok = $true }
+        @{ N = 'users may write'; O = $adm; R = @(@{ Sid = $usr; Allow = $true; Rights = 0x1201bf; InheritOnly = $false }); Ok = $false }
+        @{ N = 'users may add files (ProgramData style)'; O = $adm; R = @(@{ Sid = $usr; Allow = $true; Rights = 0x2; InheritOnly = $false }); Ok = $false }
+        @{ N = 'owned by a user'; O = 'S-1-5-21-1-2-3-1001'; R = @(@{ Sid = $adm; Allow = $true; Rights = 0x1f01ff; InheritOnly = $false }); Ok = $false })
+    $wrongAcl = @($aclCases | Where-Object { (Test-AVDTuneAdminOnlyAcl -Owner $_.O -Rules $_.R) -ne $_.Ok } | ForEach-Object N)
+    Test-Check 'admin-only permissions: only SYSTEM, Administrators and TrustedInstaller own and may write' ($wrongAcl.Count -eq 0) ($wrongAcl -join ', ')
+
+    # the real adapter, read only: environment variables and PATH of this process are set to a folder the user owns; nothing may come from there
+    $evil = Join-Path $tmp 'evil'
+    [void](New-Item -ItemType Directory -Path (Join-Path $evil 'bin') -Force)
+    Copy-Item (Join-Path $repo 'README.md') (Join-Path $evil 'bin\choco.exe'); Copy-Item (Join-Path $repo 'README.md') (Join-Path $evil 'teamsbootstrapper.exe'); Copy-Item (Join-Path $repo 'README.md') (Join-Path $evil 'avdtune-path-tool.exe')
+    $keepEnv = @{}; foreach ($n in 'ProgramFiles', 'ProgramFiles(x86)', 'CommonProgramFiles', 'SystemRoot', 'windir', 'ChocolateyInstall', 'PATH') { $keepEnv[$n] = [Environment]::GetEnvironmentVariable($n, 'Process') }
+    try {
+        foreach ($n in 'ProgramFiles', 'ProgramFiles(x86)', 'CommonProgramFiles', 'SystemRoot', 'windir', 'ChocolateyInstall') { [Environment]::SetEnvironmentVariable($n, $evil, 'Process') }
+        [Environment]::SetEnvironmentVariable('PATH', "$evil;$($keepEnv['PATH'])", 'Process')
+        $real = New-AVDTuneUpdateAdapter
+        $paths = @('C2R', 'EdgeUpdate', 'OneDrive', 'Dism', 'Sfc') | ForEach-Object { & $real.Path $_ }
+        $sys = [Environment]::GetFolderPath('System')
+        Test-Check 'real adapter: tool paths come from the system folders, not from environment variables; Dism and sfc with full path' (@($paths | Where-Object { $_ -like "$evil*" }).Count -eq 0 -and (& $real.Path 'Dism') -eq (Join-Path $sys 'Dism.exe') -and (& $real.Path 'Sfc') -eq (Join-Path $sys 'sfc.exe') -and (& $real.Path 'C2R') -eq (Join-Path ([Environment]::GetFolderPath('CommonProgramFiles')) 'Microsoft Shared\ClickToRun\OfficeC2RClient.exe')) ($paths -join ' | ')
+        $pathHit = & $real.FindTool 'avdtune-path-tool.exe'; $chocoHit = & $real.FindTool 'choco.exe'
+        Test-Check 'real adapter: no tool from PATH or from ChocolateyInstall of the process' ($null -eq $pathHit -and $null -eq (& $real.FindTool 'notepad.exe') -and ($null -eq $chocoHit -or $chocoHit -notlike "$evil*")) "$pathHit | $chocoHit"
+        Test-Check 'real adapter: a tool in a folder this user can change is not used (config\tools must be admin-only)' ($null -eq (& $real.FindTool 'teamsbootstrapper.exe' $evil)) $null
+        Test-Check 'real adapter: Dism.exe in System32 counts as admin-only (no false alarm on the real system folder)' (Test-AVDTuneAdminOnlyPath -Path (Join-Path $sys 'Dism.exe') -Base ([Environment]::GetFolderPath('Windows'))) $null
+    }
+    finally { foreach ($n in $keepEnv.Keys) { [Environment]::SetEnvironmentVariable($n, $keepEnv[$n], 'Process') } }
+    $real = New-AVDTuneUpdateAdapter
+    $staged = & $real.Stage (Join-Path $repo 'README.md') $tmp
+    $sacl = Get-Acl -LiteralPath (Split-Path $staged -Parent)
+    $others = @($sacl.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier]) | Where-Object { $_.IdentityReference.Value -notin 'S-1-5-18', 'S-1-5-32-544', [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value })
+    $stagedThere = Test-Path -LiteralPath $staged
+    & $real.Unstage $staged
+    Test-Check 'real adapter: the staged copy lies in a protected folder under <root>\temp (no inherited or other entries) and is removed afterwards' ($stagedThere -and $staged -like "$tmp\temp\*\README.md" -and $sacl.AreAccessRulesProtected -and $others.Count -eq 0 -and -not (Test-Path -LiteralPath (Split-Path $staged -Parent))) $staged
+
     # ---------------------------------------------------------------- history
     $h = @(Get-AVDTuneUpdateHistory -Root $tmp)
     Test-Check 'history: runs and repairs, newest first, with code and text' ($h.Count -ge 15 -and @($h | Where-Object { $_.Code -eq '0x80073712' }).Count -ge 1 -and @($h | Where-Object { $_.Group -eq 'Windows' }).Count -ge 5) $h.Count
@@ -183,7 +253,7 @@ try {
     $real = New-AVDTuneUpdateAdapter; $fake = New-AVDTuneFakeUpdates
     $missing = @($real.PSObject.Properties.Name | Where-Object { $_ -notin 'Kind', 'State' -and $_ -notin $fake.PSObject.Properties.Name })
     Test-Check 'real and fake adapter have the same members' ($missing.Count -eq 0 -and $real.Kind -eq 'Real') ($missing -join ',')
-    Test-Check 'real adapter, read only: a missing tool is null, a signature check of a plain file is not Valid' ($null -eq (& $real.FindTool 'avdtune-no-such-tool.exe') -and -not (& $real.VerifySignature (Join-Path $repo 'README.md')).Valid) $null
+    Test-Check 'real adapter, read only: a missing tool is null, a signature check of a plain file is not Valid and not trusted' ($null -eq (& $real.FindTool 'avdtune-no-such-tool.exe') -and -not (& $real.VerifySignature (Join-Path $repo 'README.md')).Valid -and -not (Test-AVDTuneToolTrust -Signature (& $real.VerifySignature (Join-Path $repo 'README.md')) -Name 'winget.exe').Ok) $null
 }
 finally {
     Close-AVDTuneWriteGate
