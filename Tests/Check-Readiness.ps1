@@ -13,6 +13,7 @@ Import-Module (Join-Path $repo 'Modules\AVDTune.psm1') -Force
 Import-Module (Join-Path $repo 'Modules\AVDTune.Snapshot.psm1') -Force
 Import-Module (Join-Path $repo 'Modules\AVDTune.UpdateBlock.psm1') -Force
 Import-Module (Join-Path $repo 'Modules\AVDTune.Readiness.psm1') -Force
+Import-Module (Join-Path $repo 'Modules\AVDTune.Start.psm1') -Force
 . (Join-Path $PSScriptRoot 'Fakes\FakeMachine.ps1')
 . (Join-Path $PSScriptRoot 'Fakes\FakeServices.ps1')
 
@@ -36,7 +37,7 @@ function New-Imds([string]$Size = 'Standard_D4s_v6') {
 }
 function New-Master([hashtable]$Extra = @{}, [hashtable]$Reg = @{}) {
     $registry = @{
-        "$win|UBR" = 9974; 'HKLM:\SYSTEM\CurrentControlSet\Services\stornvme|Start' = 0; 'HKLM:\SYSTEM\CurrentControlSet\Control|PEFirmwareType' = 2
+        "$win|UBR" = 9974; 'HKLM:\SYSTEM\CurrentControlSet\Services\stornvme|Start' = 0
         'HKLM:\SYSTEM\CurrentControlSet\Control\SecureBoot\State|UEFISecureBootEnabled' = 1
         'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management|PagingFiles' = @('C:\pagefile.sys 0 0')
     }
@@ -45,7 +46,7 @@ function New-Master([hashtable]$Extra = @{}, [hashtable]$Reg = @{}) {
         Now = $now; Registry = $registry; Imds = (New-Imds)
         Services = @(@{ Name = 'WindowsAzureGuestAgent' })
         Keys = @('HKLM:\SYSTEM\CurrentControlSet\Services\stornvme', 'HKLM:\SYSTEM\CurrentControlSet\Control\MUI\UILanguages\en-US', 'HKLM:\SYSTEM\CurrentControlSet\Control\MUI\UILanguages\de-DE')
-        Hotfixes = @(@{ Id = 'KB5132061'; InstalledOn = [datetime]'2026-11-10' }); Tpm = $true; Arch = 'AMD64'
+        Hotfixes = @(@{ Id = 'KB5132061'; InstalledOn = [datetime]'2026-11-10' }); Tpm = $true; Arch = 'AMD64'; Firmware = 'UEFI'
         NetAdapters = @(@{ Name = 'Ethernet'; Description = 'Microsoft Hyper-V Network Adapter'; Status = 'Up' }, @{ Name = 'Ethernet 3'; Description = 'Microsoft Azure Network Adapter #2'; Status = 'Up' })
         Pnp = @('PCI\VEN_1414&DEV_00BA&SUBSYS_00BA1414&REV_00\1')
         Native = @{ 'manage-bde.exe -status C:' = @{ ExitCode = 0; Output = "Conversion Status:    Fully Decrypted`r`nProtection Status:    Protection Off`r`n" } }
@@ -148,11 +149,30 @@ try {
     $r = Invoke-Readiness (New-Master -Reg @{ 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Environment|TEMP' = 'D:\Temp'; 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Environment|TMP' = 'C:\Windows\TEMP'; 'HKLM:\SOFTWARE\FSLogix\Profiles|CacheDirectory' = 'D:\FSLogixCache' }) (New-Arm)
     Test-Check 'TEMP on D: and FSLogix cache on D: are yellow with the value' ((Get-Row $r 'hw.temp-env-d').Status -eq 'yellow' -and (Get-Row $r 'hw.temp-env-d').Reason -like '*TEMP=D:\Temp*' -and (Get-Row $r 'hw.temp-env-d').Reason -notlike '*TMP=*' -and (Get-Row $r 'hw.fslogix-d').Status -eq 'yellow' -and (Get-Row $r 'hw.fslogix-d').Reason -like '*CacheDirectory=D:\FSLogixCache*') (Get-Row $r 'hw.temp-env-d').Reason
 
-    $r = Invoke-Readiness (New-Master -Reg @{ 'HKLM:\SYSTEM\CurrentControlSet\Control|PEFirmwareType' = 1 }) (New-Arm @{ HyperV = 'V1' })
-    Test-Check 'Generation 1: red, no plain conversion; all families not possible' ((Get-Row $r 'hw.firmware').Status -eq 'red' -and (Get-Row $r 'hw.firmware').Reason -like '*no plain conversion*' -and (@($r.Families | Where-Object { $_.Status -ne 'not-possible' }).Count -eq 0)) (Get-Row $r 'hw.firmware').Reason
-    $m = New-Master; $m.Store.Registry.Remove('hklm:\system\currentcontrolset\control|pefirmwaretype')
+    $r = Invoke-Readiness (New-Master @{ Firmware = 'BIOS' }) (New-Arm @{ HyperV = 'V1'; DiskHyperV = 'V1'; SecurityType = 'Standard' })
+    Test-Check 'Generation 1: red, no plain conversion; all families not possible' ((Get-Row $r 'hw.firmware').Status -eq 'red' -and (Get-Row $r 'hw.firmware').Reason -like '*guest firmware BIOS*no plain conversion*' -and (@($r.Families | Where-Object { $_.Status -ne 'not-possible' }).Count -eq 0)) (Get-Row $r 'hw.firmware').Reason
+    # #16: the test VM (26H2, Trusted Launch) had no PEFirmwareType (a Windows PE value) and ARM has no properties.extended (that is Resource Graph)
+    $noGuest = { $x = New-Master @{ Firmware = $null }; $x.Store.Registry.Remove('hklm:\system\currentcontrolset\control\secureboot\state|uefisecurebootenabled'); $x }
+    $m = & $noGuest
     $r = Invoke-Readiness $m $null ''
-    Test-Check 'firmware not readable and no Azure: not checkable' ((Get-Row $r 'hw.firmware').Status -eq 'unknown') $null
+    Test-Check 'firmware not readable and no Azure: not checkable, says what was tried' ((Get-Row $r 'hw.firmware').Status -eq 'unknown' -and (Get-Row $r 'hw.firmware').Reason -like '*GetFirmwareType*') (Get-Row $r 'hw.firmware').Reason
+    $r = Invoke-Readiness (New-Master) $null ''
+    Test-Check '#16: GetFirmwareType UEFI alone (no PEFirmwareType, no Azure) is green' ((Get-Row $r 'hw.firmware').Status -eq 'green' -and (Get-Row $r 'hw.firmware').Found -like '*guest firmware UEFI*') (Get-Row $r 'hw.firmware').Reason
+    $realArm = New-Arm
+    $r = Invoke-Readiness (& $noGuest) $realArm
+    Test-Check '#16: the answer of the test VM (no instanceView.hyperVGeneration): Gen2 from the OS disk and the security type, green' ((Get-Row $r 'hw.firmware').Status -eq 'green' -and (Get-Row $r 'hw.firmware').Found -like '*OS disk V2*security type TrustedLaunch*' -and @($realArm.Log | Where-Object { $_ -like 'GET */disks/gm-test01_osdisk?api-version=2023-10-02' }).Count -eq 1) (Get-Row $r 'hw.firmware').Reason
+    $r = Invoke-Readiness (& $noGuest) (New-Arm @{ DiskHyperV = '' })
+    Test-Check 'no generation on the disk either: Trusted Launch (needs Gen2) is enough for green' ((Get-Row $r 'hw.firmware').Status -eq 'green' -and (Get-Row $r 'hw.firmware').Found -eq 'security type TrustedLaunch (needs Generation 2)') (Get-Row $r 'hw.firmware').Found
+    $imdsSb = New-Imds; $imdsSb.compute | Add-Member -NotePropertyName securityProfile -NotePropertyValue ([pscustomobject]@{ secureBootEnabled = 'true'; virtualTpmEnabled = 'true' })
+    $m = & $noGuest; $m.Store.Imds = $imdsSb
+    $r = Invoke-Readiness $m $null ''
+    Test-Check 'only the instance metadata (securityProfile.secureBootEnabled) answers: green' ((Get-Row $r 'hw.firmware').Status -eq 'green' -and (Get-Row $r 'hw.firmware').Found -like '*instance metadata*') (Get-Row $r 'hw.firmware').Found
+    $r = Invoke-Readiness (& $noGuest) (New-Arm @{ DiskHyperV = 'V1'; SecurityType = 'Standard' })
+    Test-Check 'the OS disk says V1: red even when the guest cannot tell' ((Get-Row $r 'hw.firmware').Status -eq 'red' -and (Get-Row $r 'hw.firmware').Reason -like '*OS disk V1*') (Get-Row $r 'hw.firmware').Reason
+    $r = Invoke-Readiness (New-Master @{ Firmware = 'BIOS' }) (New-Arm)
+    Test-Check 'sources disagree (guest BIOS, Azure V2): red and says to check' ((Get-Row $r 'hw.firmware').Status -eq 'red' -and (Get-Row $r 'hw.firmware').Reason -like '*Other sources say otherwise*') (Get-Row $r 'hw.firmware').Reason
+    $realFw = & (New-AVDTuneMachine).FirmwareType
+    Test-Check 'the real adapter asks GetFirmwareType (read only): UEFI, BIOS or nothing' ($null -eq $realFw -or $realFw -in 'UEFI', 'BIOS') $realFw
     $r = Invoke-Readiness (New-Master -Reg @{ 'HKLM:\SYSTEM\CurrentControlSet\Control\SecureBoot\State|UEFISecureBootEnabled' = 0 }) (New-Arm)
     Test-Check 'Secure Boot off: yellow' ((Get-Row $r 'hw.securestart').Status -eq 'yellow' -and (Get-Row $r 'hw.securestart').Reason -like '*Secure Boot: off*') (Get-Row $r 'hw.securestart').Reason
     $r = Invoke-Readiness (New-Master @{ Tpm = $false }) (New-Arm)
@@ -162,7 +182,72 @@ try {
 
     # ---------------------------------------------------------------- gallery definition
     $r = Invoke-Readiness (New-Master) (New-Arm) 'tok' ''
-    Test-Check 'no image definition known: not checkable, says where to enter it' ((Get-Row $r 'hw.gallery').Status -eq 'unknown' -and (Get-Row $r 'hw.gallery').Reason -like '*Readiness card*') (Get-Row $r 'hw.gallery').Reason
+    Test-Check '#16: no gallery visible: yellow with the explanation (created later, e.g. by Hydra), not "not checkable"' ((Get-Row $r 'hw.gallery').Status -eq 'yellow' -and (Get-Row $r 'hw.gallery').Reason -like '*No Azure Compute Gallery is visible*in 1 subscription(s)*created later*Hydra*') (Get-Row $r 'hw.gallery').Reason
+
+    # ---- #16: the gallery search, with answers as the real ARM gives them (ids, paging with nextLink, a 403 on one subscription)
+    $sub2 = 'bbbbbbbb-bbbb-cccc-dddd-eeeeeeeeeeee'; $sub3 = 'cccccccc-bbbb-cccc-dddd-eeeeeeeeeeee'
+    $vmRes = "/subscriptions/$sub/resourceGroups/rg-example/providers/Microsoft.Compute/virtualMachines/gm-test01"
+    $diskRes = "/subscriptions/$sub/resourceGroups/rg-example/providers/Microsoft.Compute/disks/gm-test01_osdisk"
+    $scsiOnly = @(@{ name = 'DiskControllerTypes'; value = 'SCSI' }, @{ name = 'SecurityType'; value = 'TrustedLaunchSupported' })
+    $newSearch = {
+        param([hashtable]$AvdVersion = @{ Name = '2026.11.1'; SourceVm = "/subscriptions/$sub/resourceGroups/rg-other/providers/Microsoft.Compute/virtualMachines/other-vm" })
+        @{ Paging = $true
+            Subscriptions = @(@{ Id = $sub; Name = 'Example subscription' }, @{ Id = $sub3; Name = 'Locked subscription'; Forbidden = $true }, @{ Id = $sub2; Name = 'Second subscription' })
+            Galleries = @(
+                @{ Sub = $sub; Rg = 'rg-images'; Name = 'galA'; Images = @(
+                        @{ Name = 'win11-avd'; Features = $goodGallery.Features; Versions = @($AvdVersion, @{ Name = '2026.10.1'; SourceVm = "/subscriptions/$sub/resourceGroups/rg-other/providers/Microsoft.Compute/virtualMachines/old-master"; Published = '2026-10-01' }) }
+                        @{ Name = 'win11-scsi'; Features = $scsiOnly; Versions = @(@{ Name = '1.0.0'; SourceVm = "/subscriptions/$sub/resourceGroups/rg-other/providers/Microsoft.Compute/virtualMachines/other-vm" }) }
+                        @{ Name = 'ubuntu'; OsType = 'Linux'; Features = $goodGallery.Features })
+                }
+                @{ Sub = $sub2; Rg = 'rg-x'; Name = 'galB'; Images = @(@{ Name = 'win10-gen1'; HyperV = 'V1' }, @{ Name = 'win11-arm'; Architecture = 'Arm64'; Features = $goodGallery.Features }) }
+            )
+        }
+    }
+    $sArm = New-AVDTuneFakeArm -Seed @{ Search = (& $newSearch @{ Name = '2026.11.1'; SourceVm = $vmRes; Published = '2026-11-14' }) }
+    $r = Invoke-Readiness (New-Master) $sArm 'tok' ''
+    $row = Get-Row $r 'hw.gallery'
+    Test-Check 'a version captured from this VM (source.virtualMachineId): the definition is taken automatically and checked (green)' ($row.Status -eq 'green' -and $r.GallerySource -eq 'Matched' -and $r.GalleryImageId -eq "/subscriptions/$sub/resourceGroups/rg-images/providers/Microsoft.Compute/galleries/galA/images/win11-avd" -and $row.Reason -like '*galA/win11-avd, found automatically: version 2026.11.1 was captured from this VM*') $row.Reason
+    Test-Check 'the search reads only (GET), follows nextLink pages, reads the other subscription after the 403 one' ((-not @($sArm.Log | Where-Object { $_ -notlike 'GET *' })) -and @($sArm.Log | Where-Object { $_ -like '*fakepage=2*' }).Count -gt 0 -and @($sArm.Log | Where-Object { $_ -like "GET /subscriptions/$sub2/providers/Microsoft.Compute/galleries?*" }).Count -ge 1 -and @($sArm.Log | Where-Object { $_ -like '*/galB/images?*' }).Count -ge 1) ($sArm.Log -join ' | ')
+    Test-Check 'Linux definitions are not searched for versions' (-not @($sArm.Log | Where-Object { $_ -like '*/images/ubuntu/versions*' })) $null
+    $sArm = New-AVDTuneFakeArm -Seed @{ Search = (& $newSearch @{ Name = '2026.11.2'; SourceId = $diskRes }) }
+    $r = Invoke-Readiness (New-Master) $sArm 'tok' ''
+    Test-Check 'a version made from the OS disk (source.id) is found' ($r.GallerySource -eq 'Matched' -and $r.GalleryMatch.How -like '*OS disk of this VM*') $r.GalleryMatch.How
+    $snapRes = "/subscriptions/$sub/resourceGroups/rg-example/providers/Microsoft.Compute/snapshots/gm-test01_osdisk-14.11.2026-1"
+    $sArm = New-AVDTuneFakeArm -Seed @{ Snapshots = @(@{ Name = 'gm-test01_osdisk-14.11.2026-1'; Created = [datetime]'2026-11-14 08:00' }); Search = (& $newSearch @{ Name = '2026.11.3'; OsDiskSourceId = $snapRes }) }
+    $r = Invoke-Readiness (New-Master) $sArm 'tok' ''
+    Test-Check 'a version made from a snapshot of the OS disk (osDiskImage.source.id) is found' ($r.GallerySource -eq 'Matched' -and $r.GalleryMatch.How -like '*snapshot gm-test01_osdisk-14.11.2026-1*') $r.GalleryMatch.How
+    $miRes = "/subscriptions/$sub/resourceGroups/rg-images/providers/Microsoft.Compute/images/gm-test01-image"
+    $srch = & $newSearch @{ Name = '2026.11.4'; SourceId = $miRes }; $srch.ManagedImages = @{ $miRes = $vmRes }
+    $r = Invoke-Readiness (New-Master) (New-AVDTuneFakeArm -Seed @{ Search = $srch }) 'tok' ''
+    Test-Check 'a version made from a managed image of this VM is found' ($r.GallerySource -eq 'Matched' -and $r.GalleryMatch.How -like '*managed image of this VM*') $r.GalleryMatch.How
+    $sArm = New-AVDTuneFakeArm -Seed @{ Search = (& $newSearch) }
+    $r = Invoke-Readiness (New-Master) $sArm 'tok' ''
+    $row = Get-Row $r 'hw.gallery'
+    $labels = @($r.GalleryCandidates | ForEach-Object { $_.Name })
+    Test-Check 'no version from this VM, several definitions: yellow, choose from the Windows Gen2 x64 ones (fitting first), not "not checkable"' ($row.Status -eq 'yellow' -and $row.Reason -like '*2 Windows Generation 2 definition(s) fit*choose*' -and (($labels -join ',') -eq 'win11-avd,win11-scsi') -and $r.GalleryCandidates[0].Fits -and -not $r.GalleryCandidates[1].Fits -and $r.GalleryCandidates[1].Label -like '*no NVMe*') "$($row.Reason) / $($labels -join ',')"
+    Test-Check 'the 403 on one subscription is named in the reason, the search went on' ($row.Reason -like '*Locked subscription*403*galleries/read*') $row.Reason
+    $only = @{ Subscriptions = @(@{ Id = $sub; Name = 'Example subscription' }); Galleries = @(@{ Sub = $sub; Rg = 'rg-x'; Name = 'galL'; Images = @(@{ Name = 'ubuntu'; OsType = 'Linux' }, @{ Name = 'win10-gen1'; HyperV = 'V1' }) }) }
+    $r = Invoke-Readiness (New-Master) (New-AVDTuneFakeArm -Seed @{ Search = $only }) 'tok' ''
+    Test-Check 'galleries without a fitting definition: yellow, says how to get one' ((Get-Row $r 'hw.gallery').Status -eq 'yellow' -and (Get-Row $r 'hw.gallery').Reason -like '*have no Windows Generation 2 definition*' -and @($r.GalleryCandidates).Count -eq 0) (Get-Row $r 'hw.gallery').Reason
+    $locked = @{ Subscriptions = @(@{ Id = $sub; Name = 'Example subscription'; Forbidden = $true }); Galleries = @() }
+    $r = Invoke-Readiness (New-Master) (New-AVDTuneFakeArm -Seed @{ Search = $locked }) 'tok' ''
+    Test-Check '403 on the only subscription: yellow, with the permission named' ((Get-Row $r 'hw.gallery').Status -eq 'yellow' -and (Get-Row $r 'hw.gallery').Reason -like '*No Azure Compute Gallery is visible*403*') (Get-Row $r 'hw.gallery').Reason
+    $idn = Get-AVDTuneVmIdentity (New-Master)
+    $s = Find-AVDTuneGalleryImage -Arm (New-AVDTuneFakeArm -Seed @{ Search = (& $newSearch) }) -Token 'tok' -Identity $idn -OsArch 'AMD64' -Limits @{ Subscriptions = 1 }
+    Test-Check 'limit: only N subscriptions (this VM first), said so' ($s.Subscriptions -eq 1 -and (@($s.Limited) -join ' ') -like '*only 1 of 3 subscriptions*') (@($s.Limited) -join ' ')
+    $s = Find-AVDTuneGalleryImage -Arm (New-AVDTuneFakeArm -Seed @{ Search = (& $newSearch) }) -Token 'tok' -Identity $idn -OsArch 'AMD64' -Limits @{ Requests = 3 }
+    Test-Check 'limit: the search stops after N requests and says so, no throw' ($s.Requests -le 3 -and (@($s.Limited) -join ' ') -like '*stopped after 3 requests*') (@($s.Limited) -join ' ')
+    $evil = [pscustomobject]@{ Log = (New-Object System.Collections.ArrayList); Invoke = $null }
+    $evil.Invoke = { param($Method, $Path, $Token, $Body) [void]$evil.Log.Add("$Method $Path"); if ($Path.StartsWith('/subscriptions?')) { [pscustomobject]@{ Status = 200; Body = [pscustomobject]@{ value = @(); nextLink = 'https://evil.example/subscriptions?api-version=1' }; Error = '' } } else { [pscustomobject]@{ Status = 200; Body = [pscustomobject]@{ value = @() }; Error = '' } } }.GetNewClosure()
+    $s = Find-AVDTuneGalleryImage -Arm $evil -Token 'tok' -Identity $idn -OsArch 'AMD64'
+    Test-Check 'a nextLink to another host is not followed (noted), the search still reads this subscription' ((@($s.Notes) -join ' ') -like '*another host*' -and -not @($evil.Log | Where-Object { $_ -like '*evil*' }) -and @($evil.Log | Where-Object { $_ -like "GET /subscriptions/$sub/providers/Microsoft.Compute/galleries?*" }).Count -eq 1) (@($s.Notes) -join ' ')
+    $evil2 = [pscustomobject]@{ Log = (New-Object System.Collections.ArrayList); Invoke = $null }
+    $evil2.Invoke = { param($Method, $Path, $Token, $Body) [void]$evil2.Log.Add("$Method $Path"); if ($Path.StartsWith('/subscriptions?')) { [pscustomobject]@{ Status = 200; Body = [pscustomobject]@{ value = @(); nextLink = "https://management.azure.com/subscriptions/$sub/resourceGroups/rg/providers/Microsoft.Compute/snapshots/x?api-version=1" }; Error = '' } } else { [pscustomobject]@{ Status = 200; Body = [pscustomobject]@{ value = @() }; Error = '' } } }.GetNewClosure()
+    $s = Find-AVDTuneGalleryImage -Arm $evil2 -Token 'tok' -Identity $idn -OsArch 'AMD64'
+    Test-Check 'a nextLink on the ARM host to another resource is not followed either' ((@($s.Notes) -join ' ') -like '*another resource*' -and -not @($evil2.Log | Where-Object { $_ -like '*snapshots/x*' })) (@($s.Notes) -join ' ')
+    $real = New-AVDTuneArmAdapter
+    $refused = @(@('PUT', '/subscriptions?api-version=2022-12-01'), @('GET', '/subscriptions'), @('GET', '/tenants?api-version=2022-12-01'), @('GET', '/subscriptions?api-version=1?x=2'), @('GET', '/subscriptions?api-version=1#x') | ForEach-Object { [string](& $real.Invoke $_[0] $_[1] 'tok' $null).Error })
+    Test-Check 'real adapter: the subscription list is GET only, other paths outside a subscription stay refused (no network)' (@($refused | Where-Object { $_ -notlike 'Refused*' }).Count -eq 0) ($refused -join ' | ')
     $r = Invoke-Readiness (New-Master) (New-Arm) 'tok' "$defId/versions/1.0.0"
     Test-Check 'a version suffix is dropped, definition with NVMe, Trusted Launch and accelerated networking is green' ((Get-Row $r 'hw.gallery').Status -eq 'green' -and $r.GalleryImageId -eq $defId) (Get-Row $r 'hw.gallery').Reason
     $r = Invoke-Readiness (New-Master) (New-Arm @{} @{ def1 = @{ Features = @(@{ name = 'SecurityType'; value = 'TrustedLaunchSupported' }); Architecture = 'x64'; HyperV = 'V2' } })
@@ -178,10 +263,31 @@ try {
     $gf = New-Arm; $gf.Store.GalleryForbidden = $true
     $r = Invoke-Readiness (New-Master) $gf
     Test-Check 'definition not readable (403): not checkable, names the permission' ((Get-Row $r 'hw.gallery').Status -eq 'unknown' -and (Get-Row $r 'hw.gallery').Reason -like '*galleries/images/read*') (Get-Row $r 'hw.gallery').Reason
-    $r = Invoke-Readiness (New-Master) (New-Arm) 'tok' 'not-an-id'
-    Test-Check 'a malformed definition ID is ignored, never sent to Azure' ((Get-Row $r 'hw.gallery').Status -eq 'unknown' -and -not (@((New-Arm).Log | Where-Object { $_ -like '*not-an-id*' }))) $null
+    $badArm = New-Arm
+    $r = Invoke-Readiness (New-Master) $badArm 'tok' 'not-an-id'
+    Test-Check 'a malformed definition ID is ignored, never sent to Azure' ((Get-Row $r 'hw.gallery').Status -eq 'yellow' -and -not $r.GalleryImageId -and -not (@($badArm.Log | Where-Object { $_ -like '*not-an-id*' }))) $null
     $r = Invoke-Readiness (New-Master) (New-Arm @{ ImageRefId = "$defId/versions/2026.11.1" }) 'tok' ''
     Test-Check 'without a setting the definition comes from the VM image reference when it is a gallery image' ((Get-Row $r 'hw.gallery').Status -eq 'green' -and $r.GalleryImageId -eq $defId) (Get-Row $r 'hw.gallery').Reason
+
+    # ---- #16: the chosen definition in environment.json, with a change log entry
+    $envRoot = Join-Path $tmp 'envtest'; [void](Initialize-AVDTuneState -Root $envRoot); [void](Start-AVDTuneImageVersion -Root $envRoot -Date ([datetime]'2026-11-15') -User 'admin1')
+    $avdId = "/subscriptions/$sub/resourceGroups/rg-images/providers/Microsoft.Compute/galleries/galA/images/win11-avd"
+    Test-Check 'choosing needs the first-run answers' ((Get-ThrownText { Set-AVDTuneEnvironmentGallery -Root $envRoot -DefinitionId $avdId -User 'admin1' }) -like '*first-run*') $null
+    [void](Save-AVDTuneEnvironment -Root $envRoot -Answers (Get-AVDTuneEnvironmentDefaults) -User 'admin1')
+    $logBefore = @(Get-AVDTuneChangeLog -Root $envRoot).Count
+    $t = Set-AVDTuneEnvironmentGallery -Root $envRoot -DefinitionId $avdId -Label 'galA / win11-avd' -User 'admin1'
+    $envNow = Get-AVDTuneEnvironment $envRoot
+    Test-Check 'the choice is saved in environment.json (id, label, who, when) and goes into the change log' ((Get-AVDTuneEnvironmentGallery $envNow) -eq $avdId -and $envNow.Gallery.ChosenBy -eq 'admin1' -and $t -like '*none -> galA/win11-avd*' -and @(Get-AVDTuneChangeLog -Root $envRoot).Count -eq ($logBefore + 1)) $t
+    Test-Check 'the same choice again changes nothing' ((Set-AVDTuneEnvironmentGallery -Root $envRoot -DefinitionId $avdId -User 'admin1') -eq '' -and @(Get-AVDTuneChangeLog -Root $envRoot).Count -eq ($logBefore + 1)) $null
+    Test-Check 'only a gallery image definition ID is accepted' ((Get-ThrownText { Set-AVDTuneEnvironmentGallery -Root $envRoot -DefinitionId "$avdId/versions/1.0.0" -User 'admin1' }) -like '*not the Resource ID*' -and (Test-Throws { Set-AVDTuneEnvironmentGallery -Root $envRoot -DefinitionId '/subscriptions/x/../y' -User 'admin1' })) $null
+    $a = Get-AVDTuneEnvironmentAnswers (Get-AVDTuneEnvironment $envRoot); $a.Profiles = 'None'
+    [void](Save-AVDTuneEnvironment -Root $envRoot -Answers $a -User 'admin1')
+    [void](Set-AVDTuneEnvironmentSignIn -Root $envRoot -TenantId '11111111-2222-3333-4444-555555555555' -User 'admin1')
+    Test-Check 'saving the answers or the sign-in keeps the chosen definition' ((Get-AVDTuneEnvironmentGallery (Get-AVDTuneEnvironment $envRoot)) -eq $avdId) $null
+    $r = Invoke-Readiness (New-Master) (New-AVDTuneFakeArm -Seed @{ Search = (& $newSearch) }) 'tok' (Get-AVDTuneEnvironmentGallery (Get-AVDTuneEnvironment $envRoot))
+    Test-Check 'with the chosen definition the row is checked (green) and names it as chosen; no search' ((Get-Row $r 'hw.gallery').Status -eq 'green' -and (Get-Row $r 'hw.gallery').Reason -like '*galA/win11-avd, chosen*' -and $r.GallerySource -eq 'Saved' -and @($r.GalleryCandidates).Count -eq 0) (Get-Row $r 'hw.gallery').Reason
+    $t = Set-AVDTuneEnvironmentGallery -Root $envRoot -DefinitionId '' -User 'admin1'
+    Test-Check 'clearing the choice is saved and logged' ((Get-AVDTuneEnvironmentGallery (Get-AVDTuneEnvironment $envRoot)) -eq '' -and $t -like '*-> none*') $t
 
     # ---------------------------------------------------------------- Windows
     $m = New-Master -Reg @{ "$win|CurrentBuildNumber" = '22631'; "$win|UBR" = 7714 }

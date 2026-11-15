@@ -161,7 +161,12 @@ function New-AVDTuneFakeAuth {
 
 # ------------------------------------------------------------------ Azure Resource Manager
 # Seed: VmName, ResourceGroup, Snapshots (array of @{ Name; Created (datetime, local); Tags; State }), and for the readiness analysis Vm (hashtable: VmSize, DiskControllerType (omitted when empty), SecurityType, SecureBoot, VTpm,
-#   HyperV, ImageRefId, Nics = array of @{ Name; AccelNet }) and Galleries (hashtable image definition name -> @{ Features = array of @{ name; value }; Architecture; HyperV })\n# Switches in .Store: Offline, ReadForbidden, WriteForbidden, DiskMissing, PollsUntilReady (GETs of a new snapshot that say Creating), CreateFails, Unauthorized, VmForbidden, NicForbidden, GalleryForbidden
+#   HyperV (instanceView.hyperVGeneration, omitted when not given, as the real answer often has it), DiskHyperV (properties.hyperVGeneration of the OS disk, default V2, '' omits it),
+#   ImageRefId, Nics = array of @{ Name; AccelNet }) and Galleries (hashtable image definition name -> @{ Features = array of @{ name; value }; Architecture; HyperV })
+#   and Search for the gallery search: @{ Subscriptions = array of @{ Id; Name; State; Forbidden }; Galleries = array of @{ Sub; Rg; Name; Images = array of
+#   @{ Name; Features; Architecture; HyperV; OsType; Versions = array of @{ Name; SourceVm; SourceId; OsDiskSourceId; Published } } }; ManagedImages = hashtable
+#   image id -> source VM id; Paging = $true (every list comes in two pages) }. Without Search only this subscription and no gallery are listed.
+# Switches in .Store: Offline, ReadForbidden, WriteForbidden, DiskMissing, PollsUntilReady (GETs of a new snapshot that say Creating), CreateFails, Unauthorized, VmForbidden, NicForbidden, GalleryForbidden
 function New-AVDTuneFakeArm {
     param([hashtable]$Seed = @{})
     $rg = if ($Seed.ResourceGroup) { $Seed.ResourceGroup } else { 'rg-example' }
@@ -170,7 +175,8 @@ function New-AVDTuneFakeArm {
     $diskId = "/subscriptions/$script:FakeSubscription/resourceGroups/$rg/providers/Microsoft.Compute/disks/$vm`_osdisk"
     $store = @{ Offline = $false; ReadForbidden = $false; WriteForbidden = $false; DiskMissing = $false; PollsUntilReady = 1; CreateFails = $false; Unauthorized = $false
         DiskId = $diskId; ResourceGroup = $rg; Snapshots = @{}; Polls = @{}; Log = (New-Object System.Collections.ArrayList); LastPut = $null; Location = 'westeurope'; NextLinkPage = $false; EvilLink = $false
-        VmForbidden = $false; NicForbidden = $false; GalleryForbidden = $false; VmSeed = $(if ($Seed.Vm) { $Seed.Vm } else { @{} }); Galleries = $(if ($Seed.Galleries) { $Seed.Galleries } else { @{} }) }
+        VmForbidden = $false; NicForbidden = $false; GalleryForbidden = $false; VmSeed = $(if ($Seed.Vm) { $Seed.Vm } else { @{} }); Galleries = $(if ($Seed.Galleries) { $Seed.Galleries } else { @{} })
+        Search = $(if ($Seed.Search) { $Seed.Search } else { @{ Subscriptions = @(@{ Id = $script:FakeSubscription; Name = 'Example subscription' }); Galleries = @() } }) }
     foreach ($s in @($Seed.Snapshots)) {
         if (-not $s) { continue }
         $id = "/subscriptions/$script:FakeSubscription/resourceGroups/$rg/providers/Microsoft.Compute/snapshots/$($s.Name)"
@@ -190,7 +196,10 @@ function New-AVDTuneFakeArm {
         if ($Method -eq 'GET' -and $lower -eq $store.DiskId.ToLowerInvariant()) {
             if ($store.ReadForbidden) { return [pscustomobject]@{ Status = 403; Body = (ConvertTo-FakeJson @{ error = @{ code = 'AuthorizationFailed'; message = 'does not have authorization to perform action' } }); Error = '' } }
             if ($store.DiskMissing) { return [pscustomobject]@{ Status = 404; Body = $null; Error = 'not found' } }
-            return [pscustomobject]@{ Status = 200; Body = (ConvertTo-FakeJson @{ id = $store.DiskId; name = "$vm`_osdisk"; location = $store.Location }); Error = '' }
+            $dv = $store.VmSeed
+            $diskProps = @{ securityProfile = @{ securityType = $(if ($dv.ContainsKey('SecurityType')) { $dv.SecurityType } else { 'TrustedLaunch' }) } }
+            if ($dv.ContainsKey('DiskHyperV')) { if ($dv.DiskHyperV) { $diskProps.hyperVGeneration = $dv.DiskHyperV } } else { $diskProps.hyperVGeneration = 'V2' }
+            return [pscustomobject]@{ Status = 200; Body = (ConvertTo-FakeJson @{ id = $store.DiskId; name = "$vm`_osdisk"; location = $store.Location; properties = $diskProps }); Error = '' }
         }
         if ($Method -eq 'GET' -and $lower -eq "/subscriptions/$subId/resourcegroups/$rg/providers/microsoft.compute/virtualmachines/$vm".ToLowerInvariant()) {
             if ($store.ReadForbidden -or $store.VmForbidden) { return [pscustomobject]@{ Status = 403; Body = (ConvertTo-FakeJson @{ error = @{ code = 'AuthorizationFailed'; message = 'does not have authorization to perform action Microsoft.Compute/virtualMachines/read' } }); Error = '' } }
@@ -202,7 +211,7 @@ function New-AVDTuneFakeArm {
             $body = @{ id = $p; name = $vm; location = $store.Location; properties = @{
                     hardwareProfile = @{ vmSize = $(if ($s.VmSize) { $s.VmSize } else { 'Standard_D4s_v6' }) }; storageProfile = $storage; securityProfile = $security
                     networkProfile = @{ networkInterfaces = @($nics | ForEach-Object { @{ id = "/subscriptions/$subId/resourceGroups/$rg/providers/Microsoft.Network/networkInterfaces/$($_.Name)" } }) }
-                    extended = @{ instanceView = @{ hyperVGeneration = $(if ($s.HyperV) { $s.HyperV } else { 'V2' }) } } } }
+                    instanceView = $(if ($s.HyperV) { @{ hyperVGeneration = $s.HyperV } } else { @{ computerName = $vm } }) } }
             return [pscustomobject]@{ Status = 200; Body = (ConvertTo-FakeJson $body); Error = '' }
         }
         if ($Method -eq 'GET' -and $lower -like '*/providers/microsoft.network/networkinterfaces/*') {
@@ -213,6 +222,64 @@ function New-AVDTuneFakeArm {
             $hit = @($nics | Where-Object { $_.Name -eq $nicName })
             if ($hit.Count -eq 0) { return [pscustomobject]@{ Status = 404; Body = $null; Error = 'not found' } }
             return [pscustomobject]@{ Status = 200; Body = (ConvertTo-FakeJson @{ id = $p; name = $nicName; properties = @{ enableAcceleratedNetworking = [bool]$hit[0].AccelNet } }); Error = '' }
+        }
+        # ---- gallery search (Search seed): subscriptions, galleries, image definitions, versions, managed images; Paging splits every list in two pages
+        $search = $store.Search
+        $page = {
+            param($items)
+            $all = @($items | Where-Object { $_ })
+            if (-not $search.Paging -or $all.Count -lt 2) { return @{ value = $all } }
+            if ($Path -like '*fakepage=2*') { return @{ value = @($all | Select-Object -Skip 1) } }
+            @{ value = @($all | Select-Object -First 1); nextLink = "https://management.azure.com$Path&fakepage=2" }
+        }
+        $galleryOf = { param($g) "/subscriptions/$($g.Sub)/resourceGroups/$($g.Rg)/providers/Microsoft.Compute/galleries/$($g.Name)" }
+        $searchImage = { param($galleryPath, $imageName) foreach ($g in @($search.Galleries)) { if ((& $galleryOf $g).ToLowerInvariant() -eq $galleryPath) { foreach ($im in @($g.Images)) { if ($im -and (-not $imageName -or ([string]$im.Name).ToLowerInvariant() -eq $imageName)) { $im } } } } }
+        $imageBody = { param($id, $im) @{ id = $id; name = $im.Name; properties = @{ features = @($im.Features | Where-Object { $_ }); architecture = $(if ($im.Architecture) { $im.Architecture } else { 'x64' }); hyperVGeneration = $(if ($im.HyperV) { $im.HyperV } else { 'V2' }); osType = $(if ($im.OsType) { $im.OsType } else { 'Windows' }) } } }
+        $forbidden = { param($action) [pscustomobject]@{ Status = 403; Body = (ConvertTo-FakeJson @{ error = @{ code = 'AuthorizationFailed'; message = "does not have authorization to perform action $action" } }); Error = '' } }
+        if ($Method -eq 'GET' -and $lower -eq '/subscriptions') {
+            if ($store.ReadForbidden) { return (& $forbidden 'Microsoft.Resources/subscriptions/read') }
+            $subs = @($search.Subscriptions | Where-Object { $_ } | ForEach-Object { @{ id = "/subscriptions/$($_.Id)"; subscriptionId = $_.Id; displayName = $_.Name; state = $(if ($_.State) { $_.State } else { 'Enabled' }) } })
+            return [pscustomobject]@{ Status = 200; Body = (ConvertTo-FakeJson (& $page $subs)); Error = '' }
+        }
+        if ($Method -eq 'GET' -and $lower -match '^/subscriptions/([0-9a-f-]{36})/providers/microsoft\.compute/galleries$') {
+            $sid = $Matches[1]
+            $one = @($search.Subscriptions | Where-Object { $_ -and ([string]$_.Id).ToLowerInvariant() -eq $sid })
+            if ($store.ReadForbidden -or $store.GalleryForbidden -or ($one.Count -gt 0 -and $one[0].Forbidden)) { return (& $forbidden 'Microsoft.Compute/galleries/read') }
+            $gs = @(@($search.Galleries) | Where-Object { $_ -and ([string]$_.Sub).ToLowerInvariant() -eq $sid } | ForEach-Object { @{ id = (& $galleryOf $_); name = $_.Name; location = $store.Location } })
+            return [pscustomobject]@{ Status = 200; Body = (ConvertTo-FakeJson (& $page $gs)); Error = '' }
+        }
+        if ($Method -eq 'GET' -and $lower -match '^(/subscriptions/[^/]+/resourcegroups/[^/]+/providers/microsoft\.compute/galleries/[^/]+)/images$') {
+            $gp = $Matches[1]
+            if ($store.ReadForbidden -or $store.GalleryForbidden) { return (& $forbidden 'Microsoft.Compute/galleries/images/read') }
+            $real = @(@($search.Galleries) | Where-Object { $_ -and (& $galleryOf $_).ToLowerInvariant() -eq $gp })
+            if ($real.Count -eq 0) { return [pscustomobject]@{ Status = 404; Body = $null; Error = 'not found' } }
+            $ims = @(& $searchImage $gp '' | ForEach-Object { & $imageBody "$(& $galleryOf $real[0])/images/$($_.Name)" $_ })
+            return [pscustomobject]@{ Status = 200; Body = (ConvertTo-FakeJson (& $page $ims)); Error = '' }
+        }
+        if ($Method -eq 'GET' -and $lower -match '^(/subscriptions/[^/]+/resourcegroups/[^/]+/providers/microsoft\.compute/galleries/[^/]+)/images/([^/]+)/versions$') {
+            $gp = $Matches[1]; $in = $Matches[2]
+            if ($store.ReadForbidden -or $store.GalleryForbidden) { return (& $forbidden 'Microsoft.Compute/galleries/images/versions/read') }
+            $im = @(& $searchImage $gp $in)
+            if ($im.Count -eq 0) { return [pscustomobject]@{ Status = 404; Body = $null; Error = 'not found' } }
+            $vs = @(@($im[0].Versions) | Where-Object { $_ } | ForEach-Object {
+                    $src = @{}; if ($_.SourceVm) { $src.virtualMachineId = $_.SourceVm }; if ($_.SourceId) { $src.id = $_.SourceId }
+                    $sp = @{ source = $src }; if ($_.OsDiskSourceId) { $sp.osDiskImage = @{ source = @{ id = $_.OsDiskSourceId } } }
+                    $published = if ($_.Published) { ([datetime]$_.Published).ToUniversalTime().ToString('o') } else { '2026-11-01T00:00:00Z' }
+                    @{ id = "$p/$($_.Name)"; name = $_.Name; properties = @{ provisioningState = 'Succeeded'; storageProfile = $sp; publishingProfile = @{ publishedDate = $published } } } })
+            return [pscustomobject]@{ Status = 200; Body = (ConvertTo-FakeJson (& $page $vs)); Error = '' }
+        }
+        if ($Method -eq 'GET' -and $lower -match '^/subscriptions/[^/]+/resourcegroups/[^/]+/providers/microsoft\.compute/images/[^/]+$') {
+            $hit = $null
+            if ($search.ManagedImages) { foreach ($k in @($search.ManagedImages.Keys)) { if (([string]$k).ToLowerInvariant() -eq $lower) { $hit = $search.ManagedImages[$k] } } }
+            if (-not $hit) { return [pscustomobject]@{ Status = 404; Body = $null; Error = 'not found' } }
+            return [pscustomobject]@{ Status = 200; Body = (ConvertTo-FakeJson @{ id = $p; name = $p.Substring($p.LastIndexOf('/') + 1); properties = @{ sourceVirtualMachine = @{ id = $hit } } }); Error = '' }
+        }
+        if ($Method -eq 'GET' -and $lower -match '^(/subscriptions/[^/]+/resourcegroups/[^/]+/providers/microsoft\.compute/galleries/[^/]+)/images/([^/]+)$') {
+            $im = @(& $searchImage $Matches[1] $Matches[2])
+            if ($im.Count -gt 0) {
+                if ($store.ReadForbidden -or $store.GalleryForbidden) { return (& $forbidden 'Microsoft.Compute/galleries/images/read') }
+                return [pscustomobject]@{ Status = 200; Body = (ConvertTo-FakeJson (& $imageBody $p $im[0])); Error = '' }
+            }
         }
         if ($Method -eq 'GET' -and $lower -like '*/providers/microsoft.compute/galleries/*/images/*') {
             if ($store.ReadForbidden -or $store.GalleryForbidden) { return [pscustomobject]@{ Status = 403; Body = $null; Error = 'forbidden' } }

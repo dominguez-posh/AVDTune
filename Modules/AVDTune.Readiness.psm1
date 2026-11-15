@@ -22,7 +22,13 @@ Import-Module (Join-Path $PSScriptRoot 'AVDTune.UpdateBlock.psm1')
 $script:ComputeApi = '2024-07-01'
 $script:NetworkApi = '2024-01-01'
 $script:GalleryApi = '2023-07-03'
-$script:GalleryPattern = '^/subscriptions/[0-9a-fA-F-]{36}/resourceGroups/[A-Za-z0-9._()-]+/providers/Microsoft\.Compute/galleries/[A-Za-z0-9._()-]+/images/[A-Za-z0-9._()-]+$'
+$script:DiskApi = '2023-10-02'          # disks have their own API versions (the compute version of the VM is not one of them)
+$script:SubscriptionApi = '2022-12-01'
+# Limits of the gallery search: subscriptions (this VM's first), galleries, definitions, managed images looked up, pages per list, ARM requests in all
+$script:SearchLimits = @{ Subscriptions = 10; Galleries = 25; Definitions = 80; ManagedImages = 10; Pages = 10; Requests = 200 }
+$script:GalleryOnlyPattern = '^/subscriptions/[0-9a-fA-F-]{36}/resourceGroups/[A-Za-z0-9._()-]+/providers/Microsoft\.Compute/galleries/[A-Za-z0-9._()-]+$'
+$script:ManagedImagePattern = '^/subscriptions/[0-9a-fA-F-]{36}/resourceGroups/[A-Za-z0-9._()-]+/providers/Microsoft\.Compute/images/[A-Za-z0-9._()-]+$'
+$script:GalleryPattern ='^/subscriptions/[0-9a-fA-F-]{36}/resourceGroups/[A-Za-z0-9._()-]+/providers/Microsoft\.Compute/galleries/[A-Za-z0-9._()-]+/images/[A-Za-z0-9._()-]+$'
 $script:NicPattern = '^/subscriptions/[0-9a-fA-F-]{36}/resourceGroups/[A-Za-z0-9._()-]+/providers/Microsoft\.Network/networkInterfaces/[A-Za-z0-9._()-]+$'
 $script:Kinds = @('Start', 'Erstanalyse', 'Healthcheck', 'Manual')
 
@@ -88,13 +94,14 @@ function New-AVDTuneReadinessRow {
 
 function Get-AVDTuneReadinessArm {
     <#
-        What Azure says about this VM: the VM (size, disk controller, security), its NICs and the gallery image definition. Never throws: Ok = $false and
-        Problem say why a part is not checkable. -GalleryImageId is the definition to check (setting); without it the VM's own image reference is used
-        when it is a gallery image.
+        What Azure says about this VM: the VM (size, disk controller, security), its NICs, its OS disk (generation) and the gallery image definition.
+        Never throws: Ok = $false and Problem say why a part is not checkable. -GalleryImageId is the definition to check (saved choice, GallerySource
+        Saved); without it the VM's own image reference when it is a gallery image (ImageReference), else the gallery search (Find-AVDTuneGalleryImage:
+        Matched, or Search with the candidates to choose from). -NoSearch skips the search.
     #>
     [CmdletBinding()]
-    param([Parameter(Mandatory)]$Machine, $Arm, [string]$Token, [string]$NoTokenReason, [string]$GalleryImageId)
-    $r = [ordered]@{ Ok = $false; Problem = ''; Vm = $null; Nics = @(); NicProblem = ''; Gallery = $null; GalleryId = ''; GalleryProblem = '' }
+    param([Parameter(Mandatory)]$Machine, $Arm, [string]$Token, [string]$NoTokenReason, [string]$GalleryImageId, [switch]$NoSearch)
+    $r = [ordered]@{ Ok = $false; Problem = ''; Vm = $null; Nics = @(); NicProblem = ''; Disk = $null; DiskProblem = ''; Gallery = $null; GalleryId = ''; GalleryProblem = ''; GallerySource = ''; Search = $null }
     $id = Get-AVDTuneVmIdentity $Machine
     if (-not $id.Available) { $r.Problem = $id.Problem; return [pscustomobject]$r }
     if (-not $Arm) { $r.Problem = 'No Azure access is configured (no Azure Resource Manager adapter).'; return [pscustomobject]$r }
@@ -118,15 +125,181 @@ function Get-AVDTuneReadinessArm {
         $r.Nics = @($nics)
     }
     catch { $r.NicProblem = $_.Exception.Message }
-    # gallery image definition
+    # OS disk: hyperVGeneration and security type (the generation of the VM is a property of its OS disk)
+    try { $r.Disk = Invoke-AVDTuneArm -Arm $Arm -Method GET -Path "$($id.OsDiskId)?api-version=$($script:DiskApi)" -Token $Token -Action 'Microsoft.Compute/disks/read' -Scope "the OS disk $($id.OsDiskName)" }
+    catch { $r.DiskProblem = $_.Exception.Message }
+    # gallery image definition: the saved choice, else the VM's own gallery image, else the gallery search (a version captured from this VM)
     $defId = ConvertTo-AVDTuneGalleryImageId $GalleryImageId
-    if (-not $defId) { $defId = ConvertTo-AVDTuneGalleryImageId ([string](Get-AVDTuneProp (Get-AVDTuneProp (Get-AVDTuneProp (Get-AVDTuneProp $r.Vm 'properties') 'storageProfile') 'imageReference') 'id')) }
+    if ($defId) { $r.GallerySource = 'Saved' }
+    else {
+        $defId = ConvertTo-AVDTuneGalleryImageId ([string](Get-AVDTuneProp (Get-AVDTuneProp (Get-AVDTuneProp (Get-AVDTuneProp $r.Vm 'properties') 'storageProfile') 'imageReference') 'id'))
+        if ($defId) { $r.GallerySource = 'ImageReference' }
+    }
+    if (-not $defId -and -not $NoSearch) {
+        $r.Search = Find-AVDTuneGalleryImage -Arm $Arm -Token $Token -Identity $id -OsArch ([string](& $Machine.OsArchitecture))
+        if ($r.Search.Match) { $defId = $r.Search.Match.DefinitionId; $r.GallerySource = 'Matched'; $r.Gallery = $r.Search.Match.Definition }
+    }
     if ($defId) {
         $r.GalleryId = $defId
-        try { $r.Gallery = Invoke-AVDTuneArm -Arm $Arm -Method GET -Path "${defId}?api-version=$($script:GalleryApi)" -Token $Token -Action 'Microsoft.Compute/galleries/images/read' -Scope 'the image definition' }
-        catch { $r.GalleryProblem = $_.Exception.Message }
+        if (-not $r.Gallery) {
+            try { $r.Gallery = Invoke-AVDTuneArm -Arm $Arm -Method GET -Path "${defId}?api-version=$($script:GalleryApi)" -Token $Token -Action 'Microsoft.Compute/galleries/images/read' -Scope 'the image definition' }
+            catch { $r.GalleryProblem = $_.Exception.Message }
+        }
     }
     [pscustomobject]$r
+}
+
+function Get-AVDTuneGalleryFeature {
+    # Value of a feature of an image definition by the start of its name (DiskControllerType and DiskControllerTypes are both written), $null when missing
+    param($Properties, [string]$Name)
+    $hit = @(@(Get-AVDTuneProp $Properties 'features') | Where-Object { $_ -and ([string](Get-AVDTuneProp $_ 'name')) -like "$Name*" } | Select-Object -First 1)
+    if ($hit.Count -gt 0) { [string](Get-AVDTuneProp $hit[0] 'value') } else { $null }
+}
+
+function Find-AVDTuneGalleryImage {
+    <#
+        Searches the Azure Compute Galleries the signed-in account can read (GET only) for the image definition of this master:
+          * subscriptions: the list of the account (this VM's subscription first, at most Limits.Subscriptions), galleries, image definitions, versions;
+            every list follows nextLink on the ARM host and the same resource path only, at most Limits.Pages pages, at most Limits.Requests requests in all
+          * Match: a version whose source (storageProfile.source.virtualMachineId or .id, osDiskImage.source.id) is this VM, its OS disk, a snapshot of
+            the OS disk, or a managed image made from this VM. Several definitions with such a version: the one with the newest version wins.
+          * Candidates: the Windows definitions of generation V2 with this master's architecture (to choose from when nothing matched), with Fits
+            (NVMe and Trusted Launch features) and a label.
+        A 403 or error on one subscription or gallery is a note and the search goes on. Never throws for Azure errors.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)]$Arm, [Parameter(Mandatory)][string]$Token, [Parameter(Mandatory)]$Identity, [string]$OsArch, [hashtable]$Limits)
+    $lim = @{}; foreach ($k in $script:SearchLimits.Keys) { $lim[$k] = $script:SearchLimits[$k] }
+    if ($Limits) { foreach ($k in $Limits.Keys) { $lim[$k] = $Limits[$k] } }
+    $st = @{ Left = [int]$lim.Requests; Limited = New-Object System.Collections.ArrayList; Notes = New-Object System.Collections.ArrayList }
+    $get = {
+        param([string]$Path, [string]$Action, [string]$Scope)
+        if ($st.Left -le 0) { throw 'AVDTune: request limit' }
+        $st.Left--
+        Invoke-AVDTuneArm -Arm $Arm -Method GET -Path $Path -Token $Token -Action $Action -Scope $Scope
+    }
+    $list = {
+        # All items of a list (nextLink only on the ARM host and the same resource path), at most $Max; the rest is a limit note
+        param([string]$Path, [string]$Action, [string]$Scope, [int]$Max)
+        $items = New-Object System.Collections.ArrayList
+        $base = $Path.Split('?')[0].ToLowerInvariant()
+        for ($n = 0; $Path; $n++) {
+            if ($n -ge $lim.Pages) { [void]$st.Limited.Add("only the first $($lim.Pages) pages of $Scope were read"); break }
+            $body = & $get $Path $Action $Scope
+            foreach ($i in @(Get-AVDTuneProp $body 'value')) { if ($i) { [void]$items.Add($i) } }
+            $next = [string](Get-AVDTuneProp $body 'nextLink')
+            $Path = $null
+            if ($next) {
+                $p = ConvertTo-AVDTuneArmPath $next
+                if ($p.Split('?')[0].ToLowerInvariant() -ne $base) { throw 'Azure returned a link to another resource; it is not followed.' }
+                $Path = $p
+            }
+        }
+        if ($items.Count -gt $Max) { [void]$st.Limited.Add("only $Max of $($items.Count) $Scope were searched"); return @($items | Select-Object -First $Max) }
+        @($items)
+    }
+    $want = if ($OsArch -match 'ARM') { 'Arm64' } else { 'x64' }
+    $vmId = "/subscriptions/$($Identity.SubscriptionId)/resourceGroups/$($Identity.ResourceGroup)/providers/Microsoft.Compute/virtualMachines/$($Identity.VmName)"
+    $targets = @{}
+    $targets[$vmId.ToLowerInvariant()] = 'captured from this VM'
+    $targets[([string]$Identity.OsDiskId).ToLowerInvariant()] = 'made from the OS disk of this VM'
+    try { foreach ($s in @(Get-AVDTuneOsDiskSnapshots -Arm $Arm -Token $Token -Vm $Identity)) { if ($s -and $s.Id) { $targets[([string]$s.Id).ToLowerInvariant()] = "made from the snapshot $($s.Name) of the OS disk" } } }
+    catch { [void]$st.Notes.Add("The snapshots of the OS disk could not be read: $($_.Exception.Message)") }
+
+    $subs = New-Object System.Collections.ArrayList; $subNames = @{}
+    [void]$subs.Add(([string]$Identity.SubscriptionId).ToLowerInvariant())
+    $galleries = New-Object System.Collections.ArrayList; $definitions = New-Object System.Collections.ArrayList
+    $hits = New-Object System.Collections.ArrayList; $imageChecks = 0
+    try {
+        try {
+            foreach ($s in @(& $list "/subscriptions?api-version=$($script:SubscriptionApi)" 'Microsoft.Resources/subscriptions/read' 'subscriptions' 1000)) {
+                $sid = ([string](Get-AVDTuneProp $s 'subscriptionId')).ToLowerInvariant()
+                if ($sid -notmatch '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$') { continue }
+                $subNames[$sid] = Remove-AVDTuneControlCharacters ([string](Get-AVDTuneProp $s 'displayName')) 80
+                if ([string](Get-AVDTuneProp $s 'state') -notin '', 'Enabled', 'PastDue', 'Warned') { continue }
+                if ($sid -notin $subs) { [void]$subs.Add($sid) }
+            }
+        }
+        catch { if ($_.Exception.Message -like 'AVDTune: request limit*') { throw }; [void]$st.Notes.Add("The list of subscriptions could not be read, only this VM's subscription was searched: $($_.Exception.Message)") }
+        if ($subs.Count -gt $lim.Subscriptions) { [void]$st.Limited.Add("only $($lim.Subscriptions) of $($subs.Count) subscriptions were searched (this VM's first)"); $subs = @($subs | Select-Object -First $lim.Subscriptions) }
+        foreach ($sid in @($subs)) {
+            $label = if ($subNames[$sid]) { "subscription $($subNames[$sid])" } else { "subscription $sid" }
+            try {
+                foreach ($g in @(& $list "/subscriptions/$sid/providers/Microsoft.Compute/galleries?api-version=$($script:GalleryApi)" 'Microsoft.Compute/galleries/read' "the galleries of $label" 1000)) {
+                    $gid = [string](Get-AVDTuneProp $g 'id')
+                    if ($gid -notmatch $script:GalleryOnlyPattern) { continue }
+                    [void]$galleries.Add([pscustomobject]@{ Id = $gid; Name = [string](Get-AVDTuneProp $g 'name'); Subscription = $label })
+                }
+            }
+            catch { if ($_.Exception.Message -like 'AVDTune: request limit*') { throw }; [void]$st.Notes.Add("$label`: $($_.Exception.Message)") }
+        }
+        if ($galleries.Count -gt $lim.Galleries) { [void]$st.Limited.Add("only $($lim.Galleries) of $($galleries.Count) galleries were searched"); $galleries = @($galleries | Select-Object -First $lim.Galleries) }
+        foreach ($g in @($galleries)) {
+            try {
+                foreach ($d in @(& $list "$($g.Id)/images?api-version=$($script:GalleryApi)" 'Microsoft.Compute/galleries/images/read' "the definitions of the gallery $($g.Name)" 1000)) {
+                    $did = [string](Get-AVDTuneProp $d 'id')
+                    if ($did -notmatch $script:GalleryPattern) { continue }
+                    [void]$definitions.Add([pscustomobject]@{ Id = $did; Name = [string](Get-AVDTuneProp $d 'name'); Gallery = $g.Name; Subscription = $g.Subscription; Body = $d })
+                }
+            }
+            catch { if ($_.Exception.Message -like 'AVDTune: request limit*') { throw }; [void]$st.Notes.Add("Gallery $($g.Name): $($_.Exception.Message)") }
+        }
+        if ($definitions.Count -gt $lim.Definitions) { [void]$st.Limited.Add("only $($lim.Definitions) of $($definitions.Count) image definitions were searched"); $definitions = @($definitions | Select-Object -First $lim.Definitions) }
+        foreach ($d in @($definitions)) {
+            if ([string](Get-AVDTuneProp (Get-AVDTuneProp $d.Body 'properties') 'osType') -ne 'Windows') { continue }
+            try {
+                foreach ($v in @(& $list "$($d.Id)/versions?api-version=$($script:GalleryApi)" 'Microsoft.Compute/galleries/images/versions/read' "the versions of $($d.Gallery)/$($d.Name)" 1000)) {
+                    $sp = Get-AVDTuneProp (Get-AVDTuneProp $v 'properties') 'storageProfile'
+                    $src = Get-AVDTuneProp $sp 'source'
+                    $sources = @([string](Get-AVDTuneProp $src 'virtualMachineId'), [string](Get-AVDTuneProp $src 'id'), [string](Get-AVDTuneProp (Get-AVDTuneProp (Get-AVDTuneProp $sp 'osDiskImage') 'source') 'id')) | Where-Object { $_ }
+                    $how = $null
+                    foreach ($s in $sources) { if ($targets.ContainsKey($s.ToLowerInvariant())) { $how = $targets[$s.ToLowerInvariant()]; break } }
+                    if (-not $how) {
+                        foreach ($s in @($sources | Where-Object { $_ -match $script:ManagedImagePattern })) {
+                            if ($imageChecks -ge $lim.ManagedImages) { break }
+                            $imageChecks++
+                            try {
+                                $img = & $get "${s}?api-version=$($script:ComputeApi)" 'Microsoft.Compute/images/read' 'the managed image'
+                                $from = [string](Get-AVDTuneProp (Get-AVDTuneProp (Get-AVDTuneProp $img 'properties') 'sourceVirtualMachine') 'id')
+                                if ($from -and $from.ToLowerInvariant() -eq $vmId.ToLowerInvariant()) { $how = 'made from a managed image of this VM'; break }
+                            }
+                            catch { if ($_.Exception.Message -like 'AVDTune: request limit*') { throw } }
+                        }
+                    }
+                    if ($how) {
+                        $published = $null
+                        $raw = [string](Get-AVDTuneProp (Get-AVDTuneProp (Get-AVDTuneProp $v 'properties') 'publishingProfile') 'publishedDate')
+                        if ($raw) { try { $published = [datetime]::Parse($raw, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind) } catch { } }
+                        [void]$hits.Add([pscustomobject]@{ DefinitionId = $d.Id; Definition = $d.Body; Label = "$($d.Gallery)/$($d.Name)"; VersionName = [string](Get-AVDTuneProp $v 'name'); How = $how; Published = $published })
+                    }
+                }
+            }
+            catch { if ($_.Exception.Message -like 'AVDTune: request limit*') { throw }; [void]$st.Notes.Add("Definition $($d.Gallery)/$($d.Name): $($_.Exception.Message)") }
+        }
+    }
+    catch {
+        if ($_.Exception.Message -like 'AVDTune: request limit*') { [void]$st.Limited.Add("the search stopped after $($lim.Requests) requests to Azure") }
+        else { [void]$st.Notes.Add($_.Exception.Message) }
+    }
+    $match = $null
+    if ($hits.Count -gt 0) {
+        $match = @($hits | Sort-Object { if ($_.Published) { $_.Published } else { [datetime]::MinValue } } -Descending)[0]
+        $others = @($hits | Where-Object { $_.DefinitionId -ne $match.DefinitionId } | ForEach-Object { $_.Label } | Select-Object -Unique)
+        if ($others.Count -gt 0) { [void]$st.Notes.Add("Versions from this VM are also in: $($others -join ', '); the definition with the newest version is used.") }
+    }
+    $candidates = @($definitions | ForEach-Object {
+            $p = Get-AVDTuneProp $_.Body 'properties'
+            $arch = [string](Get-AVDTuneProp $p 'architecture'); if (-not $arch) { $arch = 'x64' }
+            if ([string](Get-AVDTuneProp $p 'osType') -ne 'Windows' -or [string](Get-AVDTuneProp $p 'hyperVGeneration') -ne 'V2' -or $arch -ne $want) { return }
+            $nvme = ([string](Get-AVDTuneGalleryFeature $p 'DiskControllerType')) -match '(?i)nvme'
+            $tl = ([string](Get-AVDTuneGalleryFeature $p 'SecurityType')) -match '(?i)^TrustedLaunch'
+            $parts = @($(if ($nvme) { 'NVMe' } else { 'no NVMe' }), $(if ($tl) { 'Trusted Launch' } else { 'no Trusted Launch' }))
+            [pscustomobject]@{ Id = $_.Id; Name = $_.Name; Gallery = $_.Gallery; Subscription = $_.Subscription; Fits = ($nvme -and $tl); Label = "$($_.Gallery) / $($_.Name) ($($parts -join ', '); $($_.Subscription))" }
+        } | Sort-Object @{ Expression = { $_.Fits }; Descending = $true }, Label)
+    [pscustomobject]@{
+        Match = $match; Candidates = @($candidates); Subscriptions = @($subs).Count; Galleries = @($galleries).Count; Definitions = @($definitions).Count
+        Notes = @($st.Notes); Limited = @($st.Limited); Requests = ([int]$lim.Requests - $st.Left)
+    }
 }
 
 #endregion
@@ -158,7 +331,8 @@ function Get-AVDTuneReadinessFamilies {
 function Invoke-AVDTuneReadiness {
     <#
         Runs every check and returns the result: Rows (Id, Group, Title, Status, Reason, Fix, FixId, Found, Source, Stand, Verified, Note), Counts, Overall, OpenIds
-        (yellow and unknown), Families, Arm (Ok/Problem), Stand. Needs nothing but the adapters; with $Arm and $Token it also reads Azure.
+        (yellow and unknown), Families, Arm (Ok/Problem), Stand, GalleryImageId with GallerySource (Saved | ImageReference | Matched), GalleryMatch and
+        GalleryCandidates (definitions to choose from when none is known). Needs nothing but the adapters; with $Arm and $Token it also reads Azure.
     #>
     [CmdletBinding()]
     param(
@@ -263,14 +437,32 @@ function Invoke-AVDTuneReadiness {
         else { Add-Row 'hw.fslogix-d' $hw 'green' 'No FSLogix cache folder is set on D:.' }
     }
     Invoke-Check 'hw.firmware' $hw {
-        $fw = & $Machine.RegGet 'HKLM:\SYSTEM\CurrentControlSet\Control' 'PEFirmwareType'
-        $gen = [string](Get-AVDTuneProp (Get-AVDTuneProp (Get-AVDTuneProp $armProps 'extended') 'instanceView') 'hyperVGeneration')
-        if ($gen -eq 'V1' -or ($null -ne $fw -and [string]$fw -eq '1')) {
+        # Every source that answers; Gen1 only from a source that states it (the guest firmware or the generation in Azure), UEFI hints count for Gen2
+        $gen1 = New-Object System.Collections.ArrayList; $gen2 = New-Object System.Collections.ArrayList
+        $fw = $null
+        if ($Machine.PSObject.Properties['FirmwareType']) { try { $fw = [string](& $Machine.FirmwareType) } catch { } }
+        if ($fw -eq 'BIOS') { [void]$gen1.Add('guest firmware BIOS') } elseif ($fw -eq 'UEFI') { [void]$gen2.Add('guest firmware UEFI') }
+        $diskGen = [string](Get-AVDTuneProp (Get-AVDTuneProp $az.Disk 'properties') 'hyperVGeneration')
+        if ($diskGen -eq 'V1') { [void]$gen1.Add('OS disk V1') } elseif ($diskGen -eq 'V2') { [void]$gen2.Add('OS disk V2') }
+        $ivGen = [string](Get-AVDTuneProp (Get-AVDTuneProp $armProps 'instanceView') 'hyperVGeneration')
+        if ($ivGen -eq 'V1') { [void]$gen1.Add('VM V1') } elseif ($ivGen -eq 'V2') { [void]$gen2.Add('VM V2') }
+        $secType = [string](Get-AVDTuneProp (Get-AVDTuneProp $armProps 'securityProfile') 'securityType')
+        if (-not $secType) { $secType = [string](Get-AVDTuneProp (Get-AVDTuneProp (Get-AVDTuneProp $az.Disk 'properties') 'securityProfile') 'securityType') }
+        if ($secType -match '(?i)^(TrustedLaunch|ConfidentialVM)') { [void]$gen2.Add("security type $secType (needs Generation 2)") }
+        $imdsSec = Get-AVDTuneProp (Get-AVDTuneProp (& $Machine.Imds) 'compute') 'securityProfile'
+        if ([string](Get-AVDTuneProp $imdsSec 'secureBootEnabled') -eq 'true') { [void]$gen2.Add('Secure Boot on (instance metadata)') }
+        if (& $Machine.RegKeyExists 'HKLM:\SYSTEM\CurrentControlSet\Control\SecureBoot\State') { [void]$gen2.Add('Secure Boot state key (UEFI only)') }
+        if ($gen1.Count -gt 0) {
             $flags.Gen1 = $true
-            Add-Row 'hw.firmware' $hw 'red' 'This master is Generation 1 (BIOS). The v6 and v7 sizes need Generation 2 (UEFI), and there is no plain conversion.' 'Build a new master from a Generation 2 image (or follow the Trusted Launch upgrade of Microsoft first).' -Found $(if ($gen) { $gen } else { 'BIOS' })
+            $also = if ($gen2.Count -gt 0) { " Other sources say otherwise ($($gen2 -join ', ')): check the VM in the Azure portal." } else { '' }
+            Add-Row 'hw.firmware' $hw 'red' "This master is Generation 1 (BIOS): $($gen1 -join ', '). The v6 and v7 sizes need Generation 2 (UEFI), and there is no plain conversion.$also" 'Build a new master from a Generation 2 image (or follow the Trusted Launch upgrade of Microsoft first).' -Found (@($gen1) + @($gen2) -join '; ')
         }
-        elseif ($gen -eq 'V2' -or ($null -ne $fw -and [string]$fw -eq '2')) { Add-Row 'hw.firmware' $hw 'green' 'Generation 2: the master boots with UEFI.' -Found $(if ($gen) { $gen } else { 'UEFI' }) }
-        else { Add-Row 'hw.firmware' $hw 'unknown' 'Not checkable: neither the firmware type of the guest nor the generation from Azure could be read.' }
+        elseif ($gen2.Count -gt 0) { Add-Row 'hw.firmware' $hw 'green' "Generation 2: the master boots with UEFI ($($gen2 -join ', '))." -Found ($gen2 -join '; ') }
+        else {
+            $why = @()
+            if (-not $az.Ok) { $why += "Azure: $($az.Problem)" } elseif ($az.DiskProblem) { $why += "OS disk: $($az.DiskProblem)" }
+            Add-Row 'hw.firmware' $hw 'unknown' ("Not checkable: Windows did not tell the firmware type (GetFirmwareType) and Azure gave no generation." + $(if ($why) { ' ' + ($why -join ' ') } else { '' }))
+        }
     }
     Invoke-Check 'hw.securestart' $hw {
         $sb = & $Machine.RegGet 'HKLM:\SYSTEM\CurrentControlSet\Control\SecureBoot\State' 'UEFISecureBootEnabled'
@@ -293,14 +485,29 @@ function Invoke-AVDTuneReadiness {
     }
     Invoke-Check 'hw.gallery' $hw {
         if (-not $az.Ok) { Add-Row 'hw.gallery' $hw 'unknown' "Not checkable: $($az.Problem)"; return }
-        if (-not $az.GalleryId) { Add-Row 'hw.gallery' $hw 'unknown' 'Not checkable: no image definition is known. Enter the Resource ID of the definition the image is captured into (Readiness card on the Overview).'; return }
+        if (-not $az.GalleryId) {
+            $s = $az.Search
+            $extra = @()
+            if ($s -and @($s.Notes).Count -gt 0) { $extra += 'Not everything could be read: ' + (@($s.Notes) -join ' ') }
+            if ($s -and @($s.Limited).Count -gt 0) { $extra += 'Search limited: ' + (@($s.Limited) -join '; ') + '.' }
+            $tail = if ($extra.Count -gt 0) { ' ' + ($extra -join ' ') } else { '' }
+            $found = if ($s) { "$($s.Subscriptions) subscription(s), $($s.Galleries) gallery(ies), $($s.Definitions) definition(s), $(@($s.Candidates).Count) to choose" } else { '' }
+            if ($s -and @($s.Candidates).Count -gt 0) {
+                Add-Row 'hw.gallery' $hw 'yellow' "No image version in the galleries was made from this VM yet, so the definition is not known for sure. $(@($s.Candidates).Count) Windows Generation 2 definition(s) fit this master: choose the one the image will be captured into (Image definition, below the list).$tail" 'Choose the image definition in the list below; it is saved in environment.json.' -Found $found
+            }
+            elseif ($s -and $s.Galleries -gt 0) {
+                Add-Row 'hw.gallery' $hw 'yellow' "The galleries the account can read ($($s.Galleries)) have no Windows Generation 2 definition for this architecture. If the definition is created later (for example by Hydra together with the first version), choose it here once it exists.$tail" 'Create a definition with the features DiskControllerType SCSI,NVMe, SecurityType TrustedLaunchSupported, accelerated networking and Generation 2, or let the deployment tool create it; then run the analysis again.' -Found $found
+            }
+            else {
+                Add-Row 'hw.gallery' $hw 'yellow' "No Azure Compute Gallery is visible to the signed-in account$(if ($s) { " in $($s.Subscriptions) subscription(s)" }). That is fine when the gallery and the image version are created later (for example by Hydra when the image is captured): choose the definition here once it exists.$tail" 'Nothing to do now; run the analysis again after the gallery exists, or grant the account Reader on the gallery.' -Found $found
+            }
+            return
+        }
         if ($az.GalleryProblem) { Add-Row 'hw.gallery' $hw 'unknown' "Not checkable: $($az.GalleryProblem)"; return }
         $p = Get-AVDTuneProp $az.Gallery 'properties'
-        $features = @(Get-AVDTuneProp $p 'features')
-        $feature = { param($n) $hit = @($features | Where-Object { $_ -and ([string](Get-AVDTuneProp $_ 'name')) -like "$n*" } | Select-Object -First 1); if ($hit.Count -gt 0) { [string](Get-AVDTuneProp $hit[0] 'value') } else { $null } }
-        $disk = & $feature 'DiskControllerType'
-        $sec = & $feature 'SecurityType'
-        $accel = & $feature 'IsAcceleratedNetworkSupported'
+        $disk = Get-AVDTuneGalleryFeature $p 'DiskControllerType'
+        $sec = Get-AVDTuneGalleryFeature $p 'SecurityType'
+        $accel = Get-AVDTuneGalleryFeature $p 'IsAcceleratedNetworkSupported'
         $arch = [string](Get-AVDTuneProp $p 'architecture'); $gen = [string](Get-AVDTuneProp $p 'hyperVGeneration')
         $red = New-Object System.Collections.ArrayList; $yellow = New-Object System.Collections.ArrayList
         if ($disk -notmatch '(?i)nvme') { [void]$red.Add("DiskControllerType is '$(if ($disk) { $disk } else { 'not set' })', not SCSI, NVMe: an image captured into it cannot be used for NVMe VMs (v6/v7)") }
@@ -309,10 +516,17 @@ function Invoke-AVDTuneReadiness {
         if ($arch -and $arch -ne $want) { [void]$red.Add("the definition is $arch but this master is $want") }
         if ($sec -notmatch '(?i)^TrustedLaunch') { [void]$yellow.Add("SecurityType is '$(if ($sec) { $sec } else { 'not set' })' (Trusted Launch is not supported by the definition)") }
         if ($accel -notmatch '(?i)^true$') { [void]$yellow.Add("IsAcceleratedNetworkSupported is '$(if ($accel) { $accel } else { 'not set' })'") }
-        $found = "disk=$disk; security=$sec; accelerated=$accel; architecture=$arch; generation=$gen"
-        if ($red.Count -gt 0) { Add-Row 'hw.gallery' $hw 'red' ('The image definition does not fit v6/v7: ' + (@($red) + @($yellow) -join '; ') + '.') 'Capture into a definition with the features DiskControllerType SCSI,NVMe, SecurityType TrustedLaunchSupported, accelerated networking and Generation 2 (create a new definition; features cannot be added to an existing one in the portal).' -Found $found }
-        elseif ($yellow.Count -gt 0) { Add-Row 'hw.gallery' $hw 'yellow' ('The image definition fits NVMe but: ' + ($yellow -join '; ') + '.') 'Use a definition with SecurityType TrustedLaunchSupported and IsAcceleratedNetworkSupported True.' -Found $found }
-        else { Add-Row 'hw.gallery' $hw 'green' 'The image definition supports NVMe, Trusted Launch and accelerated networking, Generation 2.' -Found $found }
+        $name = ($az.GalleryId -split '/')[-3] + '/' + ($az.GalleryId -split '/')[-1]
+        $from = switch ([string]$az.GallerySource) {
+            'Saved' { " ($name, chosen)" }
+            'ImageReference' { " ($name, the image this VM was created from)" }
+            'Matched' { " ($name, found automatically: version $($az.Search.Match.VersionName) was $($az.Search.Match.How))" }
+            default { " ($name)" }
+        }
+        $found = "definition=$name; disk=$disk; security=$sec; accelerated=$accel; architecture=$arch; generation=$gen"
+        if ($red.Count -gt 0) { Add-Row 'hw.gallery' $hw 'red' ("The image definition$from does not fit v6/v7: " + (@($red) + @($yellow) -join '; ') + '.') 'Capture into a definition with the features DiskControllerType SCSI,NVMe, SecurityType TrustedLaunchSupported, accelerated networking and Generation 2 (create a new definition; features cannot be added to an existing one in the portal).' -Found $found }
+        elseif ($yellow.Count -gt 0) { Add-Row 'hw.gallery' $hw 'yellow' ("The image definition$from fits NVMe but: " + ($yellow -join '; ') + '.') 'Use a definition with SecurityType TrustedLaunchSupported and IsAcceleratedNetworkSupported True.' -Found $found }
+        else { Add-Row 'hw.gallery' $hw 'green' "The image definition$from supports NVMe, Trusted Launch and accelerated networking, Generation 2." -Found $found }
     }
 
     # ---- image hygiene
@@ -441,6 +655,8 @@ function Invoke-AVDTuneReadiness {
         At = $now.ToString('o'); Stand = [string]$Data.Stand; Overall = $overall; Counts = [pscustomobject]$counts; Rows = @($rows)
         OpenIds = @($rows | Where-Object { $_.Status -in 'yellow', 'unknown' } | ForEach-Object { $_.Id }); RedIds = @($rows | Where-Object { $_.Status -eq 'red' } | ForEach-Object { $_.Id })
         Families = @($families); Arm = [pscustomobject]@{ Ok = [bool]$az.Ok; Problem = [string]$az.Problem }; GalleryImageId = [string]$az.GalleryId
+        GallerySource = [string]$az.GallerySource; GalleryCandidates = @(if ($az.Search) { @($az.Search.Candidates) })
+        GalleryMatch = $(if ($az.Search -and $az.Search.Match) { [pscustomobject]@{ DefinitionId = $az.Search.Match.DefinitionId; Label = $az.Search.Match.Label; VersionName = $az.Search.Match.VersionName; How = $az.Search.Match.How } } else { $null })
     }
 }
 
@@ -614,5 +830,5 @@ function Invoke-AVDTuneReadinessFix {
 
 #endregion
 
-Export-ModuleMember -Function Get-AVDTuneReadinessDataPath, Get-AVDTuneReadinessData, ConvertTo-AVDTuneGalleryImageId, Get-AVDTuneReadinessArm, Get-AVDTuneReadinessFamilies, Invoke-AVDTuneReadiness,
+Export-ModuleMember -Function Get-AVDTuneReadinessDataPath, Get-AVDTuneReadinessData, ConvertTo-AVDTuneGalleryImageId, Get-AVDTuneReadinessArm, Get-AVDTuneGalleryFeature, Find-AVDTuneGalleryImage, Get-AVDTuneReadinessFamilies, Invoke-AVDTuneReadiness,
     Save-AVDTuneReadinessRun, Get-AVDTuneReadinessRecord, Confirm-AVDTuneReadinessAcknowledgement, Get-AVDTuneFinishReadiness, Get-AVDTuneReadinessFixes, Invoke-AVDTuneReadinessFix

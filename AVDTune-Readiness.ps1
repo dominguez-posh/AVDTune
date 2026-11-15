@@ -12,10 +12,48 @@ $script:ReadyRank = @{ red = 0; yellow = 1; unknown = 2; green = 3; info = 4 }
 $script:ReadySettingsPath = Join-Path $script:StateRoot 'config\readiness-settings.json'
 
 function Get-ReadySettings {
-    $s = $null
-    try { $s = Read-AVDTuneJson $script:ReadySettingsPath } catch { }
-    $id = if ($s) { ConvertTo-AVDTuneGalleryImageId ([string](Get-AVDTuneProp $s 'GalleryImageId')) } else { $null }
+    # The chosen image definition lives in environment.json (Gallery); an older config\readiness-settings.json is still read when there is none
+    $id = ''
+    try { $id = Get-AVDTuneEnvironmentGallery (Get-AVDTuneEnvironment $script:StateRoot) } catch { }
+    if (-not $id) {
+        $s = $null
+        try { $s = Read-AVDTuneJson $script:ReadySettingsPath } catch { }
+        if ($s) { $id = [string](ConvertTo-AVDTuneGalleryImageId ([string](Get-AVDTuneProp $s 'GalleryImageId'))) }
+    }
     [pscustomobject]@{ GalleryImageId = [string]$id }
+}
+$script:ReadyGalleryItems = @()
+function Get-ReadyGallerySelection {
+    # The definition ID behind the selected line of the list, '' when none
+    $i = $ui.CmbReadyGallery.SelectedIndex
+    if ($i -ge 0 -and $i -lt @($script:ReadyGalleryItems).Count) { [string]@($script:ReadyGalleryItems)[$i].Id } else { '' }
+}
+function Format-ReadyGalleryName([string]$Id) { if ($Id) { (($Id -split '/')[-3]) + ' / ' + (($Id -split '/')[-1]) } else { '' } }
+function Update-ReadyGallery {
+    # The image definition part of the card: what is used and where it came from, and the definitions found to choose from
+    $r = $script:Ready
+    $saved = (Get-ReadySettings).GalleryImageId
+    $items = New-Object System.Collections.ArrayList
+    if ($r) { foreach ($c in @($r.GalleryCandidates)) { if ($c) { [void]$items.Add([pscustomobject]@{ Id = [string]$c.Id; Label = [string]$c.Label }) } } }
+    if ($saved -and -not @($items | Where-Object { $_.Id -ieq $saved })) { [void]$items.Insert(0, [pscustomobject]@{ Id = $saved; Label = "$(Format-ReadyGalleryName $saved) (chosen)" }) }
+    if ($r -and $r.GalleryImageId -and -not @($items | Where-Object { $_.Id -ieq $r.GalleryImageId })) { [void]$items.Insert(0, [pscustomobject]@{ Id = [string]$r.GalleryImageId; Label = "$(Format-ReadyGalleryName $r.GalleryImageId) (found)" }) }
+    # The list shows the labels (strings: WPF cannot bind to the properties of a PowerShell object); $script:ReadyGalleryItems keeps the IDs in the same order
+    $keep = Get-ReadyGallerySelection
+    $script:ReadyGalleryItems = @($items)
+    $ui.CmbReadyGallery.ItemsSource = [string[]]@($items | ForEach-Object { $_.Label })
+    $pick = if ($keep -and @($items | Where-Object { $_.Id -eq $keep })) { $keep } elseif ($saved) { $saved } elseif ($r -and $r.GalleryImageId) { [string]$r.GalleryImageId } else { '' }
+    $index = 0; for ($i = 0; $i -lt $items.Count; $i++) { if ($items[$i].Id -ieq $pick) { $index = $i } }
+    if ($items.Count -gt 0) { $ui.CmbReadyGallery.SelectedIndex = $index }
+    $ui.CmbReadyGallery.IsEnabled = ($items.Count -gt 0)
+    $ui.BtnReadyGallery.IsEnabled = ($items.Count -gt 0)
+    $ui.BtnReadyGalleryClear.Visibility = ConvertTo-Vis ([bool]$saved)
+    $ui.TxtReadyGalleryState.Text = $(
+        if ($saved) { "Chosen: $(Format-ReadyGalleryName $saved) (saved in environment.json). Clear it to let AVDTune find the definition again." }
+        elseif ($r -and $r.GallerySource -eq 'Matched' -and $r.GalleryMatch) { "Found automatically: $($r.GalleryMatch.Label), version $($r.GalleryMatch.VersionName) was $($r.GalleryMatch.How)." }
+        elseif ($r -and $r.GallerySource -eq 'ImageReference') { "Found automatically: $(Format-ReadyGalleryName $r.GalleryImageId), the gallery image this VM was created from." }
+        elseif ($items.Count -gt 0) { 'Choose the definition the image will be captured into and press Use. AVDTune found these in the galleries the signed-in account can read (Windows, Generation 2).' }
+        elseif ($r -and $r.Arm.Ok) { 'No image definition found in the galleries the signed-in account can read. Run the analysis again once the gallery and the definition exist.' }
+        else { 'Sign in and run the analysis: AVDTune searches the Azure Compute Galleries for the image definition (read only).' })
 }
 function Get-ReadyToken {
     $s = $script:StartContext.Session
@@ -177,7 +215,7 @@ function New-ReadyRow($Row) {
 function Update-ReadyView {
     $r = $script:Ready
     $ui.PanelReadyRows.Children.Clear()
-    if (-not $ui.TxtReadyGallery.IsKeyboardFocused) { $ui.TxtReadyGallery.Text = (Get-ReadySettings).GalleryImageId }
+    Update-ReadyGallery
     $finish = Get-AVDTuneFinishReadiness -Root $script:StateRoot
     $pair = if ($script:ReadyJob) { @('AccentSubtle', 'Primary', 'Running') } elseif (-not $r) { @('Hover', 'MutedText', 'Not run') } else { $script:ReadyPill[[string]$r.Overall] }
     Set-Brush $ui.PillReady ([System.Windows.Controls.Border]::BackgroundProperty) $pair[0]
@@ -224,14 +262,17 @@ Add-Click $ui.BtnReadyAck {
     Show-Toast 'Open items confirmed by name.'
     Update-ReadyView
 }
-Add-Click $ui.BtnReadyGallery {
-    $text = ([string]$ui.TxtReadyGallery.Text).Trim()
-    $id = ''
-    if ($text) {
-        $id = ConvertTo-AVDTuneGalleryImageId $text
-        if (-not $id) { throw 'That is not the Resource ID of a gallery image definition (/subscriptions/.../galleries/<gallery>/images/<definition>).' }
-    }
-    Write-AVDTuneFile $script:ReadySettingsPath ([ordered]@{ GalleryImageId = $id } | ConvertTo-Json)
-    Show-Toast $(if ($id) { 'Image definition saved. Running the analysis again.' } else { 'Image definition cleared. Running the analysis again.' })
+function Save-ReadyGallery([string]$Id) {
+    $item = @($script:ReadyGalleryItems | Where-Object { $_ -and $_.Id -eq $Id } | Select-Object -First 1)
+    $text = Set-AVDTuneEnvironmentGallery -Root $script:StateRoot -DefinitionId $Id -Label $(if ($item.Count -gt 0) { [string]$item[0].Label } else { '' }) -User ([string]$env:USERNAME)
+    if (-not $Id -and (Test-Path -LiteralPath $script:ReadySettingsPath)) { Write-AVDTuneFile $script:ReadySettingsPath ([ordered]@{ GalleryImageId = '' } | ConvertTo-Json) }   # the older setting must not come back
+    if ($text) { [void](Add-AVDTuneProtocolNote -Protocol $script:Protocol -Group 'setup' -Subject 'Readiness: image definition' -Note $text); Save-Protocol }
+    Show-Toast $(if ($Id) { "Image definition $(Format-ReadyGalleryName $Id) saved. Running the analysis again." } else { 'Image definition cleared. Running the analysis again.' })
     Start-ReadyJob 'Start' ''
 }
+Add-Click $ui.BtnReadyGallery {
+    $id = Get-ReadyGallerySelection
+    if (-not $id) { throw 'Choose an image definition from the list first.' }
+    Save-ReadyGallery $id
+}
+Add-Click $ui.BtnReadyGalleryClear { Save-ReadyGallery '' }

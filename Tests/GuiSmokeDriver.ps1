@@ -534,6 +534,40 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         Update-ReadyView
         Test-Smoke 'a change after the check locks Finish again' ($ui.TxtReadyGate.Text -like 'Finish: locked*changed after the check*') $ui.TxtReadyGate.Text
         $true } }
+    @{ Name = 'readiness: image definition to choose (#16)'; Do = {
+        if ($script:OverviewJob -or $script:ReadyJob -or $script:ReadyQueued) { return $false }
+        $sub = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'
+        $avdId = "/subscriptions/$sub/resourceGroups/rg-images/providers/Microsoft.Compute/galleries/galA/images/win11-avd"
+        if (-not $script:GalStep) {
+            # no saved choice; the galleries hold two Windows Gen2 definitions, no version from this VM yet (Hydra captures later)
+            $script:GalStep = 1; $script:GalArmBefore = $script:ReadyFakeArm.Log.Count
+            Write-AVDTuneFile $script:ReadySettingsPath ([ordered]@{ GalleryImageId = '' } | ConvertTo-Json)
+            $good = @(@{ name = 'DiskControllerTypes'; value = 'SCSI, NVMe' }, @{ name = 'SecurityType'; value = 'TrustedLaunchSupported' }, @{ name = 'IsAcceleratedNetworkSupported'; value = 'True' })
+            $script:ReadyFakeArm.Store.Search = @{ Paging = $true; Subscriptions = @(@{ Id = $sub; Name = 'Example subscription' })
+                Galleries = @(@{ Sub = $sub; Rg = 'rg-images'; Name = 'galA'; Images = @(@{ Name = 'win11-avd'; Features = $good; Versions = @() }, @{ Name = 'win11-scsi'; Features = @(@{ name = 'DiskControllerTypes'; value = 'SCSI' }) }) }) }
+            Show-Page 'Overview'
+            $ui.BtnReadyRun.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
+            return $false
+        }
+        if ($script:GalStep -eq 1) {
+            $window.UpdateLayout()
+            $row = @($script:Ready.Rows | Where-Object Id -eq 'hw.gallery')[0]
+            Test-Smoke '#16: no definition known: the row is yellow (not "not checkable") and asks to choose' ($row.Status -eq 'yellow' -and $row.Reason -like '*2 Windows Generation 2 definition(s) fit*choose*') $row.Reason
+            Test-Smoke '#16: the card lists the definitions found to click, the fitting one first, no free text' (@($ui.CmbReadyGallery.ItemsSource).Count -eq 2 -and ([string]$ui.CmbReadyGallery.SelectedItem) -like 'galA / win11-avd (NVMe, Trusted Launch*' -and (Get-ReadyGallerySelection) -eq $avdId -and $ui.BtnReadyGallery.IsEnabled -and $ui.TxtReadyGalleryState.Text -like 'Choose the definition*') "$(@($ui.CmbReadyGallery.ItemsSource).Count) / $($ui.CmbReadyGallery.SelectedItem) / $($ui.TxtReadyGalleryState.Text)"
+            $ui.BoxReady.BringIntoView(); $window.UpdateLayout(); $ui.TxtReadyGalleryState.BringIntoView(); $window.UpdateLayout()
+            $ui.BoxToast.Visibility = 'Collapsed'; Save-SmokeShot '45-readiness-gallery-choose-light'
+            $script:GalStep = 2
+            $ui.BtnReadyGallery.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
+            return $false
+        }
+        $window.UpdateLayout()
+        $row = @($script:Ready.Rows | Where-Object Id -eq 'hw.gallery')[0]
+        $envG = Get-AVDTuneEnvironmentGallery (Get-AVDTuneEnvironment $script:StateRoot)
+        Test-Smoke '#16: Use saves the choice in environment.json with a change log entry and runs again: green, named as chosen' ($envG -eq $avdId -and $row.Status -eq 'green' -and $row.Reason -like '*galA/win11-avd, chosen*' -and @(Get-AVDTuneChangeLog -Root $script:StateRoot | Where-Object { $_.Text -like 'Image definition for the readiness check*' }).Count -eq 1 -and $ui.BtnReadyGalleryClear.Visibility -eq 'Visible') "$envG / $($row.Status): $($row.Reason)"
+        Test-Smoke '#16: the gallery search read only (GET)' ($script:ReadyFakeArm.Log.Count -gt $script:GalArmBefore -and -not @($script:ReadyFakeArm.Log | Select-Object -Skip $script:GalArmBefore | Where-Object { $_ -notlike "GET *" })) $null
+        $ui.BoxReady.BringIntoView(); $window.UpdateLayout(); $ui.TxtReadyGalleryState.BringIntoView(); $window.UpdateLayout()
+        $ui.BoxToast.Visibility = 'Collapsed'; Save-SmokeShot '46-readiness-gallery-chosen-light'
+        $true } }
     @{ Name = 'start: sign-out and dark'; Do = {
         Open-Stage 'SignIn'; $window.UpdateLayout()
         $ui.BtnStageAction2.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
