@@ -308,6 +308,14 @@ Repeatability: warm-up run discarded, then 3 runs, median; the spread (coefficie
 | Remote display (10%) | software H.264 encode of a fixed desktop and video clip (frames per second: the CPU cost of the RDP stream per session on VMs without GPU), software rendering (WARP) of a fixed 2D/3D scene |
 | Network (5%) | DNS resolution time, TCP connect latency (p50/p95) to the AVD gateway and broker endpoints and to the Azure region, jitter, download throughput of a fixed Microsoft file with known size (several streams) |
 
+User decisions 2026-11-15: weights as above; the temporary local test user is allowed (random password in memory only, user and profile removed, the seal healthcheck verifies that nothing of it is left); reference = a typical current AVD host (a common 8-vCPU size with Premium SSD and the plain Marketplace image Windows 11 multi-session + M365 without optimization; FSLogix reference: a Premium share with private endpoint; the exact size is chosen and named when the reference is measured).
+
+**User activity simulation ("Kapazitaet", user request 2026-11-15)**: an additional, optional run (about 30 min, not part of the three scores, not required for the seal) that simulates knowledge workers:
+- Workload of one simulated user, scripted with UI Automation in the test user's session: write and format text in Word, recalculate and chart in Excel, open, search and reply to mails in Outlook (offline, local test mailbox file), browse local test pages and a video in Edge, open, scroll and zoom a PDF, copy and zip files, short idle times like a real user. Every action has a measured response time (from input to the window being ready).
+- Load: the same workload as background workers (CPU, memory, disk and file patterns of the actions, without UI) for 1, 2, 4, 8 ... simulated users, raised step by step while the interactive user keeps measuring.
+- Result: response time per action and in total per load level (median and p95), and the **number of users until the response time is 50% above the 1-user value** (similar to the VSImax idea of Login VSI, own method, named as an estimate). Plus CPU, memory, disk queue per level. This answers "how many users fit on this VM size with this image" and shows when an image change costs capacity.
+- Stored and reported like the benchmark (change log, SharePoint), compared with the last run of the same VM size.
+
 Shown as information without score: logon times of real user logons on session hosts (from the status script, section 5a), number of Run keys, Active Setup entries, scheduled tasks at logon, services set to automatic (they explain a worse Session or Applications category), and an estimate "users per host" from CPU and memory per session measured during the application test.
 
 **FSLogix-Score** (share of the environment, the test user of section 5a)
