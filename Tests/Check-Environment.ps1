@@ -366,6 +366,22 @@ try {
     [void](Invoke-Full $e3 $good (New-Root))
     $vr = Invoke-AVDTuneEnvVerify -Machine (New-AVDTuneFakeMachine) -F (New-AVDTuneFakeFSLogix) -Spec $good -Arm $e3 -ArmToken $tok
     Test-Check 'verify: the storage check runs for the new share and finds the account that was created' ((@($vr.Rows | Where-Object Id -eq 'st.account').Count -eq 1 -and $vr.Account -eq 'stprofilesexample') -and ($vr | ConvertTo-Json -Depth 6) -notmatch 'SECRET') ((@($vr.Rows | Select-Object -First 3 | ForEach-Object { "$($_.Id)=$($_.Status) $($_.Reason)" })) -join '|')
+
+    # ---------------------------------------------------------------- the page and its hooks (no window is opened here: the GUI smoke test is the Smoke-Tester's)
+    foreach ($f in 'AVDTune-Environment.ps1', 'Start-AVDTune.ps1', 'Modules\AVDTune.Environment.psm1') {
+        $errs = $null; [void][System.Management.Automation.Language.Parser]::ParseFile((Join-Path $repo $f), [ref]$null, [ref]$errs)
+        Test-Check "syntax: $f" (@($errs).Count -eq 0) (@($errs | ForEach-Object Message) -join '|')
+    }
+    Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase
+    [xml]$px = Get-Content (Join-Path $repo 'UI\AVDTune.Environment.xaml') -Raw -Encoding UTF8
+    $pageRoot = [Windows.Markup.XamlReader]::Load([System.Xml.XmlNodeReader]::new($px))
+    $names = @($px.SelectNodes("//*[@*[local-name()='Name']]") | ForEach-Object { $_.Attributes | Where-Object LocalName -eq 'Name' | Select-Object -ExpandProperty Value })
+    $pageScript = [IO.File]::ReadAllText((Join-Path $repo 'AVDTune-Environment.ps1'))
+    $used = @([regex]::Matches($pageScript, '\$ui\.((?:Txt|Btn|Panel|Page)Env\w*)') | ForEach-Object { $_.Groups[1].Value } | Select-Object -Unique)
+    Test-Check 'the page XAML loads and every control the script uses is in it' ($pageRoot -is [System.Windows.Controls.Grid] -and $pageRoot.Visibility -eq 'Collapsed' -and @($used | Where-Object { $_ -notin $names }).Count -eq 0) ((@($used | Where-Object { $_ -notin $names })) -join ',')
+    $main = [IO.File]::ReadAllText((Join-Path $repo 'Start-AVDTune.ps1'))
+    Test-Check 'the hooks in Start-AVDTune.ps1: module, navigation entry, page switch, view and the page file' ($main -match "'Storage', 'Environment'\) \{ Import" -and $main -match "Key = 'Environment'" -and $main -match "Update-EnvView" -and $main -match "AVDTune-Environment\.ps1") $null
+    Test-Check 'the page changes nothing without the plan hash: apply and undo pass the hash of the plan that was shown' ($pageScript -match 'ConfirmedHash \$p\.Hash' -and ([regex]::Matches($pageScript, 'ConfirmedHash')).Count -eq 2 -and $pageScript -match "Confirm-Action") $null
 }
 finally {
     Close-AVDTuneWriteGate

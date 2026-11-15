@@ -1,0 +1,47 @@
+<Grid xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+      xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+      x:Name="PageEnvironment" Visibility="Collapsed">
+    <!-- The environment page (docs\environment-wizard.md): loaded by AVDTune-Environment.ps1 and added next to the other pages of the window; styles and brushes come from the window resources
+         (DynamicResource, so the page follows a theme swap). The form fields and the plan rows are made in code. -->
+    <ScrollViewer Style="{DynamicResource PageScroll}">
+        <StackPanel Margin="40,32,40,28" MaxWidth="1000" HorizontalAlignment="Left">
+            <TextBlock Text="Environment" Style="{DynamicResource PageTitle}"/>
+            <TextBlock x:Name="TxtEnvSubtitle" Style="{DynamicResource Subtitle}" TextWrapping="Wrap" Text="Plans and creates the Azure resources for FSLogix profiles on Azure Files: storage account, share, private endpoint, identity and share permissions. Every change is shown as a plan first."/>
+            <TextBlock x:Name="TxtEnvState" Style="{DynamicResource Hint}" Margin="0,12,0,0" TextWrapping="Wrap"/>
+
+            <Border Style="{DynamicResource CardBox}" Margin="0,16,0,0" Background="{DynamicResource Card}" Padding="20,16">
+                <StackPanel>
+                    <TextBlock Text="What you want" Style="{DynamicResource CardTitle}"/>
+                    <TextBlock x:Name="TxtEnvModel" Style="{DynamicResource Hint}" Margin="0,4,0,0" TextWrapping="Wrap"/>
+                    <StackPanel x:Name="PanelEnvFields" Margin="0,10,0,0"/>
+                    <StackPanel Orientation="Horizontal" Margin="0,12,0,0">
+                        <Button x:Name="BtnEnvPlan" Style="{DynamicResource PrimaryButton}" Content="Make the plan" Margin="0,0,8,0" AutomationProperties.Name="Read Azure and show what would be created"/>
+                        <Button x:Name="BtnEnvApply" Content="Create the resources" Margin="0,0,8,0" IsEnabled="False" AutomationProperties.Name="Create the resources of the plan after a confirmation"/>
+                        <Button x:Name="BtnEnvUndoPlan" Content="Show what can be taken back" Margin="0,0,8,0" AutomationProperties.Name="Show what AVDTune created and may delete"/>
+                        <Button x:Name="BtnEnvUndo" Content="Take it back" IsEnabled="False" AutomationProperties.Name="Delete what AVDTune created, after a confirmation"/>
+                    </StackPanel>
+                    <TextBlock x:Name="TxtEnvResult" Style="{DynamicResource Hint}" Margin="0,10,0,0" TextWrapping="Wrap"/>
+                </StackPanel>
+            </Border>
+
+            <Border Style="{DynamicResource CardBox}" Margin="0,16,0,0" Background="{DynamicResource Card}" Padding="20,16">
+                <StackPanel>
+                    <TextBlock x:Name="TxtEnvPlanTitle" Text="Plan" Style="{DynamicResource CardTitle}"/>
+                    <StackPanel x:Name="PanelEnvPlan" Margin="0,8,0,0"/>
+                </StackPanel>
+            </Border>
+
+            <Border Style="{DynamicResource CardBox}" Margin="0,16,0,0" Background="{DynamicResource Card}" Padding="20,16">
+                <StackPanel>
+                    <TextBlock Text="FSLogix on this master" Style="{DynamicResource CardTitle}"/>
+                    <TextBlock Style="{DynamicResource Hint}" Margin="0,4,0,0" TextWrapping="Wrap" Text="After the share exists: sets Enabled and VHDLocations (and the cloud Kerberos ticket value for Microsoft Entra Kerberos) through the FSLogix settings steps, with the change log and undo of the FSLogix page."/>
+                    <StackPanel Orientation="Horizontal" Margin="0,10,0,0">
+                        <Button x:Name="BtnEnvMasterTest" Content="Show what would change" Margin="0,0,8,0" AutomationProperties.Name="Show the FSLogix settings that would be written"/>
+                        <Button x:Name="BtnEnvMasterApply" Content="Write the settings" AutomationProperties.Name="Write the FSLogix settings to this master"/>
+                    </StackPanel>
+                    <TextBlock x:Name="TxtEnvMaster" Style="{DynamicResource Hint}" Margin="0,10,0,0" TextWrapping="Wrap"/>
+                </StackPanel>
+            </Border>
+        </StackPanel>
+    </ScrollViewer>
+</Grid>
