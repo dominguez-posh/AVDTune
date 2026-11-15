@@ -166,6 +166,28 @@ One switch with a clear state on the Overview. "Blocked" (normal state, also in 
 - Edge/Chrome: `UpdateDefault=0`, `AutoUpdateCheckPeriodMinutes=0`, update tasks off. Teams: auto update off. Adobe: `bUpdater=0`, update service off. Store: `AutoDownload=2`. winget/choco: no user access to the scheduled updates.
 "Maintenance": AVDTune lifts the blocks for its own run, updates, and sets them back in a `finally` block; the state is written before and after so a crash is detected and repaired at the next start.
 
+## 3e. Custom software: install wizard with recording (added 2026-11-15)
+
+Customer software (DMS, accounting, ERP clients, vendor installers with dialogs, licence servers, ini files) is often installed by hand, sometimes together with the vendor. A sandbox test is not possible on the master (an Azure VM, the software needs the real network, servers and licences). So AVDTune records the real installation on the master and makes it reproducible.
+
+**Wizard "Neue Software"**
+1. Details: name, vendor, version, contact or ticket of the vendor, installer source (file from a share or upload; SHA256 and signature are recorded), dependencies (runtimes, .NET, VC++), licence notes (text; no licence keys, no passwords: the wizard says so and the secret check of the protocol cleans the text).
+2. Start recording. A red frame and a small toolbar (pause, note, mark step, stop) show that it runs. Based on the user's own screen tools (`dev-team-framework/tools/screen`: live recording with toolbar, step images with arrow and text), adapted for this.
+3. During the recording AVDTune collects:
+   - **Steps**: a screenshot at every mouse click and at Enter, with the window title, the clicked element (UI Automation name, e.g. button "Weiter") and a red mark where it was clicked; the admin can add a note or mark a step as important. Key presses are never logged as text (no keylogger); password fields are never captured (UI Automation `IsPassword`), the window is blurred instead.
+   - **Processes**: every process started during the recording with its command line (secrets removed), so silent install switches and the real installer chain become visible.
+   - **System changes**: a before/after comparison of installed programs (uninstall keys with version and product code), files in Program Files, ProgramData, the public desktop and the Start menu, `HKLM\SOFTWARE` (and WOW6432Node), services, scheduled tasks, drivers, firewall rules, ODBC data sources, environment variables, hosts file, fonts, shortcuts, printers.
+4. Stop, then review: timeline of the steps (captions editable, steps deletable, areas blurrable before anything is stored), the list of changes, the processes. AVDTune proposes a **detection rule** (uninstall key and version or a file version) and, if the processes show one, a **silent install command**.
+5. Save: documentation (HTML and PDF, step by step with images), change list, recipe (machine-readable: source, commands, detection, follow-up steps such as ini values, shortcuts, App Masking). The recipe uses the format of PackTune's custom applications where it fits, so a recorded app can later become a PackTune package. Change log entry of the image version.
+
+**List of custom software** (page Software, tab "Eigene Software")
+- Every recorded app with the installed version (by its detection rule), the last documented version, the date and admin of the last installation or update, and a link to every documentation (all versions, newest first).
+- "Update erfassen": the same wizard in update mode; the documentation of the last installation or update is shown beside it while recording, step by step, so the admin can follow it. The new documentation is stored as a new version; the difference to the last one (steps, changes) is shown.
+- "Neu installieren": with a silent recipe AVDTune installs on its own; otherwise it shows the recorded steps as a checklist on top (step image, text, done), and records again.
+- Optional watched source: a share folder or URL of the vendor; when a newer installer appears there (file version or name), the list shows "neue Version verfuegbar". Also part of the Updates page.
+
+**SharePoint** (site of the environment, section 7): one folder per app and version with documentation, step images, change list, recipe and (optional) the installer files with SHA256; a list "AVDTune Software" (app, vendor, version, kind install/update, image version, date, admin, links to documentation and folder, detection rule). Everything is written there after saving; when SharePoint is not reachable it waits in the local queue. The local copy under `C:\ProgramData\AVDTune\software\` stays until it is confirmed in SharePoint and is removed before seal (step images may show internal data, they do not belong in the image).
+
 ## 5. Watermark
 
 Today: a setup script writes a WinForms overlay (base64 in a VBS launcher) and a scheduled task "at logon" for BUILTIN\Users; the overlay shows "PILOTUMGEBUNG" only when the computer name matches a pattern (pilot hosts). The trigger by machine name stays (user decision). Findings in the current script:
@@ -278,7 +300,7 @@ Elevated tool on a machine that becomes the image of all users: runs from a prot
 | 1 | Shell in PackTune look, elevation, engine, state, protocol and change log, Overview (incl. source image); first-run question of the identity model (stored, used by the start sequence); start sequence: M365/Azure sign-in, DC connection and discovery when a DC is used, snapshot gate with name confirmation |
 | 2 | Updates page (Windows, Office, Edge/Teams/OneDrive/FSLogix/Defender, software) and update block with maintenance mode |
 | 3 | Environment wizard (identity model), FSLogix setup and function test, automatic storage setup (Premium account, share, private endpoint, identity, permissions), storage check; App Masking with groups in AD or Entra; SharePoint change log list; environment document |
-| 4 | Software from the library and catalog, web apps (PWA) with icon (spike first), printer drivers from a print server (also in maintenance), shortcuts, fonts, own steps |
+| 4 | Software from the library and catalog, custom software wizard with recording, list and documentation in SharePoint, web apps (PWA) with icon (spike first), printer drivers from a print server (also in maintenance), shortcuts, fonts, own steps |
 | 5 | Benchmark: design for approval, then new engine incl. GPU, comparison per version, AVD-Benchmark repo stand-alone |
 | 6 | Setup: Office, language, VDI components, optimizations, user experience, watermark |
 | 7 | Cleanup & seal (last button, checklist), export, docs and demo |
