@@ -27,7 +27,7 @@ Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, Sys
 $script:AppRoot = $PSScriptRoot
 $script:ToolVersion = (Get-Content -LiteralPath (Join-Path $PSScriptRoot 'VERSION') -Raw -Encoding UTF8).Trim()   # the file VERSION is also the version of the release
 Import-Module (Join-Path $PSScriptRoot 'Modules\AVDTune.psm1') -Force
-foreach ($part in 'Trust', 'Session', 'Snapshot', 'Directory', 'Start', 'UpdateBlock', 'Updates', 'Readiness', 'Watermark', 'Benchmark', 'Shortcut', 'FSLogix', 'Storage') { Import-Module (Join-Path $PSScriptRoot "Modules\AVDTune.$part.psm1") -Force }
+foreach ($part in 'Trust', 'Session', 'Snapshot', 'Directory', 'Start', 'UpdateBlock', 'Updates', 'Readiness', 'Watermark', 'Benchmark', 'Shortcut', 'FSLogix', 'Storage', 'Finish') { Import-Module (Join-Path $PSScriptRoot "Modules\AVDTune.$part.psm1") -Force }
 Import-Module (Join-Path $PSScriptRoot 'Modules\AVDTune.Release.psm1') -Force
 . (Join-Path $PSScriptRoot 'AVDTune-Theme.ps1')
 
@@ -199,7 +199,7 @@ foreach ($page in $script:PageTable) {
 
 function Show-Page([string]$Key) {
     $script:CurrentPage = $Key
-    $isPlaceholder = $Key -notin 'Overview', 'Protocol', 'Updates', 'UpdateBlock', 'UserExperience', 'Benchmark', 'FSLogix'
+    $isPlaceholder = $Key -notin 'Overview', 'Protocol', 'Updates', 'UpdateBlock', 'UserExperience', 'Benchmark', 'FSLogix', 'Seal'
     $ui.PageOverview.Visibility = ConvertTo-Vis ($Key -eq 'Overview')
     $ui.PageProtocol.Visibility = ConvertTo-Vis ($Key -eq 'Protocol')
     $ui.PageUpdates.Visibility = ConvertTo-Vis ($Key -eq 'Updates')
@@ -207,6 +207,7 @@ function Show-Page([string]$Key) {
     $ui.PageUserExperience.Visibility = ConvertTo-Vis ($Key -eq 'UserExperience')
     $ui.PageBenchmark.Visibility = ConvertTo-Vis ($Key -eq 'Benchmark')
     $ui.PageFSLogix.Visibility = ConvertTo-Vis ($Key -eq 'FSLogix')
+    $ui.PageSeal.Visibility = ConvertTo-Vis ($Key -eq 'Seal')
     $ui.PagePlaceholder.Visibility = ConvertTo-Vis $isPlaceholder
     $ui["Nav$Key"].IsChecked = $true
     Update-ReadOnlyBanner
@@ -223,6 +224,7 @@ function Show-Page([string]$Key) {
     elseif ($Key -eq 'UserExperience') { Update-WatermarkView }
     elseif ($Key -eq 'Benchmark') { Update-BenchmarkView }
     elseif ($Key -eq 'FSLogix') { Update-FslView }
+    elseif ($Key -eq 'Seal') { Update-SealView }
 }
 
 # ---------------------------------------------------------------- Overview
@@ -443,6 +445,7 @@ $script:ReadyFakeArm = $(if ($script:TestMode) { $script:Services.Arm } else { $
 . (Join-Path $PSScriptRoot 'AVDTune-Release.ps1')
 . (Join-Path $PSScriptRoot 'AVDTune-Benchmark.ps1')
 . (Join-Path $PSScriptRoot 'AVDTune-FSLogix.ps1')
+. (Join-Path $PSScriptRoot 'AVDTune-Seal.ps1')
 
 # ---------------------------------------------------------------- theme switch
 function Update-ThemeButton { $ui.BtnTheme.Content = [string][char]$(if ($script:Settings.Theme -eq 'Dark') { 0xE706 } else { 0xE708 }) }
@@ -473,10 +476,10 @@ Add-Click $ui.BtnClose { $window.Close() }
 $script:CloseWhenDone = $false
 $window.Add_Closing({
     param($src, $e)
-    if (-not $script:UpdJob -and -not $script:BenchJob) { return }
+    if (-not $script:UpdJob -and -not $script:BenchJob -and -not $script:SealJob) { return }
     $e.Cancel = $true
     $script:CloseWhenDone = $true
-    $what = if ($script:BenchJob) { 'The benchmark is still running' } elseif ($script:UpdJob.Kind -eq 'Scan') { 'The update search is still running' } else { 'An update operation is still running' }
+    $what = if ($script:SealJob) { 'The finish is still running' } elseif ($script:BenchJob) { 'The benchmark is still running' } elseif ($script:UpdJob.Kind -eq 'Scan') { 'The update search is still running' } else { 'An update operation is still running' }
     Show-Toast "$what. AVDTune closes by itself when it is done (what was paused or lifted is put back first)."
 })
 
@@ -506,7 +509,7 @@ function Get-ShutdownBlockReason {
     if ($h -ne [IntPtr]::Zero -and [AVDTune.ShutdownBlock]::ShutdownBlockReasonQuery($h, $sb, [ref]$size)) { $sb.ToString() } else { '' }
 }
 function Invoke-SessionEnding($EventArgs) {
-    if (-not $script:UpdJob -and -not $script:BenchJob) { return }
+    if (-not $script:UpdJob -and -not $script:BenchJob -and -not $script:SealJob) { return }
     $EventArgs.Cancel = $true
     Show-Toast 'Log off or shut down was held back: an operation (update or benchmark) is still running. Try again when it is done.'
 }
@@ -542,6 +545,7 @@ Start-OverviewRefresh
 Update-ReleaseView; Start-RelJob 'Start'   # integrity of the tool against its release and the update check, at every start (AVDTune-Release.ps1)
 Start-ReadyJob 'Start' ''   # the readiness analysis runs at every start (read only; Azure checks need the sign-in and run again after it)
 # A maintenance mode that never ended (closed or crashed in the middle) is reported at once; the repair is on the Update block page
+if (Get-AVDTuneFinishCrash -Root $script:StateRoot) { Show-Toast 'The last finish did not end properly: Windows Update or BITS may still be stopped. Open Cleanup and finish and repair it.' }
 if (Get-AVDTuneMaintenanceCrash -Root $script:StateRoot) { Show-Toast 'The last maintenance mode did not end properly: the update block may be lifted. Open Update block and repair it.' }
 # Test hook: AVDTUNE_SMOKE names a script that drives the window off-screen and renders every page (only in test mode).
 if ($script:SmokeOn) { . $script:TestInfo.SmokeScript }
