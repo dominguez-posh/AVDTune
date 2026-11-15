@@ -436,7 +436,12 @@ $window.Add_Closed({
 # ---------------------------------------------------------------- start
 Set-ProtocolImage
 $stateRepair = Get-AVDTuneStateSecurityReport
-if ($stateRepair) { Add-StartProtocol 'State folder security repaired' ("$(@($stateRepair.Problems).Count) problem(s) of owner, rights or links in $($script:StateRoot) found and repaired (logs\security.log): " + (@($stateRepair.Problems | Select-Object -First 3 | ForEach-Object { $_.Problem }) -join '; ')) }
+if ($stateRepair -and @($stateRepair.Quarantined).Count -gt 0) {
+    # N2: a prepared state folder was set aside unread; the first run starts again. The administrator is told in the protocol and in a dialog.
+    $asideText = "The state folder $($script:StateRoot) had been prepared by someone else ($(@($stateRepair.Problems | Select-Object -First 3 | ForEach-Object { $_.Problem }) -join '; ')). It was set aside unread as $(@($stateRepair.Quarantined) -join ', ') and a new one was created: the first-run questions, the domain controller pin and the sign-in start again. Check who prepared it, then delete the set-aside folder."
+    Add-StartProtocol 'Warning: manipulated state folder set aside' $asideText 'failed'
+    if (-not $env:AVDTUNE_SMOKE) { [void][System.Windows.MessageBox]::Show($asideText, 'AVDTune', 'OK', 'Warning') } else { $script:StateAsideNotice = $asideText }
+}
 Update-Chip
 Show-Page 'Overview'
 # First run: the questions open by themselves

@@ -148,9 +148,12 @@ function Invoke-AVDTuneMachine {
 #region state
 
 function New-AVDTuneStateSecurity {
-    # Administrators and SYSTEM only, no inheritance from ProgramData (which lets every user read)
+    # Administrators and SYSTEM only, no inheritance from ProgramData (which lets every user read). -WithOwner: owner Administrators too
+    # (for creating the folder in one step; needs an elevated token).
+    param([switch]$WithOwner)
     $security = New-Object System.Security.AccessControl.DirectorySecurity
     $security.SetAccessRuleProtection($true, $false)
+    if ($WithOwner) { $security.SetOwner((New-Object System.Security.Principal.SecurityIdentifier 'S-1-5-32-544')) }
     foreach ($sid in 'S-1-5-32-544', 'S-1-5-18') {
         $account = New-Object System.Security.Principal.SecurityIdentifier $sid
         $rule = New-Object System.Security.AccessControl.FileSystemAccessRule($account, 'FullControl', 'ContainerInherit, ObjectInherit', 'None', 'Allow')
@@ -200,6 +203,9 @@ function Get-AVDTuneStateSecurityProblems {
     #>
     param([Parameter(Mandatory)][string]$Root, [switch]$Final, [scriptblock]$ReadAcl = { param($Path, $IsDirectory) Read-AVDTuneAclInfo -Path $Path -IsDirectory $IsDirectory })
     $problems = New-Object System.Collections.ArrayList
+    # Owners that are fine: Administrators, SYSTEM, and the elevated administrator running AVDTune (files he creates may carry his own SID)
+    $owners = @($script:TrustedOwnerSids)
+    if (Test-AVDTuneElevated) { $owners += [Security.Principal.WindowsIdentity]::GetCurrent().User.Value }
     $rootInfo = New-Object IO.DirectoryInfo $Root
     if (-not $rootInfo.Exists) { return @() }
     $queue = New-Object System.Collections.Queue
@@ -215,7 +221,7 @@ function Get-AVDTuneStateSecurityProblems {
         try { $acl = & $ReadAcl $item.FullName $isDir }
         catch { [void]$problems.Add([pscustomobject]@{ Path = $item.FullName; Problem = "ACL cannot be read: $($_.Exception.Message)" }); $acl = $null }
         if ($acl) {
-            if ($acl.Owner -notin $script:TrustedOwnerSids) { [void]$problems.Add([pscustomobject]@{ Path = $item.FullName; Problem = "owner $($acl.Owner)" }) }
+            if ($acl.Owner -notin $owners) { [void]$problems.Add([pscustomobject]@{ Path = $item.FullName; Problem = "owner $($acl.Owner)" }) }
             # Explicit rules anywhere; on the root in the final check also the inherited ones (the root must not inherit from ProgramData)
             $foreign = @($acl.Rules | Where-Object { $_.Sid -notin $script:TrustedOwnerSids -and (-not $_.Inherited -or ($Final -and $isRoot)) } | ForEach-Object { $_.Sid } | Sort-Object -Unique)
             if ($foreign.Count -gt 0) { [void]$problems.Add([pscustomobject]@{ Path = $item.FullName; Problem = "access for $($foreign -join ', ')" }) }
@@ -229,79 +235,105 @@ function Get-AVDTuneStateSecurityProblems {
     @($problems)
 }
 
-function Repair-AVDTuneStateSecurity {
+function Move-AVDTuneStateToQuarantine {
     <#
-        The real repair (needs elevation): links are removed as links, ownership of everything goes to Administrators (icacls /setowner,
-        which uses the backup and restore privileges of an elevated administrator), every ACL below is reset to inherit only, and the root
-        gets the protected Administrators/SYSTEM ACL. SIDs, not names: works in every language.
+        The real handling of a state folder that someone else prepared. Nothing in that tree is repaired (an elevated recursive icacls follows
+        junctions, also with /L, and the tree can change while it runs): a link in place of the root is removed as a link; otherwise the owner
+        of the root alone is set to Administrators (no /T) and the root is renamed to AVDTune.untrusted-<yyyyMMdd-HHmmss> next to it. Its
+        content is never read again. Returns the new path of the set-aside folder ('' when a link was removed).
     #>
     param([Parameter(Mandatory)][string]$Root, $Problems)
-    foreach ($p in @($Problems | Where-Object { $_.Problem -like 'link*' })) {
-        $info = Get-Item -LiteralPath $p.Path -Force -ErrorAction SilentlyContinue
-        if ($info -is [IO.DirectoryInfo]) { $info.Delete() } elseif ($info) { $info.Delete() }   # Delete() of a link removes the link, not its target
-    }
+    $dir = New-Object IO.DirectoryInfo $Root
+    if (-not $dir.Exists) { return '' }
+    if (($dir.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { $dir.Delete(); return '' }   # removes the link, not its target
     $icacls = Join-Path ([Environment]::SystemDirectory) 'icacls.exe'
-    $out1 = & $icacls $Root '/setowner' '*S-1-5-32-544' '/T' '/C' '/L' '/Q' 2>&1
-    $code1 = $LASTEXITCODE
-    $out2 = & $icacls $Root '/reset' '/T' '/C' '/L' '/Q' 2>&1
-    $code2 = $LASTEXITCODE
-    if ($code1 -ne 0 -or $code2 -ne 0) { throw "icacls failed (owner $code1, reset $code2): $((@($out1) + @($out2) | Out-String).Trim())" }
-    Set-Acl -LiteralPath $Root -AclObject (New-AVDTuneStateSecurity)
+    $ErrorActionPreference = 'Continue'   # icacls writes its refusal to stderr; that must not stop the quarantine
+    try { [void](& $icacls $Root '/setowner' '*S-1-5-32-544' '/C' '/L' '/Q' 2>&1) } catch { }   # root only; a failure is fine, the rename below decides
+    $parent = Split-Path $Root -Parent
+    $stamp = (Get-Date).ToString('yyyyMMdd-HHmmss', [Globalization.CultureInfo]::InvariantCulture)
+    $target = Join-Path $parent "$(Split-Path $Root -Leaf).untrusted-$stamp"
+    for ($n = 2; Test-Path -LiteralPath $target; $n++) { $target = Join-Path $parent "$(Split-Path $Root -Leaf).untrusted-$stamp-$n" }
+    [IO.Directory]::Move($Root, $target)   # a rename on the same volume: nothing inside is opened or followed
+    $target
+}
+
+function New-AVDTuneProtectedFolder {
+    # The real creation of the state folder: created in one step with its protected ACL and owner Administrators (no moment without them)
+    param([Parameter(Mandatory)][string]$Root)
+    (New-Object IO.DirectoryInfo $Root).Create((New-AVDTuneStateSecurity -WithOwner))
 }
 
 function Assert-AVDTuneStateSecurity {
     <#
-        Before AVDTune trusts its state folder (and loads anything from it): when the folder has foreign owners, foreign explicit rules or
-        links, they are repaired (Repair-AVDTuneStateSecurity) and the repair is written to logs\security.log and kept for the protocol
-        (Get-AVDTuneStateSecurityReport). When problems are left after the repair, it throws: AVDTune must not start.
+        Makes sure the state folder is AVDTune's own before anything in it is trusted or loaded (finding 2 b, N1, N2):
+          * missing: created in one step with the protected ACL;
+          * any problem (foreign owner, foreign explicit rule, link, root not protected; Get-AVDTuneStateSecurityProblems -Final): the whole
+            folder is set aside (Move-AVDTuneStateToQuarantine) and a new one is created; nothing of the old content is taken over, so the
+            first run starts again. Up to 3 tries (someone may recreate the folder or a link between rename and create), then it throws:
+            AVDTune must not start.
+        A quarantine goes into logs\security.log of the new folder and is kept for the protocol and the warning (Get-AVDTuneStateSecurityReport).
     #>
     [CmdletBinding()]
-    param([Parameter(Mandatory)][string]$Root, [switch]$Final,
+    param([Parameter(Mandatory)][string]$Root,
         [scriptblock]$ReadAcl = { param($Path, $IsDirectory) Read-AVDTuneAclInfo -Path $Path -IsDirectory $IsDirectory },
-        [scriptblock]$Repair = { param($Root, $Problems) Repair-AVDTuneStateSecurity -Root $Root -Problems $Problems })
-    $problems = @(Get-AVDTuneStateSecurityProblems -Root $Root -Final:$Final -ReadAcl $ReadAcl)
-    if ($problems.Count -eq 0) { return [pscustomobject]@{ Repaired = $false; Problems = @() } }
-    $text = @($problems | Select-Object -First 20 | ForEach-Object { "$($_.Path): $($_.Problem)" }) -join '; '
-    $repairError = ''
-    try { & $Repair $Root $problems } catch { $repairError = $_.Exception.Message }
-    $left = @(Get-AVDTuneStateSecurityProblems -Root $Root -Final:$Final -ReadAcl $ReadAcl)
-    $report = [pscustomobject]@{ Repaired = ($left.Count -eq 0); Problems = @($problems); Left = @($left); At = (Get-Date).ToString('o'); User = "$env:USERDOMAIN\$env:USERNAME"; Error = $repairError }
+        [scriptblock]$Quarantine = { param($Root, $Problems) Move-AVDTuneStateToQuarantine -Root $Root -Problems $Problems },
+        [scriptblock]$CreateRoot = { param($Root) New-AVDTuneProtectedFolder -Root $Root })
+    $found = New-Object System.Collections.ArrayList
+    $moved = New-Object System.Collections.ArrayList
+    $errors = New-Object System.Collections.ArrayList
+    $left = @()
+    for ($try = 0; $try -lt 3; $try++) {
+        if (-not (Test-Path -LiteralPath $Root)) {
+            try { & $CreateRoot $Root } catch { [void]$errors.Add("create: $($_.Exception.Message)") }
+        }
+        $left = @(Get-AVDTuneStateSecurityProblems -Root $Root -Final -ReadAcl $ReadAcl)
+        if (-not (Test-Path -LiteralPath $Root)) { $left = @([pscustomobject]@{ Path = $Root; Problem = 'could not be created' }) }
+        if ($left.Count -eq 0) { break }
+        foreach ($p in $left) { [void]$found.Add($p) }
+        if (-not (Test-Path -LiteralPath $Root)) { continue }
+        try { $q = & $Quarantine $Root $left; [void]$moved.Add($(if ($q) { [string]$q } else { 'link removed' })) } catch { [void]$errors.Add("set aside: $($_.Exception.Message)") }
+    }
+    if ($found.Count -eq 0) { return [pscustomobject]@{ Quarantined = @(); Problems = @() } }
+    $ok = ($left.Count -eq 0)
+    $report = [pscustomobject]@{ Repaired = $ok; Quarantined = @($moved); Problems = @($found); Left = @($left); At = (Get-Date).ToString('o'); User = "$env:USERDOMAIN\$env:USERNAME"; Error = ($errors -join '; ') }
     $script:StateSecurityReport = $report
-    $line = '{0} {1} state folder security: {2} problem(s) found ({3}); {4}' -f $report.At, $report.User, $problems.Count, $text, $(if ($left.Count -eq 0) { 'owner taken, ACLs reset' } else { "NOT repaired, $($left.Count) left: $repairError" })
-    try {
-        $logs = Join-Path $Root 'logs'
-        if (-not (Test-Path -LiteralPath $logs)) { New-Item -ItemType Directory -Path $logs -Force | Out-Null }
-        [IO.File]::AppendAllText((Join-Path $logs 'security.log'), $line + "`r`n", (New-Object Text.UTF8Encoding $false))
+    $text = @($found | Select-Object -First 20 | ForEach-Object { "$($_.Path): $($_.Problem)" }) -join '; '
+    $line = '{0} {1} state folder prepared by someone else: {2} problem(s) ({3}); {4}' -f $report.At, $report.User, $found.Count, $text, $(if ($ok) { "set aside as $($moved -join ', '), new folder created, nothing taken over" } else { "NOT solved: $($report.Error)" })
+    if ($ok) {
+        try {
+            $logs = Join-Path $Root 'logs'
+            if (-not (Test-Path -LiteralPath $logs)) { New-Item -ItemType Directory -Path $logs -Force | Out-Null }
+            [IO.File]::AppendAllText((Join-Path $logs 'security.log'), $line + "`r`n", (New-Object Text.UTF8Encoding $false))
+        }
+        catch { }
+        return $report
     }
-    catch { }
-    if ($left.Count -gt 0) {
-        throw "The state folder $Root was prepared by someone else and cannot be repaired ($(@($left | Select-Object -First 5 | ForEach-Object { "$($_.Path): $($_.Problem)" }) -join '; ')). AVDTune does not start. Delete the folder as administrator and start again."
-    }
-    $report
+    throw "The state folder $Root was prepared by someone else and could not be set aside safely ($(@($left | Select-Object -First 5 | ForEach-Object { "$($_.Path): $($_.Problem)" }) -join '; ')$(if ($report.Error) { "; $($report.Error)" })). AVDTune does not start. Check the folder as administrator."
 }
 
 function Get-AVDTuneStateSecurityReport { $script:StateSecurityReport }
 
 function Initialize-AVDTuneState {
     <#
-        Creates the folders and the empty state.json / changelog.json when they are not there. -Protect sets the ACL (Administrators/SYSTEM);
-        it is the default for the real folder and off for a test root. With protection the folder is checked first (owner, explicit rules,
-        links: Assert-AVDTuneStateSecurity repairs or throws), then the ACL is set and checked again (throws when it does not hold).
+        Creates the folders and the empty state.json / changelog.json when they are not there. With protection (the real folder, or -Protect)
+        the folder is AVDTune's own first (Assert-AVDTuneStateSecurity: created with its ACL in one step, a prepared folder set aside), and
+        only then anything in it is created or read. Test roots without protection are plain folders.
     #>
     [CmdletBinding()]
-    param([string]$Root = (Get-AVDTuneRoot), [switch]$Protect, [scriptblock]$ReadAcl, [scriptblock]$Repair)
+    param([string]$Root = (Get-AVDTuneRoot), [switch]$Protect, [scriptblock]$ReadAcl, [scriptblock]$Quarantine, [scriptblock]$CreateRoot)
     $protected = $Protect -or (Test-AVDTuneDefaultRoot $Root)
-    $assert = @{ Root = $Root }
-    if ($ReadAcl) { $assert.ReadAcl = $ReadAcl }
-    if ($Repair) { $assert.Repair = $Repair }
-    if ($protected -and (Test-Path -LiteralPath $Root)) { [void](Assert-AVDTuneStateSecurity @assert) }
-    if (-not (Test-Path -LiteralPath $Root)) { New-Item -ItemType Directory -Path $Root -Force | Out-Null }
-    if ($protected) { Set-Acl -LiteralPath $Root -AclObject (New-AVDTuneStateSecurity) }
+    if ($protected) {
+        $assert = @{ Root = $Root }
+        if ($ReadAcl) { $assert.ReadAcl = $ReadAcl }
+        if ($Quarantine) { $assert.Quarantine = $Quarantine }
+        if ($CreateRoot) { $assert.CreateRoot = $CreateRoot }
+        [void](Assert-AVDTuneStateSecurity @assert)
+    }
+    elseif (-not (Test-Path -LiteralPath $Root)) { New-Item -ItemType Directory -Path $Root -Force | Out-Null }
     foreach ($sub in 'runs', 'protocols', 'config', 'benchmark', 'logs') {
         $path = Join-Path $Root $sub
         if (-not (Test-Path -LiteralPath $path)) { New-Item -ItemType Directory -Path $path -Force | Out-Null }
     }
-    if ($protected) { [void](Assert-AVDTuneStateSecurity @assert -Final) }
     $statePath = Join-Path $Root 'state.json'
     if (-not (Test-Path -LiteralPath $statePath)) {
         Write-AVDTuneFile $statePath ([ordered]@{
@@ -848,7 +880,7 @@ function Get-AVDTuneOverview {
 #endregion
 
 Export-ModuleMember -Function Get-AVDTuneProp, Test-AVDTuneElevated, Get-AVDTuneRoot, Test-AVDTuneDefaultRoot, ConvertTo-AVDTuneArgument, New-AVDTuneMachine, Invoke-AVDTuneMachine,
-    New-AVDTuneStateSecurity, Initialize-AVDTuneState, Read-AVDTuneAclInfo, Get-AVDTuneStateSecurityProblems, Repair-AVDTuneStateSecurity, Assert-AVDTuneStateSecurity, Get-AVDTuneStateSecurityReport, Get-AVDTuneState, Set-AVDTuneState, Test-AVDTuneImageVersion, Get-AVDTuneNextImageVersion, Start-AVDTuneImageVersion,
+    New-AVDTuneStateSecurity, Initialize-AVDTuneState, Read-AVDTuneAclInfo, Get-AVDTuneStateSecurityProblems, Move-AVDTuneStateToQuarantine, New-AVDTuneProtectedFolder, Assert-AVDTuneStateSecurity, Get-AVDTuneStateSecurityReport, Get-AVDTuneState, Set-AVDTuneState, Test-AVDTuneImageVersion, Get-AVDTuneNextImageVersion, Start-AVDTuneImageVersion,
     Add-AVDTuneRun, Get-AVDTuneRun, Get-AVDTuneLastChange, New-AVDTuneStep, Invoke-AVDTuneStep, New-AVDTuneStepFromData, Get-AVDTuneStepCatalog, Invoke-AVDTune,
     Add-AVDTuneChangeLogEntry, Get-AVDTuneChangeLog, Get-AVDTuneChangeLogVersions, ConvertTo-AVDTuneChangeLogDocument, Export-AVDTuneChangeLog,
     Get-AVDTuneWindowsInfo, Get-AVDTuneOfficeInfo, Get-AVDTuneSourceImage, Get-AVDTuneHealth, Get-AVDTuneOverview, Write-AVDTuneFile, Read-AVDTuneJson,
