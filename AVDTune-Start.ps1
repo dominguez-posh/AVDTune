@@ -607,6 +607,15 @@ function Invoke-SnapshotConfirm {
     if (-not $f.Valid -or $f.Valid.Count -eq 0) { Set-StageMessage 'There is no finished snapshot newer than the last change to confirm.' 'error'; return }
     $snapshot = $f.Valid[[Math]::Max(0, $f.SnapList.SelectedIndex)]
     $session = $script:StartContext.Session
+    if (-not $f.ImageVersion) {
+        # Confirming an existing snapshot before any image version (found on the test VM): check the name first,
+        # then start the first image version (asks first), as "Create snapshot now" does
+        $check = Test-AVDTuneConfirmationName -Typed $f.NameBox.Text
+        if (-not $check.Ok) { Set-StageMessage $check.Message 'error'; return }
+        Start-NewVersion
+        $f.ImageVersion = [string](Get-AVDTuneState $script:StateRoot).ImageVersion
+        if (-not $f.ImageVersion) { Set-StageMessage 'The confirmation is recorded in an image version: start a new version first.' 'error'; return }
+    }
     try {
         $record = Confirm-AVDTuneSnapshotGate -Root $script:StateRoot -Snapshot $snapshot -TypedName $f.NameBox.Text -SignedInAccount $(if ($session) { [string]$session.Account } else { '' }) -WindowsAccount "$env:USERDOMAIN\$env:USERNAME" -ImageVersion $f.ImageVersion -Machine $script:Machine
     }
