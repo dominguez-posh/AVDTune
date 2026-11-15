@@ -336,7 +336,7 @@ function Invoke-AVDTuneReadiness {
     #>
     [CmdletBinding()]
     param(
-        [Parameter(Mandatory)]$Machine, $Arm, [string]$Token, [string]$NoTokenReason, [string]$GalleryImageId, $Data, $UpdateBlock
+        [Parameter(Mandatory)]$Machine, $Arm, [string]$Token, [string]$NoTokenReason, [string]$GalleryImageId, $Data, $UpdateBlock, [bool]$FSLogixApplies = $false, $FSLogixTest
     )
     if (-not $Data) { $Data = Get-AVDTuneReadinessData }
     $now = & $Machine.Now
@@ -607,6 +607,15 @@ function Invoke-AVDTuneReadiness {
             'On' { Add-Row 'hy.update-block' $hy 'green' "The update block is on ($($st.Compliant) of $($st.Applicable) settings)." }
             'Partial' { Add-Row 'hy.update-block' $hy 'yellow' "The update block is only partly on ($($st.Compliant) of $($st.Applicable) settings; missing: $($st.Missing))." 'Switch the update block on (Update block page).' 'readiness.updateblock-on' }
             default { Add-Row 'hy.update-block' $hy 'red' 'The update block for users is off: users could see and run updates on the session hosts.' 'Switch the update block on (Update block page, or the fix here).' 'readiness.updateblock-on' }
+        }
+    }
+    if ($FSLogixApplies) {
+        Invoke-Check 'hy.fslogix-test' $hy {
+            $t = $FSLogixTest
+            if (-not $t) { Add-Row 'hy.fslogix-test' $hy 'yellow' 'The FSLogix function test has not been run on this master.' 'Run the FSLogix test on the FSLogix page.' }
+            elseif ([string]$t.Overall -eq 'green') { Add-Row 'hy.fslogix-test' $hy 'green' "The FSLogix function test passed (green) on $(([datetime]::Parse([string]$t.At, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind)).ToString('yyyy-MM-dd HH:mm'))." }
+            elseif ([string]$t.Overall -eq 'red') { Add-Row 'hy.fslogix-test' $hy 'red' "The last FSLogix function test is red ($($t.Red) red item(s): $(@($t.OpenIds) -join ', ')). Profiles will not work." 'Fix the red items on the FSLogix page and run the test again.' }
+            else { Add-Row 'hy.fslogix-test' $hy 'yellow' "The last FSLogix function test is yellow ($($t.Yellow) item(s): $(@($t.OpenIds) -join ', '))." 'Look at the yellow items on the FSLogix page, fix them or run the test again.' }
         }
     }
     Invoke-Check 'hy.defender-onboarding' $hy {

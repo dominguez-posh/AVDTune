@@ -73,7 +73,7 @@ try {
     Test-Check 'data: loads, 27 criteria, a Stand date, 52 families' ($crit.Count -eq 27 -and $data.Stand -match '^\d{4}-\d{2}-\d{2}$' -and $data.Families.Count -eq 52) "$($crit.Count) / $($data.Families.Count)"
     Test-Check 'data: every criterion has a Microsoft Learn source, a date and the Verified flag' (-not (@($crit | Where-Object { $_.Value.Source -notmatch '^https://learn\.microsoft\.com/' -or $_.Value.Stand -notmatch '^\d{4}-\d{2}-\d{2}$' -or $_.Value.Verified -isnot [bool] }))) $null
     $unverified = @($crit | Where-Object { -not $_.Value.Verified } | ForEach-Object Name)
-    Test-Check 'data: what Learn does not state is marked and explained (bitlocker, reboot markers, lcu thresholds, leftovers, public shortcut)' ((($unverified | Sort-Object) -join ',') -eq 'hy.bitlocker,hy.lcu-age,hy.leftovers,hy.public-shortcut,hy.reboot' -and -not (@($crit | Where-Object { -not $_.Value.Verified -and -not $_.Value.Note }))) ($unverified -join ',')
+    Test-Check 'data: what Learn does not state is marked and explained (bitlocker, reboot markers, lcu thresholds, leftovers, public shortcut, FSLogix-Test)' ((($unverified | Sort-Object) -join ',') -eq 'hy.bitlocker,hy.fslogix-test,hy.lcu-age,hy.leftovers,hy.public-shortcut,hy.reboot' -and -not (@($crit | Where-Object { -not $_.Value.Verified -and -not $_.Value.Note }))) ($unverified -join ',')
     Test-Check 'data: the Arm64 families are the Cobalt ones' ((@($data.Families | Where-Object Arch -eq 'Arm64' | ForEach-Object Name | Sort-Object) -join ',') -eq 'Dpdsv6,Dpldsv6,Dplsv6,Dpsv6,Epdsv6,Epsv6') $null
     Test-Check 'data: local disk only on the d sizes (Ddsv6 NVMe, Dsv6 none), Dasv6 has ConnectX and no MANA, Ddsv6 MANA' ((@($data.Families | Where-Object Name -eq 'Ddsv6')[0].TempDisk -eq 'NVMe') -and (@($data.Families | Where-Object Name -eq 'Dsv6')[0].TempDisk -eq 'None') -and (@($data.Families | Where-Object Name -eq 'Dasv6')[0].Network -notcontains 'MANA') -and (@($data.Families | Where-Object Name -eq 'Ddsv6')[0].Network -contains 'MANA')) $null
     Test-Check 'data: the family patterns match their sizes' (('Standard_D4ds_v6' -match (@($data.Families | Where-Object Name -eq 'Ddsv6')[0].SizePattern)) -and ('Standard_D4s_v6' -notmatch (@($data.Families | Where-Object Name -eq 'Ddsv6')[0].SizePattern)) -and ('Standard_D4s_v6' -match (@($data.Families | Where-Object Name -eq 'Dsv6')[0].SizePattern))) $null
@@ -91,7 +91,7 @@ try {
     $arm = New-Arm
     $r = Invoke-Readiness (New-Master) $arm
     $ids = @($r.Rows | ForEach-Object Id)
-    Test-Check 'healthy master: every criterion of the data has a row, once' ((($ids | Sort-Object -Unique).Count -eq $ids.Count) -and (@($crit | Where-Object { $_.Name -notin $ids }).Count -eq 0)) (@($crit | Where-Object { $_.Name -notin $ids } | ForEach-Object Name) -join ',')
+    Test-Check 'healthy master: every criterion of the data has a row, once (the FSLogix-Test row only with FSLogix)' ((($ids | Sort-Object -Unique).Count -eq $ids.Count) -and (@($crit | Where-Object { $_.Name -notin $ids -and $_.Name -ne 'hy.fslogix-test' }).Count -eq 0)) (@($crit | Where-Object { $_.Name -notin $ids } | ForEach-Object Name) -join ',')
     Test-Check 'healthy master: green overall, nothing red, yellow or unknown' ($r.Overall -eq 'green' -and $r.Counts.Red -eq 0 -and $r.Counts.Yellow -eq 0 -and $r.Counts.Unknown -eq 0) (($r.Rows | Where-Object { $_.Status -in 'red', 'yellow', 'unknown' } | ForEach-Object { "$($_.Id)=$($_.Status): $($_.Reason)" }) -join ' | ')
     Test-Check 'every row carries source, date and verified flag' (-not (@($r.Rows | Where-Object { $_.Source -notmatch '^https://learn' -or -not $_.Stand }))) $null
     $f = @($r.Families)
@@ -333,6 +333,15 @@ try {
     $r = Invoke-Readiness (New-Master) (New-Arm) 'tok' $defId ([pscustomobject]@{ State = 'Partial'; Compliant = 5; Applicable = 12; Missing = 'Edge' })
     Test-Check 'update block partly on: yellow with what is missing' ((Get-Row $r 'hy.update-block').Status -eq 'yellow' -and (Get-Row $r 'hy.update-block').Reason -like '*Edge*') $null
     $r = Invoke-AVDTuneReadiness -Machine (New-Master) -Arm (New-Arm) -Token 'tok' -GalleryImageId $defId
+    $fslOff = Invoke-Readiness (New-Master)
+    Test-Check 'FSLogix-Test: not part of the analysis when the environment has no FSLogix' (-not (Get-Row $fslOff 'hy.fslogix-test')) $null
+    $fslRun = { param($rec) Invoke-AVDTuneReadiness -Machine (New-Master) -Arm $null -Token '' -GalleryImageId $defId -UpdateBlock $goodBlock -FSLogixApplies $true -FSLogixTest $rec }
+    $fn = & $fslRun $null
+    $fg = & $fslRun ([pscustomobject]@{ At = '2026-11-15T09:00:00.0000000'; Overall = 'green'; Red = 0; Yellow = 0; OpenIds = @() })
+    $fy = & $fslRun ([pscustomobject]@{ At = '2026-11-15T09:00:00.0000000'; Overall = 'yellow'; Red = 0; Yellow = 2; OpenIds = @('fs.defender', 'fs.admins') })
+    $fr = & $fslRun ([pscustomobject]@{ At = '2026-11-15T09:00:00.0000000'; Overall = 'red'; Red = 1; Yellow = 0; OpenIds = @('fs.services') })
+    Test-Check 'FSLogix-Test not run: yellow with the fix; green test: green; yellow test: yellow with the ids; red test: red (blocks Finish)' ((Get-Row $fn 'hy.fslogix-test').Status -eq 'yellow' -and (Get-Row $fn 'hy.fslogix-test').Fix -like '*FSLogix page*' -and (Get-Row $fg 'hy.fslogix-test').Status -eq 'green' -and (Get-Row $fy 'hy.fslogix-test').Status -eq 'yellow' -and (Get-Row $fy 'hy.fslogix-test').Reason -like '*fs.defender*' -and (Get-Row $fr 'hy.fslogix-test').Status -eq 'red' -and $fr.RedIds -contains 'hy.fslogix-test') $null
+    Test-Check 'FSLogix-Test row carries its source and says it is AVDTune''s own criterion (not verified)' ((Get-Row $fg 'hy.fslogix-test').Source -like 'https://learn.microsoft.com/*' -and -not (Get-Row $fg 'hy.fslogix-test').Verified -and (Get-Row $fg 'hy.fslogix-test').Note -like '*own criterion*') $null
     Test-Check 'update block without a given status is read live from the machine (a fresh master: off, red)' ((Get-Row $r 'hy.update-block').Status -eq 'red') $null
     $r = Invoke-Readiness (New-Master -Reg @{ 'HKLM:\SOFTWARE\Microsoft\Windows Advanced Threat Protection|senseGuid' = 'abc' }) (New-Arm)
     Test-Check 'Defender onboarding done on the master (senseGuid): red' ((Get-Row $r 'hy.defender-onboarding').Status -eq 'red') $null

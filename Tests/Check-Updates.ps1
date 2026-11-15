@@ -11,8 +11,10 @@ $repo = Split-Path $PSScriptRoot -Parent
 Import-Module (Join-Path $repo 'Modules\AVDTune.psm1') -Force
 Import-Module (Join-Path $repo 'Modules\AVDTune.UpdateBlock.psm1') -Force
 Import-Module (Join-Path $repo 'Modules\AVDTune.Updates.psm1') -Force
+Import-Module (Join-Path $repo 'Modules\AVDTune.FSLogix.psm1') -Force
 . (Join-Path $PSScriptRoot 'Fakes\FakeMachine.ps1')
 . (Join-Path $PSScriptRoot 'Fakes\FakeUpdates.ps1')
+. (Join-Path $PSScriptRoot 'Fakes\FakeFSLogix.ps1')
 
 $script:failed = 0
 function Test-Check([string]$Name, [bool]$Ok, $Detail) { if ($Ok) { "PASS $Name" } else { $script:failed++; "FAIL $Name" + $(if ($null -ne $Detail) { "  -> $Detail" }) } }
@@ -309,6 +311,26 @@ try {
     # ---------------------------------------------------------------- history
     $h = @(Get-AVDTuneUpdateHistory -Root $tmp)
     Test-Check 'history: runs and repairs, newest first, with code and text' ($h.Count -ge 15 -and @($h | Where-Object { $_.Code -eq '0x80073712' }).Count -ge 1 -and @($h | Where-Object { $_.Group -eq 'Windows' }).Count -ge 5) $h.Count
+    # ---------------------------------------------------------------- FSLogix update (issue 10): the list shows the newest release, the run installs it
+    $fslNative = @{ '* /install /quiet /norestart' = @{ ExitCode = 3010; Output = ''; Registry = @{ 'HKLM:\SOFTWARE\FSLogix\Apps|InstallVersion' = '3.26.826.17182' } } }
+    $xf = New-Env -UExtra @{ FSLogix = (New-AVDTuneFakeFSLogix) } -MExtra @{ Native = $fslNative }
+    $lf = Get-AVDTuneUpdateList -Machine $xf.M -U $xf.U -Root $tmp
+    $fi = @($lf.Items | Where-Object { $_.Id -eq 'fslogix' })[0]
+    Test-Check 'FSLogix: the list shows the installed version, the newest release (26.08) and is selectable (Check)' ($fi.Installed -eq '2.9.8884.27471' -and $fi.Available -eq '26.08' -and $fi.Status -eq 'Check' -and $fi.Selectable -and $fi.Detail -like '*Microsoft signature*') "$($fi.Status) $($fi.Available)"
+    $xo = New-Env -UExtra @{ FSLogix = (New-AVDTuneFakeFSLogix -Seed @{ Latest = @{ Ok = $false; Url = ''; Error = 'offline' } }) }
+    $fo = @((Get-AVDTuneUpdateList -Machine $xo.M -U $xo.U -Root $tmp).Items | Where-Object { $_.Id -eq 'fslogix' })[0]
+    Test-Check 'FSLogix: no network for the release lookup keeps the detection with the reason, not selectable' ($fo.Status -eq 'DetectOnly' -and $fo.Detail -like '*offline*' -and -not $fo.Selectable) $null
+    $xnone = New-Env -MExtra @{ Registry = @{ 'HKLM:\SOFTWARE\FSLogix\Apps|InstallVersion' = $null } } -UExtra @{ FSLogix = (New-AVDTuneFakeFSLogix) }
+    Test-Check 'FSLogix not installed: Missing (installing is on the FSLogix page)' (@((Get-AVDTuneUpdateList -Machine $xnone.M -U $xnone.U -Root $tmp).Items | Where-Object { $_.Id -eq 'fslogix' })[0].Status -eq 'Missing') $null
+    Open-AVDTuneWriteGate -SnapshotId 'snap-check' -ConfirmedBy 'Check Runner'
+    $rf = Invoke-AVDTuneUpdateRun -Machine $xf.M -U $xf.U -Root $tmp -Items @($fi) -User 'admin1' -SnapshotId 'snap-check' -Settings (Get-AVDTuneUpdateSettings $tmp)
+    Test-Check 'FSLogix run: downloaded from Microsoft, installed, Changed with the new version and a restart flag, change log entry' ($rf.Results[0].Status -eq 'Changed' -and $rf.Results[0].After -eq '3.26.826.17182' -and $rf.Results[0].Reboot -and $rf.Reboot -and @(Get-AVDTuneChangeLog -Root $tmp | Where-Object { $_.Component -eq 'FSLogix' -and $_.ChangeType -eq 'Updated' }).Count -eq 1) $rf.Results[0].Message
+    $rf2 = Invoke-AVDTuneUpdateRun -Machine $xf.M -U $xf.U -Root $tmp -Items @($fi) -User 'admin1' -SnapshotId 'snap-check' -Settings (Get-AVDTuneUpdateSettings $tmp)
+    Test-Check 'FSLogix run again: already current, Unchanged' ($rf2.Results[0].Status -eq 'Unchanged') $rf2.Results[0].Message
+    $xs = New-Env -UExtra @{ FSLogix = (New-AVDTuneFakeFSLogix -Seed @{ Signatures = @{ 'FSLogixAppsSetup.exe' = @{ Valid = $true; Subject = 'CN=Contoso, O=Contoso'; Issuer = 'CN=Microsoft Code Signing PCA 2024, O=Microsoft Corporation, C=US' } } }) } -MExtra @{ Native = $fslNative }
+    $rs = Invoke-AVDTuneUpdateRun -Machine $xs.M -U $xs.U -Root $tmp -Items @($fi) -User 'admin1' -SnapshotId 'snap-check' -Settings (Get-AVDTuneUpdateSettings $tmp)
+    Test-Check 'FSLogix run with a file that is not signed by Microsoft: Failed BadSignature, the installer is never started' ($rs.Results[0].Status -eq 'Failed' -and $rs.Results[0].Code -eq 'BadSignature' -and -not (@($xs.M.Log | Where-Object { $_ -like '*/install*' }).Count)) $rs.Results[0].Message
+    Close-AVDTuneWriteGate
     Test-Check 'the check never used the real state folder' ($tmp -ne (Join-Path ([Environment]::GetFolderPath('CommonApplicationData')) 'AVDTune')) $tmp
     # the real adapter exposes the same members as the fake (read only, nothing is called)
     $real = New-AVDTuneUpdateAdapter; $fake = New-AVDTuneFakeUpdates
