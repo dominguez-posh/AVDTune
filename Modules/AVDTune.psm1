@@ -730,6 +730,19 @@ function Set-AVDTuneState {
     # Changes single values of state.json: Set-AVDTuneState -Values @{ UpdateBlock = 'On' }
     param([string]$Root = (Get-AVDTuneRoot), [Parameter(Mandatory)][hashtable]$Values)
     $state = Get-AVDTuneState $Root
+    # The first change of the image version (snapshot gate, #27): the first LastChange of a version also becomes FirstChange, with the snapshot that
+    # was confirmed at that moment. A state.json without VersionBaseline is from before #27: the old LastChange then counts as the start of the version
+    # (VersionBaseline), so no snapshot from before it becomes valid by mistake.
+    $Values = $Values.Clone()
+    if ($Values.ContainsKey('LastChange') -and $Values['LastChange']) {
+        if (Get-AVDTuneProp $state 'FirstChange') { [void]$Values.Remove('FirstChange') }
+        else {
+            if (-not $state.PSObject.Properties['VersionBaseline']) { $old = ConvertTo-AVDTuneUtc (Get-AVDTuneProp $state 'LastChange'); $Values['VersionBaseline'] = $(if ($old) { $old.ToString('o') } else { $null }) }
+            if (-not ($Values.ContainsKey('FirstChange') -and $Values['FirstChange'])) { $Values['FirstChange'] = $Values['LastChange'] }
+            $openGate = Get-AVDTuneWriteGate
+            $Values['FirstChangeSnapshotId'] = $(if ($openGate) { [string]$openGate.SnapshotId } else { $null })
+        }
+    }
     foreach ($key in $Values.Keys) {
         if ($state.PSObject.Properties[$key]) { $state.$key = $Values[$key] } else { Add-Member -InputObject $state -NotePropertyName $key -NotePropertyValue $Values[$key] }
     }
@@ -757,7 +770,15 @@ function Start-AVDTuneImageVersion {
     $version = Get-AVDTuneNextImageVersion -Root $Root -Date $Date
     $state = Get-AVDTuneState $Root
     $list = @(@($state.Versions) | Where-Object { $_ }) + [pscustomobject]@{ Version = $version; Started = $Date.ToString('o'); User = $User }
-    [void](Set-AVDTuneState -Root $Root -Values @{ ImageVersion = $version; Versions = $list; Sealed = $false })
+    # Snapshot gate (#27): the last change of the version that ends here is the baseline of the new one; the first change of the new version is not there yet
+    $baseline = Get-AVDTuneLastChange -Root $Root
+    [void](Set-AVDTuneState -Root $Root -Values @{ ImageVersion = $version; Versions = $list; Sealed = $false; VersionBaseline = $(if ($baseline) { $baseline.ToUniversalTime().ToString('o') } else { $null }); FirstChange = $null; FirstChangeSnapshotId = $null })
+    # An open gate stays open only when its snapshot is already valid for the new version (made after the last change of the old one); else new snapshot needed
+    if (Test-AVDTuneWriteAllowed) {
+        $confirmed = Get-AVDTuneProp (Get-AVDTuneState $Root) 'SnapshotGate'
+        $created = ConvertTo-AVDTuneUtc (Get-AVDTuneProp $confirmed 'SnapshotCreated')
+        if ($baseline -and (-not $created -or $created -le $baseline.ToUniversalTime().AddMinutes($script:SnapshotClockBufferMinutes))) { Close-AVDTuneWriteGate }
+    }
     $version
 }
 
@@ -801,6 +822,57 @@ function Get-AVDTuneLastChange {
     foreach ($e in @(Get-AVDTuneChangeLog -Root $Root)) { if ($e.Source -eq 'Step' -and $e.Category -notin 'Snapshot', 'Readiness', 'Benchmark') { & $parse $e.At } }
     if ($times.Count -eq 0) { return $null }
     (@($times | Sort-Object)[-1]).ToLocalTime()
+}
+
+# Snapshot gate (#27): a snapshot counts for the current image version when it was made after the last change of the previous version and before the
+# first change of this version (the state at the start of the version). The snapshot time comes from Azure, the changes from the clock of this VM:
+# a snapshot must be at least this many minutes newer than the last change of the previous version (a VM clock that runs behind Azure cannot make
+# an earlier snapshot count) and at least this many minutes older than the first change (a VM clock that runs ahead cannot make a later one count).
+$script:SnapshotClockBufferMinutes = 10
+function Get-AVDTuneSnapshotClockBufferMinutes { $script:SnapshotClockBufferMinutes }
+
+function ConvertTo-AVDTuneUtc($Value) {
+    # A date from state.json (string, or already a [datetime]) as UTC, $null when empty or not a date
+    if ($null -eq $Value -or "$Value" -eq '') { return $null }
+    if ($Value -is [datetime]) { return $Value.ToUniversalTime() }
+    try { ([datetime]::Parse([string]$Value, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind)).ToUniversalTime() } catch { $null }
+}
+
+function Get-AVDTuneSnapshotWindow {
+    <#
+        Where a snapshot may lie for the current version. Lower: the last change of the previous version (the newest change when this version has not
+        recorded a first change; so an older state.json without the new fields keeps the old strict rule: only a snapshot after the last change counts).
+        FirstChange: the first change of this version, $null as long as there is none. Mode: VersionStart (nothing changed in this version) or Reconnect.
+    #>
+    param([string]$Root = (Get-AVDTuneRoot))
+    $state = Get-AVDTuneState $Root
+    $last = Get-AVDTuneLastChange -Root $Root
+    $first = ConvertTo-AVDTuneUtc (Get-AVDTuneProp $state 'FirstChange')
+    $base = ConvertTo-AVDTuneUtc (Get-AVDTuneProp $state 'VersionBaseline')
+    $lastUtc = if ($last) { $last.ToUniversalTime() } else { $null }
+    if ($first) { $lower = if ($state.PSObject.Properties['VersionBaseline']) { $base } else { $first } }   # first without baseline (cannot happen through Set-AVDTuneState): fail closed
+    else { $lower = if ($lastUtc -and $base) { @($lastUtc, $base | Sort-Object)[-1] } elseif ($lastUtc) { $lastUtc } else { $base } }
+    $local = { param($d) if ($d) { $d.ToLocalTime() } else { $null } }
+    [pscustomobject]@{
+        Version = [string](Get-AVDTuneProp $state 'ImageVersion'); Mode = $(if ($first) { 'Reconnect' } else { 'VersionStart' })
+        Lower = (& $local $lower); FirstChange = (& $local $first); FirstChangeSnapshotId = [string](Get-AVDTuneProp $state 'FirstChangeSnapshotId'); LastChange = $last
+    }
+}
+
+function Test-AVDTuneSnapshotInWindow {
+    # Valid + Reason ('' when valid) for a finished snapshot (Created from Azure, Id) against Get-AVDTuneSnapshotWindow
+    param($Created, [string]$Id, $Window)
+    $margin = $script:SnapshotClockBufferMinutes
+    if (-not $Created) { return [pscustomobject]@{ Valid = $false; Reason = 'Azure gave no creation time.' } }
+    if (-not $Window) { return [pscustomobject]@{ Valid = $true; Reason = '' } }
+    $c = ([datetime]$Created).ToUniversalTime()
+    if ($Window.Lower -and $c -le ([datetime]$Window.Lower).ToUniversalTime().AddMinutes($margin)) {
+        return [pscustomobject]@{ Valid = $false; Reason = "Older than the last change before this version ($(([datetime]$Window.Lower).ToString('yyyy-MM-dd HH:mm'))) plus $margin minutes for clock differences between this VM and Azure: a rollback to it would lose that change." }
+    }
+    if ($Window.FirstChange -and -not ($Id -and $Window.FirstChangeSnapshotId -and $Id -ieq $Window.FirstChangeSnapshotId) -and $c -ge ([datetime]$Window.FirstChange).ToUniversalTime().AddMinutes(-$margin)) {
+        return [pscustomobject]@{ Valid = $false; Reason = "Made after the first change of this version ($(([datetime]$Window.FirstChange).ToString('yyyy-MM-dd HH:mm')); or less than $margin minutes before it): a rollback to it would not return to the start of the version." }
+    }
+    [pscustomobject]@{ Valid = $true; Reason = '' }
 }
 
 function Get-AVDTuneRun {
@@ -1008,7 +1080,7 @@ function Invoke-AVDTune {
         $run.ImageVersion = $state.ImageVersion
         [void](Add-AVDTuneRun -Root $Root -Run $run)
         # The last change AVDTune made on the master: a snapshot only counts when it is newer (snapshot gate)
-        if (@($results | Where-Object { $_.Status -in 'Changed', 'Reverted' }).Count -gt 0) { [void](Set-AVDTuneState -Root $Root -Values @{ LastChange = $run.Ended }) }
+        if (@($results | Where-Object { $_.Status -in 'Changed', 'Reverted' }).Count -gt 0) { [void](Set-AVDTuneState -Root $Root -Values @{ LastChange = $run.Ended; FirstChange = $run.Started }) }
         foreach ($r in @($results | Where-Object { $_.Status -eq 'Changed' })) {
             $step = $byId[$r.Id]
             if ($state.ImageVersion) {
@@ -1280,7 +1352,7 @@ function Get-AVDTuneOverview {
 
 Export-ModuleMember -Function Get-AVDTuneProp, Get-AVDTuneWebResponse, Test-AVDTuneElevated, Get-AVDTuneRoot, Test-AVDTuneDefaultRoot, Test-AVDTuneTestMode, Resolve-AVDTuneTestScript, Get-AVDTuneLongPath, Get-AVDTuneTestModeRefusal, Confirm-AVDTuneAction, ConvertTo-AVDTuneArgument, New-AVDTuneMachine, Invoke-AVDTuneMachine,
     New-AVDTuneStateSecurity, Initialize-AVDTuneState, Read-AVDTuneAclInfo, Get-AVDTuneStateSecurityProblems, Move-AVDTuneStateToQuarantine, New-AVDTuneProtectedFolder, Assert-AVDTuneStateSecurity, Get-AVDTuneStateSecurityReport, Get-AVDTuneState, Set-AVDTuneState, Test-AVDTuneImageVersion, Get-AVDTuneNextImageVersion, Start-AVDTuneImageVersion,
-    Add-AVDTuneRun, Get-AVDTuneRun, Get-AVDTuneLastChange, New-AVDTuneStep, Invoke-AVDTuneStep, New-AVDTuneStepFromData, Get-AVDTuneStepCatalog, Invoke-AVDTune,
+    Add-AVDTuneRun, Get-AVDTuneRun, Get-AVDTuneLastChange, Get-AVDTuneSnapshotClockBufferMinutes, ConvertTo-AVDTuneUtc, Get-AVDTuneSnapshotWindow, Test-AVDTuneSnapshotInWindow,New-AVDTuneStep, Invoke-AVDTuneStep, New-AVDTuneStepFromData, Get-AVDTuneStepCatalog, Invoke-AVDTune,
     Add-AVDTuneChangeLogEntry, Get-AVDTuneChangeLog, Get-AVDTuneChangeLogVersions, ConvertTo-AVDTuneChangeLogDocument, Export-AVDTuneChangeLog,
     Get-AVDTuneWindowsInfo, Get-AVDTuneOfficeInfo, Get-AVDTuneSourceImage, Get-AVDTuneHealth, Get-AVDTuneOverview, Write-AVDTuneFile, Read-AVDTuneJson,
     Open-AVDTuneWriteGate, Close-AVDTuneWriteGate, Set-AVDTuneWriteBlock, Clear-AVDTuneWriteBlock, Get-AVDTuneWriteBlock, Get-AVDTuneWriteGate, Test-AVDTuneWriteAllowed, Remove-AVDTuneControlCharacters, ConvertTo-AVDTuneTestResult,

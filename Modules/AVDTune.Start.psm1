@@ -400,7 +400,7 @@ function Get-AVDTuneStartStages {
     # 4 snapshot gate
     if (Test-AVDTuneWriteAllowed) { $g = Get-AVDTuneWriteGate; & $add 'Snapshot' 'Snapshot gate' 'Done' "Confirmed by $($g.ConfirmedBy). The pages can change the master." }
     elseif ($open) { & $add 'Snapshot' 'Snapshot gate' 'Locked' 'Finish the earlier steps first.' }
-    else { & $add 'Snapshot' 'Snapshot gate' $(if (& $fail 'Snapshot') { 'Failed' } else { 'Pending' }) $(if (& $fail 'Snapshot') { & $fail 'Snapshot' } else { 'A finished snapshot of the OS disk, newer than the last change AVDTune made, confirmed with your first and last name. Until then every page is read only.' }) }
+    else { & $add 'Snapshot' 'Snapshot gate' $(if (& $fail 'Snapshot') { 'Failed' } else { 'Pending' }) $(if (& $fail 'Snapshot') { & $fail 'Snapshot' } else { 'A finished snapshot of the OS disk from the start of this image version (after the last change of the previous version, before the first change of this one), confirmed with your first and last name; one per version, a rollback goes back to the version start. Until then every page is read only.' }) }
     @($stages)
 }
 
