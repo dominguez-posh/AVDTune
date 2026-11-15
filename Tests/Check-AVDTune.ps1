@@ -151,6 +151,12 @@ try {
     $aclInfo = Read-AVDTuneAclInfo -Path $aclFile -IsDirectory $false
     $aclSids = @($aclInfo.Rules | ForEach-Object { $_.Sid })
     Test-Check 'Write-AVDTuneFile over an existing file: the old ACL is gone (no Everyone), protected, only Administrators/SYSTEM, content new, no temp left' ($aclInfo.Protected -and @($aclSids | Where-Object { $_ -notin 'S-1-5-32-544', 'S-1-5-18', [Security.Principal.WindowsIdentity]::GetCurrent().User.Value }).Count -eq 0 -and ([IO.File]::ReadAllText($aclFile) -eq '{"a":2}') -and -not @(Get-ChildItem $tmp -Filter 'acl-state.json.*.tmp').Count) ($aclSids -join ',')
+    $lockFile = Join-Path $tmp 'locked.json'
+    Write-AVDTuneFile $lockFile 'old'
+    $held = [IO.File]::Open($lockFile, 'Open', 'Read', 'None')
+    $lockThrew = $false
+    try { Write-AVDTuneFile $lockFile 'new' } catch { $lockThrew = $true } finally { $held.Dispose() }
+    Test-Check 'Write-AVDTuneFile: a target that is held open makes it throw, the old content stays, no temp file is left' ($lockThrew -and [IO.File]::ReadAllText($lockFile) -eq 'old' -and -not @(Get-ChildItem $tmp -Filter 'locked.json.*.tmp' -Force).Count) $null
     $wfSrc = ((Get-Command Write-AVDTuneFile).ScriptBlock.ToString()) + ((Get-Command Write-AVDTuneAccessFile).ScriptBlock.ToString())
     Test-Check 'Write-AVDTuneFile and Write-AVDTuneAccessFile replace atomically (MoveFileEx), never delete the target before the move, never File.Replace' ($wfSrc -notmatch 'File\]::Delete\(\$Path\)\s*\}?\s*;?\s*\r?\n?\s*\[IO\.File\]::Move' -and $wfSrc -notmatch 'File\]::Replace' -and ([IO.File]::ReadAllText((Join-Path $repo 'Modules\AVDTune.psm1')) -match 'DllImport\("kernel32.dll".*MoveFileEx')) $null
     Write-AVDTuneFile (Join-Path $tmp 'state.json') ([ordered]@{ Schema = 1; ImageVersion = $null; Versions = @(); LastUpdate = $null; LastBenchmark = $null; UpdateBlock = $null; Sealed = $false; Identity = $null; LastRunId = $null } | ConvertTo-Json)

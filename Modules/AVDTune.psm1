@@ -154,11 +154,11 @@ function Write-AVDTuneAccessFile {
         if ($problems.Count -gt 0) { throw "$c is not safe ($($problems -join '; ')). Nothing was written. Check it as administrator." }
     }
     if ($Access -eq 'AdminNew' -and (Test-Path -LiteralPath $Path)) { throw "$Path exists already. It is not overwritten." }
-    $temp = "$Path.$([guid]::NewGuid().ToString('N').Substring(0, 8)).tmp"
+    $temp = "$Path.$([guid]::NewGuid().ToString('N')).tmp"
     $bytes = (New-Object Text.UTF8Encoding $false).GetBytes($Text)
     try {
         $stream = New-Object IO.FileStream($temp, [IO.FileMode]::CreateNew, [Security.AccessControl.FileSystemRights]'Write, ReadPermissions', [IO.FileShare]::None, 4096, [IO.FileOptions]::None, (New-AVDTuneFileSecurity))
-        try { $stream.Write($bytes, 0, $bytes.Length) } finally { $stream.Dispose() }
+        try { $stream.Write($bytes, 0, $bytes.Length); $stream.Flush($true) } finally { $stream.Dispose() }
         if ($Access -eq 'AdminNew') { [IO.File]::Move($temp, $Path) }
         else { Move-AVDTuneFileReplace $temp $Path }
     }
@@ -376,13 +376,14 @@ function New-AVDTuneStateSecurity {
     $security
 }
 
+# The native type is created once at import (not at the first write), a second runspace that created it first is fine
+try { Add-Type -Namespace AVDTune -Name NativeMove -MemberDefinition '[System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true, CharSet = System.Runtime.InteropServices.CharSet.Unicode)] public static extern bool MoveFileEx(string existing, string target, int flags);' -ErrorAction Stop }
+catch { if (-not ('AVDTune.NativeMove' -as [type])) { throw } }
+
 function Move-AVDTuneFileReplace {
     # Atomic replace: MoveFileEx(REPLACE_EXISTING | WRITE_THROUGH) on the same volume. The target exists at every moment (old or new file) and the new file
     # keeps the ACL of the temp file; the old ACL is gone. Throws when the move fails (the target is then unchanged).
     param([Parameter(Mandatory)][string]$Temp, [Parameter(Mandatory)][string]$Target)
-    if (-not ('AVDTune.NativeMove' -as [type])) {
-        Add-Type -Namespace AVDTune -Name NativeMove -MemberDefinition '[System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true, CharSet = System.Runtime.InteropServices.CharSet.Unicode)] public static extern bool MoveFileEx(string existing, string target, int flags);'
-    }
     if (-not [AVDTune.NativeMove]::MoveFileEx($Temp, $Target, 0x1 -bor 0x8)) {
         throw (New-Object ComponentModel.Win32Exception([Runtime.InteropServices.Marshal]::GetLastWin32Error()))
     }
@@ -394,11 +395,11 @@ function Write-AVDTuneFile {
     param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][string]$Text)
     $folder = Split-Path $Path -Parent
     if (-not (Test-Path -LiteralPath $folder)) { New-Item -ItemType Directory -Path $folder -Force | Out-Null }
-    $temp = "$Path.$([guid]::NewGuid().ToString('N').Substring(0, 8)).tmp"
+    $temp = "$Path.$([guid]::NewGuid().ToString('N')).tmp"
     $bytes = (New-Object Text.UTF8Encoding $false).GetBytes($Text)
     try {
         $stream = New-Object IO.FileStream($temp, [IO.FileMode]::CreateNew, [Security.AccessControl.FileSystemRights]'Write, ReadPermissions', [IO.FileShare]::None, 4096, [IO.FileOptions]::None, (New-AVDTuneFileSecurity -AdminOnly))
-        try { $stream.Write($bytes, 0, $bytes.Length) } finally { $stream.Dispose() }
+        try { $stream.Write($bytes, 0, $bytes.Length); $stream.Flush($true) } finally { $stream.Dispose() }
         Move-AVDTuneFileReplace $temp $Path
     }
     finally { if (Test-Path -LiteralPath $temp) { Remove-Item -LiteralPath $temp -Force -ErrorAction SilentlyContinue } }
