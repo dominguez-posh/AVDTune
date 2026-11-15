@@ -246,7 +246,18 @@ try {
     $s = Find-AVDTuneGalleryImage -Arm $evil2 -Token 'tok' -Identity $idn -OsArch 'AMD64'
     Test-Check 'a nextLink on the ARM host to another resource is not followed either' ((@($s.Notes) -join ' ') -like '*another resource*' -and -not @($evil2.Log | Where-Object { $_ -like '*snapshots/x*' })) (@($s.Notes) -join ' ')
     $real = New-AVDTuneArmAdapter
-    $refused = @(@('PUT', '/subscriptions?api-version=2022-12-01'), @('GET', '/subscriptions'), @('GET', '/tenants?api-version=2022-12-01'), @('GET', '/subscriptions?api-version=1?x=2'), @('GET', '/subscriptions?api-version=1#x') | ForEach-Object { [string](& $real.Invoke $_[0] $_[1] 'tok' $null).Error })
+    $dirty = "evil`r`nINJECT " + ('x' * 200)
+    $labelArm = [pscustomobject]@{ Invoke = { param($Method, $Path, $Token, $Body)
+            $body = switch -Wildcard ($Path) {
+                "/subscriptions/$sub/providers/Microsoft.Compute/galleries?*" { @{ value = @(@{ id = "/subscriptions/$sub/resourceGroups/rg/providers/Microsoft.Compute/galleries/galZ"; name = $dirty }) } }
+                '*/galleries/galZ/images?*' { @{ value = @(@{ id = "/subscriptions/$sub/resourceGroups/rg/providers/Microsoft.Compute/galleries/galZ/images/defZ"; name = $dirty; properties = @{ osType = 'Windows'; hyperVGeneration = 'V2' } }) } }
+                default { @{ value = @() } }  # '/subscriptions?*' also matches '/subscriptions/', so the specific paths come first
+            }
+            [pscustomobject]@{ Status = 200; Body = ([pscustomobject]$body | ConvertTo-Json -Depth 8 | ConvertFrom-Json); Error = '' } }.GetNewClosure() }
+    $s = Find-AVDTuneGalleryImage -Arm $labelArm -Token 'tok' -Identity $idn -OsArch 'AMD64'
+    $lbl = [string]@($s.Candidates)[0].Label
+    Test-Check 'labels from ARM names: no control characters, each name at most 80 characters' (@($s.Candidates).Count -eq 1 -and $lbl -notmatch '[\x00-\x1F\x7F]' -and $lbl.Length -lt 260 -and $lbl -like 'evil INJECT*') ("$lbl | " + (@($s.Notes) -join ' '))
+    $refused = @(@('POST', '/subscriptions?api-version=2022-12-01'), @('PUT', '/subscriptions?api-version=2022-12-01'), @('DELETE', '/subscriptions?api-version=2022-12-01'), @('PATCH', '/subscriptions?api-version=2022-12-01'), @('GET', '/subscriptions'), @('GET', '/tenants?api-version=2022-12-01'), @('GET', '/subscriptions?api-version=1?x=2'), @('GET', '/subscriptions?api-version=1#x') | ForEach-Object { [string](& $real.Invoke $_[0] $_[1] 'tok' $null).Error })
     Test-Check 'real adapter: the subscription list is GET only, other paths outside a subscription stay refused (no network)' (@($refused | Where-Object { $_ -notlike 'Refused*' }).Count -eq 0) ($refused -join ' | ')
     $r = Invoke-Readiness (New-Master) (New-Arm) 'tok' "$defId/versions/1.0.0"
     Test-Check 'a version suffix is dropped, definition with NVMe, Trusted Launch and accelerated networking is green' ((Get-Row $r 'hw.gallery').Status -eq 'green' -and $r.GalleryImageId -eq $defId) (Get-Row $r 'hw.gallery').Reason

@@ -203,7 +203,7 @@ function Find-AVDTuneGalleryImage {
     $targets = @{}
     $targets[$vmId.ToLowerInvariant()] = 'captured from this VM'
     $targets[([string]$Identity.OsDiskId).ToLowerInvariant()] = 'made from the OS disk of this VM'
-    try { foreach ($s in @(Get-AVDTuneOsDiskSnapshots -Arm $Arm -Token $Token -Vm $Identity)) { if ($s -and $s.Id) { $targets[([string]$s.Id).ToLowerInvariant()] = "made from the snapshot $($s.Name) of the OS disk" } } }
+    try { foreach ($s in @(Get-AVDTuneOsDiskSnapshots -Arm $Arm -Token $Token -Vm $Identity)) { if ($s -and $s.Id) { $targets[([string]$s.Id).ToLowerInvariant()] = "made from the snapshot $(Remove-AVDTuneControlCharacters ([string]$s.Name) 80) of the OS disk" } } }
     catch { [void]$st.Notes.Add("The snapshots of the OS disk could not be read: $($_.Exception.Message)") }
 
     $subs = New-Object System.Collections.ArrayList; $subNames = @{}
@@ -228,7 +228,7 @@ function Find-AVDTuneGalleryImage {
                 foreach ($g in @(& $list "/subscriptions/$sid/providers/Microsoft.Compute/galleries?api-version=$($script:GalleryApi)" 'Microsoft.Compute/galleries/read' "the galleries of $label" 1000)) {
                     $gid = [string](Get-AVDTuneProp $g 'id')
                     if ($gid -notmatch $script:GalleryOnlyPattern) { continue }
-                    [void]$galleries.Add([pscustomobject]@{ Id = $gid; Name = [string](Get-AVDTuneProp $g 'name'); Subscription = $label })
+                    [void]$galleries.Add([pscustomobject]@{ Id = $gid; Name = (Remove-AVDTuneControlCharacters ([string](Get-AVDTuneProp $g 'name')) 80); Subscription = $label })
                 }
             }
             catch { if ($_.Exception.Message -like 'AVDTune: request limit*') { throw }; [void]$st.Notes.Add("$label`: $($_.Exception.Message)") }
@@ -239,7 +239,7 @@ function Find-AVDTuneGalleryImage {
                 foreach ($d in @(& $list "$($g.Id)/images?api-version=$($script:GalleryApi)" 'Microsoft.Compute/galleries/images/read' "the definitions of the gallery $($g.Name)" 1000)) {
                     $did = [string](Get-AVDTuneProp $d 'id')
                     if ($did -notmatch $script:GalleryPattern) { continue }
-                    [void]$definitions.Add([pscustomobject]@{ Id = $did; Name = [string](Get-AVDTuneProp $d 'name'); Gallery = $g.Name; Subscription = $g.Subscription; Body = $d })
+                    [void]$definitions.Add([pscustomobject]@{ Id = $did; Name = (Remove-AVDTuneControlCharacters ([string](Get-AVDTuneProp $d 'name')) 80); Gallery = $g.Name; Subscription = $g.Subscription; Body = $d })
                 }
             }
             catch { if ($_.Exception.Message -like 'AVDTune: request limit*') { throw }; [void]$st.Notes.Add("Gallery $($g.Name): $($_.Exception.Message)") }
@@ -270,7 +270,7 @@ function Find-AVDTuneGalleryImage {
                         $published = $null
                         $raw = [string](Get-AVDTuneProp (Get-AVDTuneProp (Get-AVDTuneProp $v 'properties') 'publishingProfile') 'publishedDate')
                         if ($raw) { try { $published = [datetime]::Parse($raw, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind) } catch { } }
-                        [void]$hits.Add([pscustomobject]@{ DefinitionId = $d.Id; Definition = $d.Body; Label = "$($d.Gallery)/$($d.Name)"; VersionName = [string](Get-AVDTuneProp $v 'name'); How = $how; Published = $published })
+                        [void]$hits.Add([pscustomobject]@{ DefinitionId = $d.Id; Definition = $d.Body; Label = "$($d.Gallery)/$($d.Name)"; VersionName = (Remove-AVDTuneControlCharacters ([string](Get-AVDTuneProp $v 'name')) 80); How = $how; Published = $published })
                     }
                 }
             }

@@ -142,6 +142,15 @@ try {
 
     Write-AVDTuneFile (Join-Path $tmp 'state.json') '{"Schema":99}'
     Test-Check 'a newer state schema is refused' (Test-Throws { Get-AVDTuneState $tmp }) $null
+    $aclFile = Join-Path $tmp 'acl-state.json'
+    Write-AVDTuneFile $aclFile '{"a":1}'
+    $open = (New-Object IO.FileInfo $aclFile).GetAccessControl()
+    $open.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule((New-Object Security.Principal.SecurityIdentifier 'S-1-1-0'), 'Read', 'Allow')))
+    (New-Object IO.FileInfo $aclFile).SetAccessControl($open)
+    Write-AVDTuneFile $aclFile '{"a":2}'
+    $aclInfo = Read-AVDTuneAclInfo -Path $aclFile -IsDirectory $false
+    $aclSids = @($aclInfo.Rules | ForEach-Object { $_.Sid })
+    Test-Check 'Write-AVDTuneFile over an existing file: the old ACL is gone (no Everyone), protected, only Administrators/SYSTEM, content new, no temp left' ($aclInfo.Protected -and @($aclSids | Where-Object { $_ -notin 'S-1-5-32-544', 'S-1-5-18', [Security.Principal.WindowsIdentity]::GetCurrent().User.Value }).Count -eq 0 -and ([IO.File]::ReadAllText($aclFile) -eq '{"a":2}') -and -not @(Get-ChildItem $tmp -Filter 'acl-state.json.*.tmp').Count) ($aclSids -join ',')
     Write-AVDTuneFile (Join-Path $tmp 'state.json') ([ordered]@{ Schema = 1; ImageVersion = $null; Versions = @(); LastUpdate = $null; LastBenchmark = $null; UpdateBlock = $null; Sealed = $false; Identity = $null; LastRunId = $null } | ConvertTo-Json)
 
     # ---------------------------------------------------------------- image version

@@ -119,13 +119,17 @@ function New-AVDTuneUsersReadSecurity {
 
 function New-AVDTuneFileSecurity {
     # A file that everybody may read and run and only Administrators/SYSTEM may change; protected (no inheritance), owner Administrators when elevated
+    # -AdminOnly: nobody else may even read it (state files)
+    param([switch]$AdminOnly)
     $security = New-Object System.Security.AccessControl.FileSecurity
     $security.SetAccessRuleProtection($true, $false)
     if (Test-AVDTuneElevated) { $security.SetOwner((New-Object System.Security.Principal.SecurityIdentifier 'S-1-5-32-544')) }
     foreach ($sid in 'S-1-5-32-544', 'S-1-5-18') {
         $security.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule((New-Object System.Security.Principal.SecurityIdentifier $sid), 'FullControl', 'Allow')))
     }
-    $security.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule((New-Object System.Security.Principal.SecurityIdentifier 'S-1-5-32-545'), 'ReadAndExecute', 'Allow')))
+    # AVDTune runs elevated; only a check run (not elevated) needs its own user as well, or it could not move its own file
+    if ($AdminOnly -and -not (Test-AVDTuneElevated)) { $security.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule([Security.Principal.WindowsIdentity]::GetCurrent().User, 'FullControl', 'Allow'))) }
+    if (-not $AdminOnly) { $security.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule((New-Object System.Security.Principal.SecurityIdentifier 'S-1-5-32-545'), 'ReadAndExecute', 'Allow'))) }
     $security
 }
 
@@ -373,14 +377,18 @@ function New-AVDTuneStateSecurity {
 }
 
 function Write-AVDTuneFile {
-    # Written next to the target, then moved over it: a crash leaves the old or the new file, never half of one
+    # Written next to the target with an explicit protected admin-only ACL (CreateNew), then moved over it: a crash leaves the old or the new file,
+    # never half of one, and the file never keeps an ACL that was there before (File.Replace would keep it)
     param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][string]$Text)
     $folder = Split-Path $Path -Parent
     if (-not (Test-Path -LiteralPath $folder)) { New-Item -ItemType Directory -Path $folder -Force | Out-Null }
     $temp = "$Path.$([guid]::NewGuid().ToString('N').Substring(0, 8)).tmp"
+    $bytes = (New-Object Text.UTF8Encoding $false).GetBytes($Text)
     try {
-        [IO.File]::WriteAllText($temp, $Text, (New-Object Text.UTF8Encoding $false))
-        if (Test-Path -LiteralPath $Path) { [IO.File]::Replace($temp, $Path, [NullString]::Value) } else { [IO.File]::Move($temp, $Path) }
+        $stream = New-Object IO.FileStream($temp, [IO.FileMode]::CreateNew, [Security.AccessControl.FileSystemRights]'Write, ReadPermissions', [IO.FileShare]::None, 4096, [IO.FileOptions]::None, (New-AVDTuneFileSecurity -AdminOnly))
+        try { $stream.Write($bytes, 0, $bytes.Length) } finally { $stream.Dispose() }
+        if (Test-Path -LiteralPath $Path) { [IO.File]::Delete($Path) }
+        [IO.File]::Move($temp, $Path)
     }
     finally { if (Test-Path -LiteralPath $temp) { Remove-Item -LiteralPath $temp -Force -ErrorAction SilentlyContinue } }
 }
