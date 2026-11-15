@@ -380,6 +380,26 @@ function Add-AVDTuneRun {
     $path
 }
 
+function Get-AVDTuneLastChange {
+    <#
+        When AVDTune last changed the master (Apply or Undo that changed something), as a local [datetime], or $null when it never did.
+        The newest of: state.json LastChange, the end of every run record with a Changed/Reverted result, every automatic change log
+        entry (Source Step) except the snapshot confirmations themselves.
+    #>
+    param([string]$Root = (Get-AVDTuneRoot))
+    $times = New-Object System.Collections.ArrayList
+    $parse = { param($v) if ($v) { try { [void]$times.Add(([datetime]::Parse([string]$v, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind)).ToUniversalTime()) } catch { } } }
+    $state = Read-AVDTuneJson (Join-Path $Root 'state.json')
+    & $parse (Get-AVDTuneProp $state 'LastChange')
+    foreach ($run in @(Get-AVDTuneRun -Root $Root)) {
+        if (-not $run -or (Get-AVDTuneProp $run 'WhatIf')) { continue }
+        if (@(@(Get-AVDTuneProp $run 'Results') | Where-Object { $_ -and $_.Status -in 'Changed', 'Reverted' }).Count -gt 0) { & $parse (Get-AVDTuneProp $run 'Ended') }
+    }
+    foreach ($e in @(Get-AVDTuneChangeLog -Root $Root)) { if ($e.Source -eq 'Step' -and $e.Category -ne 'Snapshot') { & $parse $e.At } }
+    if ($times.Count -eq 0) { return $null }
+    (@($times | Sort-Object)[-1]).ToLocalTime()
+}
+
 function Get-AVDTuneRun {
     param([string]$Root = (Get-AVDTuneRoot), [string]$Id)
     $folder = Join-Path $Root 'runs'
@@ -393,7 +413,7 @@ function Get-AVDTuneRun {
 
 #region write gate
 
-# The snapshot gate (AVDTune.Snapshot.psm1) opens this when a snapshot of today is confirmed by name. Until then the engine refuses every
+# The snapshot gate (AVDTune.Snapshot.psm1) opens this when a snapshot newer than the last change of AVDTune is confirmed by name. Until then the engine refuses every
 # change of the master (Apply and Undo without -WhatIf); reading and dry runs always work. The gate is held in memory only: a new
 # start of AVDTune starts closed.
 $script:WriteGate = $null
@@ -445,7 +465,7 @@ function Invoke-AVDTuneStep {
     [CmdletBinding()]
     param([Parameter(Mandatory)]$Step, [Parameter(Mandatory)]$Machine, [ValidateSet('Test', 'Apply', 'Undo')][string]$Mode = 'Test', [switch]$WhatIf)
     if (($Mode -in 'Apply', 'Undo') -and -not $WhatIf -and -not (Test-AVDTuneWriteAllowed)) {
-        throw 'The snapshot gate is not confirmed: AVDTune is read only until a snapshot of today is confirmed on the Overview.'
+        throw 'The snapshot gate is not confirmed: AVDTune is read only until a snapshot newer than its last change is confirmed on the Overview.'
     }
     $started = & $Machine.Now
     $result = [ordered]@{
@@ -576,6 +596,8 @@ function Invoke-AVDTune {
         $state = Get-AVDTuneState $Root
         $run.ImageVersion = $state.ImageVersion
         [void](Add-AVDTuneRun -Root $Root -Run $run)
+        # The last change AVDTune made on the master: a snapshot only counts when it is newer (snapshot gate)
+        if (@($results | Where-Object { $_.Status -in 'Changed', 'Reverted' }).Count -gt 0) { [void](Set-AVDTuneState -Root $Root -Values @{ LastChange = $run.Ended }) }
         foreach ($r in @($results | Where-Object { $_.Status -eq 'Changed' })) {
             $step = $byId[$r.Id]
             if ($state.ImageVersion) {
@@ -827,7 +849,7 @@ function Get-AVDTuneOverview {
 
 Export-ModuleMember -Function Get-AVDTuneProp, Test-AVDTuneElevated, Get-AVDTuneRoot, Test-AVDTuneDefaultRoot, ConvertTo-AVDTuneArgument, New-AVDTuneMachine, Invoke-AVDTuneMachine,
     New-AVDTuneStateSecurity, Initialize-AVDTuneState, Read-AVDTuneAclInfo, Get-AVDTuneStateSecurityProblems, Repair-AVDTuneStateSecurity, Assert-AVDTuneStateSecurity, Get-AVDTuneStateSecurityReport, Get-AVDTuneState, Set-AVDTuneState, Test-AVDTuneImageVersion, Get-AVDTuneNextImageVersion, Start-AVDTuneImageVersion,
-    Add-AVDTuneRun, Get-AVDTuneRun, New-AVDTuneStep, Invoke-AVDTuneStep, New-AVDTuneStepFromData, Get-AVDTuneStepCatalog, Invoke-AVDTune,
+    Add-AVDTuneRun, Get-AVDTuneRun, Get-AVDTuneLastChange, New-AVDTuneStep, Invoke-AVDTuneStep, New-AVDTuneStepFromData, Get-AVDTuneStepCatalog, Invoke-AVDTune,
     Add-AVDTuneChangeLogEntry, Get-AVDTuneChangeLog, Get-AVDTuneChangeLogVersions, ConvertTo-AVDTuneChangeLogDocument, Export-AVDTuneChangeLog,
     Get-AVDTuneWindowsInfo, Get-AVDTuneOfficeInfo, Get-AVDTuneSourceImage, Get-AVDTuneHealth, Get-AVDTuneOverview, Write-AVDTuneFile, Read-AVDTuneJson,
     Open-AVDTuneWriteGate, Close-AVDTuneWriteGate, Get-AVDTuneWriteGate, Test-AVDTuneWriteAllowed, Remove-AVDTuneControlCharacters

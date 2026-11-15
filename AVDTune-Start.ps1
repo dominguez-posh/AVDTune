@@ -192,7 +192,7 @@ function Build-EnvironmentForm {
     $auth.Add_SelectionChanged({ try { Update-EnvironmentPreview } catch { } })
     $f.AuthCombo = $auth; $f.AuthWanted = [string]$answers.AzureFilesAuth
     [void]$ui.PanelStageBody.Children.Add((New-FormRow 'Azure Files authentication' $auth))
-    foreach ($t in @(@('VNet', 'Network: virtual network of the session hosts'), @('Subnet', 'Network: subnet of the session hosts'), @('TenantId', 'Tenant (domain or ID)'), @('ClientId', 'Client ID of the app registration'))) {
+    foreach ($t in @(@('VNet', 'Network: virtual network of the session hosts'), @('Subnet', 'Network: subnet of the session hosts'), @('TenantId', 'Tenant (domain or ID)'), @('ClientId', 'Client ID of the app registration'), @('SnapshotNamePattern', 'Snapshot name: {OsDisk} {VM} {ImageVersion} {DD} {MM} {YYYY}, {N} = number of the day'))) {
         $tb = New-Object System.Windows.Controls.TextBox; $tb.Width = 430; $tb.Text = [string]$answers.($t[0]); $tb.MaxLength = 255; $tb.Name = "T$($t[0])"
         $tb.Add_TextChanged({ try { Update-EnvironmentPreview } catch { } })
         $f.Texts[$t[0]] = $tb
@@ -436,17 +436,18 @@ function Invoke-DomainConnect {
 # ---------------------------------------------------------------- 4. snapshot gate
 function Build-SnapshotForm {
     $ui.TxtStageTitle.Text = '4. Snapshot gate'
-    $ui.TxtStageIntro.Text = 'Before AVDTune changes the master there must be a snapshot of its OS disk from today, so a rollback is possible. Create one here (incremental) or use an existing one, then confirm it with your full name. Until then every page is read only.'
+    $ui.TxtStageIntro.Text = 'Before AVDTune changes the master there must be a finished snapshot of its OS disk that is newer than the last change AVDTune made, so a rollback loses nothing. Create one here (incremental, named by the pattern of this environment) or use an existing one, then confirm it with your first and last name. Until then every page is read only.'
     $f = $script:Form
     $f.Info = New-Object System.Windows.Controls.StackPanel
     [void]$ui.PanelStageBody.Children.Add($f.Info)
     $f.SnapList = New-Object System.Windows.Controls.ComboBox; $f.SnapList.Width = 520; $f.SnapList.Name = 'CmbSnapshot'
-    [void]$ui.PanelStageBody.Children.Add((New-FormRow 'Snapshot of today to confirm' $f.SnapList))
+    [void]$ui.PanelStageBody.Children.Add((New-FormRow 'Snapshot to confirm' $f.SnapList))
     $f.SnapList.Visibility = 'Collapsed'
     $f.Phrase = New-Text (Get-AVDTuneGateText) $null '0,10,0,6'; $f.Phrase.FontWeight = 'SemiBold'
     [void]$ui.PanelStageBody.Children.Add($f.Phrase)
     $f.NameBox = New-Object System.Windows.Controls.TextBox; $f.NameBox.Width = 320; $f.NameBox.Name = 'TxtConfirmName'; $f.NameBox.MaxLength = 100
-    [void]$ui.PanelStageBody.Children.Add((New-FormRow 'Your full name' $f.NameBox 'Your full name to confirm the snapshot'))
+    [void]$ui.PanelStageBody.Children.Add((New-FormRow 'Your first and last name' $f.NameBox 'Your first and last name to confirm the snapshot'))
+    $ui.PanelStageBody.Children.Add((New-Text 'Shared admin accounts are fine: the protocol and the change log record the typed name together with the signed-in Microsoft account and the Windows account.' 'Hint' '0,4,0,0')) | Out-Null
     $ui.BtnStageAction.Content = 'Confirm'
     $ui.BtnStageAction2.Content = 'Create snapshot now'; $ui.BtnStageAction2.Visibility = 'Visible'
     $script:StageAction = { Invoke-SnapshotConfirm }
@@ -467,11 +468,15 @@ function Update-SnapshotForm {
         $ui.BtnStageAction.IsEnabled = $false; $ui.BtnStageAction2.IsEnabled = $false
         return
     }
-    foreach ($row in @(@('VM', $vm.VmName), @('Resource group', $vm.ResourceGroup), @('OS disk', $vm.OsDiskName), @('Image version', $(if ($f.ImageVersion) { $f.ImageVersion } else { 'none yet: Create snapshot starts the first one' })))) {
+    $f.LastChange = Get-AVDTuneLastChange -Root $script:StateRoot
+    $e = Get-AVDTuneEnvironment $script:StateRoot
+    $f.NamePattern = [string](Get-AVDTuneEnvironmentAnswers $e).SnapshotNamePattern
+    foreach ($row in @(@('VM', $vm.VmName), @('Resource group', $vm.ResourceGroup), @('OS disk', $vm.OsDiskName), @('Image version', $(if ($f.ImageVersion) { $f.ImageVersion } else { 'none yet: Create snapshot starts the first one' })),
+            @('Last change by AVDTune', $(if ($f.LastChange) { $f.LastChange.ToString('yyyy-MM-dd HH:mm') } else { 'none yet: every finished snapshot counts' })), @('Name pattern', $f.NamePattern))) {
         [void]$f.Info.Children.Add((New-InfoRow $row[0] ([string]$row[1])))
     }
     try {
-        $list = Invoke-Busy 'Looking for snapshots of the OS disk ...' { @(Get-AVDTuneOsDiskSnapshots -Arm (Get-StartArm) -Token (Get-ArmToken) -Vm $vm -Now (& $script:Machine.Now)) }
+        $list = Invoke-Busy 'Looking for snapshots of the OS disk ...' { @(Get-AVDTuneOsDiskSnapshots -Arm (Get-StartArm) -Token (Get-ArmToken) -Vm $vm -LastChange $f.LastChange) }
     }
     catch {
         $script:StartContext.Failures['Snapshot'] = $_.Exception.Message
@@ -482,17 +487,17 @@ function Update-SnapshotForm {
     }
     $script:StartContext.Failures.Remove('Snapshot')
     $f.Snapshots = $list
-    $today = @($list | Where-Object IsToday)
-    $gate = Get-AVDTuneGateStatus -Vm $vm -Snapshots $list
-    $f.SnapList.ItemsSource = @($today | ForEach-Object { "$($_.Name)  ($($_.Created.ToString('HH:mm')), $(if ($_.ByAVDTune) { 'made by AVDTune' } else { 'made by someone else' }))" })
-    if ($today.Count -gt 0) { $f.SnapList.SelectedIndex = 0 }
-    $f.SnapList.Visibility = ConvertTo-Vis ($today.Count -gt 0)
-    $f.Today = $today
-    $ui.BtnStageAction.IsEnabled = ($today.Count -gt 0)
+    $valid = @($list | Where-Object Valid)
+    $gate = Get-AVDTuneGateStatus -Vm $vm -Snapshots $list -LastChange $f.LastChange
+    $f.SnapList.ItemsSource = @($valid | ForEach-Object { "$($_.Name)  ($($_.Created.ToString('yyyy-MM-dd HH:mm')), $(if ($_.ByAVDTune) { 'made by AVDTune' } else { 'made by someone else' }))" })
+    if ($valid.Count -gt 0) { $f.SnapList.SelectedIndex = 0 }
+    $f.SnapList.Visibility = ConvertTo-Vis ($valid.Count -gt 0)
+    $f.Valid = $valid
+    $ui.BtnStageAction.IsEnabled = ($valid.Count -gt 0)
     $ui.BtnStageAction2.IsEnabled = $true
-    $others = @($list | Where-Object { -not $_.IsToday }).Count
-    $kind = if ($today.Count -gt 0) { 'ok' } else { 'warn' }
-    Set-StageMessage ($gate.Detail + $(if ($others -gt 0) { " ($others older snapshot(s) of this disk do not count.)" })) $kind
+    $others = @($list | Where-Object { -not $_.Valid }).Count
+    $kind = if ($valid.Count -gt 0) { 'ok' } else { 'warn' }
+    Set-StageMessage ($gate.Detail + $(if ($others -gt 0) { " ($others snapshot(s) of this disk do not count: not finished or older than the last change.)" })) $kind
 }
 function Invoke-SnapshotCreate {
     $f = $script:Form
@@ -506,7 +511,7 @@ function Invoke-SnapshotCreate {
     if ($script:PendingSnapshot) { return }
     $vm = $f.Vm
     try {
-        $started = Invoke-Busy 'Asking Azure to create the incremental snapshot ...' { Start-AVDTuneSnapshot -Arm (Get-StartArm) -Token (Get-ArmToken) -Vm $vm -ImageVersion $f.ImageVersion -User ([string]$script:StartContext.Session.Account) -At (& $script:Machine.Now) }
+        $started = Invoke-Busy 'Asking Azure to create the incremental snapshot ...' { Start-AVDTuneSnapshot -Arm (Get-StartArm) -Token (Get-ArmToken) -Vm $vm -ImageVersion $f.ImageVersion -User ([string]$script:StartContext.Session.Account) -At (& $script:Machine.Now) -NamePattern $f.NamePattern -ExistingNames @(@($f.Snapshots) | Where-Object { $_ } | ForEach-Object { $_.Name }) }
     }
     catch {
         $script:StartContext.Failures['Snapshot'] = $_.Exception.Message
@@ -549,15 +554,15 @@ $script:SnapTimer.Add_Tick({
     })
 function Invoke-SnapshotConfirm {
     $f = $script:Form
-    if (-not $f.Today -or $f.Today.Count -eq 0) { Set-StageMessage 'There is no finished snapshot of today to confirm.' 'error'; return }
-    $snapshot = $f.Today[[Math]::Max(0, $f.SnapList.SelectedIndex)]
+    if (-not $f.Valid -or $f.Valid.Count -eq 0) { Set-StageMessage 'There is no finished snapshot newer than the last change to confirm.' 'error'; return }
+    $snapshot = $f.Valid[[Math]::Max(0, $f.SnapList.SelectedIndex)]
     $session = $script:StartContext.Session
     try {
-        $record = Confirm-AVDTuneSnapshotGate -Root $script:StateRoot -Snapshot $snapshot -TypedName $f.NameBox.Text -ExpectedName ([string]$session.Name) -User ([string]$env:USERNAME) -ImageVersion $f.ImageVersion -Machine $script:Machine
+        $record = Confirm-AVDTuneSnapshotGate -Root $script:StateRoot -Snapshot $snapshot -TypedName $f.NameBox.Text -SignedInAccount $(if ($session) { [string]$session.Account } else { '' }) -WindowsAccount "$env:USERDOMAIN\$env:USERNAME" -ImageVersion $f.ImageVersion -Machine $script:Machine
     }
     catch { Set-StageMessage $_.Exception.Message 'error'; return }
     $made = if ($record.CreatedByAVDTune) { 'yes' } else { 'no' }
-    Add-StartProtocol 'Snapshot gate confirmed' "$($record.SnapshotName), created $(([datetime]$record.SnapshotCreated).ToString('yyyy-MM-dd HH:mm')), by AVDTune: $made, confirmed by $($record.ConfirmedBy), ID $($record.SnapshotId)"
+    Add-StartProtocol 'Snapshot gate confirmed' "$($record.SnapshotName), created $(([datetime]$record.SnapshotCreated).ToString('yyyy-MM-dd HH:mm')), by AVDTune: $made, confirmed by $($record.ConfirmedBy) (Microsoft account $($record.SignedInAccount), Windows account $($record.WindowsAccount)), ID $($record.SnapshotId)"
     $script:StartContext.Failures.Remove('Snapshot')
     Show-Toast 'Snapshot confirmed. The pages can change the master now.'
     Close-Stage

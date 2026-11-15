@@ -2,7 +2,7 @@
     AVDTune start: the first-run questions (identity model) with environment.json, and the start sequence on the Overview.
 
     environment.json (C:\ProgramData\AVDTune\environment.json, next to state.json): the answers, the tenant and client ID of the app
-    registration, the domain controller (name, account name, pinned certificate thumbprints, summary of what was read). Never a secret:
+    registration, the snapshot name pattern, the domain controller (name, account name, pinned certificate thumbprints, summary of what was read). Never a secret:
     only fields of the table below are written, text is cleaned, and no password, token or key has a field.
 
     Start sequence (docs\plans\avdtune.md 1a): Environment -> Sign-in -> Domain (only with a DC) -> Snapshot gate. Every stage has a status the
@@ -11,6 +11,7 @@
 
 Set-StrictMode -Version 2.0
 Import-Module (Join-Path $PSScriptRoot 'AVDTune.psm1')
+Import-Module (Join-Path $PSScriptRoot 'AVDTune.Snapshot.psm1')
 
 #region questions
 
@@ -44,7 +45,7 @@ function Get-AVDTuneQuestions { $script:Questions }
 function Get-AVDTuneEnvironmentDefaults {
     [pscustomobject][ordered]@{
         Join = 'EntraOnly'; Dc = 'None'; Identities = 'CloudOnly'; Profiles = 'AzureFiles'; AzureFilesAuth = 'Auto'
-        Endpoint = 'Private'; VNet = ''; Subnet = ''; DnsZone = 'Azure'; TenantId = ''; ClientId = ''
+        Endpoint = 'Private'; VNet = ''; Subnet = ''; DnsZone = 'Azure'; TenantId = ''; ClientId = ''; SnapshotNamePattern = (Get-AVDTuneDefaultSnapshotNamePattern)
     }
 }
 
@@ -77,6 +78,8 @@ function Test-AVDTuneEnvironmentAnswers {
     if ($t -and $t -notmatch '^([0-9a-fA-F-]{36}|[A-Za-z0-9][A-Za-z0-9.-]{0,250}\.[A-Za-z]{2,})$') { [void]$errors.Add('The tenant must be a tenant ID (GUID) or a domain name.') }
     $c = [string](Get-AVDTuneProp $Answers 'ClientId')
     if ($c -and $c -notmatch '^[0-9a-fA-F-]{36}$') { [void]$errors.Add('The client ID must be a GUID.') }
+    $pattern = [string](Get-AVDTuneProp $Answers 'SnapshotNamePattern')
+    if ($pattern) { $problem = Test-AVDTuneSnapshotNamePattern $pattern; if ($problem) { [void]$errors.Add($problem) } }
     if ($c -ieq '14d82eec-204b-4c2f-b7e8-296a70dab67e') { [void]$errors.Add("That is Microsoft's setup app; AVDTune needs the client ID of the own app registration (the one PackTune uses).") }
     [pscustomobject]@{ Errors = @($errors); Warnings = @($warnings) }
 }
@@ -140,6 +143,7 @@ function Get-AVDTuneEnvironmentAnswers {
             $v = Get-AVDTuneProp $answers $p.Name
             if ($null -eq $v) { $v = Get-AVDTuneProp (Get-AVDTuneProp $answers 'Network') $p.Name }
             if ($null -eq $v) { $v = Get-AVDTuneProp (Get-AVDTuneProp $Environment 'SignIn') $p.Name }
+            if ($null -eq $v -and $p.Name -eq 'SnapshotNamePattern') { $v = Get-AVDTuneProp (Get-AVDTuneProp $Environment 'Snapshot') 'NamePattern' }
             if ($null -ne $v) { $a.($p.Name) = [string]$v }
         }
     }
@@ -167,6 +171,7 @@ function Save-AVDTuneEnvironment {
             AzureFilesAuth = [string]$plan.AzureFilesAuth; Network = [ordered]@{ Endpoint = [string]$Answers.Endpoint; VNet = (& $clean $Answers.VNet 200); Subnet = (& $clean $Answers.Subnet 200); DnsZone = [string]$Answers.DnsZone }
         }
         SignIn = [ordered]@{ TenantId = (& $clean $Answers.TenantId 255).Trim(); ClientId = (& $clean $Answers.ClientId 36).Trim() }
+        Snapshot = [ordered]@{ NamePattern = $(if ([string](Get-AVDTuneProp $Answers 'SnapshotNamePattern')) { (& $clean $Answers.SnapshotNamePattern 80).Trim() } else { Get-AVDTuneDefaultSnapshotNamePattern }) }
         Dc = $(if ($old -and (Get-AVDTuneProp $old 'Dc')) { Get-AVDTuneProp $old 'Dc' } else { [ordered]@{ Server = ''; User = ''; Pins = [ordered]@{}; Discovery = $null } })
         Updated = (Get-Date).ToString('o'); UpdatedBy = (& $clean $User 80)
     }
@@ -223,7 +228,7 @@ function Set-AVDTuneDcPin {
 
 function Update-AVDTuneEnvironmentDc {
     param([string]$Root, $Environment, $Dc)
-    $copy = [ordered]@{ Schema = 1; Answers = $Environment.Answers; SignIn = $Environment.SignIn; Dc = $Dc; Updated = (Get-Date).ToString('o'); UpdatedBy = [string](Get-AVDTuneProp $Environment 'UpdatedBy') }
+    $copy = [ordered]@{ Schema = 1; Answers = $Environment.Answers; SignIn = $Environment.SignIn; Snapshot = (Get-AVDTuneProp $Environment 'Snapshot'); Dc = $Dc; Updated = (Get-Date).ToString('o'); UpdatedBy = [string](Get-AVDTuneProp $Environment 'UpdatedBy') }
     Write-AVDTuneFile (Get-AVDTuneEnvironmentPath $Root) ($copy | ConvertTo-Json -Depth 10)
 }
 
@@ -283,7 +288,7 @@ function Get-AVDTuneStartStages {
     # 4 snapshot gate
     if (Test-AVDTuneWriteAllowed) { $g = Get-AVDTuneWriteGate; & $add 'Snapshot' 'Snapshot gate' 'Done' "Confirmed by $($g.ConfirmedBy). The pages can change the master." }
     elseif ($open) { & $add 'Snapshot' 'Snapshot gate' 'Locked' 'Finish the earlier steps first.' }
-    else { & $add 'Snapshot' 'Snapshot gate' $(if (& $fail 'Snapshot') { 'Failed' } else { 'Pending' }) $(if (& $fail 'Snapshot') { & $fail 'Snapshot' } else { 'A snapshot of the OS disk from today, confirmed by your full name. Until then every page is read only.' }) }
+    else { & $add 'Snapshot' 'Snapshot gate' $(if (& $fail 'Snapshot') { 'Failed' } else { 'Pending' }) $(if (& $fail 'Snapshot') { & $fail 'Snapshot' } else { 'A finished snapshot of the OS disk, newer than the last change AVDTune made, confirmed with your first and last name. Until then every page is read only.' }) }
     @($stages)
 }
 

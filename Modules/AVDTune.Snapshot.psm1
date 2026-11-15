@@ -1,14 +1,18 @@
 <#
-    AVDTune snapshot gate: nothing changes the master until a snapshot of its OS disk from today exists and the administrator has confirmed it
-    by typing the full name. Until then the engine stays read only (Test-AVDTuneWriteAllowed in AVDTune.psm1).
+    AVDTune snapshot gate: nothing changes the master until a finished snapshot of its OS disk exists that is newer than the last change
+    AVDTune made on the master (Get-AVDTuneLastChange; with no change recorded yet any finished snapshot counts; user decision 2026-11-15),
+    and the administrator has confirmed it by typing first and last name (not matched against the sign-in: shared admin accounts are
+    used). Until then the engine stays read only (Test-AVDTuneWriteAllowed in AVDTune.psm1).
 
       * The VM finds itself through the instance metadata service (machine adapter member Imds): subscription, resource group, VM, OS disk.
       * Azure Resource Manager is an adapter ($Arm): Invoke = { param($Method, $Path, $Token, $Body) } returns
         @{ Status; Body; Error } and never throws (Status 0 = no connection). New-AVDTuneArmAdapter is the real one (only
         https://management.azure.com), Tests\Fakes\FakeServices.ps1 has the fake.
-      * Snapshot: incremental, name <vm>-avdtune-<image version>-<yyyyMMdd-HHmm>, tags ImageVersion, CreatedBy (user), CreatedWith=AVDTune.
-      * The confirmation is written to state.json (SnapshotGate), the change log and returned for the protocol: name, time, snapshot ID,
-        whether AVDTune made it. The open gate itself lives in memory only; a new start of AVDTune starts closed.
+      * Snapshot: incremental, name from the pattern of the environment (environment.json Snapshot.NamePattern, default
+        {OsDisk}-{DD}.{MM}.{YYYY}-{N} as in the administrators' own process, {N} = next free number of that day), tags ImageVersion,
+        CreatedBy (user), CreatedWith=AVDTune.
+      * The confirmation is written to state.json (SnapshotGate), the change log and returned for the protocol: typed name, signed-in
+        Microsoft account, local Windows account, time, snapshot ID, whether AVDTune made it. The open gate itself lives in memory only.
 #>
 
 Set-StrictMode -Version 2.0
@@ -81,21 +85,55 @@ function Get-AVDTuneVmIdentity {
 
 #region snapshots
 
+$script:DefaultSnapshotNamePattern = '{OsDisk}-{DD}.{MM}.{YYYY}-{N}'
+$script:SnapshotNameTokens = @('OsDisk', 'VM', 'ImageVersion', 'YYYY', 'MM', 'DD', 'N')
+function Get-AVDTuneDefaultSnapshotNamePattern { $script:DefaultSnapshotNamePattern }
+
+function Test-AVDTuneSnapshotNamePattern {
+    <# Error text for a name pattern, '' when it is fine: tokens {OsDisk} {VM} {ImageVersion} {YYYY} {MM} {DD} {N}, {N} required, else letters, digits, '_', '.', '-'. #>
+    param([string]$Pattern)
+    if (-not $Pattern) { return 'The snapshot name pattern is empty.' }
+    if ($Pattern.Length -gt 80) { return 'The snapshot name pattern is longer than 80 characters.' }
+    if ($Pattern -notmatch '\{N\}') { return 'The snapshot name pattern needs the counter {N}.' }
+    $rest = [regex]::Replace($Pattern, '\{(' + ($script:SnapshotNameTokens -join '|') + ')\}', '')
+    if ($rest -match '[^A-Za-z0-9_.-]') { return "The snapshot name pattern has characters Azure does not allow or unknown tokens (allowed: $(@($script:SnapshotNameTokens | ForEach-Object { "{$_}" }) -join ' '), letters, digits, '_', '.', '-')." }
+    ''
+}
+
 function Get-AVDTuneSnapshotName {
-    # <vm>-avdtune-<image version>-<yyyyMMdd-HHmm>; Azure allows 80 characters of letters, digits, '_', '.', '-'
-    param([Parameter(Mandatory)][string]$VmName, [Parameter(Mandatory)][string]$ImageVersion, [Parameter(Mandatory)][datetime]$At)
-    if (-not (Test-AVDTuneImageVersion $ImageVersion)) { throw 'Start an image version first (Overview, Start new version): the snapshot name and tags carry it.' }
-    $suffix = '-avdtune-{0}-{1}' -f $ImageVersion, $At.ToString('yyyyMMdd-HHmm', [Globalization.CultureInfo]::InvariantCulture)
-    $vm = [regex]::Replace($VmName, '[^A-Za-z0-9_.-]', '-').Trim('-', '.')
-    if (-not $vm) { $vm = 'vm' }
-    if ($vm.Length + $suffix.Length -gt 80) { $vm = $vm.Substring(0, 80 - $suffix.Length).TrimEnd('-', '.') }
-    $vm + $suffix
+    <#
+        The name of a new snapshot from the pattern of the environment. {N} is the next free number among the existing snapshot names that
+        match the pattern for that day (1 when none). Azure: 1 to 80 characters, letters, digits, '_', '.', '-', starts with a letter or digit,
+        ends with a letter, digit or '_'.
+    #>
+    param([string]$Pattern = $script:DefaultSnapshotNamePattern, [Parameter(Mandatory)][string]$OsDiskName, [string]$VmName, [string]$ImageVersion,
+        [Parameter(Mandatory)][datetime]$At, [string[]]$ExistingNames = @())
+    $problem = Test-AVDTuneSnapshotNamePattern $Pattern
+    if ($problem) { throw $problem }
+    if ($Pattern -match '\{ImageVersion\}' -and -not (Test-AVDTuneImageVersion $ImageVersion)) { throw 'Start an image version first (Overview, Start new version): the snapshot name carries it.' }
+    $inv = [Globalization.CultureInfo]::InvariantCulture
+    $clean = { param($v) [regex]::Replace([string]$v, '[^A-Za-z0-9_.-]', '-') }
+    $values = @{ OsDisk = (& $clean $OsDiskName); VM = (& $clean $VmName); ImageVersion = [string]$ImageVersion; YYYY = $At.ToString('yyyy', $inv); MM = $At.ToString('MM', $inv); DD = $At.ToString('dd', $inv) }
+    $parts = $Pattern -split '\{N\}'
+    $fill = { param($text) $out = $text; foreach ($k in $values.Keys) { $out = $out.Replace("{$k}", $values[$k]) }; $out }
+    $filled = @($parts | ForEach-Object { & $fill $_ })
+    $regex = '^' + ((@($filled | ForEach-Object { [regex]::Escape($_) })) -join '(\d+)') + '$'
+    $highest = 0
+    foreach ($n in @($ExistingNames)) {
+        $m = [regex]::Match([string]$n, $regex, [Text.RegularExpressions.RegexOptions]::IgnoreCase)
+        if ($m.Success) { foreach ($g in @($m.Groups | Select-Object -Skip 1)) { $v = [int]$g.Value; if ($v -gt $highest) { $highest = $v } } }
+    }
+    $name = $filled -join [string]($highest + 1)
+    if ($name.Length -gt 80) { throw "The snapshot name '$name' is longer than the 80 characters Azure allows: shorten the name pattern of the environment." }
+    if ($name -notmatch '^[A-Za-z0-9][A-Za-z0-9_.-]*[A-Za-z0-9_]$') { throw "The snapshot name '$name' is not allowed by Azure (start with a letter or digit, end with a letter, digit or '_')." }
+    $name
 }
 
 function ConvertTo-AVDTuneTagValue([string]$Text) { (Remove-AVDTuneControlCharacters $Text 256) -replace '[<>%&\\?/]', '_' }
 
 function ConvertTo-AVDTuneSnapshotInfo {
-    param($Item, [datetime]$Today)
+    # Valid: finished (Succeeded) and newer than the last change of AVDTune on the master (any finished one when there was none)
+    param($Item, $LastChange)
     $p = Get-AVDTuneProp $Item 'properties'
     $tags = Get-AVDTuneProp $Item 'tags'
     $created = $null
@@ -107,14 +145,15 @@ function ConvertTo-AVDTuneSnapshotInfo {
         Name = [string](Get-AVDTuneProp $Item 'name'); Id = [string](Get-AVDTuneProp $Item 'id'); Created = $created; State = $state
         Incremental = [bool](Get-AVDTuneProp $p 'incremental'); ByAVDTune = $byTool
         ImageVersion = [string](Get-AVDTuneProp $tags 'ImageVersion'); CreatedBy = [string](Get-AVDTuneProp $tags 'CreatedBy')
-        IsToday = [bool]($created -and $created.Date -eq $Today.Date -and $state -eq 'Succeeded')
+        Finished = ($state -eq 'Succeeded')
+        Valid = [bool]($created -and $state -eq 'Succeeded' -and ($null -eq $LastChange -or $created.ToUniversalTime() -gt ([datetime]$LastChange).ToUniversalTime()))
     }
 }
 
 function Get-AVDTuneOsDiskSnapshots {
-    <# All snapshots of this OS disk in the VM's resource group (newest first), each with IsToday (succeeded and created today, local time). #>
+    <# All snapshots of this OS disk in the VM's resource group (newest first), each with Valid (finished and newer than -LastChange). #>
     [CmdletBinding()]
-    param([Parameter(Mandatory)]$Arm, [Parameter(Mandatory)][string]$Token, [Parameter(Mandatory)]$Vm, [datetime]$Now = (Get-Date))
+    param([Parameter(Mandatory)]$Arm, [Parameter(Mandatory)][string]$Token, [Parameter(Mandatory)]$Vm, $LastChange)
     $path = "/subscriptions/$($Vm.SubscriptionId)/resourceGroups/$($Vm.ResourceGroup)/providers/Microsoft.Compute/snapshots?api-version=$($script:ComputeApi)"
     $found = New-Object System.Collections.ArrayList
     for ($page = 0; $path -and $page -lt 20; $page++) {
@@ -122,7 +161,7 @@ function Get-AVDTuneOsDiskSnapshots {
         foreach ($item in @(Get-AVDTuneProp $body 'value')) {
             if (-not $item) { continue }
             $source = [string](Get-AVDTuneProp (Get-AVDTuneProp (Get-AVDTuneProp $item 'properties') 'creationData') 'sourceResourceId')
-            if ($source -ieq $Vm.OsDiskId) { [void]$found.Add((ConvertTo-AVDTuneSnapshotInfo -Item $item -Today $Now)) }
+            if ($source -ieq $Vm.OsDiskId) { [void]$found.Add((ConvertTo-AVDTuneSnapshotInfo -Item $item -LastChange $LastChange)) }
         }
         $next = [string](Get-AVDTuneProp $body 'nextLink')
         $path = if ($next) { ConvertTo-AVDTuneArmPath $next } else { $null }
@@ -136,8 +175,10 @@ function Start-AVDTuneSnapshot {
         Get-AVDTuneSnapshotState says Succeeded. The disk is read first (it must exist and tells the location).
     #>
     [CmdletBinding()]
-    param([Parameter(Mandatory)]$Arm, [Parameter(Mandatory)][string]$Token, [Parameter(Mandatory)]$Vm, [Parameter(Mandatory)][string]$ImageVersion, [string]$User, [datetime]$At = (Get-Date))
-    $name = Get-AVDTuneSnapshotName -VmName $Vm.VmName -ImageVersion $ImageVersion -At $At
+    param([Parameter(Mandatory)]$Arm, [Parameter(Mandatory)][string]$Token, [Parameter(Mandatory)]$Vm, [Parameter(Mandatory)][string]$ImageVersion, [string]$User, [datetime]$At = (Get-Date),
+        [string]$NamePattern = $script:DefaultSnapshotNamePattern, [string[]]$ExistingNames = @())
+    if (-not (Test-AVDTuneImageVersion $ImageVersion)) { throw 'Start an image version first (Overview, Start new version): the snapshot tags carry it.' }
+    $name = Get-AVDTuneSnapshotName -Pattern $NamePattern -OsDiskName $Vm.OsDiskName -VmName $Vm.VmName -ImageVersion $ImageVersion -At $At -ExistingNames $ExistingNames
     $diskBody = Invoke-AVDTuneArm -Arm $Arm -Method GET -Path "$($Vm.OsDiskId)?api-version=$($script:ComputeApi)" -Token $Token -Action 'Microsoft.Compute/disks/read' -Scope "the OS disk $($Vm.OsDiskName)"
     $location = [string](Get-AVDTuneProp $diskBody 'location'); if (-not $location) { $location = $Vm.Location }
     $id = "/subscriptions/$($Vm.SubscriptionId)/resourceGroups/$($Vm.ResourceGroup)/providers/Microsoft.Compute/snapshots/$name"
@@ -160,7 +201,7 @@ function Get-AVDTuneSnapshotState {
     $b = Invoke-AVDTuneArm -Arm $Arm -Method GET -Path "${Id}?api-version=$($script:ComputeApi)" -Token $Token -Action 'Microsoft.Compute/snapshots/read' -Scope 'the snapshot'
     $p = Get-AVDTuneProp $b 'properties'
     $percent = Get-AVDTuneProp $p 'completionPercent'
-    [pscustomobject]@{ Id = $Id; State = [string](Get-AVDTuneProp $p 'provisioningState'); Percent = $(if ($null -ne $percent) { [double]$percent } else { $null }); Info = (ConvertTo-AVDTuneSnapshotInfo -Item $b -Today (Get-Date)) }
+    [pscustomobject]@{ Id = $Id; State = [string](Get-AVDTuneProp $p 'provisioningState'); Percent = $(if ($null -ne $percent) { [double]$percent } else { $null }); Info = (ConvertTo-AVDTuneSnapshotInfo -Item $b -LastChange $null) }
 }
 
 function Wait-AVDTuneSnapshot {
@@ -182,54 +223,67 @@ function Wait-AVDTuneSnapshot {
 #region the gate
 
 function Test-AVDTuneConfirmationName {
-    <# The typed full name: at least two words; when the sign-in told the name, it must be the same (case and spacing ignored). #>
-    param([string]$Typed, [string]$Expected)
+    <#
+        The typed name: at least first and last name (two words with two letters or more each). Not matched against the sign-in, because shared
+        admin accounts are used (user decision 2026-11-15); the protocol and the change log record the typed name with both accounts instead.
+    #>
+    param([string]$Typed)
     $t = ([regex]::Replace([string]$Typed, '\s+', ' ')).Trim()
-    if (@($t -split ' ' | Where-Object { $_ }).Count -lt 2 -or $t.Length -lt 5) { return [pscustomobject]@{ Ok = $false; Message = 'Type your full name (first and last name).' } }
     if ($t -match '[\x00-\x1F]') { return [pscustomobject]@{ Ok = $false; Message = 'The name contains control characters.' } }
-    $e = ([regex]::Replace([string]$Expected, '\s+', ' ')).Trim()
-    if ($e -and -not [string]::Equals($t, $e, [StringComparison]::OrdinalIgnoreCase)) { return [pscustomobject]@{ Ok = $false; Message = 'The name does not match the account that is signed in. Type it as it is in your Microsoft account.' } }
+    $words = @($t -split ' ' | Where-Object { $_ })
+    $named = @($words | Where-Object { ([regex]::Matches($_, '\p{L}')).Count -ge 2 })
+    if ($words.Count -lt 2 -or $named.Count -lt 2) { return [pscustomobject]@{ Ok = $false; Message = 'Type your first and last name.' } }
     [pscustomobject]@{ Ok = $true; Message = '' }
 }
 
 function Get-AVDTuneGateStatus {
     <#
-        Where the gate stands: NoVm (not Azure / no OS disk), NoSnapshotToday (create one), SnapshotToday (confirm it), Confirmed.
-        Snapshots = the snapshots of the OS disk; Chosen = the newest of today.
+        Where the gate stands: NoVm (not Azure / no OS disk), NoValidSnapshot (create one), SnapshotReady (confirm it), Confirmed.
+        Snapshots = the snapshots of the OS disk; Chosen = the newest valid one (finished and newer than the last change of AVDTune).
     #>
-    param([Parameter(Mandatory)]$Vm, $Snapshots, [bool]$Confirmed = (Test-AVDTuneWriteAllowed))
+    param([Parameter(Mandatory)]$Vm, $Snapshots, [bool]$Confirmed = (Test-AVDTuneWriteAllowed), $LastChange)
     if (-not $Vm.Available) { return [pscustomobject]@{ Status = 'NoVm'; Detail = $Vm.Problem; Chosen = $null; Snapshots = @() } }
     $list = @($Snapshots | Where-Object { $_ })
-    $today = @($list | Where-Object { $_.IsToday })
-    $chosen = $today | Select-Object -First 1
+    $valid = @($list | Where-Object { $_.Valid })
+    $chosen = $valid | Select-Object -First 1
+    $since = if ($LastChange) { "newer than the last change by AVDTune ($(([datetime]$LastChange).ToString('yyyy-MM-dd HH:mm')))" } else { 'that is finished (AVDTune has not changed this master yet)' }
     if ($Confirmed) { return [pscustomobject]@{ Status = 'Confirmed'; Detail = 'The snapshot is confirmed; the pages can change the master.'; Chosen = $chosen; Snapshots = $list } }
-    if ($chosen) { return [pscustomobject]@{ Status = 'SnapshotToday'; Detail = "A snapshot of today exists: $($chosen.Name). Confirm it to unlock the pages."; Chosen = $chosen; Snapshots = $list } }
-    [pscustomobject]@{ Status = 'NoSnapshotToday'; Detail = 'No snapshot of the OS disk from today. Create one now.'; Chosen = $null; Snapshots = $list }
+    if ($chosen) { return [pscustomobject]@{ Status = 'SnapshotReady'; Detail = "A snapshot $since exists: $($chosen.Name). Confirm it to unlock the pages."; Chosen = $chosen; Snapshots = $list } }
+    [pscustomobject]@{ Status = 'NoValidSnapshot'; Detail = "No snapshot of the OS disk $since. Create one now."; Chosen = $null; Snapshots = $list }
 }
 
 function Confirm-AVDTuneSnapshotGate {
     <#
-        Confirmation of a snapshot of today by the typed full name. Writes SnapshotGate into state.json and an entry into the change log
-        (name, time, snapshot ID, created by AVDTune yes/no), then opens the write gate of the engine. Returns the record for the protocol.
+        Confirmation of a valid snapshot by the typed name. Checks again that the snapshot is finished and newer than the last change of AVDTune
+        (Get-AVDTuneLastChange, read from state.json, runs and change log now). Writes SnapshotGate into state.json and an entry into the change
+        log (typed name, signed-in Microsoft account, local Windows account, time, snapshot ID, created by AVDTune yes/no), then opens the
+        write gate of the engine. Returns the record for the protocol.
     #>
     [CmdletBinding()]
     param(
-        [string]$Root = (Get-AVDTuneRoot), [Parameter(Mandatory)]$Snapshot, [Parameter(Mandatory)][string]$TypedName, [string]$ExpectedName, [string]$User,
-        [Parameter(Mandatory)][string]$ImageVersion, [Parameter(Mandatory)]$Machine, [string]$VmName
+        [string]$Root = (Get-AVDTuneRoot), [Parameter(Mandatory)]$Snapshot, [Parameter(Mandatory)][string]$TypedName, [string]$SignedInAccount,
+        [string]$WindowsAccount = "$env:USERDOMAIN\$env:USERNAME", [Parameter(Mandatory)][string]$ImageVersion, [Parameter(Mandatory)]$Machine
     )
-    if (-not $Snapshot.IsToday) { throw 'Only a finished snapshot of today can be confirmed.' }
-    $check = Test-AVDTuneConfirmationName -Typed $TypedName -Expected $ExpectedName
+    if ([string]$Snapshot.State -ne 'Succeeded' -or -not $Snapshot.Created) { throw 'Only a finished snapshot can be confirmed.' }
+    $last = Get-AVDTuneLastChange -Root $Root
+    if ($last -and ([datetime]$Snapshot.Created).ToUniversalTime() -le $last.ToUniversalTime()) {
+        throw "The snapshot $($Snapshot.Name) ($(([datetime]$Snapshot.Created).ToString('yyyy-MM-dd HH:mm'))) is older than the last change AVDTune made on this master ($($last.ToString('yyyy-MM-dd HH:mm'))): a rollback to it would lose that change. Create a new snapshot."
+    }
+    $check = Test-AVDTuneConfirmationName -Typed $TypedName
     if (-not $check.Ok) { throw $check.Message }
-    $name = ([regex]::Replace($TypedName, '\s+', ' ')).Trim()
+    $name = Remove-AVDTuneControlCharacters (([regex]::Replace($TypedName, '\s+', ' ')).Trim()) 100
+    $ms = Remove-AVDTuneControlCharacters $SignedInAccount 120; if (-not $ms) { $ms = 'not signed in' }
+    $win = Remove-AVDTuneControlCharacters $WindowsAccount 120
     $now = (& $Machine.Now)
     $record = [pscustomobject][ordered]@{
-        SnapshotName = $Snapshot.Name; SnapshotId = $Snapshot.Id; SnapshotCreated = $Snapshot.Created.ToString('o'); CreatedByAVDTune = [bool]$Snapshot.ByAVDTune
-        ConfirmedBy = $name; ConfirmedAt = $now.ToString('o'); ImageVersion = $ImageVersion; User = $User; Text = $script:ConfirmationText
+        SnapshotName = $Snapshot.Name; SnapshotId = $Snapshot.Id; SnapshotCreated = ([datetime]$Snapshot.Created).ToString('o'); CreatedByAVDTune = [bool]$Snapshot.ByAVDTune
+        ConfirmedBy = $name; SignedInAccount = $ms; WindowsAccount = $win; ConfirmedAt = $now.ToString('o'); ImageVersion = $ImageVersion
+        LastChange = $(if ($last) { $last.ToString('o') } else { $null }); Text = $script:ConfirmationText
     }
     [void](Set-AVDTuneState -Root $Root -Values @{ SnapshotGate = $record })
     $made = if ($Snapshot.ByAVDTune) { 'yes' } else { 'no' }
-    $text = "Snapshot $($Snapshot.Name) confirmed by $name at $($now.ToString('yyyy-MM-dd HH:mm')); created $($Snapshot.Created.ToString('yyyy-MM-dd HH:mm')); created by AVDTune: $made"
-    [void](Add-AVDTuneChangeLogEntry -Root $Root -Version $ImageVersion -Category 'Snapshot' -Component 'OS disk' -ChangeType $(if ($Snapshot.ByAVDTune) { 'Added' } else { 'Note' }) -Text $text -User $User -SnapshotId $Snapshot.Id -Source Step -At $now)
+    $text = "Snapshot $($Snapshot.Name) confirmed by $name (Microsoft account $ms, Windows account $win) at $($now.ToString('yyyy-MM-dd HH:mm')); created $(([datetime]$Snapshot.Created).ToString('yyyy-MM-dd HH:mm')); created by AVDTune: $made"
+    [void](Add-AVDTuneChangeLogEntry -Root $Root -Version $ImageVersion -Category 'Snapshot' -Component 'OS disk' -ChangeType $(if ($Snapshot.ByAVDTune) { 'Added' } else { 'Note' }) -Text $text -User $name -SnapshotId $Snapshot.Id -Source Step -At $now)
     Open-AVDTuneWriteGate -SnapshotId $Snapshot.Id -ConfirmedBy $name
     $record
 }
@@ -277,5 +331,5 @@ function New-AVDTuneArmAdapter {
 
 #endregion
 
-Export-ModuleMember -Function Get-AVDTuneGateText, Invoke-AVDTuneArm, Get-AVDTuneVmIdentity, Get-AVDTuneSnapshotName, Get-AVDTuneOsDiskSnapshots, Start-AVDTuneSnapshot,
+Export-ModuleMember -Function Get-AVDTuneGateText, Invoke-AVDTuneArm, Get-AVDTuneVmIdentity, Get-AVDTuneDefaultSnapshotNamePattern, Test-AVDTuneSnapshotNamePattern, Get-AVDTuneSnapshotName, Get-AVDTuneOsDiskSnapshots, Start-AVDTuneSnapshot,
     Get-AVDTuneSnapshotState, Wait-AVDTuneSnapshot, Test-AVDTuneConfirmationName, Get-AVDTuneGateStatus, Confirm-AVDTuneSnapshotGate, New-AVDTuneArmAdapter

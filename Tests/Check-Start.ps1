@@ -4,7 +4,7 @@
     Checks the start sequence against fakes (Tests\Fakes\FakeServices.ps1, FakeMachine.ps1): first-run questions and environment.json,
     the sign-in session (three audiences, tokens in memory), the snapshot gate (IMDS, ARM, confirmation by name, read-only until then),
     the domain controller connection (LDAPS pinning, signed fallback, never a simple bind) and discovery, including the error paths:
-    no network, 403 (missing role), changed LDAPS certificate, no snapshot of today. No real sign-in, tenant, Azure or domain controller.
+    no network, 403 (missing role), changed LDAPS certificate, LDAPS blocked, snapshot older than the last change, one-word name. No real sign-in, tenant, Azure or domain controller.
 #>
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path $PSScriptRoot -Parent
@@ -138,62 +138,91 @@ try {
     Test-Check 'outside Azure: not available with a reason' (-not $noAzure.Available -and $noAzure.Problem -like '*not an Azure VM*') $null
     $unmanaged = Get-AVDTuneVmIdentity (New-AVDTuneFakeMachine -Seed @{ Imds = [pscustomobject]@{ compute = [pscustomobject]@{ name = 'x'; resourceGroupName = 'rg'; subscriptionId = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'; storageProfile = [pscustomobject]@{ osDisk = [pscustomobject]@{ name = 'd' } } } } })
     Test-Check 'an unmanaged OS disk is refused with a reason' (-not $unmanaged.Available -and $unmanaged.Problem -like '*managed disk*') $null
-    $name = Get-AVDTuneSnapshotName -VmName 'gm-test01' -ImageVersion '2026.11.001' -At ([datetime]'2026-11-15 14:07')
-    Test-Check 'snapshot name: <vm>-avdtune-<image version>-<yyyyMMdd-HHmm>' ($name -eq 'gm-test01-avdtune-2026.11.001-20261115-1407') $name
-    $long = Get-AVDTuneSnapshotName -VmName ('v' * 90) -ImageVersion '2026.11.001' -At ([datetime]'2026-11-15 14:07')
-    Test-Check 'a long VM name is shortened to the 80 characters Azure allows, the suffix stays' ($long.Length -le 80 -and $long -like '*-avdtune-2026.11.001-20261115-1407') $long
-    Test-Check 'no image version: no snapshot name (tells to start a version)' ((Get-ThrownText { Get-AVDTuneSnapshotName -VmName 'x' -ImageVersion 'none' -At (Get-Date) }) -like '*image version*') $null
+    # snapshot name pattern per environment (user decision): default <OS disk>-DD.MM.YYYY-N, N = next free number of that day
+    $day = [datetime]'2026-11-15 14:07'
+    Test-Check 'default pattern is {OsDisk}-{DD}.{MM}.{YYYY}-{N}' ((Get-AVDTuneDefaultSnapshotNamePattern) -eq '{OsDisk}-{DD}.{MM}.{YYYY}-{N}') $null
+    $name = Get-AVDTuneSnapshotName -OsDiskName 'gm-test01_osdisk' -At $day
+    Test-Check 'snapshot name without snapshots of that day: <OS disk>-15.11.2026-1' ($name -eq 'gm-test01_osdisk-15.11.2026-1') $name
+    $name = Get-AVDTuneSnapshotName -OsDiskName 'gm-test01_osdisk' -At $day -ExistingNames @('gm-test01_osdisk-15.11.2026-1', 'GM-TEST01_OSDISK-15.11.2026-3', 'gm-test01_osdisk-14.11.2026-7', 'other-15.11.2026-9')
+    Test-Check 'the counter is the next free number of that day (other days and disks do not count)' ($name -eq 'gm-test01_osdisk-15.11.2026-4') $name
+    $name = Get-AVDTuneSnapshotName -Pattern '{VM}-{ImageVersion}-{YYYY}{MM}{DD}-{N}' -OsDiskName 'd' -VmName 'gm-test01' -ImageVersion '2026.11.001' -At $day
+    Test-Check 'an own pattern with VM and image version' ($name -eq 'gm-test01-2026.11.001-20261115-1') $name
+    Test-Check 'patterns without {N}, with characters Azure does not allow or unknown tokens are refused' ((Test-AVDTuneSnapshotNamePattern '{OsDisk}-{DD}') -like '*{N}*' -and (Test-AVDTuneSnapshotNamePattern '{OsDisk} {N}') -like '*not allow*' -and (Test-AVDTuneSnapshotNamePattern '{Disk}-{N}') -like '*not allow*' -and -not (Test-AVDTuneSnapshotNamePattern '{OsDisk}-{DD}.{MM}.{YYYY}-{N}')) $null
+    Test-Check 'a name longer than 80 characters is refused with a readable text' ((Get-ThrownText { Get-AVDTuneSnapshotName -OsDiskName ('d' * 75) -At $day }) -like '*80 characters*') $null
+    Test-Check 'a pattern with {ImageVersion} needs an image version' ((Get-ThrownText { Get-AVDTuneSnapshotName -Pattern '{ImageVersion}-{N}' -OsDiskName 'x' -ImageVersion 'none' -At $day }) -like '*image version*') $null
+    $pa = Get-AVDTuneEnvironmentAnswers (Get-AVDTuneEnvironment $tmp); $pa.SnapshotNamePattern = 'snap {N}'
+    Test-Check 'the first-run questions refuse a bad name pattern' (@((Test-AVDTuneEnvironmentAnswers $pa).Errors | Where-Object { $_ -like '*pattern*' }).Count -eq 1) $null
+    $pa.SnapshotNamePattern = '{OsDisk}-before-{YYYY}{MM}{DD}-{N}'
+    [void](Save-AVDTuneEnvironment -Root $tmp -Answers $pa -User 'admin1')
+    Test-Check 'the name pattern is saved per environment in environment.json (Snapshot.NamePattern)' ((Get-AVDTuneEnvironment $tmp).Snapshot.NamePattern -eq '{OsDisk}-before-{YYYY}{MM}{DD}-{N}' -and (Get-AVDTuneEnvironmentAnswers (Get-AVDTuneEnvironment $tmp)).SnapshotNamePattern -eq '{OsDisk}-before-{YYYY}{MM}{DD}-{N}') $null
+    $pa.SnapshotNamePattern = Get-AVDTuneDefaultSnapshotNamePattern
+    [void](Save-AVDTuneEnvironment -Root $tmp -Answers $pa -User 'admin1')
 
     $now = [datetime]'2026-11-15 14:30'
     $armToken = 'fake-arm-token-value'
     $arm = New-AVDTuneFakeArm -Seed @{ Snapshots = @(
-            @{ Name = 'gm-test01-avdtune-2026.10.001-20261030-0900'; Created = [datetime]'2026-10-30 09:00'; Tags = @{ CreatedWith = 'AVDTune'; ImageVersion = '2026.10.001' } }
+            @{ Name = 'gm-test01_osdisk-30.10.2026-1'; Created = [datetime]'2026-10-30 09:00'; Tags = @{ CreatedWith = 'AVDTune'; ImageVersion = '2026.10.001' } }
             @{ Name = 'other-disk-snap'; Created = [datetime]'2026-11-15 08:00'; Source = '/subscriptions/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee/resourceGroups/rg-example/providers/Microsoft.Compute/disks/another_disk' }) }
-    $list = @(Get-AVDTuneOsDiskSnapshots -Arm $arm -Token $armToken -Vm $vm -Now $now)
-    Test-Check 'snapshots of this OS disk only; the one of another disk is ignored' ($list.Count -eq 1 -and $list[0].Name -like '*2026.10.001*' -and $list[0].ByAVDTune) ($list | ForEach-Object Name)
+    Test-Check 'no change by AVDTune recorded yet: no last change' ($null -eq (Get-AVDTuneLastChange -Root $tmp)) (Get-AVDTuneLastChange -Root $tmp)
+    $list = @(Get-AVDTuneOsDiskSnapshots -Arm $arm -Token $armToken -Vm $vm -LastChange (Get-AVDTuneLastChange -Root $tmp))
+    Test-Check 'snapshots of this OS disk only; the one of another disk is ignored' ($list.Count -eq 1 -and $list[0].Name -like '*30.10.2026*' -and $list[0].ByAVDTune) ($list | ForEach-Object Name)
     $gate = Get-AVDTuneGateStatus -Vm $vm -Snapshots $list -Confirmed $false
-    Test-Check 'no snapshot from today: status NoSnapshotToday (old snapshot does not count)' ($gate.Status -eq 'NoSnapshotToday' -and -not $gate.Chosen) $gate.Status
+    Test-Check 'without a recorded change any finished snapshot counts, also an old one ("from today" is gone)' ($gate.Status -eq 'SnapshotReady' -and $gate.Chosen.Name -like '*30.10.2026*') $gate.Status
+    [void](Set-AVDTuneState -Root $tmp -Values @{ LastChange = ([datetime]'2026-11-01 10:00').ToString('o') })
+    $last = Get-AVDTuneLastChange -Root $tmp
+    $list = @(Get-AVDTuneOsDiskSnapshots -Arm $arm -Token $armToken -Vm $vm -LastChange $last)
+    $gate = Get-AVDTuneGateStatus -Vm $vm -Snapshots $list -Confirmed $false -LastChange $last
+    Test-Check 'a snapshot older than the last change of AVDTune does not count: NoValidSnapshot' ($last -eq [datetime]'2026-11-01 10:00' -and -not $list[0].Valid -and $gate.Status -eq 'NoValidSnapshot' -and -not $gate.Chosen -and $gate.Detail -like '*2026-11-01 10:00*') "$last $($gate.Status) $($gate.Detail)"
+    $forged = $list[0].PSObject.Copy(); $forged.Valid = $true
+    Test-Check 'attack: a snapshot older than the last change cannot be confirmed, even when the caller says it is valid' ((Get-ThrownText { Confirm-AVDTuneSnapshotGate -Root $tmp -Snapshot $forged -TypedName 'Alex Example' -ImageVersion '2026.11.001' -Machine $machine }) -like '*older than the last change*' -and -not (Test-AVDTuneWriteAllowed)) $null
     Test-Check 'outside Azure: gate status NoVm' ((Get-AVDTuneGateStatus -Vm $noAzure -Snapshots @() -Confirmed $false).Status -eq 'NoVm') $null
 
-    $started = Start-AVDTuneSnapshot -Arm $arm -Token $armToken -Vm $vm -ImageVersion '2026.11.001' -User 'Alex Example' -At $now
+    $started = Start-AVDTuneSnapshot -Arm $arm -Token $armToken -Vm $vm -ImageVersion '2026.11.001' -User 'Alex Example' -At $now -NamePattern (Get-AVDTuneEnvironmentAnswers (Get-AVDTuneEnvironment $tmp)).SnapshotNamePattern -ExistingNames @($list | ForEach-Object Name)
     $put = $arm.Store.LastPut
     Test-Check 'snapshot request: incremental, copy of the OS disk, tags image version and user, in the disk region' ($put.properties.incremental -eq $true -and $put.properties.creationData.createOption -eq 'Copy' -and $put.properties.creationData.sourceResourceId -eq $vm.OsDiskId -and $put.tags.ImageVersion -eq '2026.11.001' -and $put.tags.CreatedBy -eq 'Alex Example' -and $put.tags.CreatedWith -eq 'AVDTune' -and $put.location -eq 'westeurope') ($put | ConvertTo-Json -Compress -Depth 5)
-    Test-Check 'the snapshot is named as the plan says and starts as Creating' ($started.Name -eq 'gm-test01-avdtune-2026.11.001-20261115-1430' -and $started.State -eq 'Creating') ($started | ConvertTo-Json -Compress)
-    Test-Check 'a snapshot that is still being created does not unlock the gate' (@(Get-AVDTuneOsDiskSnapshots -Arm $arm -Token $armToken -Vm $vm -Now $now | Where-Object IsToday).Count -eq 0) $null
+    Test-Check 'the snapshot is named by the pattern of the environment and starts as Creating' ($started.Name -eq 'gm-test01_osdisk-15.11.2026-1' -and $started.State -eq 'Creating') ($started | ConvertTo-Json -Compress)
+    Test-Check 'a snapshot that is still being created does not unlock the gate' (@(Get-AVDTuneOsDiskSnapshots -Arm $arm -Token $armToken -Vm $vm -LastChange $last | Where-Object Valid).Count -eq 0) $null
     $ready = Wait-AVDTuneSnapshot -Arm $arm -Token $armToken -Id $started.Id -PollSeconds 0
     Test-Check 'polling until Succeeded' ($ready.State -eq 'Succeeded') $ready.State
-    $list = @(Get-AVDTuneOsDiskSnapshots -Arm $arm -Token $armToken -Vm $vm -Now $now)
-    $gate = Get-AVDTuneGateStatus -Vm $vm -Snapshots $list -Confirmed $false
-    Test-Check 'with a finished snapshot of today the gate waits for the confirmation' ($gate.Status -eq 'SnapshotToday' -and $gate.Chosen.Name -eq $started.Name -and $gate.Chosen.ByAVDTune) $gate.Status
+    $list = @(Get-AVDTuneOsDiskSnapshots -Arm $arm -Token $armToken -Vm $vm -LastChange $last)
+    $gate = Get-AVDTuneGateStatus -Vm $vm -Snapshots $list -Confirmed $false -LastChange $last
+    Test-Check 'with a finished snapshot newer than the last change the gate waits for the confirmation' ($gate.Status -eq 'SnapshotReady' -and $gate.Chosen.Name -eq $started.Name -and $gate.Chosen.ByAVDTune) $gate.Status
+    Test-Check 'the next snapshot of the same day gets number 2' ((Get-AVDTuneSnapshotName -OsDiskName 'gm-test01_osdisk' -At $now -ExistingNames @($list | ForEach-Object Name)) -eq 'gm-test01_osdisk-15.11.2026-2') $null
     Test-Check 'the confirmation text is the one of the plan' ((Get-AVDTuneGateText) -eq 'Ich bestaetige, dass vor diesem Lauf ein Snapshot des Golden Masters erstellt wurde und ein Rollback moeglich ist.') $null
 
-    # confirmation: typed full name
-    Test-Check 'one word or nothing is no full name' (-not (Test-AVDTuneConfirmationName -Typed 'Alex' -Expected '').Ok -and -not (Test-AVDTuneConfirmationName -Typed '' -Expected '').Ok) $null
-    Test-Check 'the name must match the signed-in account when it is known (case and spacing ignored)' ((Test-AVDTuneConfirmationName -Typed '  alex   example ' -Expected 'Alex Example').Ok -and -not (Test-AVDTuneConfirmationName -Typed 'Max Mustermann' -Expected 'Alex Example').Ok) $null
-    Test-Check 'a snapshot that is not from today cannot be confirmed' ((Get-ThrownText { Confirm-AVDTuneSnapshotGate -Root $tmp -Snapshot $list[-1] -TypedName 'Alex Example' -ImageVersion '2026.11.001' -Machine $machine }) -like '*of today*') $null
-    Test-Check 'a wrong name does not open the gate' ($null -ne (Get-ThrownText { Confirm-AVDTuneSnapshotGate -Root $tmp -Snapshot $gate.Chosen -TypedName 'Max Mustermann' -ExpectedName 'Alex Example' -ImageVersion '2026.11.001' -Machine $machine }) -and -not (Test-AVDTuneWriteAllowed)) $null
+    # confirmation: first and last name, not matched against the sign-in (shared admin accounts)
+    Test-Check 'attack: a name with one word (or nothing, or initials) does not count' (-not (Test-AVDTuneConfirmationName -Typed 'Alex').Ok -and -not (Test-AVDTuneConfirmationName -Typed '').Ok -and -not (Test-AVDTuneConfirmationName -Typed 'A. E.').Ok) $null
+    Test-Check 'first and last name count, whatever account is signed in (also with accents and a double name)' ((Test-AVDTuneConfirmationName -Typed '  max   mustermann ').Ok -and (Test-AVDTuneConfirmationName -Typed ('Ren' + [char]0xE9 + ' M' + [char]0xFC + 'ller-Lang')).Ok) $null
+    Test-Check 'one word does not open the gate' ($null -ne (Get-ThrownText { Confirm-AVDTuneSnapshotGate -Root $tmp -Snapshot $gate.Chosen -TypedName 'Alex' -ImageVersion '2026.11.001' -Machine $machine }) -and -not (Test-AVDTuneWriteAllowed)) $null
     $stepRan = New-AVDTuneStep -Id 'setup.gatetest' -Section Setup -Title 'Gate test' -Test { param($m) @{ Compliant = ((& $m.RegGet 'HKLM:\SOFTWARE\AVDTuneGate' 'V') -eq 1); State = $null } } -Apply { param($m) & $m.RegSet 'HKLM:\SOFTWARE\AVDTuneGate' 'V' 1 'DWord' }
     Test-Check 'read only without the confirmation: a change is refused, the machine is untouched' (($null -ne (Get-ThrownText { Invoke-AVDTuneStep -Step $stepRan -Machine $machine -Mode Apply })) -and $machine.Log.Count -eq 0) $null
     Test-Check 'a dry run still works while read only' ((Invoke-AVDTuneStep -Step $stepRan -Machine $machine -Mode Apply -WhatIf).Status -eq 'WhatIf') $null
     $logBefore = @(Get-AVDTuneChangeLog -Root $tmp).Count
-    $record = Confirm-AVDTuneSnapshotGate -Root $tmp -Snapshot $gate.Chosen -TypedName 'Alex  Example' -ExpectedName 'Alex Example' -User 'admin1' -ImageVersion '2026.11.001' -Machine $machine
-    Test-Check 'confirmation opens the gate in memory' ((Test-AVDTuneWriteAllowed) -and (Get-AVDTuneWriteGate).SnapshotId -eq $started.Id -and (Get-AVDTuneWriteGate).ConfirmedBy -eq 'Alex Example') $null
+    $record = Confirm-AVDTuneSnapshotGate -Root $tmp -Snapshot $gate.Chosen -TypedName 'Max  Mustermann' -SignedInAccount 'admin.shared@contoso.example' -WindowsAccount 'GM-TEST01\localadmin' -ImageVersion '2026.11.001' -Machine $machine
+    Test-Check 'confirmation opens the gate in memory' ((Test-AVDTuneWriteAllowed) -and (Get-AVDTuneWriteGate).SnapshotId -eq $started.Id -and (Get-AVDTuneWriteGate).ConfirmedBy -eq 'Max Mustermann') $null
     $st = Get-AVDTuneState $tmp
-    Test-Check 'state.json records name, time, snapshot ID, created by AVDTune, who confirmed' ($st.SnapshotGate.SnapshotName -eq $started.Name -and $st.SnapshotGate.SnapshotId -eq $started.Id -and $st.SnapshotGate.CreatedByAVDTune -eq $true -and $st.SnapshotGate.ConfirmedBy -eq 'Alex Example' -and $st.SnapshotGate.ConfirmedAt -and $st.SnapshotGate.Text -like 'Ich bestaetige*') ($st.SnapshotGate | ConvertTo-Json -Compress)
+    Test-Check 'state.json records typed name, Microsoft account, Windows account, time, snapshot ID, created by AVDTune' ($st.SnapshotGate.SnapshotName -eq $started.Name -and $st.SnapshotGate.SnapshotId -eq $started.Id -and $st.SnapshotGate.CreatedByAVDTune -eq $true -and $st.SnapshotGate.ConfirmedBy -eq 'Max Mustermann' -and $st.SnapshotGate.SignedInAccount -eq 'admin.shared@contoso.example' -and $st.SnapshotGate.WindowsAccount -eq 'GM-TEST01\localadmin' -and $st.SnapshotGate.ConfirmedAt -and $st.SnapshotGate.Text -like 'Ich bestaetige*') ($st.SnapshotGate | ConvertTo-Json -Compress)
     $cl = @(Get-AVDTuneChangeLog -Root $tmp)
     $entry = $cl | Where-Object { $_.Category -eq 'Snapshot' } | Select-Object -First 1
-    Test-Check 'the change log has one snapshot entry with name, time, snapshot ID and "created by AVDTune: yes"' ($cl.Count -eq $logBefore + 1 -and $entry.SnapshotId -eq $started.Id -and $entry.Text -like "*$($started.Name)*" -and $entry.Text -like '*created by AVDTune: yes*' -and $entry.Text -match '\d{4}-\d{2}-\d{2} \d{2}:\d{2}') ($entry | ConvertTo-Json -Compress)
-    Test-Check 'a change works after the confirmation' ((Invoke-AVDTuneStep -Step $stepRan -Machine $machine -Mode Apply).Status -eq 'Changed') $null
+    Test-Check 'the change log entry has the typed name with both accounts, time, snapshot ID and "created by AVDTune: yes"' ($cl.Count -eq $logBefore + 1 -and $entry.SnapshotId -eq $started.Id -and $entry.Text -like "*$($started.Name)*" -and $entry.Text -like '*confirmed by Max Mustermann (Microsoft account admin.shared@contoso.example, Windows account GM-TEST01\localadmin)*' -and $entry.User -eq 'Max Mustermann' -and $entry.Text -like '*created by AVDTune: yes*' -and $entry.Text -match '\d{4}-\d{2}-\d{2} \d{2}:\d{2}') ($entry | ConvertTo-Json -Compress)
+    Test-Check 'the confirmation itself is no change of the master (last change unchanged)' ((Get-AVDTuneLastChange -Root $tmp) -eq $last) (Get-AVDTuneLastChange -Root $tmp)
+    $catalog = @($stepRan)
+    $run = Invoke-AVDTune -Plan ([pscustomobject]@{ Name = 'gate'; Steps = @('setup.gatetest') }) -Catalog $catalog -Machine $machine -Root $tmp -User 'admin1' -SnapshotId $started.Id
+    Test-Check 'a change works after the confirmation' ($run.Results[0].Status -eq 'Changed') $run.Results[0].Status
+    $last2 = Get-AVDTuneLastChange -Root $tmp
+    $list2 = @(Get-AVDTuneOsDiskSnapshots -Arm $arm -Token $armToken -Vm $vm -LastChange $last2)
+    Test-Check 'after a change by AVDTune the confirmed snapshot no longer counts for the next start (state.json LastChange)' ($last2 -gt $last -and (Get-AVDTuneState $tmp).LastChange -and @($list2 | Where-Object Valid).Count -eq 0) "$last2"
     $stages = Get-AVDTuneStartStages -Context (New-AVDTuneStartContext) -Root $tmp
-    Test-Check 'the snapshot stage shows Done with the name of the confirming person' (($stages | Where-Object Id -eq 'Snapshot').Status -eq 'Done' -and ($stages | Where-Object Id -eq 'Snapshot').Detail -like '*Alex Example*') $null
+    Test-Check 'the snapshot stage shows Done with the name of the confirming person' (($stages | Where-Object Id -eq 'Snapshot').Status -eq 'Done' -and ($stages | Where-Object Id -eq 'Snapshot').Detail -like '*Max Mustermann*') $null
     Close-AVDTuneWriteGate
     Test-Check 'a new start is closed again (the gate is memory only)' (-not (Test-AVDTuneWriteAllowed)) $null
+    Test-Check 'Get-AVDTuneLastChange also reads run records and automatic change log entries' (@(Get-AVDTuneRun -Root $tmp | Where-Object { $_.Results[0].Status -eq 'Changed' }).Count -eq 1) $null
 
-    # an existing snapshot of today made by someone else
-    $armOther = New-AVDTuneFakeArm -Seed @{ Snapshots = @(@{ Name = 'manual-snap-before-patching'; Created = [datetime]'2026-11-15 09:10' }) }
-    $listOther = @(Get-AVDTuneOsDiskSnapshots -Arm $armOther -Token $armToken -Vm $vm -Now $now)
-    Test-Check 'an existing snapshot of today is found and counts (not made by AVDTune)' ($listOther.Count -eq 1 -and $listOther[0].IsToday -and -not $listOther[0].ByAVDTune) ($listOther | ConvertTo-Json -Compress -Depth 3)
-    [void](Confirm-AVDTuneSnapshotGate -Root $tmp -Snapshot $listOther[0] -TypedName 'Alex Example' -User 'admin1' -ImageVersion '2026.11.001' -Machine $machine)
+    # an existing snapshot made by someone else after the last change
+    $armOther = New-AVDTuneFakeArm -Seed @{ Snapshots = @(@{ Name = 'manual-snap-before-patching'; Created = $last2.AddMinutes(5) }) }
+    $listOther = @(Get-AVDTuneOsDiskSnapshots -Arm $armOther -Token $armToken -Vm $vm -LastChange $last2)
+    Test-Check 'an existing snapshot newer than the last change is found and counts (not made by AVDTune)' ($listOther.Count -eq 1 -and $listOther[0].Valid -and -not $listOther[0].ByAVDTune) ($listOther | ConvertTo-Json -Compress -Depth 3)
+    [void](Confirm-AVDTuneSnapshotGate -Root $tmp -Snapshot $listOther[0] -TypedName 'Alex Example' -SignedInAccount 'admin.example@contoso.example' -ImageVersion '2026.11.001' -Machine $machine)
     $entry2 = @(Get-AVDTuneChangeLog -Root $tmp | Where-Object { $_.Category -eq 'Snapshot' }) | Select-Object -Last 1
     Test-Check 'the change log says created by AVDTune: no' ($entry2.Text -like '*created by AVDTune: no*' -and (Get-AVDTuneState $tmp).SnapshotGate.CreatedByAVDTune -eq $false) $entry2.Text
     Close-AVDTuneWriteGate
@@ -219,7 +248,7 @@ try {
     $armUn = New-AVDTuneFakeArm -Seed @{}; $armUn.Store.Unauthorized = $true
     Test-Check '401: sign in again' ((Get-ThrownText { Get-AVDTuneOsDiskSnapshots -Arm $armUn -Token $armToken -Vm $vm }) -like '*Sign in again*') $null
     $armPaged = New-AVDTuneFakeArm -Seed @{ Snapshots = @(@{ Name = 'p1'; Created = [datetime]'2026-11-15 09:10' }) }; $armPaged.Store.NextLinkPage = $true
-    Test-Check 'nextLink on the ARM host is followed' (@(Get-AVDTuneOsDiskSnapshots -Arm $armPaged -Token $armToken -Vm $vm -Now $now).Count -eq 1 -and @($armPaged.Log | Where-Object { $_ -like '*page2*' }).Count -eq 1) $null
+    Test-Check 'nextLink on the ARM host is followed' (@(Get-AVDTuneOsDiskSnapshots -Arm $armPaged -Token $armToken -Vm $vm).Count -eq 1 -and @($armPaged.Log | Where-Object { $_ -like '*page2*' }).Count -eq 1) $null
     $armEvil = New-AVDTuneFakeArm -Seed @{}; $armEvil.Store.EvilLink = $true
     Test-Check 'a nextLink to another host is refused (the token is not sent there)' ((Get-ThrownText { Get-AVDTuneOsDiskSnapshots -Arm $armEvil -Token $armToken -Vm $vm }) -like '*another host*') $null
     Test-Check 'a snapshot ID is checked before it is used as a path' ($null -ne (Get-ThrownText { Get-AVDTuneSnapshotState -Arm $arm -Token $armToken -Id '/subscriptions/x/../../evil' })) $null
@@ -407,7 +436,7 @@ try {
     $code = ($dirSource -split "`n" | Where-Object { $_ -notmatch '^\s*#' }) -join "`n"
     Test-Check 'Directory module: no simple bind, anonymous bind or clear-text password in the code' ($code -notmatch '(?i)AuthType\]::(Basic|Anonymous|Ntlm|Digest|Sicily|Msn|Dpa|External)' -and $code -notmatch 'ConvertTo-SecureString|AsPlainText|SecureStringToBSTR|SecureStringToGlobalAllocUnicode|ConvertFrom-AVDTuneSecure' -and $code -match 'AuthType\]::Negotiate' -and $code -match 'AuthType\]::Kerberos') $null
     Test-Check 'real LDAP adapter: the server name is used as given (LdapDirectoryIdentifier with fullyQualifiedDnsHostName = true)' ($code -match 'LdapDirectoryIdentifier\(\$Options\.Server, \[int\]\$Options\.Port, \$true, \$false\)') $null
-    $nonAscii = @('Modules\AVDTune.Start.psm1', 'Modules\AVDTune.Session.psm1', 'Modules\AVDTune.Snapshot.psm1', 'Modules\AVDTune.Directory.psm1', 'Tests\Fakes\FakeServices.ps1', 'Tests\Check-Start.ps1') | Where-Object { [IO.File]::ReadAllText((Join-Path $repo $_)) -match '[^\x00-\x7F]' }
+    $nonAscii = @('Modules\AVDTune.Trust.psm1', 'Modules\AVDTune.Start.psm1', 'Modules\AVDTune.Session.psm1', 'Modules\AVDTune.Snapshot.psm1', 'Modules\AVDTune.Directory.psm1', 'Tests\Fakes\FakeServices.ps1', 'Tests\Check-Start.ps1') | Where-Object { [IO.File]::ReadAllText((Join-Path $repo $_)) -match '[^\x00-\x7F]' }
     Test-Check 'new files are plain ASCII' ($nonAscii.Count -eq 0) ($nonAscii -join ',')
     $sessSource = [IO.File]::ReadAllText((Join-Path $repo 'Modules\AVDTune.Session.psm1'))
     Test-Check 'Session module writes nothing to disk and prints no token' ($sessSource -notmatch 'Set-Content|Out-File|WriteAllText|Write-AVDTuneFile|Write-Host|Write-Output') $null
