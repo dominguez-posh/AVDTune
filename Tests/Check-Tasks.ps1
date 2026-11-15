@@ -126,6 +126,13 @@ foreach ($file in $use.Keys) {
     $missing = @($use[$file] | Where-Object { $text -notlike "*$_*" })
     Test-Check "$file uses the task mechanism ($($use[$file] -join ', '))" ($missing.Count -eq 0) ($missing -join ', ')
 }
+# the FSLogix page (#10): every operation is a task; Retry only for what reads (function test without write tests, storage check), never for a change of the master or the share
+$fsl = [IO.File]::ReadAllText((Join-Path $repo 'AVDTune-FSLogix.ps1'))
+Test-Check 'FSLogix: install, settings, redirections.xml, Defender, ACL, function test and storage check are tasks (counter-test)' ((@('fslogix-settings', 'fslogix-redirections', 'fslogix-defender', 'fslogix-acl') | Where-Object { $fsl -notlike "*Invoke-FslChange -Kind '$_'*" }).Count -eq 0 -and $fsl -like '*function New-FslTask*' -and $fsl -like '*Complete-AVDTuneUiTask $job.Task*' -and $fsl -like '*Update-AVDTuneUiTask $job.Task*') $null
+$fslChange = $fsl.Substring($fsl.IndexOf('function Invoke-FslChange'), $fsl.IndexOf('function Show-FslRun') - $fsl.IndexOf('function Invoke-FslChange'))
+Test-Check 'FSLogix: the changes of the master and the share offer no Retry (counter-test)' ($fslChange -notmatch '-Retry|Retry =') $null
+$fslNew = $fsl.Substring($fsl.IndexOf('function New-FslTask'), $fsl.IndexOf('function Start-FslJob') - $fsl.IndexOf('function New-FslTask'))
+Test-Check 'FSLogix: Retry only for the function test without write tests and for the storage check, not for the install (counter-test)' ($fslNew.Contains('$Kind -eq ''Test'' -and -not $Write') -and $fslNew.Contains('$Kind -eq ''Storage''') -and $fslNew -notmatch '''Install''.*Retry' -and ([regex]::Matches($fslNew, 'Command = ')).Count -eq 2) $null
 $bar = [IO.File]::ReadAllText((Join-Path $repo 'AVDTune-TaskBar.ps1'))
 Test-Check 'the bar colors are theme resources (no color literal in the bar code)' ($bar -notmatch '#[0-9A-Fa-f]{6}' -and $bar -notmatch 'ConvertTo-Brush') $null
 $xaml = [IO.File]::ReadAllText((Join-Path $repo 'UI\AVDTune.xaml'))

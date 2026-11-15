@@ -709,6 +709,8 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         $ui.BtnFslSettingsApply.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
         Test-Smoke 'Apply: the confirmation names the count, the registry has the recommended values, LastChange shown, change log written' ($script:ConfirmAsked -like 'Write * FSLogix setting*' -and (& $script:Machine.RegGet 'HKLM:\SOFTWARE\FSLogix\Profiles' 'LockedRetryCount') -eq 3 -and (& $script:Machine.RegGet 'HKLM:\SOFTWARE\FSLogix\Profiles' 'VolumeType') -eq 'vhdx' -and $ui.TxtFslSettingsState.Text -like 'LastChange:*' -and @(Get-AVDTuneChangeLog -Root $script:StateRoot | Where-Object Category -eq 'FSLogix').Count -ge 3) "$($script:ConfirmAsked) / $($ui.TxtFslSettingsState.Text)"
         Test-Smoke 'the change is in the protocol (category FSLogix)' (@($script:Protocol.Actions | Where-Object { $_.Category -eq 'fslogix' }).Count -ge 1) $null
+        $tk = @(Get-AVDTuneUiTasks | Where-Object { $_.Kind -eq 'fslogix-settings' })
+        Test-Smoke 'task bar: applying the settings is a task, ended as succeeded, no Retry (a change of the master)' ($tk.Count -eq 1 -and $tk[0].Status -eq 'succeeded' -and -not $tk[0].Retry -and $tk[0].Title -like '*FSLogix settings*') ($tk | ForEach-Object { $_.Status })
         $ui.BtnFslSettingsUndo.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
         Test-Smoke 'Undo: the previous values are back' ((& $script:Machine.RegGet 'HKLM:\SOFTWARE\FSLogix\Profiles' 'LockedRetryCount') -eq 12 -and (& $script:Machine.RegGet 'HKLM:\SOFTWARE\FSLogix\Profiles' 'VolumeType') -eq 'vhd') $null
         $ui.BtnFslFill.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
@@ -731,15 +733,21 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         Test-Smoke 'the token broker is refused with the single sign-on reason' ($ui.TxtFslRedirState.Text -like 'Not valid:*single sign-on*') $ui.TxtFslRedirState.Text
         $ui.BtnFslRedirSave.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
         Test-Smoke 'saving that text is refused, nothing is written' ($script:LastToast -like '*not valid*' -and -not $script:FslFake.F.Store.Files.ContainsKey('\\storageaccount.file.core.windows.net\profiles\redirections.xml')) $script:LastToast
+        $tk = @(Get-AVDTuneUiTasks | Where-Object { $_.Kind -eq 'fslogix-redirections' })
+        Test-Smoke 'task bar: the refused redirections.xml is a failed task with the cause, no Retry' ($tk.Count -eq 1 -and $tk[0].Status -eq 'failed' -and $tk[0].Summary -like '*not valid*' -and -not $tk[0].Retry) ($tk | ForEach-Object { $_.Status + ' ' + $_.Summary })
         $ui.TxtFslRedirXml.Text = $good
         $ui.BtnFslRedirSave.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
         Test-Smoke 'redirections.xml saved to the folder, the folder is in the registry' ($script:FslFake.F.Store.Files['\\storageaccount.file.core.windows.net\profiles\redirections.xml'] -ceq $good -and (& $script:Machine.RegGet 'HKLM:\SOFTWARE\FSLogix\Profiles' 'RedirXMLSourceFolder') -eq '\\storageaccount.file.core.windows.net\profiles') $null
+        $tk = @(Get-AVDTuneUiTasks | Where-Object { $_.Kind -eq 'fslogix-redirections' })
+        Test-Smoke 'task bar: the saved redirections.xml is a second task, succeeded' ($tk.Count -eq 2 -and $tk[1].Status -eq 'succeeded') ($tk | ForEach-Object { $_.Status })
         # Defender: one exclusion unticked (a folder with a risk note) is not set; ticking it again and adding sets it
         $defKey = 'C:\Users\*\AppData\Local\FSLogix\'
         $defRow = @($ui.PanelFslDefender.Children | Where-Object { $_.Children[0].Tag -eq $defKey })
         $defRow[0].Children[0].IsChecked = $false
         $ui.BtnFslDefAdd.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
         Test-Smoke 'Defender: the unticked exclusion is not set (still Missing and unticked after the list is drawn again), the others are' ($defRow.Count -eq 1 -and $script:ConfirmAsked -like '*1 are unticked*' -and $script:FslFake.F.Store.Defender.Paths -notcontains $defKey -and $script:FslFake.F.Store.Defender.Processes -contains 'C:\Program Files\FSLogix\Apps\frxccds.exe' -and @($ui.PanelFslDefender.Children | Where-Object { $_.Children[0].Tag -eq $defKey -and $_.Children[0].IsChecked -eq $false -and $_.Children[0].IsEnabled }).Count -eq 1) "$($script:ConfirmAsked) / $($defRow.Count)"
+        $tk = @(Get-AVDTuneUiTasks | Where-Object { $_.Kind -eq 'fslogix-defender' })
+        Test-Smoke 'task bar: the Defender exclusions are a task, succeeded, no Retry' ($tk.Count -eq 1 -and $tk[0].Status -eq 'succeeded' -and -not $tk[0].Retry) ($tk | ForEach-Object { $_.Status })
         @($ui.PanelFslDefender.Children | Where-Object { $_.Children[0].Tag -eq $defKey })[0].Children[0].IsChecked = $true
         # Defender
         $ui.BtnFslDefAdd.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
@@ -761,6 +769,8 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         $window.UpdateLayout()
         $r = $script:FslTest
         Test-Smoke 'function test ran: result stored in the state, run record, change log note' ($r -and (Get-AVDTuneState $script:StateRoot).FSLogixTest.Overall -eq $r.Overall -and @(Get-AVDTuneRun -Root $script:StateRoot | Where-Object Plan -eq 'FSLogix-Test').Count -eq 1 -and @(Get-AVDTuneChangeLog -Root $script:StateRoot | Where-Object Component -eq 'FSLogix-Test').Count -eq 1) $null
+        $tk = @(Get-AVDTuneUiTasks | Where-Object { $_.Kind -eq 'fslogix-test' })
+        Test-Smoke 'task bar: the function test is a task, succeeded; its log is clean of secrets' ($tk.Count -ge 1 -and $tk[0].Status -eq 'succeeded' -and $tk[0].Summary -like '*function test*' -and $tk[0].Title -eq 'FSLogix function test') ($tk | ForEach-Object { $_.Status + ' ' + $_.Title })
         Test-Smoke 'the typo in the registry is found (yellow); the write tests did not run (info); the real sign-in is info' ((@($r.Rows | Where-Object Id -eq 'fs.registry')[0].Status -eq 'yellow') -and (@($r.Rows | Where-Object Id -eq 'fs.loc1.rw')[0].Status -eq 'info') -and (@($r.Rows | Where-Object Id -eq 'fs.logon')[0].Status -eq 'info') -and @($script:FslFake.F.Log | Where-Object { $_ -like 'ShareWriteTest*' }).Count -eq 0) ((@($r.Rows | Where-Object Id -eq 'fs.registry')[0].Reason))
         Test-Smoke 'the card shows the pill, the counts and one row per check' ($ui.TxtFslTestSummary.Text -like '*without the write tests*' -and $ui.PanelFslTest.Children.Count -eq @($r.Rows).Count) "$($ui.TxtFslTestPill.Text) $($ui.PanelFslTest.Children.Count)"
         Test-Smoke 'the healthcheck follows: the readiness analysis has the FSLogix-Test row' ($script:Ready -and @($script:Ready.Rows | Where-Object Id -eq 'hy.fslogix-test').Count -eq 1) $null
@@ -808,6 +818,8 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         $r = $script:FslStorage
         $by = @{}; foreach ($x in $r.Rows) { $by[$x.Id] = $x }
         Test-Smoke 'storage check ran with the fake Azure: account found, identity AD, only GET against ARM' ($r -and $by['st.account'].Status -eq 'green' -and $by['st.identity'].Status -eq 'green' -and @($script:FslFake.Arm.Log | Where-Object { $_ -notlike 'GET *' }).Count -eq 0) (@($r.Rows | ForEach-Object { "$($_.Id)=$($_.Status)" }) -join ' ')
+        $tk = @(Get-AVDTuneUiTasks | Where-Object { $_.Kind -eq 'fslogix-storage' })
+        Test-Smoke 'task bar: the storage check is a task, succeeded, and the password and key never reach its texts' ($tk.Count -ge 1 -and $tk[0].Status -eq 'succeeded' -and $tk[0].Summary -like 'Storage check:*' -and -not (@(Get-AVDTuneUiTaskLog $tk[0]) | Where-Object { $_.Text -match 'fake-arm-token|fake-storage-token|Password|AccountKey' })) ($tk | ForEach-Object { $_.Status + ' ' + $_.Summary })
         Test-Smoke 'password of the AD object almost expired (7 days): yellow with the rotation hint; RC4 allowed too: yellow; the ACL deviates: red with the diff offered' ($by['st.ad.password'].Status -eq 'yellow' -and $by['st.smb.kerberos'].Status -eq 'yellow' -and $by['st.acl.root'].Status -eq 'red' -and $r.AclDiff -and $ui.BtnFslAclSet.Visibility -eq 'Visible' -and $ui.TxtFslAclDiff.Text -like '*recommendation*') ($by['st.ad.password'].Reason)
         Test-Smoke 'the access test ran as the domain user; the password field is empty again and the key was not used' ($by['st.access'].Status -eq 'green' -and $ui.PwdFslPassword.Password -eq '' -and -not $r.KeyUsed -and $script:FslFake.Arm.Store.KeyRequests -eq 0) $by['st.access'].Reason
         Test-Smoke 'the result is stored, no password or token in the state folder' ((Get-AVDTuneState $script:StateRoot).StorageCheck.Account -eq 'storageaccount' -and ((Get-ChildItem $script:StateRoot -Recurse -File | ForEach-Object { [IO.File]::ReadAllText($_.FullName) }) -join "`n") -notmatch 'smoke-test-password-1|fake-storage-token|fake-arm-token') $null

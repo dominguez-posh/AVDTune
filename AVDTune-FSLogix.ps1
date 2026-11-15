@@ -113,6 +113,22 @@ function Get-FslFormValues {
     }
     $vals
 }
+function Invoke-FslChange {
+    # A change of the master that runs on the window thread (registry, redirections.xml, Defender, ACL): the task shows in the bar first, then the call blocks the thread.
+    # The task ends as failed when the call throws or a step of the run failed. No Retry: every one of these changes the master or the share and starts from its own confirmation.
+    param([Parameter(Mandatory)][string]$Kind, [Parameter(Mandatory)][string]$Title, [Parameter(Mandatory)][string]$Step, [Parameter(Mandatory)][scriptblock]$Block)
+    $fslTask = Start-AVDTuneUiTask -Kind $Kind -Title $Title -Step $Step
+    try { Update-TaskBar; $window.Dispatcher.Invoke([Action] {}, [System.Windows.Threading.DispatcherPriority]::Render) } catch { }
+    $fslOut = $null
+    try { $fslOut = & $Block }
+    catch { Complete-AVDTuneUiTask $fslTask -Failed -Summary $_.Exception.Message; throw }
+    $fslResults = @(); if ($fslOut -and $fslOut.PSObject.Properties['Results']) { $fslResults = @($fslOut.Results | Where-Object { $_ }) }
+    $fslFailed = @($fslResults | Where-Object { $_.Status -eq 'Failed' })
+    if ($fslOut -and -not $fslOut.PSObject.Properties['Results'] -and $fslOut.PSObject.Properties['Status'] -and $fslOut.Status -eq 'Failed') { Complete-AVDTuneUiTask $fslTask -Failed -Summary ([string]$fslOut.Message) }
+    elseif ($fslFailed.Count -gt 0) { Complete-AVDTuneUiTask $fslTask -Failed -Summary "$($fslFailed.Count) step(s) failed: $($fslFailed[0].Message)" }
+    else { Complete-AVDTuneUiTask $fslTask -Summary "$(@($fslResults | Where-Object { $_.Status -eq 'Changed' }).Count) changed" }
+    $fslOut
+}
 function Show-FslRun($Run, [string]$What) {
     foreach ($r in @($Run.Results)) { Register-StepResult $r }
     $changed = @($Run.Results | Where-Object { $_.Status -eq 'Changed' }).Count; $failed = @($Run.Results | Where-Object { $_.Status -eq 'Failed' })
@@ -137,7 +153,7 @@ Add-Click $ui.BtnFslSettingsApply {
     $vals = Get-FslFormValues
     if ($vals.Count -eq 0) { throw 'Nothing to change: every filled value equals the current one.' }
     if (-not (Confirm-Action "Write $($vals.Count) FSLogix setting(s) to the registry of this master?" 'FSLogix settings')) { return }
-    $run = Set-AVDTuneFSLogixSettings -Machine $script:Machine -Root $script:StateRoot -Values $vals -User (Get-FslUser) -SnapshotId (Get-FslGateSnapshot)
+    $run = Invoke-FslChange -Kind 'fslogix-settings' -Title 'Applying FSLogix settings' -Step "Writing $($vals.Count) setting(s) to the registry" -Block { Set-AVDTuneFSLogixSettings -Machine $script:Machine -Root $script:StateRoot -Values $vals -User (Get-FslUser) -SnapshotId (Get-FslGateSnapshot) }
     Show-FslRun $run 'FSLogix settings'; Update-FslView
 }
 Add-Click $ui.BtnFslSettingsUndo {
@@ -212,7 +228,8 @@ Add-Click $ui.BtnFslRedirSave {
     $folder = $ui.TxtFslRedirFolder.Text.Trim()
     if (-not $folder) { throw 'Enter the folder (RedirXMLSourceFolder), a share or a local folder. Users need read access to it.' }
     if (-not (Confirm-Action "Write redirections.xml to $folder and set RedirXMLSourceFolder?" 'redirections.xml')) { return }
-    $run = Save-AVDTuneRedirections -Machine $script:Machine -F (Get-FslAdapter) -Root $script:StateRoot -Xml $ui.TxtFslRedirXml.Text -Folder $folder -User (Get-FslUser) -SnapshotId (Get-FslGateSnapshot)
+    $redirXml = $ui.TxtFslRedirXml.Text
+    $run = Invoke-FslChange -Kind 'fslogix-redirections' -Title 'Writing redirections.xml' -Step 'Checking the text and writing the file to the folder' -Block { Save-AVDTuneRedirections -Machine $script:Machine -F (Get-FslAdapter) -Root $script:StateRoot -Xml $redirXml -Folder $folder -User (Get-FslUser) -SnapshotId (Get-FslGateSnapshot) }
     Show-FslRun $run 'redirections.xml'; $ui.TxtFslRedirState.Text = $ui.TxtFslState.Text; Update-FslView
 }
 Add-Click $ui.BtnFslRedirUndo {
@@ -251,7 +268,7 @@ Add-Click $ui.BtnFslDefAdd {
     Assert-FslWrite
     $off = @($script:FslDefOff.Keys)
     if (-not (Confirm-Action "Add the checked, missing FSLogix exclusions to Microsoft Defender Antivirus on this master? Some are folders that users can write to (marked [risk] in the list): files there are not scanned. Untick an exclusion to leave it out.$(if ($off.Count -gt 0) { " $($off.Count) are unticked and will not be set." })" 'Defender exclusions')) { return }
-    $run = Set-AVDTuneFSLogixDefender -Machine $script:Machine -F (Get-FslAdapter) -Root $script:StateRoot -VhdLocations @(Get-AVDTuneFSLogixLocations -Machine $script:Machine) -User (Get-FslUser) -SnapshotId (Get-FslGateSnapshot) -Skip $off
+    $run = Invoke-FslChange -Kind 'fslogix-defender' -Title 'Setting the Defender exclusions' -Step 'Adding the ticked exclusions to Microsoft Defender Antivirus' -Block { Set-AVDTuneFSLogixDefender -Machine $script:Machine -F (Get-FslAdapter) -Root $script:StateRoot -VhdLocations @(Get-AVDTuneFSLogixLocations -Machine $script:Machine) -User (Get-FslUser) -SnapshotId (Get-FslGateSnapshot) -Skip $off }
     Show-FslRun $run 'Defender exclusions'; Update-FslDefender
 }
 Add-Click $ui.BtnFslDefUndo {
@@ -331,6 +348,13 @@ function Get-FslSids {
     if ($ui.CmbFslAdminsGroup.Text.Trim()) { $s = Resolve-FslSid $ui.CmbFslAdminsGroup.Text $ch; if ($s) { $admins = @($s) } }
     @{ Users = $users; Admins = $admins }
 }
+function New-FslTask([string]$Kind, [bool]$Write) {
+    # Retry only for what reads (function test without the write tests, storage check): the install, and the write tests that create files on the share, start from their own confirmation
+    $title = switch ($Kind) { 'Install' { 'Installing or updating FSLogix' } 'Test' { $(if ($Write) { 'FSLogix function test with write tests' } else { 'FSLogix function test' }) } default { 'FSLogix storage check' } }
+    $step = switch ($Kind) { 'Install' { 'Looking up the newest release' } 'Test' { 'Checking the master against Microsoft''s FSLogix requirements' } default { 'Reading the storage account, the share and its settings' } }
+    $retry = if ($Kind -eq 'Test' -and -not $Write) { @{ Command = 'Start-FslJob'; Arguments = @('Test', @{ Write = $false }) } } elseif ($Kind -eq 'Storage') { @{ Command = 'Start-FslJob'; Arguments = @('Storage', @{}) } }
+    Start-AVDTuneUiTask -Kind "fslogix-$($Kind.ToLower())" -Title $title -Step $step -Retry $retry
+}
 function Start-FslJob([string]$Kind, [hashtable]$Arg = @{}) {
     if ($script:FslJob) { throw 'Another FSLogix operation is still running.' }
     $sids = Get-FslSids
@@ -355,7 +379,7 @@ function Start-FslJob([string]$Kind, [hashtable]$Arg = @{}) {
         if ($Kind -eq 'Storage') { $c.Arm = $script:FslFake.Arm; $c.Files = $script:FslFake.Files; $c.Ldap = $script:FslFake.Ldap; $c.FakeLdap = $true; $c.ArmToken = 'fake-arm-token'; $c.StorageToken = 'fake-storage-token' }
         $res = $null; $err = ''
         try { $res = & ([scriptblock]::Create($script:FslWorkerText)) $Kind $c } catch { $err = $_.Exception.Message }
-        $script:FslJob = @{ Inline = $true; Result = $res; Err = $err; Kind = $Kind; Write = [bool]$Arg.Write }
+        $script:FslJob = @{ Inline = $true; Result = $res; Err = $err; Kind = $Kind; Write = [bool]$Arg.Write; Task = (New-FslTask $Kind ([bool]$Arg.Write)) }
     }
     else {
         $sync = [hashtable]::Synchronized(@{ Text = '' })
@@ -370,7 +394,7 @@ function Start-FslJob([string]$Kind, [hashtable]$Arg = @{}) {
                 if ($Gate) { Open-AVDTuneWriteGate -SnapshotId $Gate.SnapshotId -ConfirmedBy $Gate.ConfirmedBy }
                 & ([scriptblock]::Create($WorkerText)) $Kind $c
             }).AddArgument($script:AppRoot).AddArgument($Kind).AddArgument($common).AddArgument($gate).AddArgument($sync).AddArgument($script:FslWorkerText)
-        $script:FslJob = @{ PS = $ps; Handle = $ps.BeginInvoke(); Kind = $Kind; Sync = $sync; Write = [bool]$Arg.Write }
+        $script:FslJob = @{ PS = $ps; Handle = $ps.BeginInvoke(); Kind = $Kind; Sync = $sync; Write = [bool]$Arg.Write; Task = (New-FslTask $Kind ([bool]$Arg.Write)) }
     }
     Set-ShutdownBlock $true
     Set-FslBusy $true
@@ -378,7 +402,7 @@ function Start-FslJob([string]$Kind, [hashtable]$Arg = @{}) {
 function Complete-FslJob {
     $job = $script:FslJob
     if (-not $job) { return }
-    if (-not $job.Inline -and -not $job.Handle.IsCompleted) { if ($job.Sync.Text -and $script:CurrentPage -eq 'FSLogix') { $ui.TxtFslState.Text = $job.Sync.Text }; return }
+    if (-not $job.Inline -and -not $job.Handle.IsCompleted) { if ($job.Sync.Text) { Update-AVDTuneUiTask $job.Task -Step ([string]$job.Sync.Text); if ($script:CurrentPage -eq 'FSLogix') { $ui.TxtFslState.Text = $job.Sync.Text } }; return }
     $script:FslJob = $null
     Set-ShutdownBlock $false
     $result = $null; $err = ''
@@ -394,11 +418,12 @@ function Complete-FslJob {
     }
     Set-FslBusy $false
     if ($job.Kind -eq 'Storage') { $ui.PwdFslPassword.Clear(); $ui.ChkFslKey.IsChecked = $false }   # the password and the key confirmation are for one run, also after an error
-    if ($err -or -not $result) { $ui.TxtFslState.Text = "The $($job.Kind.ToLower()) failed: $err"; Show-Error $ui.TxtFslState.Text; Update-FslView; return }
+    if ($err -or -not $result) { Complete-AVDTuneUiTask $job.Task -Failed -Summary "The $($job.Kind.ToLower()) failed: $err"; $ui.TxtFslState.Text = "The $($job.Kind.ToLower()) failed: $err"; Show-Error $ui.TxtFslState.Text; Update-FslView; return }
     switch ($job.Kind) {
         'Install' {
             Register-StepResult $result.Result
             $ui.TxtFslState.Text = "FSLogix: $($result.Install.Status). $($result.Install.Message)$(if ($result.Result.Reboot) { ' Restart the master before you test.' })"
+            Complete-AVDTuneUiTask $job.Task -Failed:([bool]($result.Install.Status -eq 'Failed')) -Summary $ui.TxtFslState.Text
             Show-Toast $ui.TxtFslState.Text
             $script:FslLatest = $result.Install.Message
             Start-OverviewRefresh
@@ -409,6 +434,7 @@ function Complete-FslJob {
             [void](Add-AVDTuneProtocolNote -Protocol $script:Protocol -Group 'fslogix' -Subject 'FSLogix function test' -Note "$($result.Overall): $($result.Counts.Red) red, $($result.Counts.Yellow) yellow, $($result.Counts.Green) green")
             Save-Protocol
             $ui.TxtFslState.Text = "FSLogix function test: $($result.Overall) ($($result.Counts.Red) red, $($result.Counts.Yellow) yellow, $($result.Counts.Green) green)."
+            Complete-AVDTuneUiTask $job.Task -Summary $ui.TxtFslState.Text
             Show-Toast $ui.TxtFslState.Text
             if (-not $script:ReadyJob) { Start-ReadyJob 'Manual' '' } else { $script:ReadyQueued = @{ Kind = 'Manual'; FixId = '' } }   # the healthcheck row follows the test
         }
@@ -418,6 +444,7 @@ function Complete-FslJob {
             [void](Add-AVDTuneProtocolNote -Protocol $script:Protocol -Group 'fslogix' -Subject 'FSLogix storage check' -Note "$($result.Overall): $($result.Counts.Red) red, $($result.Counts.Yellow) yellow, $($result.Counts.Unknown) not checkable$(if ($result.KeyUsed) { '; the account key was used for this run (in memory only)' })")
             Save-Protocol
             $ui.TxtFslState.Text = "Storage check: $($result.Overall)."
+            Complete-AVDTuneUiTask $job.Task -Summary "Storage check: $($result.Overall) ($($result.Counts.Red) red, $($result.Counts.Yellow) yellow, $($result.Counts.Unknown) not checkable)"
             Show-Toast $ui.TxtFslState.Text
             $ui.PwdFslPassword.Clear(); $ui.ChkFslKey.IsChecked = $false   # the confirmation of the key fallback is for one run
         }
@@ -454,7 +481,7 @@ Add-Click $ui.BtnFslAclSet {
     $files = if ($script:TestMode) { $script:FslFake.Files } else { New-AVDTuneFilesAdapter }
     $token = if ($script:TestMode) { 'fake-storage-token' } else { '' }
     if (-not $token) { throw 'No token for Azure Storage: the sign-in of AVDTune does not request that audience yet (issue 11).' }
-    $res = Set-AVDTuneStorageRootAcl -Files $files -Account $share.Account -Share $share.Share -Token $token -UsersSid $sids.Users[0] -AdminsSid $sids.Admins[0] -ConfirmedHash $d.Hash -Root $script:StateRoot -User (Get-FslUser) -SnapshotId (Get-FslGateSnapshot)
+    $res = Invoke-FslChange -Kind 'fslogix-acl' -Title 'Setting the NTFS ACL of the share root' -Step 'Reading the ACL again and setting the recommended one' -Block { Set-AVDTuneStorageRootAcl -Files $files -Account $share.Account -Share $share.Share -Token $token -UsersSid $sids.Users[0] -AdminsSid $sids.Admins[0] -ConfirmedHash $d.Hash -Root $script:StateRoot -User (Get-FslUser) -SnapshotId (Get-FslGateSnapshot) }
     $ui.TxtFslState.Text = "NTFS ACL: $($res.Status). $($res.Message)"; Show-Toast $ui.TxtFslState.Text
     [void](Add-AVDTuneProtocolNote -Protocol $script:Protocol -Group 'fslogix' -Subject 'NTFS ACL of the share root' -Note "$($res.Status). $($res.Message)"); Save-Protocol
 }
