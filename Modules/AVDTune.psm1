@@ -1061,7 +1061,7 @@ function Get-AVDTuneHealth {
     }
     if ($State.Sealed) { Add-Health 'sealed' 'Finish' 'info' 'Finished: the master is ready for capture.' } else { Add-Health 'sealed' 'Finish' 'info' 'Not finished.' }
 
-    $agent = @('RDAgentBootLoader', 'RDAgent' | Where-Object { & $Machine.ServiceGet $_ })
+    $agent = @('RDAgentBootLoader' | Where-Object { & $Machine.ServiceGet $_ })
     $agentKey = & $Machine.RegKeyExists 'HKLM:\SOFTWARE\Microsoft\RDInfraAgent'
     if ($agent.Count -gt 0 -or $agentKey) { Add-Health 'avdagent' 'AVD agent' 'bad' 'The AVD agent is installed. It must not be on the master: the host pool installs it on the session hosts.' }
     else { Add-Health 'avdagent' 'AVD agent' 'ok' 'Not installed (as it should be on a master).' }
