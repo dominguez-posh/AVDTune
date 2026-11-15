@@ -365,6 +365,21 @@ try {
     $cleanDir = Join-Path $tmp 'pc-clean'; New-Item -ItemType Directory -Path $cleanDir | Out-Null; [IO.File]::WriteAllText((Join-Path $cleanDir 'ok.md'), "nothing here`n")
     $out = & $powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'Check-PublicContent.ps1') -Root $cleanDir -DenyListPath $none 2>&1 | Out-String
     Test-Check 'public content: a clean tree passes, exit code 0' ($LASTEXITCODE -eq 0 -and $out -notlike '*FAIL*') $out
+    # GUI smoke (#8): the output folder is printed and cleared without following links
+    $smokeSource = [IO.File]::ReadAllText((Join-Path $PSScriptRoot 'Invoke-GuiSmoke.ps1'))
+    Test-Check 'smoke: prints the folder it uses and clears it with Remove-AVDTuneFolderNoFollow, not with Remove-Item -Recurse' ($smokeSource -match 'Smoke output folder: \$OutDir' -and $smokeSource -match 'Remove-AVDTuneFolderNoFollow \$OutDir' -and $smokeSource -notmatch 'Remove-Item[^\r\n]*-Recurse') $null
+    Import-Module (Join-Path $repo 'Modules\AVDTune.Trust.psm1') -Force
+    $outside = Join-Path $tmp 'smoke-outside'; New-Item -ItemType Directory -Path $outside | Out-Null; [IO.File]::WriteAllText((Join-Path $outside 'keep.txt'), 'keep')
+    $smokeOut = Join-Path $tmp 'smoke-out'; New-Item -ItemType Directory -Path $smokeOut | Out-Null
+    & cmd.exe /c mklink /J "$smokeOut\link" $outside | Out-Null
+    Remove-AVDTuneFolderNoFollow $smokeOut
+    $smokeScript = Join-Path $PSScriptRoot 'Invoke-GuiSmoke.ps1'
+    $foreign = Join-Path $tmp 'foreign-folder'; New-Item -ItemType Directory -Path $foreign | Out-Null; [IO.File]::WriteAllText((Join-Path $foreign 'mine.txt'), 'mine')
+    $eap = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    $o1 = & $powershell -NoProfile -ExecutionPolicy Bypass -File $smokeScript -OutDir 'C:\' 2>&1 | Out-String
+    $o2 = & $powershell -NoProfile -ExecutionPolicy Bypass -File $smokeScript -OutDir $foreign 2>&1 | Out-String; $ErrorActionPreference = $eap
+    Test-Check 'smoke: -OutDir C:\ and a foreign folder without marker are refused and nothing is deleted' ($o1 -like '*drive root*' -and $o2 -like '*not a smoke folder*' -and (Test-Path (Join-Path $foreign 'mine.txt')) -and (Test-Path 'C:\Windows')) ($o1 + $o2)
+    Test-Check 'smoke: a junction in the output folder is removed itself, the folder it points to stays' (-not (Test-Path $smokeOut) -and (Test-Path (Join-Path $outside 'keep.txt'))) $null
 }
 finally {
     Clear-AVDTuneWriteBlock; Close-AVDTuneWriteGate
