@@ -226,6 +226,9 @@ try {
     # the real ARM adapter refuses foreign paths without a network call
     $realArm = New-AVDTuneArmAdapter
     Test-Check 'real ARM adapter refuses a path outside /subscriptions and path tricks' ((& $realArm.Invoke GET '/tenants?api-version=1' 't' $null).Status -eq 0 -and (& $realArm.Invoke GET '/subscriptions/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee/../x' 't' $null).Status -eq 0) $null
+    $armCode = [IO.File]::ReadAllText((Join-Path $repo 'Modules\AVDTune.Snapshot.psm1'))
+    $armBlock = $armCode.Substring($armCode.IndexOf('function New-AVDTuneArmAdapter'))
+    Test-Check 'real ARM adapter asks for TLS 1.2 explicitly before the request (finding: TLS)' ($armBlock -match 'SecurityProtocol -bor \[Net\.SecurityProtocolType\]::Tls12' -and $armBlock.IndexOf('Tls12') -lt $armBlock.IndexOf('HttpWebRequest]::Create')) $null
 
     # ---------------------------------------------------------------- domain controller
     $ldap = New-AVDTuneFakeLdap

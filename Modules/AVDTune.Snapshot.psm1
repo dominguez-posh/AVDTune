@@ -247,6 +247,8 @@ function New-AVDTuneArmAdapter {
     $adapter.Invoke = {
         param($Method, $Path, $Token, $Body)
         if ($Path -notmatch '^/subscriptions/[0-9a-fA-F-]{36}/' -or $Path -match '\.\.' -or $Path -match '[\s\x00-\x1F]') { return [pscustomobject]@{ Status = 0; Body = $null; Error = 'Refused: not an ARM resource path.' } }
+        # .NET Framework 4.x may still offer TLS 1.0/1.1 by default: TLS 1.2 is asked for explicitly (added, never removed: TLS 1.3 stays when the system has it)
+        [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
         try {
             $request = [System.Net.HttpWebRequest]::Create("https://management.azure.com$Path")
             $request.Method = $Method; $request.Timeout = 60000; $request.AllowAutoRedirect = $false
