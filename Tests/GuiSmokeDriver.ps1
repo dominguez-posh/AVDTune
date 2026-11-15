@@ -136,6 +136,153 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         Test-Smoke 'every fake write stayed in memory (no registry value written)' ($script:Machine.Log.Count -eq 0) ($script:Machine.Log -join '; ')
         Save-SmokeShot '09-overview-light-final'
         $true } }
+
+    @{ Name = 'read only banner'; Do = {
+        Show-Page 'Updates'; $window.UpdateLayout()
+        Test-Smoke 'a page that could change the master shows the read-only banner while the gate is closed' ($ui.BoxReadOnly.Visibility -eq 'Visible' -and -not (Test-AVDTuneWriteAllowed)) $null
+        Save-SmokeShot '10-readonly-banner'
+        Show-Page 'Protocol'
+        Test-Smoke 'the protocol page stays usable (no banner)' ($ui.BoxReadOnly.Visibility -eq 'Collapsed') $null
+        Show-Page 'Overview'
+        $refused = try { [void](Invoke-AVDTuneStep -Step (New-AVDTuneStep -Id 'setup.smoke' -Section Setup -Title 'x' -Test { $true } -Apply { }) -Machine $script:Machine -Mode Apply); $null } catch { $_.Exception.Message }
+        Test-Smoke 'a change of the machine is refused through the engine while the gate is closed' ($refused -like '*snapshot gate*') $refused
+        $true } }
+    @{ Name = 'start: questions'; Do = {
+        # the first run opened the questions by itself
+        Test-Smoke 'first start without environment.json: the questions are open, 6 questions and the fields (snapshot name pattern with its default)' ($script:OpenStage -eq 'Environment' -and $ui.BoxStage.Visibility -eq 'Visible' -and $script:Form.Combos.Count -eq 6 -and $script:Form.Texts.Count -eq 5 -and $script:Form.Texts['SnapshotNamePattern'].Text -eq '{OsDisk}-{DD}.{MM}.{YYYY}-{N}' -and -not (Test-Path (Join-Path $script:StateRoot 'environment.json'))) $script:OpenStage
+        Test-Smoke 'the four stages are listed: questions to do, the rest waiting' ($ui.PanelStages.Children.Count -eq 4 -and (($script:Stages | ForEach-Object Status) -join ',') -eq 'Pending,Locked,Locked,Locked') (($script:Stages | ForEach-Object Status) -join ',')
+        Save-SmokeShot '11-start-questions'
+        # an invalid combination is explained and cannot be saved
+        $set = { param($key, $text) $script:Form.Combos[$key].Control.SelectedItem = $text }
+        & $set 'Join' 'Microsoft Entra hybrid join'
+        Test-Smoke 'hybrid join without a domain controller: problem shown, save disabled' ($script:Form.Preview.Text -like '*Problem:*domain controller*' -and -not $ui.BtnStageAction.IsEnabled) $script:Form.Preview.Text
+        Save-SmokeShot '12-start-questions-problem'
+        & $set 'Dc' 'AD DS on premises (VPN or ExpressRoute)'
+        & $set 'Identities' 'Synchronized (Entra Connect / Cloud Sync)'
+        $script:Form.Texts['TenantId'].Text = 'contoso.example'
+        $script:Form.Texts['ClientId'].Text = '66666666-7777-8888-9999-000000000000'
+        $script:Form.Texts['VNet'].Text = 'vnet-example'; $script:Form.Texts['Subnet'].Text = 'snet-avd'
+        Test-Smoke 'hybrid with an on-premises DC is valid and the preview names the domain step and Azure Files with AD DS' ($ui.BtnStageAction.IsEnabled -and $script:Form.Preview.Text -like '*Domain step*' -and $script:Form.Preview.Text -like '*Azure Files with AD DS*') $script:Form.Preview.Text
+        Save-SmokeShot '13-start-questions-hybrid'
+        $ui.BtnStageAction.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
+        $env1 = Get-AVDTuneEnvironment $script:StateRoot
+        Test-Smoke 'saving writes environment.json (no secret), closes the form and moves on to the sign-in' ($env1.Answers.Join -eq 'Hybrid' -and $env1.Answers.Dc -eq 'AdDsOnPrem' -and $env1.SignIn.TenantId -eq 'contoso.example' -and $ui.BoxStage.Visibility -eq 'Collapsed' -and (($script:Stages | ForEach-Object Status) -join ',') -eq 'Done,Pending,Locked,Locked') (($script:Stages | ForEach-Object Status) -join ',')
+        Test-Smoke 'the protocol has the answered questions' (@($script:Protocol.Actions | Where-Object { $_.Subject -like 'First-run questions answered*' }).Count -eq 1) $null
+        # no FSLogix: the two pages disappear from the navigation
+        $none = Get-AVDTuneEnvironmentAnswers (Get-AVDTuneEnvironment $script:StateRoot); $none.Profiles = 'None'
+        [void](Save-AVDTuneEnvironment -Root $script:StateRoot -Answers $none -User 'smoke'); Update-StartView
+        Test-Smoke 'without FSLogix the FSLogix and App Masking pages are hidden' ($ui.NavFSLogix.Visibility -eq 'Collapsed' -and $ui.NavAppMasking.Visibility -eq 'Collapsed' -and $ui.NavUpdates.Visibility -eq 'Visible') $null
+        $none.Profiles = 'AzureFiles'; [void](Save-AVDTuneEnvironment -Root $script:StateRoot -Answers $none -User 'smoke'); Update-StartView
+        Test-Smoke 'with FSLogix they are back; a change after a version exists is a change log entry' ($ui.NavFSLogix.Visibility -eq 'Visible' -and @(Get-AVDTuneChangeLog -Root $script:StateRoot | Where-Object { $_.Component -eq 'Environment' }).Count -eq 2) $null
+        $true } }
+    @{ Name = 'start: sign-in'; Do = {
+        Open-Stage 'SignIn'; $window.UpdateLayout()
+        Test-Smoke 'sign-in form lists the three tokens with their permissions' ($ui.PanelStageBody.Children.Count -ge 5 -and (Find-Text $ui.PanelStageBody 'Sites') -and (Find-Text $ui.PanelStageBody 'Azure Resource Manager (snapshot, VM size, region): user_impersonation')) $null
+        Save-SmokeShot '14-start-signin'
+        $ui.BtnStageAction.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
+        $info = Get-AVDTuneSessionInfo $script:StartContext.Session
+        Test-Smoke 'sign-in (fake): connected, three audiences, stage Done, domain stage open' ($info.Connected -and $info.Audiences.Count -eq 3 -and (($script:Stages | ForEach-Object Status) -join ',') -eq 'Done,Done,Pending,Locked') (($script:Stages | ForEach-Object Status) -join ',')
+        Test-Smoke 'the protocol names the account and holds no token' (@($script:Protocol.Actions | Where-Object { $_.Subject -eq 'Microsoft 365 and Azure sign-in' -and $_.Note -like 'Signed in as admin.example@*' -and $_.Note -notmatch 'eyJ' }).Count -eq 1) $null
+        $true } }
+    @{ Name = 'start: domain'; Do = {
+        Open-Stage 'Domain'; $window.UpdateLayout()
+        $script:Form.Server.Text = '10.0.0.10'; $script:Form.User.Text = 'EXAMPLE\svc-avdtune'
+        $ui.BtnStageAction.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
+        Test-Smoke 'connect without a password is refused with a message' ($ui.TxtStageMessage.Text -like '*password*') $ui.TxtStageMessage.Text
+        $script:Form.PasswordBox.Password = 'Not-A-Real-Password-1'
+        $ui.BtnStageAction.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
+        $window.UpdateLayout()
+        Test-Smoke 'first contact: the certificate and its thumbprint are shown, nothing was bound' ($ui.TxtStageMessage.Text -like '*SHA-256: AB:AB:AB*' -and $ui.TxtStageMessage.Text -like '*Subject: CN=dc1.example.test*' -and $ui.BtnStageAction2.Visibility -eq 'Visible' -and $script:Services.Ldap.Opened.Count -eq 0) $ui.TxtStageMessage.Text
+        Save-SmokeShot '15-start-domain-pin'
+        $ui.BtnStageAction2.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
+        $window.UpdateLayout()
+        $opened = $script:Services.Ldap.Opened
+        Test-Smoke 'pinned, then connected over LDAPS 636 and read: domain, OUs, groups with SIDs, site' ($opened.Count -eq 1 -and $opened[0].Port -eq 636 -and $opened[0].AuthType -eq 'Negotiate' -and $script:Form.Summary.Text -like '*example.test*NetBIOS EXAMPLE*' -and $script:Form.Summary.Text -like '*Default-First-Site-Name*' -and $script:Form.Summary.Text -like '*AVD-Users  S-1-5-21-*-1104*') $script:Form.Summary.Text
+        Test-Smoke 'the password is cleared after the read' ($script:Form.PasswordBox.SecurePassword.Length -eq 0) $null
+        Test-Smoke 'domain stage Done with the facts, environment.json has the pin and the account name but no password' ((($script:Stages | ForEach-Object Status) -join ',') -eq 'Done,Done,Done,Pending' -and ((Get-Content (Join-Path $script:StateRoot 'environment.json') -Raw) -notmatch 'Not-A-Real-Password') -and (Get-AVDTuneEnvironment $script:StateRoot).Dc.Pins.'10.0.0.10'.Sha256 -and (Get-AVDTuneEnvironment $script:StateRoot).Dc.User -eq 'EXAMPLE\svc-avdtune') $null
+        Save-SmokeShot '16-start-domain-read'
+        # the certificate changes: the connection stops
+        $script:Services.Ldap.Store.Servers['10.0.0.10'].Cert = @{ Sha256 = ('CD' * 32); Thumbprint = ('CD' * 20); Subject = 'CN=dc1.example.test'; Issuer = 'CN=Other CA'; NotBefore = ''; NotAfter = '' }
+        Open-Stage 'Domain'
+        $script:Form.PasswordBox.Password = 'Not-A-Real-Password-1'
+        $ui.BtnStageAction.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
+        $window.UpdateLayout()
+        Test-Smoke 'changed certificate: error shown with both thumbprints, no second bind, pin button offered' ($ui.TxtStageMessage.Text -like '*changed*' -and $ui.TxtStageMessage.Text -like "*$('CD' * 32)*" -and $script:Services.Ldap.Opened.Count -eq 1 -and $ui.BtnStageAction2.Visibility -eq 'Visible') $ui.TxtStageMessage.Text
+        Save-SmokeShot '17-start-domain-cert-changed'
+        $script:Services.Ldap.Store.Servers['10.0.0.10'].Cert = @{ Sha256 = ('AB' * 32); Thumbprint = ('AB' * 20); Subject = 'CN=dc1.example.test'; Issuer = 'CN=Example Test CA'; NotBefore = '2026-01-01T00:00:00Z'; NotAfter = '2027-01-01T00:00:00Z' }
+        # a DC without LDAPS: warning first, no bind; only the confirmation (logged) connects, Kerberos for a DNS name
+        $script:Services.Ldap.Store.Servers['dc9.example.test'] = @{ Ldaps = $false; Ldap389 = $true; Cert = $null; BadPassword = $false }
+        Open-Stage 'Domain'
+        $script:Form.Server.Text = 'dc9.example.test'; $script:Form.PasswordBox.Password = 'Not-A-Real-Password-1'
+        $opened = $script:Services.Ldap.Opened.Count
+        $ui.BtnStageAction.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
+        $window.UpdateLayout()
+        Test-Smoke 'DC without LDAPS: warning shown, no bind before the confirmation' ($ui.TxtStageMessage.Text -like '*does not answer*Kerberos*' -and $script:Services.Ldap.Opened.Count -eq $opened -and $ui.BtnStageAction2.Visibility -eq 'Visible') $ui.TxtStageMessage.Text
+        Save-SmokeShot '17b-start-domain-no-ldaps'
+        # N3: the warning was for dc9; after the name changes the confirmation is gone
+        $script:Form.Server.Text = 'dc8.example.test'
+        Test-Smoke 'a changed server name drops the pending LDAP 389 confirmation' ($ui.BtnStageAction2.Visibility -eq 'Collapsed' -and -not $script:Form.PendingServer -and -not $script:StageAction2) $null
+        $script:Form.Server.Text = 'dc9.example.test'
+        $ui.BtnStageAction.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
+        $ui.BtnStageAction2.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
+        $last = $script:Services.Ldap.Opened[$script:Services.Ldap.Opened.Count - 1]
+        Test-Smoke 'after the confirmation: 389 with Kerberos, the confirmation is in the protocol' ($script:Services.Ldap.Opened.Count -eq $opened + 1 -and $last.Port -eq 389 -and $last.AuthType -eq 'Kerberos' -and @($script:Protocol.Actions | Where-Object { $_.Subject -like 'Domain controller without LDAPS confirmed*' -and $_.Note -like 'Confirmed by *' }).Count -eq 1) ($last | ConvertTo-Json -Compress)
+        Close-Stage
+        $true } }
+    @{ Name = 'start: snapshot'; Do = {
+        if (-not $script:SnapStarted) {
+            Open-Stage 'Snapshot'; $window.UpdateLayout()
+            Test-Smoke 'snapshot gate without a snapshot: says so, confirm disabled, create offered' ($ui.TxtStageMessage.Text -like '*No snapshot of the OS disk that is finished*' -and -not $ui.BtnStageAction.IsEnabled -and $ui.BtnStageAction2.Visibility -eq 'Visible' -and (Find-Text $ui.PanelStageBody 'gm-test01') -and (Find-Text $ui.PanelStageBody 'gm-test01_osdisk')) $ui.TxtStageMessage.Text
+            Save-SmokeShot '18-start-snapshot-none'
+            $ui.BtnStageAction2.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
+            $put = $script:Services.Arm.Store.LastPut
+            Test-Smoke 'Create snapshot now: incremental request with image version and user tags, the button waits' ($put.properties.incremental -eq $true -and $put.tags.ImageVersion -eq (Get-AVDTuneState $script:StateRoot).ImageVersion -and $put.tags.CreatedWith -eq 'AVDTune' -and $script:PendingSnapshot -and -not $ui.BtnStageAction2.IsEnabled) ($put | ConvertTo-Json -Compress -Depth 4)
+            Test-Smoke 'the snapshot is named by the default pattern <OS disk>-DD.MM.YYYY-N' ($script:PendingSnapshot.Name -match '^gm-test01_osdisk-\d{2}\.\d{2}\.\d{4}-1$') $script:PendingSnapshot.Name
+            Save-SmokeShot '19-start-snapshot-creating'
+            $script:SnapStarted = $true
+            return $false
+        }
+        if ($script:PendingSnapshot) { return $false }   # the timer polls Azure (fake) until the snapshot is ready
+        $window.UpdateLayout()
+        Test-Smoke 'when ready the snapshot is listed and can be confirmed' ($ui.BtnStageAction.IsEnabled -and $script:Form.Valid.Count -eq 1 -and $script:Form.Valid[0].ByAVDTune -and $script:Form.SnapList.Visibility -eq 'Visible') $ui.TxtStageMessage.Text
+        Save-SmokeShot '20-start-snapshot-ready'
+        $script:Form.NameBox.Text = 'Alex'
+        $ui.BtnStageAction.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
+        Test-Smoke 'one word is no first and last name: the gate stays closed' (-not (Test-AVDTuneWriteAllowed) -and $ui.TxtStageMessage.Text -like '*first and last name*') $ui.TxtStageMessage.Text
+        $script:Form.NameBox.Text = 'A. E.'
+        $ui.BtnStageAction.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
+        Test-Smoke 'initials only do not open the gate' (-not (Test-AVDTuneWriteAllowed) -and $ui.TxtStageMessage.Text -like '*first and last name*') $ui.TxtStageMessage.Text
+        $script:Form.NameBox.Text = 'Alex Example'
+        $ui.BtnStageAction.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
+        $window.UpdateLayout()
+        $state = Get-AVDTuneState $script:StateRoot
+        Test-Smoke 'confirmed with the full name: gate open, state.json has the record' ((Test-AVDTuneWriteAllowed) -and $state.SnapshotGate.ConfirmedBy -eq 'Alex Example' -and $state.SnapshotGate.CreatedByAVDTune -eq $true -and $state.SnapshotGate.SnapshotId -like '*/snapshots/gm-test01_osdisk-*' -and $state.SnapshotGate.SignedInAccount -like 'admin.example@*' -and $state.SnapshotGate.WindowsAccount -like '*\*') ($state.SnapshotGate | ConvertTo-Json -Compress)
+        $entry = @(Get-AVDTuneChangeLog -Root $script:StateRoot | Where-Object { $_.Category -eq 'Snapshot' })
+        Test-Smoke 'the change log has the snapshot entry (name, time, ID, created by AVDTune: yes)' ($entry.Count -eq 1 -and $entry[0].SnapshotId -eq $state.SnapshotGate.SnapshotId -and $entry[0].Text -like '*created by AVDTune: yes*') ($entry | ConvertTo-Json -Compress)
+        $act = @($script:Protocol.Actions | Where-Object { $_.Subject -eq 'Snapshot gate confirmed' })
+        Test-Smoke 'the protocol has the confirmation with typed name, both accounts, time and whether AVDTune made it' ($act.Count -eq 1 -and $act[0].Note -like '*gm-test01_osdisk-*' -and $act[0].Note -like '*by AVDTune: yes*' -and $act[0].Note -like '*confirmed by Alex Example (Microsoft account admin.example@*, Windows account *') ($act | ConvertTo-Json -Compress)
+        Test-Smoke 'all four stages are Done, the rollback hint is on the Overview' ((($script:Stages | ForEach-Object Status) -join ',') -eq 'Done,Done,Done,Done' -and $ui.BoxRollback.Visibility -eq 'Visible' -and $ui.TxtRollback.Text -like '*Swap OS disk*') (($script:Stages | ForEach-Object Status) -join ',')
+        Save-SmokeShot '21-start-done'
+        Show-Page 'Updates'; $window.UpdateLayout()
+        Test-Smoke 'unlocked: no read-only banner on the page any more' ($ui.BoxReadOnly.Visibility -eq 'Collapsed') $null
+        Save-SmokeShot '22-page-updates-unlocked'
+        Show-Page 'Overview'
+        $ok = (Invoke-AVDTuneStep -Step (New-AVDTuneStep -Id 'setup.smoke' -Section Setup -Title 'x' -Test { $true } -Apply { }) -Machine $script:Machine -Mode Apply).Status
+        Test-Smoke 'the engine accepts a change after the confirmation' ($ok -eq 'Unchanged') $ok
+        $true } }
+    @{ Name = 'start: sign-out and dark'; Do = {
+        Open-Stage 'SignIn'; $window.UpdateLayout()
+        $ui.BtnStageAction2.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
+        Test-Smoke 'sign out removes every token from memory (checked as before seal)' (Test-AVDTuneSessionClear $script:StartContext.Session) $null
+        $allFiles = (Get-ChildItem $script:StateRoot -Recurse -File | ForEach-Object { [IO.File]::ReadAllText($_.FullName) }) -join "`n"
+        Test-Smoke 'no token, refresh token or password in any file of the state folder' ($allFiles -notmatch 'eyJ[A-Za-z0-9_-]{10,}' -and $allFiles -notmatch 'fake-refresh' -and $allFiles -notmatch 'Not-A-Real-Password') $null
+        Test-Smoke 'every service of the start sequence was a fake (no real adapter in test mode)' ($script:Services.Auth.Kind -eq 'Fake' -and $script:Services.Arm.Kind -eq 'Fake' -and $script:Services.Ldap.Kind -eq 'Fake') $null
+        if ($script:Settings.Theme -ne 'Dark') { $ui.BtnTheme.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent))) }
+        Open-Stage 'Environment'; $window.UpdateLayout()
+        Save-SmokeShot '23-start-questions-dark'
+        Close-Stage
+        $ui.BtnTheme.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
+        $true } }
 )
 
 $script:SmokeTimer = New-Object System.Windows.Threading.DispatcherTimer

@@ -9,7 +9,7 @@
     State lives in C:\ProgramData\AVDTune (Modules\AVDTune.psm1). One instance at a time (mutex Global\AVDTune).
     Test hooks (all only honoured together, so they cannot be used to run the real tool unelevated):
       AVDTUNE_FAKE   script that defines New-AVDTuneFakeMachine (Tests\Fakes\FakeMachine.ps1): no real machine access
-      AVDTUNE_ROOT   state folder other than ProgramData
+      AVDTUNE_ROOT   state folder other than ProgramData (ignored with a warning without AVDTUNE_FAKE)
       AVDTUNE_SMOKE  script that drives the window off-screen (Tests\GuiSmokeDriver.ps1)
 .PARAMETER HideConsole
     Hides the console window of this process.
@@ -26,6 +26,7 @@ Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, Sys
 $script:AppRoot = $PSScriptRoot
 $script:ToolVersion = '0.1.0'
 Import-Module (Join-Path $PSScriptRoot 'Modules\AVDTune.psm1') -Force
+foreach ($part in 'Trust', 'Session', 'Snapshot', 'Directory', 'Start') { Import-Module (Join-Path $PSScriptRoot "Modules\AVDTune.$part.psm1") -Force }
 . (Join-Path $PSScriptRoot 'AVDTune-Theme.ps1')
 
 # ---------------------------------------------------------------- test mode, elevation, one instance
@@ -45,8 +46,15 @@ $script:MutexOwned = $false
 try { $script:MutexOwned = $script:Mutex.WaitOne(0) } catch [System.Threading.AbandonedMutexException] { $script:MutexOwned = $true }
 if (-not $script:MutexOwned) { Stop-WithMessage 'AVDTune is already running on this computer (one instance at a time).' }
 
-if ($script:TestMode) { . $env:AVDTUNE_FAKE; $script:Machine = New-AVDTuneFakeMachine } else { $script:Machine = New-AVDTuneMachine }
-[void](Initialize-AVDTuneState -Root $script:StateRoot)
+if ($script:TestMode) {
+    . $env:AVDTUNE_FAKE; $script:Machine = New-AVDTuneFakeMachine
+    # sign-in, Azure Resource Manager and LDAP are fakes in test mode (Tests\Fakes\FakeServices.ps1 next to the fake machine): no real sign-in, tenant or domain controller
+    . (Join-Path (Split-Path $env:AVDTUNE_FAKE -Parent) 'FakeServices.ps1')
+    $script:Services = @{ Auth = (New-AVDTuneFakeAuth); Arm = (New-AVDTuneFakeArm); Ldap = (New-AVDTuneFakeLdap) }
+}
+else { $script:Machine = New-AVDTuneMachine }
+# The state folder is checked before it is trusted (owner, explicit rules, links; repaired when possible, Modules\AVDTune.psm1)
+try { [void](Initialize-AVDTuneState -Root $script:StateRoot) } catch { Stop-WithMessage $_.Exception.Message }
 $script:WorkRoot = $script:StateRoot
 . (Join-Path $PSScriptRoot 'AVDTune-Protocol.ps1')
 
@@ -174,13 +182,14 @@ function Show-Page([string]$Key) {
     $ui.PageProtocol.Visibility = ConvertTo-Vis ($Key -eq 'Protocol')
     $ui.PagePlaceholder.Visibility = ConvertTo-Vis $isPlaceholder
     $ui["Nav$Key"].IsChecked = $true
+    Update-ReadOnlyBanner
     if ($isPlaceholder) {
         $page = $script:PageTable | Where-Object { $_.Key -eq $Key } | Select-Object -First 1
         $ui.TxtPhTitle.Text = $page.Title
         $ui.TxtPhPhase.Text = "Planned for phase $($page.Phase)"
         $ui.TxtPhText.Text = $page.Text
     }
-    elseif ($Key -eq 'Overview') { Update-OverviewView }
+    elseif ($Key -eq 'Overview') { Update-OverviewView; Update-StartView }
     elseif ($Key -eq 'Protocol') { Update-ProtocolView }
 }
 
@@ -389,6 +398,8 @@ Add-Click $ui.BtnProtocolCopy {
     Show-Toast 'Copied.'
 }
 
+. (Join-Path $PSScriptRoot 'AVDTune-Start.ps1')
+
 # ---------------------------------------------------------------- theme switch
 function Update-ThemeButton { $ui.BtnTheme.Content = [string][char]$(if ($script:Settings.Theme -eq 'Dark') { 0xE706 } else { 0xE708 }) }
 function Switch-Theme {
@@ -415,6 +426,8 @@ Add-Click $ui.BtnClose { $window.Close() }
 
 $window.Add_Closed({
     $script:Timer.Stop()
+    try { $script:SnapTimer.Stop() } catch { }
+    try { if ($script:StartContext.Session) { Disconnect-AVDTuneSession $script:StartContext.Session } } catch { }   # tokens leave the memory with the window
     if ($script:OverviewJob) { try { [void]$script:OverviewJob.PS.BeginStop($null, $null) } catch { } }
     try { if ($script:MutexOwned) { $script:Mutex.ReleaseMutex() } } catch { }
     [System.Windows.Application]::Current.Shutdown()
@@ -422,8 +435,17 @@ $window.Add_Closed({
 
 # ---------------------------------------------------------------- start
 Set-ProtocolImage
+$stateRepair = Get-AVDTuneStateSecurityReport
+if ($stateRepair -and @($stateRepair.Quarantined).Count -gt 0) {
+    # N2: a prepared state folder was set aside unread; the first run starts again. The administrator is told in the protocol and in a dialog.
+    $asideText = "The state folder $($script:StateRoot) had been prepared by someone else ($(@($stateRepair.Problems | Select-Object -First 3 | ForEach-Object { $_.Problem }) -join '; ')). It was set aside unread as $(@($stateRepair.Quarantined) -join ', ') and a new one was created: the first-run questions, the domain controller pin and the sign-in start again. Check who prepared it, then delete the set-aside folder."
+    Add-StartProtocol 'Warning: manipulated state folder set aside' $asideText 'failed'
+    if (-not $env:AVDTUNE_SMOKE) { [void][System.Windows.MessageBox]::Show($asideText, 'AVDTune', 'OK', 'Warning') } else { $script:StateAsideNotice = $asideText }
+}
 Update-Chip
 Show-Page 'Overview'
+# First run: the questions open by themselves
+if (-not (Get-AVDTuneEnvironment $script:StateRoot)) { try { Open-Stage 'Environment' } catch { Show-Error $_.Exception.Message } }
 $script:Timer.Start()
 Start-OverviewRefresh
 # Test hook: AVDTUNE_SMOKE names a script that drives the window off-screen and renders every page (only in test mode).

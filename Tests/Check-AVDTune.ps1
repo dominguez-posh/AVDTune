@@ -13,6 +13,14 @@ Import-Module (Join-Path $repo 'Modules\AVDTune.psm1') -Force
 $script:failed = 0
 function Test-Check([string]$Name, [bool]$Ok, $Detail) { if ($Ok) { "PASS $Name" } else { $script:failed++; "FAIL $Name" + $(if ($null -ne $Detail) { "  -> $Detail" }) } }
 function Test-Throws([scriptblock]$Block) { try { & $Block | Out-Null; $false } catch { $true } }
+function Remove-AVDTuneTestTree([string]$Path) {
+    # deletes a test folder; links are removed as links (their targets stay)
+    $d = New-Object IO.DirectoryInfo $Path
+    if (-not $d.Exists) { if (Test-Path -LiteralPath $Path) { Remove-Item -LiteralPath $Path -Force }; return }
+    if (($d.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { $d.Delete(); return }
+    foreach ($c in $d.GetFileSystemInfos()) { if ($c -is [IO.DirectoryInfo]) { Remove-AVDTuneTestTree $c.FullName } else { $c.Delete() } }
+    $d.Delete()
+}
 function Join-Pairs($Table) { (($Table.GetEnumerator() | Sort-Object Name | ForEach-Object { "$($_.Key)=$($_.Value)" }) -join ' ') }
 
 $tmp = Join-Path ([IO.Path]::GetTempPath()) ('avdtune-check-' + [guid]::NewGuid().ToString('N'))
@@ -24,6 +32,9 @@ try {
     $realRoot = Get-AVDTuneRoot
     Test-Check 'default root is ProgramData\AVDTune and counts as the real one' ($realRoot -like '*\AVDTune' -and (Test-AVDTuneDefaultRoot $realRoot) -and -not (Test-AVDTuneDefaultRoot $tmp)) $realRoot
     $env:AVDTUNE_ROOT = $tmp
+    $rootAlone = Get-AVDTuneRoot -WarningVariable rootWarn -WarningAction SilentlyContinue
+    Test-Check 'attack: AVDTUNE_ROOT without AVDTUNE_FAKE is ignored with a warning (state stays in ProgramData)' ($rootAlone -eq $realRoot -and (@($rootWarn) -join ' ') -like '*ignored without AVDTUNE_FAKE*') "$rootAlone / $(@($rootWarn) -join ' ')"
+    $env:AVDTUNE_FAKE = Join-Path $PSScriptRoot 'Fakes\FakeMachine.ps1'
     Test-Check 'AVDTUNE_ROOT overrides the root' ((Get-AVDTuneRoot) -eq $tmp) $null
 
     # ---------------------------------------------------------------- state
@@ -39,6 +50,96 @@ try {
     $acl = New-AVDTuneStateSecurity
     $rules = @($acl.GetAccessRules($true, $false, [Security.Principal.SecurityIdentifier]))
     Test-Check 'state ACL: Administrators and SYSTEM only, inheritance off' ($acl.AreAccessRulesProtected -and $rules.Count -eq 2 -and (@($rules | ForEach-Object { $_.IdentityReference.Value } | Sort-Object) -join ',') -eq 'S-1-5-18,S-1-5-32-544' -and -not (@($rules | Where-Object { $_.FileSystemRights -ne 'FullControl' }).Count)) (@($rules | ForEach-Object { $_.IdentityReference.Value }) -join ',')
+
+    # ---------------------------------------------------------------- state folder prepared by someone else (finding 2 b)
+    $sec = Join-Path $tmp 'sec-root'
+    New-Item -ItemType Directory -Path (Join-Path $sec 'WebView2') -Force | Out-Null
+    [IO.File]::WriteAllText((Join-Path $sec 'WebView2\Microsoft.Web.WebView2.Core.dll'), 'MZ planted')
+    $foreignSid = 'S-1-5-21-1000000000-2000000000-3000000000-1001'
+    # fake ACL reader: a table path -> @{ Owner; Protected; Rules }; everything not in the table is trusted
+    $aclTable = @{}
+    $okAcl = { [pscustomobject]@{ Owner = 'S-1-5-32-544'; Protected = $false; Rules = @([pscustomobject]@{ Sid = 'S-1-5-18'; Inherited = $true }) } }
+    $readFake = { param($Path, $IsDirectory) if ($aclTable.ContainsKey($Path)) { $aclTable[$Path] } else { & $okAcl } }.GetNewClosure()
+    Test-Check 'state folder of Administrators/SYSTEM: no problem' (@(Get-AVDTuneStateSecurityProblems -Root $sec -ReadAcl $readFake).Count -eq 0) $null
+    $aclTable[(Join-Path $sec 'WebView2')] = [pscustomobject]@{ Owner = $foreignSid; Protected = $true; Rules = @([pscustomobject]@{ Sid = $foreignSid; Inherited = $false }) }
+    $aclTable[(Join-Path $sec 'WebView2\Microsoft.Web.WebView2.Core.dll')] = [pscustomobject]@{ Owner = 'S-1-5-32-544'; Protected = $false; Rules = @([pscustomobject]@{ Sid = 'S-1-5-32-545'; Inherited = $false }) }
+    $pr = @(Get-AVDTuneStateSecurityProblems -Root $sec -ReadAcl $readFake)
+    Test-Check 'attack: a sub folder owned by a user and a file with an explicit rule for Users are found' ($pr.Count -eq 3 -and ($pr | Where-Object { $_.Path -like '*WebView2' -and $_.Problem -like "owner $foreignSid" }) -and ($pr | Where-Object { $_.Path -like '*Core.dll' -and $_.Problem -like '*S-1-5-32-545*' })) (($pr | ForEach-Object { "$($_.Path)=$($_.Problem)" }) -join '; ')
+    $aclTable[$sec] = [pscustomobject]@{ Owner = 'S-1-5-32-544'; Protected = $false; Rules = @([pscustomobject]@{ Sid = 'S-1-5-32-545'; Inherited = $true }) }
+    Test-Check 'inherited rules of the root count only in the final check (root must be protected, Administrators/SYSTEM only)' (@(Get-AVDTuneStateSecurityProblems -Root $sec -ReadAcl $readFake | Where-Object { $_.Path -eq $sec }).Count -eq 0 -and @(Get-AVDTuneStateSecurityProblems -Root $sec -ReadAcl $readFake -Final | Where-Object { $_.Path -eq $sec }).Count -eq 2) $null
+    $aclTable.Clear()
+
+    # prepared state folder: set aside as a whole (quarantine), never repaired recursively (N1), nothing of it trusted (N2)
+    $qParent = Join-Path $tmp 'q-parent'; $qRoot = Join-Path $qParent 'AVDTune'
+    $qTarget = Join-Path $tmp 'q-target'; New-Item -ItemType Directory -Path $qTarget -Force | Out-Null
+    [IO.File]::WriteAllText((Join-Path $qTarget 'system-file.txt'), 'must stay as it is')
+    $targetAcl = (Get-Acl -LiteralPath $qTarget).Sddl
+    # fake ACL reader: a folder with a file FOREIGN in it belongs to someone else; everything else is AVDTune's own (the real reader can only
+    # see this unelevated user as owner); links are found by the walker itself
+    $readQ = { param($Path, $IsDirectory)
+        if ($IsDirectory -and (Test-Path -LiteralPath (Join-Path $Path 'FOREIGN'))) { return [pscustomobject]@{ Owner = 'S-1-5-21-1000000000-2000000000-3000000000-1001'; Protected = $false; Rules = @() } }
+        [pscustomobject]@{ Owner = 'S-1-5-32-544'; Protected = $true; Rules = @([pscustomobject]@{ Sid = 'S-1-5-18'; Inherited = $false }) } }
+    $createPlain = { param($Root) New-Item -ItemType Directory -Path $Root -Force | Out-Null }
+    New-Item -ItemType Directory -Path (Join-Path $qRoot 'config') -Force | Out-Null
+    [IO.File]::WriteAllText((Join-Path $qRoot 'FOREIGN'), 'x')
+    [IO.File]::WriteAllText((Join-Path $qRoot 'environment.json'), '{"Schema":1,"SignIn":{"TenantId":"attacker.example","ClientId":"00000000-0000-0000-0000-000000000001"},"Dc":{"Server":"10.0.0.66","Pins":{}}}')
+    [IO.File]::WriteAllText((Join-Path $qRoot 'state.json'), '{"Schema":1,"LastChange":"2020-01-01T00:00:00Z"}')
+    [IO.File]::WriteAllText((Join-Path $qRoot 'config\webview2-trust.json'), '{"Files":[]}')
+    New-Item -ItemType Junction -Path (Join-Path $qRoot 'logs') -Value $qTarget | Out-Null
+    $rep = $null; $e = $null
+    try { [void](Initialize-AVDTuneState -Root $qRoot -Protect -ReadAcl $readQ -CreateRoot $createPlain); $rep = Get-AVDTuneStateSecurityReport } catch { $e = $_.Exception.Message }
+    $aside = @(Get-ChildItem -LiteralPath $qParent -Directory | Where-Object { $_.Name -like 'AVDTune.untrusted-*' })
+    Test-Check 'attack: a prepared state folder is set aside as AVDTune.untrusted-<time> and a new one is created' (-not $e -and $aside.Count -eq 1 -and $aside[0].Name -match '^AVDTune\.untrusted-\d{8}-\d{6}$' -and (Test-Path (Join-Path $qRoot 'state.json')) -and @($rep.Quarantined).Count -eq 1) "$e / $(@($aside | ForEach-Object Name) -join ',')"
+    Test-Check 'N2: nothing of the prepared folder is taken over (no environment.json, no LastChange, no WebView2 trust record)' (-not (Test-Path (Join-Path $qRoot 'environment.json')) -and -not (Test-Path (Join-Path $qRoot 'config\webview2-trust.json')) -and $null -eq (Get-AVDTuneState $qRoot).PSObject.Properties['LastChange'] -and (Test-Path (Join-Path $aside[0].FullName 'environment.json'))) $null
+    Test-Check 'the quarantine is in logs\security.log of the new folder and in the report for the protocol and the warning' ((Test-Path (Join-Path $qRoot 'logs\security.log')) -and ([IO.File]::ReadAllText((Join-Path $qRoot 'logs\security.log')) -like '*prepared by someone else*set aside as*AVDTune.untrusted-*nothing taken over*') -and -not ((Get-Item -LiteralPath (Join-Path $qRoot 'logs')).Attributes -band [IO.FileAttributes]::ReparsePoint)) $null
+    Test-Check 'the junction in the prepared folder was not followed: its target is unchanged' ((Get-Content -LiteralPath (Join-Path $qTarget 'system-file.txt') -Raw).Trim() -eq 'must stay as it is' -and @(Get-ChildItem -LiteralPath $qTarget -Force).Count -eq 1 -and (Get-Acl -LiteralPath $qTarget).Sddl -eq $targetAcl) (@(Get-ChildItem -LiteralPath $qTarget -Force -Name) -join ',')
+    Get-ChildItem -LiteralPath $qParent -Force | ForEach-Object { Remove-AVDTuneTestTree $_.FullName }
+
+    # race: the attacker puts a junction in place of the root while AVDTune sets it aside / creates it again
+    $calls = New-Object System.Collections.ArrayList
+    $createRace = { param($Root) [void]$calls.Add('create'); New-Item -ItemType Junction -Path $Root -Value $qTarget | Out-Null }.GetNewClosure()
+    $e = $null; try { [void](Initialize-AVDTuneState -Root $qRoot -Protect -ReadAcl $readQ -CreateRoot $createRace) } catch { $e = $_.Exception.Message }
+    Test-Check 'attack: a junction that appears again at every create is removed as a link each time; after 3 tries the start is refused' ($e -like '*could not be set aside safely*does not start*' -and $calls.Count -eq 3 -and -not (Test-Path -LiteralPath $qRoot)) $e
+    $quarantineRace = { param($Root, $Problems) $r = Move-AVDTuneStateToQuarantine -Root $Root -Problems $Problems; New-Item -ItemType Junction -Path $Root -Value $qTarget | Out-Null; $r }.GetNewClosure()
+    New-Item -ItemType Directory -Path $qRoot -Force | Out-Null; [IO.File]::WriteAllText((Join-Path $qRoot 'FOREIGN'), 'x')
+    $e = $null; try { [void](Initialize-AVDTuneState -Root $qRoot -Protect -ReadAcl $readQ -CreateRoot $createPlain -Quarantine $quarantineRace) } catch { $e = $_.Exception.Message }
+    Test-Check 'attack: a junction that reappears during the quarantine never gets an owner or ACL change through it; the start is refused' ($e -like '*does not start*' -and (Get-Content -LiteralPath (Join-Path $qTarget 'system-file.txt') -Raw).Trim() -eq 'must stay as it is' -and @(Get-ChildItem -LiteralPath $qTarget -Force).Count -eq 1 -and (Get-Acl -LiteralPath $qTarget).Sddl -eq $targetAcl) $e
+    Remove-AVDTuneTestTree $qRoot
+    Get-ChildItem -LiteralPath $qParent -Force | ForEach-Object { Remove-AVDTuneTestTree $_.FullName }
+    # the SID of the administrator himself counts as owner below the root only (an unelevated process of his could have made the root)
+    $adminSid = 'S-1-5-21-1000000000-2000000000-3000000000-500'
+    $aRoot = Join-Path $tmp 'admin-root'; New-Item -ItemType Directory -Path (Join-Path $aRoot 'runs') -Force | Out-Null
+    $readAdmin = { param($Path, $IsDirectory) [pscustomobject]@{ Owner = $adminSid; Protected = $true; Rules = @([pscustomobject]@{ Sid = 'S-1-5-32-544'; Inherited = $false }) } }.GetNewClosure()
+    $pa = @(Get-AVDTuneStateSecurityProblems -Root $aRoot -Final -ReadAcl $readAdmin -AdminSid $adminSid)
+    Test-Check 'root owned by the administrator''s own SID is a problem; the same owner below the root is fine' ($pa.Count -eq 1 -and $pa[0].Path -eq $aRoot -and $pa[0].Problem -eq "owner $adminSid") (($pa | ForEach-Object { "$($_.Path)=$($_.Problem)" }) -join '; ')
+    Remove-AVDTuneTestTree $aRoot
+    # a FILE named like the state folder: a problem, set aside like a foreign folder, then the folder is created
+    $fParent = Join-Path $tmp 'file-parent'; New-Item -ItemType Directory -Path $fParent -Force | Out-Null
+    $fRoot = Join-Path $fParent 'AVDTune'; [IO.File]::WriteAllText($fRoot, 'planted file')
+    Test-Check 'a file in place of the state folder is a problem' (@(Get-AVDTuneStateSecurityProblems -Root $fRoot -Final -ReadAcl $readQ | Where-Object { $_.Problem -eq 'a file, not a folder' }).Count -eq 1) $null
+    $e = $null; try { [void](Initialize-AVDTuneState -Root $fRoot -Protect -ReadAcl $readQ -CreateRoot $createPlain) } catch { $e = $_.Exception.Message }
+    $asideF = @(Get-ChildItem -LiteralPath $fParent -File | Where-Object { $_.Name -like 'AVDTune.untrusted-*' })
+    Test-Check 'attack: a file named AVDTune is set aside (renamed) and the state folder is created; no unclear abort' (-not $e -and $asideF.Count -eq 1 -and (Test-Path -LiteralPath $fRoot -PathType Container) -and (Test-Path (Join-Path $fRoot 'state.json')) -and @((Get-AVDTuneStateSecurityReport).Quarantined).Count -eq 1) $e
+    Remove-AVDTuneTestTree $fParent
+    $modCode = [IO.File]::ReadAllText((Join-Path $repo 'Modules\AVDTune.psm1'))
+    Test-Check 'N1: no recursive icacls (/T, /reset) anywhere in the engine; the folder is created in one step with its ACL' ($modCode -notmatch "'/T'" -and $modCode -notmatch "'/reset'" -and $modCode -match '\.Create\(\(New-AVDTuneStateSecurity -WithOwner\)\)') $null
+    $sd = New-AVDTuneStateSecurity -WithOwner
+    Test-Check 'the security for creating the folder carries owner Administrators and the protected rules' ($sd.GetOwner([Security.Principal.SecurityIdentifier]).Value -eq 'S-1-5-32-544' -and $sd.AreAccessRulesProtected) $null
+    $created = New-Object System.Collections.ArrayList
+    $createRec = { param($Root) [void]$created.Add($Root); New-Item -ItemType Directory -Path $Root -Force | Out-Null }.GetNewClosure()
+    [void](Initialize-AVDTuneState -Root (Join-Path $tmp 'fresh\AVDTune') -Protect -ReadAcl $readQ -CreateRoot $createRec)
+    Test-Check 'first start: the protected folder is created by the one-step create, not by New-Item and a later ACL' ($created.Count -eq 1 -and (Test-Path (Join-Path $tmp 'fresh\AVDTune\state.json'))) $null
+
+    # the real reader on this computer: files of a user who is not elevated belong to that user, a link is reported and not followed
+    $target = Join-Path $tmp 'sec-target'; New-Item -ItemType Directory -Path $target -Force | Out-Null; [IO.File]::WriteAllText((Join-Path $target 'outside.txt'), 'x')
+    New-Item -ItemType Junction -Path (Join-Path $sec 'config') -Value $target | Out-Null
+    $real = @(Get-AVDTuneStateSecurityProblems -Root $sec)
+    Test-Check 'real ACL reader: a junction in the state folder is a problem and is not followed' (@($real | Where-Object { $_.Path -like '*\config' -and $_.Problem -like 'link*' }).Count -eq 1 -and @($real | Where-Object { $_.Path -like '*outside.txt' }).Count -eq 0) (($real | ForEach-Object { "$($_.Path)=$($_.Problem)" }) -join '; ')
+    if (-not (Test-AVDTuneElevated)) {
+        Test-Check 'real ACL reader: files owned by a user who is not an administrator are found (this check runs unelevated)' (@($real | Where-Object { $_.Problem -like 'owner S-1-5-21-*' }).Count -ge 2) (($real | ForEach-Object { $_.Problem }) -join '; ')
+    }
+    (New-Object IO.DirectoryInfo (Join-Path $sec 'config')).Delete()
+
     Write-AVDTuneFile (Join-Path $tmp 'state.json') '{"Schema":99}'
     Test-Check 'a newer state schema is refused' (Test-Throws { Get-AVDTuneState $tmp }) $null
     Write-AVDTuneFile (Join-Path $tmp 'state.json') ([ordered]@{ Schema = 1; ImageVersion = $null; Versions = @(); LastUpdate = $null; LastBenchmark = $null; UpdateBlock = $null; Sealed = $false; Identity = $null; LastRunId = $null } | ConvertTo-Json)
@@ -74,6 +175,8 @@ try {
     Test-Check 'Test: NonCompliant, nothing written' ($t.Status -eq 'NonCompliant' -and $m.Log.Count -eq 0) $t.Status
     $w = Invoke-AVDTuneStep -Step $step -Machine $m -Mode Apply -WhatIf
     Test-Check 'Apply -WhatIf: WhatIf, nothing written' ($w.Status -eq 'WhatIf' -and $m.Log.Count -eq 0 -and $w.WhatIf) $w.Status
+    Test-Check 'Apply without the snapshot gate is refused, nothing written (read only)' (-not (Test-AVDTuneWriteAllowed) -and (Test-Throws { Invoke-AVDTuneStep -Step $step -Machine $m -Mode Apply }) -and (Test-Throws { Invoke-AVDTuneStep -Step $step -Machine $m -Mode Undo }) -and $m.Log.Count -eq 0) $null
+    Open-AVDTuneWriteGate -SnapshotId 'snap-check' -ConfirmedBy 'Check Runner'
     $a = Invoke-AVDTuneStep -Step $step -Machine $m -Mode Apply
     Test-Check 'Apply: Changed with before and after, reboot flag from the step' ($a.Status -eq 'Changed' -and $null -eq $a.Before -and $a.After -eq 1 -and $a.Reboot -and $m.Log.Count -eq 1) "$($a.Status) $($a.After)"
     $a2 = Invoke-AVDTuneStep -Step $step -Machine $m -Mode Apply
@@ -184,7 +287,7 @@ try {
     Test-Check 'real adapter: a missing key and a missing service are null' ($null -eq (& $real.RegGet 'HKLM:\SOFTWARE\AVDTune-does-not-exist' 'x') -and $null -eq (& $real.ServiceGet 'AVDTune-no-such-service') -and -not (& $real.RegKeyExists 'HKLM:\SOFTWARE\AVDTune-does-not-exist')) $null
 }
 finally {
-    $env:AVDTUNE_ROOT = $null
+    $env:AVDTUNE_ROOT = $null; $env:AVDTUNE_FAKE = $null
     if (Test-Path $tmp) { Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue }
 }
 if ($script:failed -gt 0) { throw "$script:failed check(s) failed." }
