@@ -28,7 +28,8 @@
     "hy.defender-onboarding": { "Title": "Defender for Endpoint not onboarded on the master", "Source": "https://learn.microsoft.com/en-us/defender-endpoint/configure-endpoints-vdi", "Stand": "2026-11-15", "Verified": true, "Note": "Learn: do not onboard the primary image; cloning an onboarded image duplicates senseGuid (HKLM\\SOFTWARE\\Microsoft\\Windows Advanced Threat Protection)." },
     "hy.language": { "Title": "Installed display languages", "Source": "https://learn.microsoft.com/en-us/azure/virtual-desktop/windows-11-language-packs", "Stand": "2026-11-15", "Verified": true, "Note": "Information only: AVDTune does not know which languages the users need yet (Setup page, later phase)." },
     "hy.vm-agent": { "Title": "Azure VM agent", "Source": "https://learn.microsoft.com/en-us/azure/virtual-machines/extensions/agent-windows", "Stand": "2026-11-15", "Verified": true, "Note": "Learn: the process WindowsAzureGuestAgent.exe; without the agent some Azure services (backup, security) cannot be used. Whether the agent is current is not checked." },
-    "hy.leftovers": { "Title": "Leftovers of earlier scripts", "Source": "https://learn.microsoft.com/en-us/azure/virtual-desktop/set-up-golden-image", "Stand": "2026-11-15", "Verified": false, "Note": "AVDTune's own list (tasks, VBS starters in ProgramData, driver export folders); no Learn page lists them. Edit LeftoverTaskPatterns and LeftoverPaths below." }
+    "hy.leftovers": { "Title": "Leftovers of earlier scripts", "Source": "https://learn.microsoft.com/en-us/azure/virtual-desktop/set-up-golden-image", "Stand": "2026-11-15", "Verified": false, "Note": "AVDTune's own list (tasks, VBS starters in ProgramData, driver export folders); no Learn page lists them. Edit LeftoverTaskPatterns and LeftoverPaths below." },
+    "hy.public-shortcut": { "Title": "No AVDTune shortcut on the Public Desktop", "Source": "https://learn.microsoft.com/en-us/azure/virtual-desktop/set-up-golden-image", "Stand": "2026-11-15", "Verified": false, "Note": "AVDTune's own rule: a shortcut on the Public Desktop is in the image for every user. AVDTune only ever puts its shortcut on the desktop of the signed-in administrator; this finds AVDTune shortcuts (PublicDesktopFilter) in PublicDesktopFolder." }
   },
   "Windows": {
     "Builds": [
@@ -47,7 +48,9 @@
     "LeftoverTaskPatterns": [ "PilotOverlay", "Overlay", "^(GM|Golden)[-_ ]?(Master)?[-_ ]?(Setup|Prep|Logon|Startup)" ],
     "LeftoverPaths": [ "C:\\Drivers", "C:\\DriverBackup", "C:\\DriverExport", "C:\\ExportedDrivers", "C:\\ProgramData\\DriverExport" ],
     "LeftoverStarterFolder": "C:\\ProgramData",
-    "LeftoverStarterFilter": "*.vbs"
+    "LeftoverStarterFilter": "*.vbs",
+    "PublicDesktopFolder": "C:\\Users\\Public\\Desktop",
+    "PublicDesktopFilter": "*AVDTune*.lnk"
   },
   "Families": [
       {

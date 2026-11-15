@@ -125,6 +125,10 @@
                                                 <CheckBox x:Name="ChkRelEarly" Content="Include early access releases" VerticalAlignment="Center" AutomationProperties.Name="Include early access releases in the update check"/>
                                             </StackPanel>
                                             <TextBlock x:Name="TxtRelLimit" Style="{DynamicResource Hint}" Margin="0,10,0,0" TextWrapping="Wrap" Text="Limit: the check proves that the files are the ones published on GitHub for this version and unchanged on this master. It does not protect against a compromised GitHub account or repository. Updates are installed only when you click, never during a run or the maintenance mode."/>
+                                            <StackPanel x:Name="PanelRelShortcut" Orientation="Horizontal" Margin="0,12,0,0">
+                                                <Button x:Name="BtnRelShortcut" Content="Create desktop shortcut" Margin="0,0,12,0" AutomationProperties.Name="Create or remove the AVDTune shortcut on your desktop"/>
+                                                <TextBlock x:Name="TxtRelShortcut" VerticalAlignment="Center" TextWrapping="Wrap" MaxWidth="640"/>
+                                            </StackPanel>
                                         </StackPanel>
                                     </Border>
                                     <Border x:Name="BoxStart" Style="{DynamicResource CardBox}" Margin="0,16,0,0" Background="{DynamicResource Card}" Padding="20,16">

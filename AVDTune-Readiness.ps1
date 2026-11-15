@@ -33,7 +33,8 @@ function Set-ReadyBusy([bool]$Busy) {
 }
 function Start-ReadyJob([string]$Kind, [string]$FixId) {
     # Kind: Start | Erstanalyse | Healthcheck | Manual (analysis) or Fix. A request while one runs is queued (the newest one wins).
-    if ($script:ReadyJob) { $script:ReadyQueued = @{ Kind = $Kind; FixId = $FixId }; return }
+    # Test mode: the inline run waits while the Overview refresh uses the same fake machine on its own thread (the timer starts it afterwards)
+    if ($script:ReadyJob -or ($script:TestMode -and $script:OverviewJob)) { $script:ReadyQueued = @{ Kind = $Kind; FixId = $FixId }; return }
     $tok = Get-ReadyToken
     $gate = Get-AVDTuneWriteGate
     $gallery = (Get-ReadySettings).GalleryImageId
@@ -70,7 +71,10 @@ function Start-ReadyJob([string]$Kind, [string]$FixId) {
 }
 function Complete-ReadyJob {
     $job = $script:ReadyJob
-    if (-not $job) { return }
+    if (-not $job) {
+        if ($script:ReadyQueued -and -not ($script:TestMode -and $script:OverviewJob)) { $q = $script:ReadyQueued; $script:ReadyQueued = $null; Start-ReadyJob $q.Kind $q.FixId }
+        return
+    }
     if (-not $job.Inline -and -not $job.Handle.IsCompleted) { return }
     $script:ReadyJob = $null
     $result = $null; $err = ''

@@ -69,10 +69,10 @@ try {
     # ---------------------------------------------------------------- the data
     $data = Get-AVDTuneReadinessData
     $crit = @($data.Criteria.PSObject.Properties)
-    Test-Check 'data: loads, 26 criteria, a Stand date, 52 families' ($crit.Count -eq 26 -and $data.Stand -match '^\d{4}-\d{2}-\d{2}$' -and $data.Families.Count -eq 52) "$($crit.Count) / $($data.Families.Count)"
+    Test-Check 'data: loads, 27 criteria, a Stand date, 52 families' ($crit.Count -eq 27 -and $data.Stand -match '^\d{4}-\d{2}-\d{2}$' -and $data.Families.Count -eq 52) "$($crit.Count) / $($data.Families.Count)"
     Test-Check 'data: every criterion has a Microsoft Learn source, a date and the Verified flag' (-not (@($crit | Where-Object { $_.Value.Source -notmatch '^https://learn\.microsoft\.com/' -or $_.Value.Stand -notmatch '^\d{4}-\d{2}-\d{2}$' -or $_.Value.Verified -isnot [bool] }))) $null
     $unverified = @($crit | Where-Object { -not $_.Value.Verified } | ForEach-Object Name)
-    Test-Check 'data: what Learn does not state is marked and explained (bitlocker, reboot markers, lcu thresholds, leftovers)' ((($unverified | Sort-Object) -join ',') -eq 'hy.bitlocker,hy.lcu-age,hy.leftovers,hy.reboot' -and -not (@($crit | Where-Object { -not $_.Value.Verified -and -not $_.Value.Note }))) ($unverified -join ',')
+    Test-Check 'data: what Learn does not state is marked and explained (bitlocker, reboot markers, lcu thresholds, leftovers, public shortcut)' ((($unverified | Sort-Object) -join ',') -eq 'hy.bitlocker,hy.lcu-age,hy.leftovers,hy.public-shortcut,hy.reboot' -and -not (@($crit | Where-Object { -not $_.Value.Verified -and -not $_.Value.Note }))) ($unverified -join ',')
     Test-Check 'data: the Arm64 families are the Cobalt ones' ((@($data.Families | Where-Object Arch -eq 'Arm64' | ForEach-Object Name | Sort-Object) -join ',') -eq 'Dpdsv6,Dpldsv6,Dplsv6,Dpsv6,Epdsv6,Epsv6') $null
     Test-Check 'data: local disk only on the d sizes (Ddsv6 NVMe, Dsv6 none), Dasv6 has ConnectX and no MANA, Ddsv6 MANA' ((@($data.Families | Where-Object Name -eq 'Ddsv6')[0].TempDisk -eq 'NVMe') -and (@($data.Families | Where-Object Name -eq 'Dsv6')[0].TempDisk -eq 'None') -and (@($data.Families | Where-Object Name -eq 'Dasv6')[0].Network -notcontains 'MANA') -and (@($data.Families | Where-Object Name -eq 'Ddsv6')[0].Network -contains 'MANA')) $null
     Test-Check 'data: the family patterns match their sizes' (('Standard_D4ds_v6' -match (@($data.Families | Where-Object Name -eq 'Ddsv6')[0].SizePattern)) -and ('Standard_D4s_v6' -notmatch (@($data.Families | Where-Object Name -eq 'Ddsv6')[0].SizePattern)) -and ('Standard_D4s_v6' -match (@($data.Families | Where-Object Name -eq 'Dsv6')[0].SizePattern))) $null
@@ -234,6 +234,9 @@ try {
     $r = Invoke-Readiness (New-Master @{ Tasks = @(@{ Path = '\'; Name = 'PilotOverlay'; Enabled = $true }, @{ Path = '\'; Name = 'MicrosoftEdgeUpdateTaskMachineCore'; Enabled = $true }); Paths = @('C:\Drivers'); Dirs = @{ 'C:\ProgramData' = @('start.vbs', 'readme.txt') } }) (New-Arm)
     $left = Get-Row $r 'hy.leftovers'
     Test-Check 'leftovers: task, driver folder and VBS starter found, the Edge task is not one' ($left.Status -eq 'yellow' -and $left.Reason -like '*task PilotOverlay*' -and $left.Reason -like '*folder C:\Drivers*' -and $left.Reason -like '*start.vbs*' -and $left.Reason -notlike '*Edge*' -and $left.Reason -notlike '*readme*') $left.Reason
+    $pubOk = (Get-Row (Invoke-Readiness (New-Master) (New-Arm)) 'hy.public-shortcut').Status -eq 'green'
+    $pub = Get-Row (Invoke-Readiness (New-Master @{ Dirs = @{ 'C:\Users\Public\Desktop' = @('AVDTune.lnk', 'Microsoft Edge.lnk') } }) (New-Arm)) 'hy.public-shortcut'
+    Test-Check 'an AVDTune shortcut on the Public Desktop is yellow and named (other shortcuts are not); none is green' ($pubOk -and $pub.Status -eq 'yellow' -and $pub.Reason -like '*C:\Users\Public\Desktop\AVDTune.lnk*' -and $pub.Reason -notlike '*Edge*' -and $pub.Verified -eq $false) $pub.Reason
     $r = Invoke-Readiness (New-Master) (New-Arm)
     Test-Check 'languages are information only' ((Get-Row $r 'hy.language').Status -eq 'info' -and (Get-Row $r 'hy.language').Reason -like '*de-DE, en-US*') (Get-Row $r 'hy.language').Reason
 

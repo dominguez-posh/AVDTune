@@ -184,6 +184,7 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         $ui.BtnStageAction.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
         $env1 = Get-AVDTuneEnvironment $script:StateRoot
         Test-Smoke 'saving writes environment.json (no secret), closes the form and moves on to the sign-in' ($env1.Answers.Join -eq 'Hybrid' -and $env1.Answers.Dc -eq 'AdDsOnPrem' -and $env1.SignIn.TenantId -eq '' -and $env1.SignIn.ClientId -eq '' -and $ui.BoxStage.Visibility -eq 'Collapsed' -and (($script:Stages | ForEach-Object Status) -join ',') -eq 'Done,Pending,Locked,Locked') (($script:Stages | ForEach-Object Status) -join ',')
+        Test-Smoke 'first run in a development copy: no shortcut question, the hint to install first (issue #15)' ($script:LastToast -like '*desktop shortcut can be created once AVDTune is installed*' -and $script:OpenStage -ne 'Shortcut') $script:LastToast
         Test-Smoke 'the protocol has the answered questions' (@($script:Protocol.Actions | Where-Object { $_.Subject -like 'First-run questions answered*' }).Count -eq 1) $null
         # no FSLogix: the two pages disappear from the navigation
         $none = Get-AVDTuneEnvironmentAnswers (Get-AVDTuneEnvironment $script:StateRoot); $none.Profiles = 'None'
@@ -191,6 +192,25 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         Test-Smoke 'without FSLogix the FSLogix and App Masking pages are hidden' ($ui.NavFSLogix.Visibility -eq 'Collapsed' -and $ui.NavAppMasking.Visibility -eq 'Collapsed' -and $ui.NavUpdates.Visibility -eq 'Visible') $null
         $none.Profiles = 'AzureFiles'; [void](Save-AVDTuneEnvironment -Root $script:StateRoot -Answers $none -User 'smoke'); Update-StartView
         Test-Smoke 'with FSLogix they are back; a change after a version exists is a change log entry' ($ui.NavFSLogix.Visibility -eq 'Visible' -and @(Get-AVDTuneChangeLog -Root $script:StateRoot | Where-Object { $_.Component -eq 'Environment' }).Count -eq 2) $null
+        $true } }
+    @{ Name = 'shortcut question'; Do = {
+        # issue #15: the installed copy asks once; the shortcut goes into the desktop folder of the test state, never the real desktop
+        $script:ShortcutTestMode = 'Installed'
+        $desk = Join-Path $script:StateRoot 'desktop-test'
+        Test-Smoke 'installed copy, not answered: the question opens below the stages' ((Show-ShortcutQuestion) -and $script:OpenStage -eq 'Shortcut' -and $ui.BoxStage.Visibility -eq 'Visible' -and $ui.TxtStageTitle.Text -eq 'Desktop shortcut' -and $ui.BtnStageAction2.Visibility -eq 'Visible' -and (Find-Text $ui.PanelStageBody 'as administrator (Windows asks for confirmation)')) $script:OpenStage
+        $window.UpdateLayout(); $ui.BoxStage.BringIntoView(); $window.UpdateLayout()
+        Save-SmokeShot '13b-shortcut-question'
+        $ui.BtnStageAction.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
+        $link = Get-AVDTuneDesktopShortcut -Folder $desk -InstallRoot $script:RelInstallRoot
+        Test-Smoke 'Create: AVDTune.lnk in the test desktop, runs as administrator, points to the launcher; the answer is stored and the card closes' ($link -and $link.Matches -and $link.RunAs -and (Get-AVDTuneShortcutAnswer -Root $script:StateRoot) -eq 'Yes' -and $ui.BoxStage.Visibility -eq 'Collapsed' -and $desk -like "$($script:StateRoot)*") ($link | Out-String)
+        Test-Smoke 'answered: not asked again' (-not (Show-ShortcutQuestion) -and $script:OpenStage -ne 'Shortcut') $null
+        Test-Smoke 'the Integrity and updates card offers Remove' ([string]$ui.BtnRelShortcut.Content -eq 'Remove desktop shortcut' -and $ui.TxtRelShortcut.Text -like 'Desktop shortcut on your desktop*') $ui.TxtRelShortcut.Text
+        $ui.BtnRelShortcut.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
+        Test-Smoke 'Remove deletes it; the card offers Create again' (-not (Test-Path (Join-Path $desk 'AVDTune.lnk')) -and [string]$ui.BtnRelShortcut.Content -eq 'Create desktop shortcut') $null
+        $script:ShortcutTestMode = 'Development'; Update-ShortcutRow
+        Test-Smoke 'not installed: Create is off and the card says to install first' (-not $ui.BtnRelShortcut.IsEnabled -and $ui.TxtRelShortcut.Text -like '*install AVDTune first*') $ui.TxtRelShortcut.Text
+        $script:ShortcutTestMode = ''; Update-ShortcutRow
+        Test-Smoke 'the protocol has the shortcut created and removed' (@($script:Protocol.Actions | Where-Object { $_.Subject -eq 'Desktop shortcut created' }).Count -eq 1 -and @($script:Protocol.Actions | Where-Object { $_.Subject -eq 'Desktop shortcut removed' }).Count -eq 1) $null
         $true } }
     @{ Name = 'start: sign-in'; Do = {
         Open-Stage 'SignIn'; $window.UpdateLayout()
