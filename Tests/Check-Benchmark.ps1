@@ -173,9 +173,9 @@ try {
     Test-Check 'run: a measure has 3 runs, median, CV, reference, index near 1200' (@($dl.runs).Count -eq 3 -and $dl.median -gt 0 -and $dl.cv -lt 5 -and $dl.reference -eq 0.30 -and $dl.index -ge 1190 -and $dl.index -le 1230) "$($dl.index)"
     Test-Check 'run: the median is the middle of the three noisy runs' ((Near $dl.median (Get-AVDTuneBenchMedian ([double[]]@($dl.runs))) 1e-12)) $null
     Test-Check 'run: lower-is-better measure is inverted (latency 1.2x better gives index about 1200)' ((@($r.measures | Where-Object id -eq 'host.disk.rr.qd1.p50')[0].index) -ge 1190 -and (@($r.measures | Where-Object id -eq 'host.disk.rr.qd1.p50')[0].index) -le 1230) $null
-    Test-Check 'run: Host score about 1200 over five categories, partial (applications not built yet)' ($r.scores.host.value -ge 1190 -and $r.scores.host.value -le 1230 -and $r.scores.host.partial -and $r.scores.host.missingCategories -contains 'apps' -and @($r.scores.host.categories.PSObject.Properties).Count -eq 5) $r.scores.host.value
-    Test-Check 'run: marked provisional because of the placeholder reference' ($r.scores.host.provisional -and $r.referenceInfo.provisional -and $run.Summary -like '*vorlaeufige Referenz*' -and $run.Summary -like '*Teilscore*') $run.Summary
-    Test-Check 'run: fslogix and gpu are skipped with a reason, mode full, kind baseline' ($r.scores.fslogix.status -eq 'skipped' -and $r.scores.gpu.status -eq 'skipped' -and $r.mode -eq 'full' -and $r.kind -eq 'baseline') $null
+    Test-Check 'run: Host score about 1200 over six categories (applications included), not partial' ($r.scores.host.value -ge 1190 -and $r.scores.host.value -le 1230 -and -not $r.scores.host.partial -and @($r.scores.host.missingCategories).Count -eq 0 -and @($r.scores.host.categories.PSObject.Properties).Count -eq 6) $r.scores.host.value
+    Test-Check 'run: marked provisional and nicht kalibriert because of the placeholder reference' ($r.scores.host.provisional -and $r.scores.host.uncalibrated -and $r.referenceInfo.provisional -and $run.Summary -like '*vorlaeufige Referenz*' -and $run.Summary -like '*nicht kalibriert*') $run.Summary
+    Test-Check 'run: fslogix skipped (no share), gpu nicht vorhanden, mode full, kind baseline' ($r.scores.fslogix.status -eq 'skipped' -and $r.scores.fslogix.reason -like '*no FSLogix share*' -and $r.scores.gpu.status -eq 'unsupported' -and $r.scores.gpu.reason -eq 'nicht vorhanden' -and -not $r.share.used -and $r.mode -eq 'full' -and $r.kind -eq 'baseline') $null
     Test-Check 'run: system block from the adapter and the machine' ($r.system.vCpu -eq 8 -and $r.system.cpuModel -eq 'Fake CPU 3.0 GHz' -and $r.system.vmSize -eq 'Standard_D4s_v5' -and $r.system.imageVersion -eq '2026.11.001' -and $r.system.windows.build -eq 26100) $null
     Test-Check 'run: state has the summary, run id and (baseline, full) the baseline' ((Get-AVDTuneState $tmp).LastBenchmark -eq $run.Summary -and (Get-AVDTuneBenchmarkBaseline -Root $tmp).runId -eq $run.RunId) $null
     $log = @(Get-AVDTuneChangeLog -Root $tmp | Where-Object { $_.Category -eq 'Benchmark' -and $_.RunId -eq $run.RunId })
@@ -394,7 +394,7 @@ public static class StandIn { public static int Main(string[] a) {
         }
         finally { & $mod { $script:Limits.BenchMs = 600000 } }
         Test-Check 'child process: a program that hangs is ended after the timeout with a clear message' ($hm -like '*did not finish in time*' -and $sw.Elapsed.TotalSeconds -lt 30) "$hm $($sw.Elapsed.TotalSeconds)"
-        $hr = & $mod { Invoke-AVDTuneChildProcess -FileName $args[0] -Arguments 'hang' -TimeoutMs 2000 } $exe
+        $hr = & $mod { Invoke-AVDTuneChildProcess -FileName $args[0] -Arguments 'hang' -TimeoutMs 6000 } $exe
         $childId = [int](([regex]::Match($hr.Output, 'child:(\d+)')).Groups[1].Value)
         Start-Sleep -Milliseconds 500
         Test-Check 'child process: on a timeout the whole tree is ended, also the process it started' ($hr.TimedOut -and $childId -gt 0 -and $null -eq (Get-Process -Id $childId -ErrorAction SilentlyContinue)) ($hr | Out-String)
@@ -472,6 +472,166 @@ public static class StandIn { public static int Main(string[] a) {
         Test-Check 'measure program: the checks used a temporary install folder, not Program Files' ($inst -ne (Get-AVDTuneInstallRoot) -and (Test-AVDTuneTestMode).Enabled) $null
     }
     finally { $env:AVDTUNE_FAKE = $oldFake; if ($null -eq $oldFake) { Remove-Item Env:\AVDTUNE_FAKE -ErrorAction SilentlyContinue }; $env:AVDTUNE_ROOT = $oldRoot; if ($null -eq $oldRoot) { Remove-Item Env:\AVDTUNE_ROOT -ErrorAction SilentlyContinue } }
+
+
+    # ================================================================ round 2 (issue #14): applications, FSLogix, GPU, capacity, report per image version
+    $r2 = Join-Path ([IO.Path]::GetTempPath()) ('avdtune-bench-r2-' + [guid]::NewGuid().ToString('N'))
+    try {
+        [void](Initialize-AVDTuneState -Root $r2)
+        [void](Start-AVDTuneImageVersion -Root $r2 -Date ([datetime]'2026-11-15') -User 'admin1')
+        $share = '\\fakehost\profiles'
+
+        # ---- environment allowlist: extended only for the applications, values from Windows, not from the inherited variables
+        $base = Get-AVDTuneChildEnvironment -TempDir 'C:\x'
+        $names = @('USERPROFILE', 'APPDATA', 'LOCALAPPDATA', 'USERNAME', 'USERDOMAIN', 'COMPUTERNAME', 'HOMEDRIVE', 'HOMEPATH')
+        Test-Check 'environment: the plain allowlist has no user variables' (@($names | Where-Object { $base.Contains($_) }).Count -eq 0) (($base.Keys) -join ',')
+        $oldUp = $env:USERPROFILE; $oldAd = $env:APPDATA; $oldHook = $env:DOTNET_STARTUP_HOOKS
+        try {
+            $env:USERPROFILE = 'C:\evil-profile'; $env:APPDATA = 'C:\evil-appdata'; $env:DOTNET_STARTUP_HOOKS = 'C:\evil.dll'
+            $ext = Get-AVDTuneChildEnvironment -TempDir 'C:\x' -Extended
+        }
+        finally { $env:USERPROFILE = $oldUp; $env:APPDATA = $oldAd; if ($null -eq $oldHook) { Remove-Item Env:\DOTNET_STARTUP_HOOKS -ErrorAction SilentlyContinue } else { $env:DOTNET_STARTUP_HOOKS = $oldHook } }
+        Test-Check 'environment: -Extended adds exactly the eight variables, from the folder API (an inherited USERPROFILE/APPDATA is not used)' (@($names | Where-Object { -not $ext.Contains($_) }).Count -eq 0 -and $ext['USERPROFILE'] -eq [Environment]::GetFolderPath('UserProfile') -and $ext['APPDATA'] -eq [Environment]::GetFolderPath('ApplicationData') -and $ext['LOCALAPPDATA'] -eq [Environment]::GetFolderPath('LocalApplicationData') -and $ext['USERPROFILE'] -ne 'C:\evil-profile' -and $ext['COMPUTERNAME'] -eq [Environment]::MachineName) "$($ext['USERPROFILE']) $($ext['APPDATA'])"
+        Test-Check 'environment: -Extended still has no DOTNET_*, COR*, __COMPAT_LAYER and keeps TEMP/TMP/PATH fixed' (@($ext.Keys | Where-Object { $_ -like 'DOTNET_*' -or $_ -like 'COR*' -or $_ -eq '__COMPAT_LAYER' }).Count -eq 0 -and $ext['TEMP'] -eq 'C:\x' -and $ext['PATH'] -eq [Environment]::GetFolderPath('System') -and @($ext.Keys).Count -eq (@($base.Keys).Count + 8)) $null
+        Test-Check 'environment: only the application starts and the capacity run use the extended list (source)' ((Get-Content -LiteralPath (Join-Path $repo 'Modules\AVDTune.Benchmark.psm1') -Raw) -match '\$b\.RunBench = \{ param\(\[string\]\$Command, \[string\[\]\]\$Arguments\) & \$runner \$Command \$Arguments \$limits\.BenchMs \$false \}' -and (Get-Content -LiteralPath (Join-Path $repo 'Modules\AVDTune.Benchmark.psm1') -Raw) -match '& \$runner \$Command \$args2 \$timeout \$true') $null
+
+        Import-Module (Join-Path $repo 'Modules/AVDTune.Updates.psm1')
+        # ---- programs: trust entries for the applications, paths from Windows folders
+        $sigOk = [pscustomobject]@{ Valid = $true; Status = 'Valid'; Subject = 'CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US'; Issuer = 'CN=Microsoft Code Signing PCA 2011, O=Microsoft Corporation, L=Redmond, S=Washington, C=US'; OriginalFilename = 'WinWord.exe' }
+        Test-Check 'trust: WINWORD.EXE of Microsoft with the right original file name is accepted' ((Test-AVDTuneToolTrust -Signature $sigOk -Name 'WINWORD.EXE').Ok) $null
+        Test-Check 'trust: a wrong subject, a wrong original file name or no signature is refused' (-not (Test-AVDTuneToolTrust -Signature ($sigOk | Select-Object *) -Name 'EXCEL.EXE').Ok -and -not (Test-AVDTuneToolTrust -Signature ([pscustomobject]@{ Valid = $true; Status = 'Valid'; Subject = 'CN=Evil Corp, O=Evil Corp'; Issuer = $sigOk.Issuer; OriginalFilename = 'WinWord.exe' }) -Name 'WINWORD.EXE').Ok -and -not (Test-AVDTuneToolTrust -Signature ([pscustomobject]@{ Valid = $false; Status = 'NotSigned'; Subject = ''; Issuer = ''; OriginalFilename = '' }) -Name 'msedge.exe').Ok) $null
+        $ps5 = Get-AVDTuneAppProgramPath -Key powershell; $ex = Get-AVDTuneAppProgramPath -Key explorer
+        Test-Check 'programs: powershell.exe and explorer.exe come from the System and Windows folders (known folders, no PATH)' ($ps5 -ieq (Join-Path ([Environment]::GetFolderPath('System')) 'WindowsPowerShell\v1.0\powershell.exe') -and $ex -ieq (Join-Path ([Environment]::GetFolderPath('Windows')) 'explorer.exe')) "$ps5 $ex"
+        $adapterSrc = Get-Content -LiteralPath (Join-Path $repo 'Modules\AVDTune.Benchmark.psm1') -Raw
+        $runAppsText = [regex]::Match($adapterSrc, '(?s)\$b\.RunApps = \{.*?\}\.GetNewClosure\(\)').Value
+        Test-Check 'RunApps (source): admin-only path, held open with FileShare.Read, Authenticode of Microsoft, UseShellExecute never off the checked list, no PATH lookup' ($runAppsText -match 'Test-AVDTuneAdminOnlyPath' -and $runAppsText -match 'FileShare\]::Read' -and $runAppsText -match 'Test-AVDTuneToolTrust' -and $runAppsText -notmatch 'Get-Command' -and $runAppsText -notmatch '\$env:') $null
+        $appPathText = [regex]::Match($adapterSrc, '(?s)function Get-AVDTuneAppProgramPath \{.*?\n\}').Value
+        Test-Check 'programs (source): the path function reads HKLM and known folders only, no environment variable, no Get-Command' ($appPathText -match 'HKLM:' -and $appPathText -notmatch 'Get-Command' -and $appPathText -notmatch '\$env:' -and $appPathText -notmatch 'HKCU') $null
+
+        # ---- applications in a fake run: warm-up and quick shortcuts, not installed programs, no Speedometer copy
+        $b = New-AVDTuneFakeBench -Reference $ref -Config $config -Seed @{ SkipApps = @('word') }
+        $res = Invoke-AVDTuneBenchmark -Machine (New-Master) -Bench $b -Root $r2 -Mode Full -Kind manual -SkipIdleCheck -NoReport
+        $appCalls = @($b.Log | Where-Object { $_ -like 'RunApps apps*' })
+        Test-Check 'apps: warm-up has no cold start and no Speedometer; the three runs do the cold starts' ($appCalls.Count -eq 4 -and $appCalls[0] -like '*--no-cold*--no-speedometer*' -and @($appCalls[1..3] | Where-Object { $_ -notlike '*--no-cold*' -and $_ -notlike '*--no-speedometer*' }).Count -eq 3) ($appCalls -join ' | ')
+        $word = @($res.Result.measures | Where-Object { $_.id -like 'host.app.word.*' })
+        Test-Check 'apps: a program that is not installed is skipped with the reason, the others count' (@($word | Where-Object { $_.status -eq 'skipped' -and $_.reason -like 'not installed*' }).Count -eq 2 -and @($res.Result.measures | Where-Object { $_.id -eq 'host.app.edge.cold' -and $_.status -eq 'ok' }).Count -eq 1 -and $res.Result.scores.host.categories.PSObject.Properties.Name -contains 'apps') $null
+        $spd = @($res.Result.measures | Where-Object id -eq 'host.app.speedometer')[0]
+        Test-Check 'apps: without the Speedometer copy the measure is skipped with the reason; Outlook and Teams are skipped' ($spd.status -eq 'skipped' -and $spd.reason -like '*Speedometer copy*' -and @($res.Result.measures | Where-Object { $_.id -like 'host.app.outlook.*' -and $_.status -eq 'skipped' }).Count -eq 2 -and @($res.Result.measures | Where-Object { $_.id -like 'host.app.teams.*' -and $_.status -eq 'skipped' }).Count -eq 2) $spd.status
+        $quick = New-AVDTuneFakeBench -Reference $ref -Config $config
+        [void](Invoke-AVDTuneBenchmark -Machine (New-Master) -Bench $quick -Root $r2 -Mode Quick -SkipIdleCheck -NoReport)
+        $qCalls = @($quick.Log | Where-Object { $_ -like 'RunApps apps*' })
+        Test-Check 'apps: a quick run has no cold start and one Speedometer iteration' ($qCalls.Count -eq 2 -and @($qCalls | Where-Object { $_ -like '*--no-cold*' -and $_ -like '*--speed-iterations 1*' }).Count -eq 2 -and $qCalls[0] -like '*--no-speedometer*' -and $qCalls[1] -notlike '*--no-speedometer*') ($qCalls -join ' | ')
+        Test-Check 'apps: the work folder of the apps is the work folder of the run (removed afterwards)' (@($qCalls | Where-Object { $_ -match '--dir .*benchmark\\work\\' }).Count -eq 2 -and (Get-Leftover -Bench $quick -Root $r2).Count -eq 0) $null
+        $keys = @($res.Result.measures | Where-Object { $_.id -like 'host.app.*' -and $_.status -eq 'ok' })
+        Test-Check 'references: every application measure carries calibrated=false and is labelled nicht kalibriert in the result' (@($keys | Where-Object { $_.calibrated -ne $false }).Count -eq 0 -and $res.Result.scores.host.uncalibrated -and $res.Result.scores.host.categories.apps.uncalibrated) $null
+        Test-Check 'references: the file says nicht kalibriert and every new measure id has a reference value' ($ref.Status -like '*nicht kalibriert*' -and @(@('fsl.rr.qd1.p50', 'fsl.vhd.parallel5', 'gpu.cs.gflops', 'gpu.dec.av1', 'host.app.speedometer', 'host.app.powershell.warm') | Where-Object { -not $ref.Measures.PSObject.Properties[$_] }).Count -eq 0) $null
+
+        # ---- FSLogix score
+        $m = New-Master
+        $b = New-AVDTuneFakeBench -Reference $ref -Config $config -Seed @{ Factor = 1.2 }
+        $res = Invoke-AVDTuneBenchmark -Machine $m -Bench $b -Root $r2 -Mode Full -Kind manual -SkipIdleCheck -Share $share -NoReport
+        $f = $res.Result.scores.fslogix
+        Test-Check 'fslogix: score about 1200 over four categories, uncalibrated, provisional, no partial' ($f.value -ge 1190 -and $f.value -le 1230 -and @($f.categories.PSObject.Properties).Count -eq 4 -and -not $f.partial -and $f.uncalibrated -and $f.provisional -and $res.Result.share.used -and $res.Result.share.auth -eq 'kerberos') "$($f.value)"
+        Test-Check 'fslogix: the host score is not influenced by the fsl.* and gpu.* measures (six host categories)' (@($res.Result.scores.host.categories.PSObject.Properties).Count -eq 6 -and $res.Result.scores.host.value -ge 1190 -and $res.Result.scores.host.value -le 1230) $res.Result.scores.host.value
+        $fslDisk = @($b.Log | Where-Object { $_ -cmatch '^Diskspd .*AVDTune-Bench-[0-9a-f]{32}' })
+        Test-Check 'fslogix: diskspd goes only to a file in the GUID test folder on the share, fixed templates with -c2G, 20 calls' ($fslDisk.Count -eq 20 -and @($fslDisk | Where-Object { $_ -cmatch '-c2G \\\\fakehost\\profiles\\AVDTune-Bench-[0-9a-f]{32}\\disk\.dat$' -and $_ -like '*-Sh*' -and $_ -like '*-Rxml*' }).Count -eq 20) $fslDisk[0]
+        Test-Check 'fslogix: the share test, the container cycle and five parallel containers ran each time' (@($b.Log | Where-Object { $_ -like 'RunBench share*--host fakehost*' }).Count -eq 4 -and @($b.Log | Where-Object { $_ -like 'VhdCycle 1 2 200' }).Count -eq 3 -and @($b.Log | Where-Object { $_ -like 'VhdParallel 5' }).Count -eq 4 -and @($b.Log | Where-Object { $_ -like 'VhdCycle 1 2 50' }).Count -eq 1) $null
+        Test-Check 'fslogix: the test folder is removed after every run and the store holds none' ($b.Store.ShareFolders.Count -eq 0 -and @($b.Log | Where-Object { $_ -like 'ShareMakeFolder*' }).Count -eq 4 -and @($b.Log | Where-Object { $_ -like 'ShareRemoveFolder*' }).Count -eq 4) $b.Store.ShareFolders.Count
+        Test-Check 'fslogix: summary names the FSLogix score and nicht kalibriert' ($res.Summary -like '*FSLogix 1*' -and $res.Summary -like '*nicht kalibriert*') $res.Summary
+        foreach ($case in @(@{ N = 'the container cannot be attached'; S = @{ VhdFails = $true }; Gone = 'fsl.vhd.create' }, @{ N = 'the parallel test fails'; S = @{ VhdParallelFails = $true }; Gone = 'fsl.vhd.parallel5' }, @{ N = 'the share test program fails'; S = @{ FailCommands = @('share') }; Gone = 'fsl.meta.create' })) {
+            $bf = New-AVDTuneFakeBench -Reference $ref -Config $config -Seed $case.S
+            $rf = Invoke-AVDTuneBenchmark -Machine (New-Master) -Bench $bf -Root $r2 -Mode Quick -SkipIdleCheck -Share $share -NoReport
+            $mm = @($rf.Result.measures | Where-Object id -eq $case.Gone)[0]
+            Test-Check "fslogix: $($case.N): that measure fails with a reason, the rest is scored, the test folder is removed" ($mm.status -eq 'failed' -and $mm.reason -and $null -ne $rf.Result.scores.fslogix.value -and $bf.Store.ShareFolders.Count -eq 0) "$($mm.status) $($mm.reason)"
+        }
+        $bn = New-AVDTuneFakeBench -Reference $ref -Config $config -Seed @{ ShareFails = $true }
+        $rn = Invoke-AVDTuneBenchmark -Machine (New-Master) -Bench $bn -Root $r2 -Mode Quick -SkipIdleCheck -Share $share -NoReport
+        Test-Check 'fslogix: a share that cannot be used gives a failed FSLogix score with the error, the host score still comes' ($rn.Result.scores.fslogix.status -eq 'failed' -and (@($rn.Errors) -join ' ') -like '*fslogix*denied*' -and $null -ne $rn.Result.scores.host.value -and (Get-Leftover -Bench $bn -Root $r2).Count -eq 0) ($rn.Errors -join ';')
+        $shareSrc = [regex]::Match($adapterSrc, '(?s)\$b\.ShareMakeFolder = \{.*?\n    \}').Value
+        Test-Check 'share (source): a plain UNC pattern is required, the test folder gets a GUID name, a link is refused, removal is no-follow and only for AVDTune-Bench-<guid>' ($shareSrc -match 'plain UNC' -and $shareSrc -match 'NewGuid' -and $shareSrc -match 'ReparsePoint' -and $adapterSrc -match 'AVDTune-Bench-\[0-9a-f\]\{32\}\$.\) \{ throw .Not a test folder' -and $adapterSrc -match 'Remove-AVDTuneFolderNoFollow \$Dir') $null
+        $mu = New-Master
+        foreach ($case in @(@{ V = '\\files.contoso.test\profiles'; W = '\\files.contoso.test\profiles' }, @{ V = @('C:\local', '\\a.test\one;\\b.test\two'); W = '\\a.test\one' }, @{ V = '\\host\share\sub\'; W = '\\host\share\sub' }, @{ V = 'http://x/y'; W = '' }, @{ V = '\\host\sha"re'; W = '' }, @{ V = '\\ho st\share'; W = '' }, @{ V = '\\host\share\a\..\..\x'; W = '' })) {
+            $mu.Store.Registry['hklm:\software\fslogix\profiles|vhdlocations'] = $case.V
+            Test-Check "share: VHDLocations '$(@($case.V) -join ' & ')' gives '$($case.W)'" ((Get-AVDTuneBenchShare -Machine $mu) -eq $case.W) (Get-AVDTuneBenchShare -Machine $mu)
+        }
+        Test-Check 'share: the host of a UNC path' ((Get-AVDTuneBenchShareHost '\\acct.file.core.windows.net\profiles') -eq 'acct.file.core.windows.net' -and (Get-AVDTuneBenchShareHost 'C:\x') -eq '') $null
+        $mnoShare = New-Master
+        $rs = New-AVDTuneFakeBench -Reference $ref -Config $config
+        [void](Invoke-AVDTuneBenchmark -Machine $mnoShare -Bench $rs -Root $r2 -Mode Quick -SkipIdleCheck -NoReport)
+        Test-Check 'share: without VHDLocations nothing touches a share' (@($rs.Log | Where-Object { $_ -like 'ShareMakeFolder*' -or $_ -like 'VhdCycle*' }).Count -eq 0) $null
+
+        # ---- GPU score
+        $bg = New-AVDTuneFakeBench -Reference $ref -Config $config -Seed @{ Gpu = $true }
+        $rg = Invoke-AVDTuneBenchmark -Machine (New-Master) -Bench $bg -Root $r2 -Mode Full -SkipIdleCheck -NoReport
+        $g = $rg.Result.scores.gpu
+        Test-Check 'gpu: with a hardware GPU the score is a partial score (encode and decode not built), render and compute counted, adapter in the system block' ($null -ne $g.value -and $g.partial -and $g.missingCategories -contains 'encode' -and $g.missingCategories -contains 'decode' -and @($g.categories.PSObject.Properties).Count -eq 2 -and $g.uncalibrated -and $rg.Result.system.gpu.adapter -eq 'Fake GPU 8Q' -and $rg.Summary -like '*GPU 1*') "$($g.value) $($g.missingCategories -join ',')"
+        $enc = @($rg.Result.measures | Where-Object id -eq 'gpu.enc.h264')[0]
+        Test-Check 'gpu: a codec that is not measured is unsupported with the reason, not zero' ($enc.status -eq 'unsupported' -and $enc.reason -like '*not part*') $enc.status
+        Test-Check 'gpu: without a GPU the score is nicht vorhanden (not 0) and no GPU measure is asked' ($res.Result.scores.gpu.reason -eq 'nicht vorhanden' -and $null -eq $res.Result.scores.gpu.value -and @($b.Log | Where-Object { $_ -match '^RunBench gpu --quiet' }).Count -eq 0 -and $null -eq $res.Result.system.gpu) $null
+        $gSet = Get-AVDTuneBenchmarkScores -Measures @([pscustomobject]@{ Id = 'gpu.d3d11.1080'; Status = 'ok'; Index = 1000 }, [pscustomobject]@{ Id = 'gpu.cs.gflops'; Status = 'ok'; Index = 1000 }, [pscustomobject]@{ Id = 'host.cpu.single'; Status = 'ok'; Index = 5 }) -Config $config -Set gpu
+        Test-Check 'gpu: the category set only takes gpu.* ids (weights 35/30/15/20), a host id is ignored' ($gSet.Host -eq 1000 -and $gSet.Categories.Count -eq 2 -and (@((Get-AVDTuneBenchCategorySet $config gpu).PSObject.Properties | ForEach-Object { $_.Value.weight }) -join ',') -eq '35,30,15,20' -and (@((Get-AVDTuneBenchCategorySet $config fslogix).PSObject.Properties | ForEach-Object { $_.Value.weight }) -join ',') -eq '35,20,15,30') $null
+
+        # ---- capacity simulation
+        Test-Check 'capacity: not available in a quick run' ((Get-ThrownText { Invoke-AVDTuneBenchmark -Machine (New-Master) -Bench (New-AVDTuneFakeBench -Reference $ref -Config $config) -Root $r2 -Mode Quick -SkipIdleCheck -Capacity }) -like '*not available in a quick run*') $null
+        $bc = New-AVDTuneFakeBench -Reference $ref -Config $config
+        $rc = Invoke-AVDTuneBenchmark -Machine (New-Master) -Bench $bc -Root $r2 -Mode Full -SkipIdleCheck -Capacity -NoReport
+        $capCall = @($bc.Log | Where-Object { $_ -like 'RunApps capacity*' })
+        Test-Check 'capacity: runs once after the measured runs, with the work folder; the result carries the levels and the estimate; it is not part of the scores' ($capCall.Count -eq 1 -and $capCall[0] -like '*--dir *benchmark\work\*' -and $rc.Result.capacity.estimatedUsers -eq 5.9 -and @($rc.Result.capacity.levels).Count -eq 3 -and $rc.Result.scores.host.value -ge 1190 -and $rc.Summary -like '*capacity about 5.9 users*' -and (Test-Path -LiteralPath $rc.Path)) ($capCall -join ' ')
+        Test-Check 'capacity: the method is named an estimate of our own, not a Login VSI result' ($rc.Result.capacity.method -like '*not a Login VSI result*') $null
+        Test-Check 'capacity: the work folder (probe files, workers) is gone and the quiet mode is restored' ((Get-Leftover -Bench $bc -Root $r2).Count -eq 0) $null
+        $bc2 = New-AVDTuneFakeBench -Reference $ref -Config $config -Seed @{ CapacityBlock = [pscustomobject]@{ levels = @(); estimatedUsers = 7.0; thresholdReached = $true; stopReason = 'x'; method = 'own method, not a Login VSI result' } }
+        $rc2 = Invoke-AVDTuneBenchmark -Machine (New-Master) -Bench $bc2 -Root $r2 -Mode Full -SkipIdleCheck -Capacity -NoReport
+        Test-Check 'capacity: compared with the last run of the same VM size (5.9 to 7.0 is +18.6 percent, better)' ($rc2.Result.capacityCompare.DeltaPercent -eq 18.6 -and $rc2.Result.capacityCompare.Class -eq 'better') ($rc2.Result.capacityCompare | Out-String)
+        $bc3 = New-AVDTuneFakeBench -Reference $ref -Config $config -Seed @{ CapacityFails = $true }
+        $rc3 = Invoke-AVDTuneBenchmark -Machine (New-Master) -Bench $bc3 -Root $r2 -Mode Full -SkipIdleCheck -Capacity -NoReport
+        Test-Check 'capacity: a failed simulation is an error text, the benchmark is still stored, quiet mode restored' ((@($rc3.Errors) -join ' ') -like '*capacity*' -and $null -eq $rc3.Result.capacity -and (Test-Path -LiteralPath $rc3.Path) -and (Get-Leftover -Bench $bc3 -Root $r2).Count -eq 0) ($rc3.Errors -join ';')
+        Test-Check 'capacity: compare helper (no previous gives nothing, one side without number is side by side)' ($null -eq (Compare-AVDTuneCapacity -Current ([pscustomobject]@{ estimatedUsers = 5 }) -Previous $null) -and (Compare-AVDTuneCapacity -Current ([pscustomobject]@{ estimatedUsers = $null }) -Previous ([pscustomobject]@{ estimatedUsers = 5 })).Class -eq 'side-by-side' -and (Compare-AVDTuneCapacity -Current ([pscustomobject]@{ estimatedUsers = 4 }) -Previous ([pscustomobject]@{ estimatedUsers = 5 })).Class -eq 'worse') $null
+
+        # ---- report per image version
+        $rr = Join-Path ([IO.Path]::GetTempPath()) ('avdtune-bench-rep-' + [guid]::NewGuid().ToString('N'))
+        try {
+            [void](Initialize-AVDTuneState -Root $rr)
+            $made = @{}
+            foreach ($v in @(@('2026.11.002', 1.0, 'Standard_D8s_v5'), @('2026.11.010', 1.3, 'Standard_D8s_v5'), @('2026.11.003', 1.1, 'Standard_D8s_v5'))) {
+                Set-AVDTuneState -Root $rr -Values @{ ImageVersion = $v[0] } | Out-Null
+                $bv = New-AVDTuneFakeBench -Reference $ref -Config $config -Seed @{ Factor = $v[1] }
+                $made[$v[0]] = Invoke-AVDTuneBenchmark -Machine (New-Master) -Bench $bv -Root $rr -Mode Full -SkipIdleCheck -Share $share
+                Start-Sleep -Milliseconds 1100
+            }
+            $rep010 = $made['2026.11.010']
+            Test-Check 'report: written for a full run of a version, next to the results, named by the version' ($rep010.ReportPath -and (Test-Path -LiteralPath $rep010.ReportPath) -and $rep010.ReportPath -like '*runs\benchmark\report-2026.11.010.html') $rep010.ReportPath
+            [void](Save-AVDTuneBenchmarkReport -Root $rr -ImageVersion '2026.11.010')   # the later versions exist now: written again
+            $html = Get-Content -LiteralPath $rep010.ReportPath -Raw
+            Test-Check 'report: self-contained (no external resource, no script, no link, no image)' ($html -notmatch '(?i)https?://' -and $html -notmatch '(?i)<script' -and $html -notmatch '(?i)<link' -and $html -notmatch '(?i)<img' -and $html -notmatch '(?i)\bsrc=' -and $html -notmatch '(?i)\bhref=' -and $html -notmatch '(?i)url\(' -and $html -notmatch '(?i)@import') $null
+            Test-Check 'report: three scores, categories of the three sets, every measure, nicht kalibriert' ($html -like '*Host score*' -and $html -like '*FSLogix score*' -and $html -like '*GPU score*' -and $html -like '*Profile container*' -and $html -like '*host.app.word.cold*' -and $html -like '*fsl.vhd.parallel5*' -and $html -like '*nicht kalibriert*' -and $html -like '*nicht vorhanden*') $null
+            $prevOf010 = Get-AVDTunePreviousVersionResult -Root $rr -ImageVersion '2026.11.010'
+            Test-Check 'report: the previous version is the closest earlier one by number (2026.11.003 for 2026.11.010, not 002 or 011), 2026.11.002 has none' ($prevOf010.system.imageVersion -eq '2026.11.003' -and $null -eq (Get-AVDTunePreviousVersionResult -Root $rr -ImageVersion '2026.11.002') -and (Get-AVDTunePreviousVersionResult -Root $rr -ImageVersion '2026.11.003').system.imageVersion -eq '2026.11.002') $prevOf010.system.imageVersion
+            $expect = [math]::Round(($made['2026.11.010'].Result.scores.host.value / $made['2026.11.003'].Result.scores.host.value - 1) * 100, 1)
+            Test-Check 'report: the host score delta against the previous version is in the page (about +18 percent, green)' ($html -like "*previous image version <b>2026.11.003</b>*" -and $html -like ('*' + ('{0:+0.0;-0.0;0.0}' -f $expect) + ' % vs previous version*') -and $expect -gt 10) "$expect"
+            $html2 = Get-Content -LiteralPath $made['2026.11.002'].ReportPath -Raw
+            Test-Check 'report: the first version says that there is nothing to compare with' ($html2 -like '*No earlier image version*') $null
+            # the HTML is made from data that may come from outside: every value is encoded
+            $evil = Get-AVDTuneBenchmarkResult -Root $rr -RunId $made['2026.11.010'].RunId | Select-Object -First 1
+            $evil.system.vmSize = '<script>alert(1)</script>'; $evil.system.cpuModel = '"><img src=x onerror=alert(1)>'; $evil.measures[0].id = '<b>x</b>'; $evil.measures[1].reason = '<i>r</i>'; $evil.measures[1].status = 'failed'
+            $evilHtml = New-AVDTuneBenchmarkReport -Current $evil -Previous $null -Baseline $null -Config $config
+            Test-Check 'report: markup in a result file is shown as text (script, img, b, i are all escaped)' ($evilHtml -notmatch '<script' -and $evilHtml -notmatch '<img' -and $evilHtml -notmatch '<b>x</b>' -and $evilHtml -notmatch '<i>r</i>' -and $evilHtml -like '*&lt;script&gt;alert(1)&lt;/script&gt;*' -and $evilHtml -like '*&lt;img src=x*') $null
+            Test-Check 'report: an image version that cannot be a file name is refused' ((Get-ThrownText { Save-AVDTuneBenchmarkReport -Root $rr -ImageVersion '..\..\x' }) -like '*cannot be used in a file name*' -and (Get-ThrownText { Save-AVDTuneBenchmarkReport -Root $rr -ImageVersion '9.9.9' }) -like '*No full benchmark result*') $null
+            # benchmark major version of the previous version differs: raw values only
+            $majorPrev = Get-AVDTuneBenchmarkResult -Root $rr -RunId $made['2026.11.003'].RunId | Select-Object -First 1
+            $majorPrev.benchmarkVersion = 'B2.0'
+            $mHtml = New-AVDTuneBenchmarkReport -Current $evil -Previous $majorPrev -Baseline $null -Config $config
+            Test-Check 'report: another benchmark major version is never compared as a score (a note, no delta)' ($mHtml -like '*another benchmark version or mode*' -and $mHtml -notlike '*% vs previous version*') $null
+            # quick runs and runs without an image version write no report
+            $bq = New-AVDTuneFakeBench -Reference $ref -Config $config
+            $rq = Invoke-AVDTuneBenchmark -Machine (New-Master) -Bench $bq -Root $rr -Mode Quick -SkipIdleCheck
+            Test-Check 'report: a quick run writes no report and the quick result is not used as a previous version' (-not $rq.ReportPath -and (Get-AVDTuneBenchmarkVersionResults -Root $rr | Where-Object { $_.mode -ne 'full' }).Count -eq 0) $null
+            Test-Check 'report: the result file with the report and the capacity stays free of secret-like names' ((Get-Content -LiteralPath $rep010.Path -Raw) -notmatch '(?i)password|secret|token|accountkey|sas=') $null
+        }
+        finally { Remove-Item -LiteralPath $rr -Recurse -Force -ErrorAction SilentlyContinue }
+        Test-Check 'run records: the state folder of the round 2 checks has no leftovers of the fake share or work folders' ((Get-Leftover -Bench (New-AVDTuneFakeBench -Reference $ref -Config $config) -Root $r2).Count -eq 0) $null
+    }
+    finally { Remove-Item -LiteralPath $r2 -Recurse -Force -ErrorAction SilentlyContinue }
+
 
     $direct = @(Get-ChildItem -LiteralPath $repo -Recurse -Include *.ps1, *.psm1, *.cs, *.xaml -File | Where-Object { $_.FullName -notlike (Join-Path $repo 'Tests\*') -and $_.FullName -notlike '*\Bench\*in\*' -and $_.FullName -notlike '*\Bench\*\obj\*' } | Select-String -Pattern 'env:AVDTUNE_(FAKE|ROOT|SMOKE)|GetEnvironmentVariable\(.AVDTUNE_(FAKE|ROOT|SMOKE)' | Where-Object { $_.Line -notmatch '^\s*#' -and $_.Line -notmatch '\$fake = \[string\]\$env:AVDTUNE_FAKE' })
     Test-Check 'no code outside Tests reads AVDTUNE_FAKE/ROOT/SMOKE directly (only Test-AVDTuneTestMode)' ($direct.Count -eq 0) (($direct | ForEach-Object { "$($_.Path):$($_.LineNumber)" }) -join '; ')

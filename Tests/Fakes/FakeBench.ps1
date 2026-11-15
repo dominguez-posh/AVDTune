@@ -6,6 +6,8 @@
 # default 1.0, 1.01, 0.99, 1.02), FailCommands ('cpu', 'mem', 'disp', 'files'), SkipMeasures (ids left out), Offline ($true: DNS and TCP fail), NoExe, Elevated, Sessions (array of @{ Id; User } or $null),
 # UptimeMinutes, CpuLoad, FreeGiB, PendingReboot, OnBattery, UpdateBusyCalls (busy for the first N asks), LockBusy, ZipSha256, ExeSha256, ZipBytes, SigStatus, SigSubject, DownloadFails,
 # DiskspdExitCode, DiskspdXml (a fixed answer), TaskRegisterFails, Throttle (cpu.sustained value).
+# Round 2: Gpu ($true: a hardware GPU is listed), SkipApps (app keys that are 'not installed'), NoSite (the Speedometer copy is missing; default $true), ShareFails ($true: the share folder cannot be made),
+# VhdFails, VhdParallelFails, CapacityFails, CapacityBlock (the info.capacity object), RefusedPrograms (names the adapter would refuse). .Store.ShareFolders = test folders that exist now (the checks look for leftovers).
 # .Store holds the state, .Log what was asked (never a secret).
 
 function New-FakeDiskspdXml {
@@ -44,6 +46,7 @@ function New-AVDTuneFakeBench {
         Sessions = @(); UptimeMinutes = 120; CpuLoad = 2.0; FreeGiB = 100.0; PendingReboot = $false; OnBattery = $false; UpdateBusyCalls = 0; LockBusy = $false
         ZipSha256 = [string]$Config.diskspd.zipSha256; ExeSha256 = [string]$Config.diskspd.exeSha256; ZipBytes = [long]$Config.diskspd.zipBytes; SigStatus = 'Valid'; SigSubject = 'CN=Microsoft Windows, O=Microsoft Corporation'
         DownloadFails = $false; DiskspdExitCode = 0; DiskspdXml = $null; TaskRegisterFails = $false; Throttle = 0.98
+        Gpu = $false; SkipApps = @(); NoSite = $true; ShareFails = $false; VhdFails = $false; VhdParallelFails = $false; CapacityFails = $false; CapacityBlock = $null; RefusedPrograms = @(); ShareFolders = @{}
         Tasks = @{}; Counts = @{}; Log = (New-Object System.Collections.ArrayList); BusyAsked = 0; LockHeld = $false; Sleeps = 0
         Reference = $Reference; Config = $Config
     }
@@ -94,19 +97,89 @@ function New-AVDTuneFakeBench {
             'mem' { @('host.mem.bandwidth', 'host.mem.latency', 'host.mem.alloc') }
             'disp' { @('host.disp.h264.desktop', 'host.disp.h264.video', 'host.disp.warp.3d', 'host.disp.warp.2d') }
             'files' { @('host.disk.smallfiles') }
+            'share' { @('fsl.openclose', 'fsl.rtt', 'fsl.meta.create', 'fsl.meta.stat', 'fsl.meta.delete') }
+            'gpu' { @('gpu.d3d11.1080', 'gpu.d3d11.2160', 'gpu.cs.gflops', 'gpu.cs.bandwidth', 'gpu.enc.h264', 'gpu.enc.hevc', 'gpu.enc.av1', 'gpu.dec.h264', 'gpu.dec.hevc', 'gpu.dec.av1') }
+            'gpuinfo' { @() }
             default { throw "unknown command $Command" }
         }
         if ($Command -eq 'files') {
             $dir = $Arguments[([array]::IndexOf(@($Arguments), '--dir') + 1)]
             if (-not (Test-Path -LiteralPath $dir)) { throw 'the work folder does not exist' }
         }
+        if ($Command -eq 'gpuinfo') { return [pscustomobject]@{ schemaVersion = 1; command = 'gpuinfo'; measures = @(); info = [pscustomobject]@{ hardware = [bool]$store.Gpu; adapter = 'Fake GPU 8Q'; driver = '31.0.15.0'; vramMiB = 8192 } } }
+        if ($Command -eq 'share') { $shareDir = $Arguments[([array]::IndexOf(@($Arguments), '--dir') + 1)]; if (-not $store.ShareFolders.ContainsKey($shareDir)) { throw 'the test folder on the share does not exist' } }
         $list = @()
         foreach ($id in @($ids | Where-Object { $store.SkipMeasures -notcontains $_ })) {
             $m = & $measure $id $run
+            if ($id -match '^gpu\.(enc|dec)\.') { $m.status = 'unsupported'; $m.value = $null; $m | Add-Member reason 'not part of this version' }
             if ($id -eq 'host.disp.h264.video' -and $store.ContainsKey('NoEncoder') -and $store.NoEncoder) { $m.status = 'skipped'; $m.value = $null; $m | Add-Member reason 'no encoder' }
             $list += $m
         }
         [pscustomobject]@{ schemaVersion = 1; command = $Command; measures = @($list) }
+    }.GetNewClosure()
+    $b.RunApps = {
+        param([string]$Command, [string[]]$Arguments, [string[]]$Programs = @('word', 'excel', 'edge', 'explorer', 'powershell'))
+        [void]$store.Log.Add("RunApps $Command $(@($Arguments) -join ' ')")
+        if ($store.FailCommands -contains $Command) { throw "AVDTune.Bench $Command failed (exit 1): fake failure" }
+        if ($Command -eq 'capacity') {
+            if ($store.CapacityFails) { throw 'AVDTune.Bench capacity did not finish in time and was ended with everything it had started.' }
+            $blk = $store.CapacityBlock
+            if (-not $blk) {
+                $blk = [pscustomobject]@{
+                    levels = @([pscustomobject]@{ users = 0; cycles = 3; totalMedianMs = 900.0; totalP95Ms = 950.0 }, [pscustomobject]@{ users = 1; cycles = 2; totalMedianMs = 1000.0; totalP95Ms = 1100.0; cpuPercent = 12.5; availableMemoryMB = 24000; commitPercent = 20.0; diskQueue = 0.2 }, [pscustomobject]@{ users = 8; cycles = 2; totalMedianMs = 1700.0; totalP95Ms = 1900.0; cpuPercent = 80.0; availableMemoryMB = 12000; commitPercent = 45.0; diskQueue = 1.4 })
+                    estimatedUsers = 5.9; thresholdReached = $true; atLeastUsers = $null; stopReason = 'the threshold was passed by two levels'; thresholdFactor = 1.5; method = 'own method, similar to the VSImax idea, not a Login VSI result'
+                }
+            }
+            return [pscustomobject]@{ schemaVersion = 1; command = 'capacity'; measures = @(); info = [pscustomobject]@{ capacity = $blk } }
+        }
+        $args2 = @($Arguments)
+        $noCold = $args2 -contains '--no-cold'; $noSpeed = $args2 -contains '--no-speedometer'
+        $run = & $count 'run-apps'
+        $list = @()
+        foreach ($key in 'word', 'excel', 'edge', 'explorer') {
+            foreach ($phase in 'cold', 'warm') {
+                if ($phase -eq 'cold' -and $noCold) { continue }
+                $id = "host.app.$key.$phase"
+                if ($store.SkipApps -contains $key) { $list += [pscustomobject]@{ id = $id; unit = 'ms'; better = 'lower'; value = $null; status = 'skipped'; reason = 'not installed (AVDTune gave no path)' }; continue }
+                $list += & $measure $id $run
+            }
+        }
+        $list += $(if ($store.SkipApps -contains 'powershell') { [pscustomobject]@{ id = 'host.app.powershell.warm'; unit = 'ms'; better = 'lower'; value = $null; status = 'skipped'; reason = 'not installed (AVDTune gave no path)' } } else { & $measure 'host.app.powershell.warm' $run })
+        foreach ($id in 'host.app.outlook.cold', 'host.app.outlook.warm', 'host.app.teams.cold', 'host.app.teams.warm') { if (-not ($noCold -and $id -like '*.cold')) { $list += [pscustomobject]@{ id = $id; unit = 'ms'; better = 'lower'; value = $null; status = 'skipped'; reason = 'not part of this version of the benchmark' } } }
+        if (-not $noSpeed) {
+            if (($args2 -notcontains '--site') -or $store.NoSite) { $list += [pscustomobject]@{ id = 'host.app.speedometer'; unit = 'runs/min'; better = 'higher'; value = $null; status = 'skipped'; reason = 'no Speedometer copy (--site)' } }
+            else { $list += & $measure 'host.app.speedometer' $run }
+        }
+        $list = @($list | Where-Object { $store.SkipMeasures -notcontains $_.id })
+        $o = [pscustomobject]@{ schemaVersion = 1; command = 'apps'; measures = @($list) }
+        if (@($store.RefusedPrograms).Count -gt 0) { $o | Add-Member refusedPrograms @($store.RefusedPrograms) }
+        $o
+    }.GetNewClosure()
+    $b.ShareMakeFolder = {
+        param([string]$Unc)
+        [void]$store.Log.Add("ShareMakeFolder $Unc")
+        if ($store.ShareFails) { throw 'fake: access to the share was denied' }
+        $dir = $Unc.TrimEnd('\') + '\AVDTune-Bench-' + [guid]::NewGuid().ToString('N')
+        $store.ShareFolders[$dir] = $true
+        $dir
+    }.GetNewClosure()
+    $b.ShareRemoveFolder = { param([string]$Dir) [void]$store.Log.Add("ShareRemoveFolder $Dir"); $store.ShareFolders.Remove($Dir) }.GetNewClosure()
+    $b.VhdCycle = {
+        param([string]$ShareFolder, [string]$MountRoot, [int]$Index, [int]$SizeGiB, [int]$WriteMB)
+        [void]$store.Log.Add("VhdCycle $Index $SizeGiB $WriteMB")
+        if (-not $store.ShareFolders.ContainsKey($ShareFolder)) { throw 'fake: the container goes only into a test folder' }
+        if ($store.VhdFails) { throw 'fake: the virtual disk could not be attached' }
+        $run = & $count 'run-vhd'
+        $f = [double]$store.Factor * [double]$store.RunNoise[($run - 1) % @($store.RunNoise).Count]
+        $ref = $store.Reference.Measures
+        [pscustomobject]@{ Create = [double]$ref.'fsl.vhd.create'.value / $f; Attach = [double]$ref.'fsl.vhd.attach'.value / $f; WriteMBps = [double]$ref.'fsl.vhd.write'.value * $f; Detach = [double]$ref.'fsl.vhd.detach'.value / $f; Reattach = [double]$ref.'fsl.vhd.reattach'.value / $f }
+    }.GetNewClosure()
+    $b.VhdParallel = {
+        param([string]$ShareFolder, [string]$MountRoot, [int]$Count, [int]$SizeGiB, [int]$WriteMB)
+        [void]$store.Log.Add("VhdParallel $Count")
+        if ($store.VhdParallelFails) { throw 'fake: one of the parallel containers failed' }
+        $f = [double]$store.Factor
+        [pscustomobject]@{ WallSeconds = [double]$store.Reference.Measures.'fsl.vhd.parallel5'.value / $f; AttachP95 = 4.0 }
     }.GetNewClosure()
     $b.Download = {
         param([string]$Url, [string]$Path)
@@ -135,7 +208,7 @@ function New-AVDTuneFakeBench {
         $seconds = 12.0
         if ($line -match '-d(\d+)') { $seconds = [double]$Matches[1] }
         $v = {
-            param($id) $x = & $value $id ([math]::Max(1, [math]::Floor(($run - 1) / 5) + 1)); $x
+            param($id) if ($line -cmatch 'AVDTune-Bench-[0-9a-f]{32}') { $id = $id -replace '^host\.disk\.', 'fsl.' }; $x = & $value $id ([math]::Max(1, [math]::Floor(($run - 1) / 5) + 1)); $x
         }
         switch ($key) {
             'rr.qd1' { $xml = New-FakeDiskspdXml -Seconds $seconds -ReadP50 (& $v 'host.disk.rr.qd1.p50') -ReadP99 (& $v 'host.disk.rr.qd1.p99') -ReadCount 100000 -ReadBytes (100000 * 4096) }

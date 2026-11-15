@@ -4,8 +4,12 @@
 
     This round (issue #14, part 1): host categories CPU, memory, OS disk (diskspd), remote display and network; warm-up run, 3 runs, median, CV;
     index and score against a reference file; result file without secrets; storing in the state; change log entry; quiet mode with restore journal
-    and crash repair; comparison with the baseline. NOT yet: applications and Speedometer, FSLogix score, GPU score, capacity simulation, HTML/PDF
-    report, SharePoint, benchmark-only mode, stand-alone script, disturber watch, automatic repeat of unstable measures.
+    and crash repair; comparison with the baseline.
+    Round 2 (issue #14): application starts and Speedometer (measure program command apps), FSLogix score (diskspd on the share, share test, VirtDisk
+    profile container), GPU score (partial: no hardware encode/decode yet), capacity simulation (optional), HTML report per image version with the
+    comparison to the previous version. Reference values of the new measures are placeholders marked "nicht kalibriert".
+    NOT yet: PDF export, SharePoint, benchmark-only mode (#5), stand-alone script, Outlook and Teams starts, UI Automation, disturber watch, automatic
+    repeat of unstable measures.
 
     All access to the machine goes through adapters, so the checks run against fakes (Tests\Fakes\FakeMachine.ps1, Tests\Fakes\FakeBench.ps1):
       Machine  = New-AVDTuneMachine (registry, services; Modules\AVDTune.psm1)
@@ -16,6 +20,8 @@
 
 Set-StrictMode -Version 2.0
 Import-Module (Join-Path $PSScriptRoot 'AVDTune.psm1')
+Import-Module (Join-Path $PSScriptRoot 'AVDTune.Updates.psm1')   # Test-AVDTuneToolTrust, Get-AVDTuneSystemFolder, Test-AVDTuneAdminOnlyPath
+Import-Module (Join-Path $PSScriptRoot 'AVDTune.Trust.psm1')   # Remove-AVDTuneFolderNoFollow
 Import-Module (Join-Path $PSScriptRoot 'AVDTune.Release.psm1')   # Open-AVDTuneVerifiedBenchExe: the measure program is only started after the check against the release manifest (issue #19)
 
 $script:DataDefault = Join-Path (Split-Path $PSScriptRoot -Parent) 'Bench\data'
@@ -45,10 +51,16 @@ function Get-AVDTuneBenchmarkReference {
     }
 }
 
+function Get-AVDTuneBenchCategorySet {
+    # The categories of one of the three scores: host (Config.categories), fslogix, gpu
+    param([Parameter(Mandatory)]$Config, [ValidateSet('host', 'fslogix', 'gpu')][string]$Set = 'host')
+    switch ($Set) { 'host' { $Config.categories } 'fslogix' { $Config.fslogixCategories } 'gpu' { $Config.gpuCategories } }
+}
+
 function Get-AVDTuneBenchCategoryKey {
     # Category of a measure id by its prefix, or $null
-    param([Parameter(Mandatory)]$Config, [Parameter(Mandatory)][string]$Id)
-    foreach ($c in $Config.categories.PSObject.Properties) {
+    param([Parameter(Mandatory)]$Config, [Parameter(Mandatory)][string]$Id, [ValidateSet('host', 'fslogix', 'gpu')][string]$Set = 'host')
+    foreach ($c in (Get-AVDTuneBenchCategorySet $Config $Set).PSObject.Properties) {
         foreach ($p in @($c.Value.prefixes)) { if ($Id.StartsWith($p, [StringComparison]::Ordinal)) { return $c.Name } }
     }
     $null
@@ -117,17 +129,20 @@ function Get-AVDTuneBenchmarkScores {
         measures, the score the weighted geometric mean of the categories that ran (design 2.2). Categories that did not run, or are not built yet, are listed
         in Missing: the score is then a partial score and says so.
     #>
-    param([Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Measures, [Parameter(Mandatory)]$Config, [double]$UnstableCv = 10)
+    param([Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Measures, [Parameter(Mandatory)]$Config, [double]$UnstableCv = 10, [ValidateSet('host', 'fslogix', 'gpu')][string]$Set = 'host')
     $cats = [ordered]@{}
     $missing = @()
     $unstableAny = $false
-    foreach ($c in $Config.categories.PSObject.Properties) {
-        $mine = @($Measures | Where-Object { (Get-AVDTuneBenchCategoryKey $Config $_.Id) -eq $c.Name -and $_.Status -eq 'ok' -and $null -ne (Get-AVDTuneProp $_ 'Index') })
+    $uncalAny = $false
+    foreach ($c in (Get-AVDTuneBenchCategorySet $Config $Set).PSObject.Properties) {
+        $mine = @($Measures | Where-Object { (Get-AVDTuneBenchCategoryKey $Config $_.Id -Set $Set) -eq $c.Name -and $_.Status -eq 'ok' -and $null -ne (Get-AVDTuneProp $_ 'Index') })
         if ($mine.Count -eq 0) { $missing += $c.Name; continue }
         $idx = Get-AVDTuneBenchGeometricMean ([double[]]@($mine | ForEach-Object { [double]$_.Index }))
         $unstable = @($mine | Where-Object { Get-AVDTuneProp $_ 'Unstable' }).Count -gt 0
         if ($unstable) { $unstableAny = $true }
-        $cats[$c.Name] = [ordered]@{ index = (Get-AVDTuneBenchRound $idx); weight = [double]$c.Value.weight; measures = $mine.Count; unstable = $unstable; title = [string]$c.Value.title }
+        $uncal = @($mine | Where-Object { (Get-AVDTuneProp $_ 'Calibrated') -eq $false }).Count -gt 0
+        if ($uncal) { $uncalAny = $true }
+        $cats[$c.Name] = [ordered]@{ index = (Get-AVDTuneBenchRound $idx); weight = [double]$c.Value.weight; measures = $mine.Count; unstable = $unstable; uncalibrated = $uncal; title = [string]$c.Value.title }
     }
     $hostScore = $null
     if ($cats.Count -gt 0) {
@@ -135,7 +150,7 @@ function Get-AVDTuneBenchmarkScores {
         $weights = [double[]]@($cats.Values | ForEach-Object { [double]$_.weight })
         $hostScore = Get-AVDTuneBenchRound (Get-AVDTuneBenchWeightedGeometricMean $values $weights)
     }
-    [pscustomobject]@{ Host = $hostScore; Categories = $cats; Missing = @($missing); Partial = ($missing.Count -gt 0); Unstable = $unstableAny }
+    [pscustomobject]@{ Host = $hostScore; Categories = $cats; Missing = @($missing); Partial = ($missing.Count -gt 0); Unstable = $unstableAny; Uncalibrated = $uncalAny }
 }
 
 #endregion
@@ -186,7 +201,7 @@ function ConvertFrom-AVDTuneDiskspdXml {
 
 #region child processes (issue #19)
 
-$script:Limits = @{ BenchMs = 600000; DiskspdMs = 900000 }      # timeouts; the checks lower them in module scope
+$script:Limits = @{ BenchMs = 600000; DiskspdMs = 900000; AppsMs = 1800000; CapacityMs = 3300000 }      # timeouts; the checks lower them in module scope
 $script:Hooks = @{ AclReader = $null }   # test hook: a fake ACL reader for the TEMP folder check
 
 function Initialize-AVDTuneBenchJob {
@@ -255,13 +270,27 @@ function Initialize-AVDTuneBenchTemp {
 function Get-AVDTuneChildEnvironment {
     # Allowlist of the environment of a child: only what Windows programs need to find the system, plus fixed PATH, TEMP and TMP. Everything else (DOTNET_*, COR*, __COMPAT_LAYER,
     # variables from the profile of the user) is not passed on.
-    param([Parameter(Mandatory)][string]$TempDir)
+    # -Extended (only for the application starts, Office and Edge need a profile): USERPROFILE, APPDATA, LOCALAPPDATA, USERNAME, USERDOMAIN, COMPUTERNAME, HOMEDRIVE, HOMEPATH. Their values are
+    # NOT taken from the inherited environment (HKCU\Environment of the user could redirect them): they come from Windows' own folder API and the token of this process.
+    param([Parameter(Mandatory)][string]$TempDir, [switch]$Extended)
     $names = @('SystemRoot', 'windir', 'ProgramData', 'ProgramFiles', 'ProgramFiles(x86)', 'CommonProgramFiles', 'NUMBER_OF_PROCESSORS', 'OS', 'COMSPEC')
     $env = [ordered]@{}
     foreach ($k in @([Environment]::GetEnvironmentVariables().Keys | ForEach-Object { [string]$_ })) {
         if ($k -in $names -or $k -like 'PROCESSOR_*') { $env[$k] = [Environment]::GetEnvironmentVariable($k) }
     }
     $env['PATH'] = [Environment]::GetFolderPath('System'); $env['TEMP'] = $TempDir; $env['TMP'] = $TempDir
+    if ($Extended) {
+        $profile = [Environment]::GetFolderPath('UserProfile')
+        $who = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+        $env['USERPROFILE'] = $profile
+        $env['APPDATA'] = [Environment]::GetFolderPath('ApplicationData'); $env['LOCALAPPDATA'] = [Environment]::GetFolderPath('LocalApplicationData')
+        $bs = [string][char]92
+        $at = $who.IndexOf($bs)
+        $env['USERNAME'] = $(if ($at -ge 0) { $who.Substring($at + 1) } else { $who }); $env['USERDOMAIN'] = $(if ($at -ge 0) { $who.Substring(0, $at) } else { [Environment]::MachineName })
+        $env['COMPUTERNAME'] = [Environment]::MachineName
+        $pathRoot = [IO.Path]::GetPathRoot($profile)
+        $env['HOMEDRIVE'] = $pathRoot.TrimEnd([char]92); $env['HOMEPATH'] = $profile.Substring($pathRoot.Length - 1)
+    }
     $env
 }
 
@@ -271,7 +300,7 @@ function Invoke-AVDTuneChildProcess {
         job object (kill on close): on a timeout, or when this function ends, the whole tree is ended. -CleanEnvironment passes only the allowlist of Get-AVDTuneChildEnvironment
         and TEMP/TMP in -TempDir (Initialize-AVDTuneBenchTemp). If the process cannot be put into the job it is ended. Returns ExitCode, Output, Error, TimedOut.
     #>
-    param([Parameter(Mandatory)][string]$FileName, [string]$Arguments = '', [int]$TimeoutMs = 600000, [switch]$CleanEnvironment, [string]$TempDir)
+    param([Parameter(Mandatory)][string]$FileName, [string]$Arguments = '', [int]$TimeoutMs = 600000, [switch]$CleanEnvironment, [string]$TempDir, [switch]$ExtendedEnvironment)
     Initialize-AVDTuneBenchJob
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName = $FileName; $psi.Arguments = $Arguments
@@ -279,7 +308,7 @@ function Invoke-AVDTuneChildProcess {
     if ($CleanEnvironment) {
         if (-not $TempDir) { throw 'A clean environment needs a TEMP folder.' }
         $psi.EnvironmentVariables.Clear()
-        $clean = Get-AVDTuneChildEnvironment -TempDir $TempDir
+        $clean = Get-AVDTuneChildEnvironment -TempDir $TempDir -Extended:$ExtendedEnvironment
         foreach ($k in $clean.Keys) { $psi.EnvironmentVariables[$k] = [string]$clean[$k] }
     }
     $job = [AVDTuneBenchNative.Job]::Create()
@@ -379,21 +408,92 @@ function New-AVDTuneBenchAdapter {
         finally { if ($v) { $v.Stream.Dispose() } }
     }.GetNewClosure()
     $b.EngineProblem = { [string]$engineState.Problem }.GetNewClosure()
-    $b.RunBench = {
+    $runner = {
         # Runs the measure program and parses its JSON. Arguments are fixed words and numbers made by this module, never user text
-        param([string]$Command, [string[]]$Arguments)
+        param([string]$Command, [string[]]$Arguments, [int]$TimeoutMs, [bool]$Extended)
         if ($Command -notmatch '^[a-z]+$') { throw "Invalid command '$Command'." }
         # checked against the release manifest right before this start, and held open (no write, delete or rename) until the process has started
         $verified = Open-AVDTuneVerifiedBenchExe -AppRoot $AppRoot -InstallRoot $InstallRoot -StateRoot $StateRoot -Manifest $Manifest
         $cmdLine = (@($Command) + @($Arguments) | ForEach-Object { ConvertTo-AVDTuneArgument ([string]$_) }) -join ' '
         # environment allowlist, TEMP in an administrators-only folder, timeout with the whole tree ended, kill on close
         # the verified file stays held (no write, delete, rename) until the process has ended
-        try { $r = Invoke-AVDTuneChildProcess -FileName $verified.Path -Arguments $cmdLine -TimeoutMs $limits.BenchMs -CleanEnvironment -TempDir (Initialize-AVDTuneBenchTemp -StateRoot $StateRoot) }
+        try { $r = Invoke-AVDTuneChildProcess -FileName $verified.Path -Arguments $cmdLine -TimeoutMs $TimeoutMs -CleanEnvironment -TempDir (Initialize-AVDTuneBenchTemp -StateRoot $StateRoot) -ExtendedEnvironment:$Extended }
         finally { $verified.Stream.Dispose() }
         if ($r.TimedOut) { throw "AVDTune.Bench $Command did not finish in time and was ended with everything it had started." }
         if ($r.ExitCode -ne 0) { throw "AVDTune.Bench $Command failed (exit $($r.ExitCode)): $($r.Error.Trim())" }
         $r.Output | ConvertFrom-Json
     }.GetNewClosure()
+    $b.RunBench = { param([string]$Command, [string[]]$Arguments) & $runner $Command $Arguments $limits.BenchMs $false }.GetNewClosure()
+    $b.RunApps = {
+        # The programs of the application starts (checklist "Programs started"): the full path from HKLM (App Paths) or the Windows folders (never PATH or the environment),
+        # the file in an administrator-only place, Authenticode of Microsoft (exact subject, issuer and original file name, Test-AVDTuneToolTrust), and every checked file is
+        # HELD OPEN (no write, delete, rename) until the run is over, so it cannot be swapped between check and start. Returns the parsed JSON; programs that are not
+        # installed or not trusted are not passed, the measure program then marks their measures as skipped.
+        param([string]$Command, [string[]]$Arguments, [string[]]$Programs = @('word', 'excel', 'edge', 'explorer', 'powershell'))
+        if ($Command -notin 'apps', 'capacity') { throw "Invalid command '$Command'." }
+        $held = @(); $args2 = @($Arguments); $refused = @()
+        try {
+            foreach ($key in $Programs) {
+                $path = Get-AVDTuneAppProgramPath -Key $key
+                if (-not $path) { continue }
+                $file = [IO.Path]::GetFileName($path)
+                $parent = [IO.Path]::GetDirectoryName($path)
+                $base = [IO.Path]::GetDirectoryName($parent)
+                $okAcl = $false
+                foreach ($rootName in 'ProgramFiles', 'ProgramFilesX86', 'Windows') { $r0 = Get-AVDTuneSystemFolder $rootName; if ($path.StartsWith($r0.TrimEnd([char]92) + [char]92, [StringComparison]::OrdinalIgnoreCase)) { $okAcl = Test-AVDTuneAdminOnlyPath -Path $path -Base (Split-Path $r0 -Parent); break } }
+                if (-not $okAcl) { $refused += "$key (not in an administrator-only folder)"; continue }
+                $stream = $null
+                try { $stream = New-Object IO.FileStream($path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read) } catch { $refused += "$key (cannot be held open: $($_.Exception.Message))"; continue }
+                $held += $stream
+                $s = Get-AuthenticodeSignature -LiteralPath $path
+                $orig = ''; try { $orig = [string](Get-Item -LiteralPath $path).VersionInfo.OriginalFilename } catch { }
+                $sig = [pscustomobject]@{ Valid = ($s.Status -eq 'Valid'); Status = [string]$s.Status; Subject = $(if ($s.SignerCertificate) { [string]$s.SignerCertificate.Subject } else { '' }); Issuer = $(if ($s.SignerCertificate) { [string]$s.SignerCertificate.Issuer } else { '' }); OriginalFilename = $orig }
+                $t = Test-AVDTuneToolTrust -Signature $sig -Name $file
+                if (-not $t.Ok) { $stream.Dispose(); $held = @($held | Where-Object { $_ -ne $stream }); $refused += "$key ($($t.Reason))"; continue }
+                $args2 += @('--app', "$key=$path")
+            }
+            $timeout = if ($Command -eq 'capacity') { $limits.CapacityMs } else { $limits.AppsMs }
+            $json = & $runner $Command $args2 $timeout $true
+            if ($refused.Count -gt 0 -and $json.PSObject.Properties['info'] -eq $null) { $json | Add-Member -NotePropertyName info -NotePropertyValue ([pscustomobject]@{}) }
+            if ($refused.Count -gt 0) { $json | Add-Member -NotePropertyName refusedPrograms -NotePropertyValue @($refused) -Force }
+            $json
+        }
+        finally { foreach ($h in $held) { $h.Dispose() } }
+    }.GetNewClosure()
+    $b.ShareMakeFolder = {
+        # a new test folder below the share (a GUID name made by this module); never an existing one, never a link
+        param([string]$Unc)
+        if ($Unc -notmatch '^\\\\[A-Za-z0-9][A-Za-z0-9.-]{0,200}\\[A-Za-z0-9._$ -]{1,80}(\\[A-Za-z0-9._ -]{1,80}){0,4}$') { throw 'The share path is not a plain UNC path.' }
+        if ($Unc -match '(^|\\)\.+(\\|$)') { throw 'The share path is not a plain UNC path.' }
+        $dir = Join-Path $Unc ('AVDTune-Bench-' + [guid]::NewGuid().ToString('N'))
+        $info = [IO.Directory]::CreateDirectory($dir)
+        if (($info.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'The test folder on the share is a link.' }
+        $dir
+    }
+    $b.ShareRemoveFolder = { param([string]$Dir) if ($Dir -notmatch 'AVDTune-Bench-[0-9a-f]{32}$') { throw 'Not a test folder of AVDTune.' }; if (Test-Path -LiteralPath $Dir) { Remove-AVDTuneFolderNoFollow $Dir } }
+    $b.VhdCycle = {
+        param([string]$ShareFolder, [string]$MountRoot, [int]$Index, [int]$SizeGiB, [int]$WriteMB)
+        Invoke-AVDTuneVhdCycle -ShareFolder $ShareFolder -MountRoot $MountRoot -Index $Index -SizeGiB $SizeGiB -WriteMB $WriteMB
+    }
+    $b.VhdParallel = {
+        # N containers at the same time (users logging on together): wall time of all cycles. Each cycle runs in its own runspace (the function text is passed on)
+        param([string]$ShareFolder, [string]$MountRoot, [int]$Count, [int]$SizeGiB, [int]$WriteMB)
+        $text = (Get-Command Invoke-AVDTuneVhdCycle).ScriptBlock.ToString()
+        $pool = [runspacefactory]::CreateRunspacePool(1, $Count); $pool.Open()
+        $jobs = @(); $sw = [Diagnostics.Stopwatch]::StartNew()
+        try {
+            for ($i = 2; $i -lt 2 + $Count; $i++) {
+                $ps = [powershell]::Create(); $ps.RunspacePool = $pool
+                [void]$ps.AddScript($text).AddParameter('ShareFolder', $ShareFolder).AddParameter('MountRoot', $MountRoot).AddParameter('Index', $i).AddParameter('SizeGiB', $SizeGiB).AddParameter('WriteMB', $WriteMB)
+                $jobs += [pscustomobject]@{ PS = $ps; Handle = $ps.BeginInvoke() }
+            }
+            $attach = @()
+            foreach ($j in $jobs) { $r = @($j.PS.EndInvoke($j.Handle)); if ($j.PS.Streams.Error.Count -gt 0) { throw $j.PS.Streams.Error[0].Exception.Message }; $attach += [double]$r[-1].Attach }
+            $sw.Stop()
+            [pscustomobject]@{ WallSeconds = $sw.Elapsed.TotalSeconds; AttachP95 = (Get-AVDTuneBenchPercentile ([double[]]$attach) 95) }
+        }
+        finally { foreach ($j in $jobs) { $j.PS.Dispose() }; $pool.Close() }
+    }
     $b.Download = {
         param([string]$Url, [string]$Path)
         if ($Url -notmatch '^https://') { throw 'Only https downloads are allowed.' }
@@ -521,6 +621,123 @@ namespace AVDTuneBenchNative {
         [pscustomobject]$facts
     }
     [pscustomobject]$b
+}
+
+#endregion
+
+#region application programs and profile container (round 2)
+
+function Get-AVDTuneAppProgramPath {
+    <#
+        Full path of a program of the application starts, or $null when it is not installed. From HKLM (App Paths) or the Windows folders, never through the search path or
+        the process environment. Keys: word, excel, edge (App Paths), explorer, powershell (Windows folders). The checks of the file itself are in the adapter (RunApps).
+    #>
+    param([Parameter(Mandatory)][ValidateSet('word', 'excel', 'edge', 'explorer', 'powershell')][string]$Key)
+    $bs = [string][char]92
+    if ($Key -eq 'explorer') { $p = Join-Path (Get-AVDTuneSystemFolder Windows) 'explorer.exe'; return $(if (Test-Path -LiteralPath $p -PathType Leaf) { $p } else { $null }) }
+    if ($Key -eq 'powershell') { $p = Join-Path (Get-AVDTuneSystemFolder System) ('WindowsPowerShell' + $bs + 'v1.0' + $bs + 'powershell.exe'); return $(if (Test-Path -LiteralPath $p -PathType Leaf) { $p } else { $null }) }
+    $exe = @{ word = 'winword.exe'; excel = 'excel.exe'; edge = 'msedge.exe' }[$Key]
+    foreach ($hive in 'HKLM:' + $bs + 'SOFTWARE' + $bs + 'Microsoft' + $bs + 'Windows' + $bs + 'CurrentVersion' + $bs + 'App Paths' + $bs + $exe, 'HKLM:' + $bs + 'SOFTWARE' + $bs + 'WOW6432Node' + $bs + 'Microsoft' + $bs + 'Windows' + $bs + 'CurrentVersion' + $bs + 'App Paths' + $bs + $exe) {
+        try {
+            $v = [string](Get-ItemProperty -LiteralPath $hive -ErrorAction Stop).'(default)'
+            $v = $v.Trim().Trim('"')
+            if ($v -and [IO.Path]::IsPathRooted($v) -and $v -notlike ($bs + $bs + '*') -and (Test-Path -LiteralPath $v -PathType Leaf) -and [IO.Path]::GetFileName($v) -ieq $exe) { return [IO.Path]::GetFullPath($v) }
+        }
+        catch { }
+    }
+    $null
+}
+
+function Invoke-AVDTuneVhdCycle {
+    <#
+        One profile container like a logon and logoff of a user (design 1.2, VirtDisk API, no FSLogix needed): create a dynamic VHDX on the share and format it NTFS (create), attach it
+        and mount it to a folder below the work folder, no drive letter (attach), write mixed files like a profile (write), flush and detach (detach), attach again and read all
+        files (reattach). Seconds per step and MiB/s of the write. NOT verified on a real VM yet. The container is detached and deleted at the end, also on an error.
+        Self-contained (own Add-Type), so it can run in a runspace for the parallel test.
+    #>
+    param([Parameter(Mandatory)][string]$ShareFolder, [Parameter(Mandatory)][string]$MountRoot, [int]$Index = 1, [int]$SizeGiB = 2, [int]$WriteMB = 200)
+    if (-not ('AVDTuneBenchNative.Vhd' -as [type])) {
+        Add-Type -TypeDefinition @"
+using System; using System.ComponentModel; using System.Runtime.InteropServices; using System.Text;
+namespace AVDTuneBenchNative {
+  public static class Vhd {
+    [StructLayout(LayoutKind.Sequential)] struct StorageType { public uint DeviceId; public Guid VendorId; }
+    [StructLayout(LayoutKind.Sequential)] struct CreateParams { public uint Version; public Guid UniqueId; public ulong MaximumSize; public uint BlockSizeInBytes; public uint SectorSizeInBytes; public IntPtr ParentPath; public IntPtr SourcePath; }
+    [DllImport("virtdisk.dll", CharSet = CharSet.Unicode)] static extern int CreateVirtualDisk(ref StorageType t, string path, uint access, IntPtr sd, uint flags, uint providerFlags, ref CreateParams p, IntPtr overlapped, out IntPtr handle);
+    [DllImport("virtdisk.dll", CharSet = CharSet.Unicode)] static extern int OpenVirtualDisk(ref StorageType t, string path, uint access, uint flags, IntPtr p, out IntPtr handle);
+    [DllImport("virtdisk.dll")] static extern int AttachVirtualDisk(IntPtr h, IntPtr sd, uint flags, uint providerFlags, IntPtr p, IntPtr overlapped);
+    [DllImport("virtdisk.dll")] static extern int DetachVirtualDisk(IntPtr h, uint flags, uint providerFlags);
+    [DllImport("virtdisk.dll", CharSet = CharSet.Unicode)] static extern int GetVirtualDiskPhysicalPath(IntPtr h, ref uint size, StringBuilder path);
+    [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr h);
+    static StorageType Type() { StorageType t = new StorageType(); t.DeviceId = 3; t.VendorId = new Guid("ec984aec-a0f9-47e9-901f-71415a66345b"); return t; }
+    static void Check(int rc, string what) { if (rc != 0) throw new Win32Exception(rc, what + " failed"); }
+    public static void Create(string path, ulong bytes) {
+      StorageType t = Type(); CreateParams p = new CreateParams(); p.Version = 1; p.MaximumSize = bytes; IntPtr h;
+      Check(CreateVirtualDisk(ref t, path, 0, IntPtr.Zero, 0, 0, ref p, IntPtr.Zero, out h), "CreateVirtualDisk"); CloseHandle(h);
+    }
+    public static IntPtr Open(string path) { StorageType t = Type(); IntPtr h; Check(OpenVirtualDisk(ref t, path, 0x003f0000, 0, IntPtr.Zero, out h), "OpenVirtualDisk"); return h; }
+    public static void Attach(IntPtr h) { Check(AttachVirtualDisk(h, IntPtr.Zero, 0x2, 0, IntPtr.Zero, IntPtr.Zero), "AttachVirtualDisk"); }   // ATTACH_VIRTUAL_DISK_FLAG_NO_DRIVE_LETTER
+    public static void Detach(IntPtr h) { Check(DetachVirtualDisk(h, 0, 0), "DetachVirtualDisk"); }
+    public static string PhysicalPath(IntPtr h) { uint size = 1024; StringBuilder sb = new StringBuilder(512); Check(GetVirtualDiskPhysicalPath(h, ref size, sb), "GetVirtualDiskPhysicalPath"); return sb.ToString(); }
+    public static void Close(IntPtr h) { if (h != IntPtr.Zero) CloseHandle(h); }
+  }
+}
+"@
+    }
+    $bs = [string][char]92
+    if ($ShareFolder -notmatch 'AVDTune-Bench-[0-9a-f]{32}$') { throw 'The container goes only into a test folder of AVDTune.' }
+    $vhd = Join-Path $ShareFolder "profile$Index.vhdx"
+    $mnt = Join-Path $MountRoot "mnt$Index"
+    if (Test-Path -LiteralPath $mnt) { throw "The mount folder $mnt exists already." }
+    [void][IO.Directory]::CreateDirectory($mnt)
+    $st = @{ h = [IntPtr]::Zero; disk = -1; part = -1 }
+    $out = [ordered]@{ Create = $null; Attach = $null; WriteMBps = $null; Detach = $null; Reattach = $null }
+    $time = { param($block) $sw = [Diagnostics.Stopwatch]::StartNew(); & $block; $sw.Stop(); $sw.Elapsed.TotalSeconds }
+    $mount = {
+        $deadline = [DateTime]::UtcNow.AddSeconds(60)
+        $p = $null
+        while ([DateTime]::UtcNow -lt $deadline -and -not $p) { $p = @(Get-Partition -DiskNumber $st.disk -ErrorAction SilentlyContinue | Where-Object { $_.Type -eq 'Basic' -or $_.Type -eq 'IFS' } | Select-Object -First 1)[0]; if (-not $p) { Start-Sleep -Milliseconds 100 } }
+        if (-not $p) { throw 'The volume of the container did not come up.' }
+        $st.part = $p.PartitionNumber
+        Add-PartitionAccessPath -DiskNumber $st.disk -PartitionNumber $p.PartitionNumber -AccessPath $mnt -ErrorAction Stop
+    }
+    $unmount = { try { Remove-PartitionAccessPath -DiskNumber $st.disk -PartitionNumber $st.part -AccessPath $mnt -ErrorAction Stop } catch { } }
+    try {
+        $out.Create = & $time {
+            [AVDTuneBenchNative.Vhd]::Create($vhd, [uint64]$SizeGiB * 1GB)
+            $st.h = [AVDTuneBenchNative.Vhd]::Open($vhd); [AVDTuneBenchNative.Vhd]::Attach($st.h)
+            $st.disk = [int]([regex]::Match([AVDTuneBenchNative.Vhd]::PhysicalPath($st.h), '(\d+)$').Groups[1].Value)
+            Initialize-Disk -Number $st.disk -PartitionStyle GPT -ErrorAction Stop
+            [void](New-Partition -DiskNumber $st.disk -UseMaximumSize -ErrorAction Stop)
+            [void](Get-Partition -DiskNumber $st.disk | Where-Object { $_.Type -eq 'Basic' } | Format-Volume -FileSystem NTFS -NewFileSystemLabel 'AVDTuneBench' -Confirm:$false -ErrorAction Stop)
+            & $mount
+        }
+        $rng = New-Object Random 4242
+        $buf = New-Object byte[] (4MB); $rng.NextBytes($buf)
+        $files = New-Object System.Collections.ArrayList
+        $writeSeconds = & $time {
+            $total = [long]$WriteMB * 1MB; $done = 0L; $n = 0
+            while ($done -lt $total) {
+                $size = [int][math]::Min([math]::Min(4MB, $total - $done), [math]::Pow(2, 10 + $rng.NextDouble() * 12))
+                $f = Join-Path $mnt ('f' + $n++ + '.dat')
+                $fs = New-Object IO.FileStream($f, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None, 65536)
+                try { $fs.Write($buf, 0, $size); $fs.Flush($true) } finally { $fs.Dispose() }
+                [void]$files.Add($f); $done += $size
+            }
+        }
+        $out.WriteMBps = $WriteMB / [math]::Max($writeSeconds, 0.001)
+        $out.Detach = & $time { & $unmount; [AVDTuneBenchNative.Vhd]::Detach($st.h); [AVDTuneBenchNative.Vhd]::Close($st.h); $st.h = [IntPtr]::Zero }
+        $out.Attach = & $time { $st.h = [AVDTuneBenchNative.Vhd]::Open($vhd); [AVDTuneBenchNative.Vhd]::Attach($st.h); & $mount }
+        $reSeconds = & $time { foreach ($f in $files) { [void][IO.File]::ReadAllBytes($f) } }
+        $out.Reattach = $out.Attach + $reSeconds
+        & $unmount; [AVDTuneBenchNative.Vhd]::Detach($st.h); [AVDTuneBenchNative.Vhd]::Close($st.h); $st.h = [IntPtr]::Zero
+        [pscustomobject]$out
+    }
+    finally {
+        if ($st.h -ne [IntPtr]::Zero) { & $unmount; try { [AVDTuneBenchNative.Vhd]::Detach($st.h) } catch { }; [AVDTuneBenchNative.Vhd]::Close($st.h) }
+        if (Test-Path -LiteralPath $mnt) { try { [IO.Directory]::Delete($mnt) } catch { } }
+        if (Test-Path -LiteralPath $vhd) { try { [IO.File]::Delete($vhd) } catch { } }
+    }
 }
 
 #endregion
@@ -828,6 +1045,293 @@ function Invoke-AVDTuneBenchNetwork {
     $out
 }
 
+function Get-AVDTuneBenchShare {
+    # The FSLogix share of the environment: the first UNC path of VHDLocations (HKLM FSLogix Profiles), or '' when there is none. Only a plain UNC path is accepted
+    param([Parameter(Mandatory)]$Machine)
+    $v = & $Machine.RegGet 'HKLM:\SOFTWARE\FSLogix\Profiles' 'VHDLocations'
+    foreach ($item in @($v)) {
+        foreach ($part in ([string]$item -split ';')) {
+            $t = $part.Trim().TrimEnd([char]92)
+            if ($t -match '(^|\\)\.+(\\|$)') { continue }   # no dot segments
+            if ($t -match '^\\\\[A-Za-z0-9][A-Za-z0-9.-]{0,200}\\[A-Za-z0-9._$ -]{1,80}(\\[A-Za-z0-9._ -]{1,80}){0,4}$') { return $t.TrimEnd('\') }
+        }
+    }
+    ''
+}
+
+function Get-AVDTuneBenchShareHost([string]$Unc) { if ($Unc -match '^\\\\([^\\]+)\\') { $Matches[1] } else { '' } }
+
+function Invoke-AVDTuneBenchApps {
+    # Application starts and Speedometer (design 1.1). Warm-up: no cold start, no Speedometer; quick: no cold start, one Speedometer iteration. The program paths are checked by the adapter
+    param([Parameter(Mandatory)]$Bench, [Parameter(Mandatory)][string]$WorkDir, [ValidateSet('Full', 'Quick')][string]$Mode = 'Full', [switch]$WarmUp, [string]$SiteDir, [scriptblock]$Progress)
+    if ($Progress) { & $Progress 'Applications: starts' $null }
+    $cliArgs = @('--quiet', '--dir', $WorkDir)
+    if ($WarmUp -or $Mode -eq 'Quick') { $cliArgs += '--no-cold' }
+    if ($WarmUp) { $cliArgs += '--no-speedometer' }
+    if ($Mode -eq 'Quick') { $cliArgs += @('--speed-iterations', '1') }
+    if ($SiteDir -and (Test-Path -LiteralPath (Join-Path $SiteDir 'index.html'))) { $cliArgs += @('--site', $SiteDir) }
+    ConvertFrom-AVDTuneBenchOutput (& $Bench.RunApps 'apps' $cliArgs)
+}
+
+function Invoke-AVDTuneBenchGpu {
+    # GPU measures (design 1.3): only when DXGI lists a hardware adapter. Returns Present, Measures, Info (adapter, driver, memory)
+    param([Parameter(Mandatory)]$Bench, [double]$Scale = 1.0, [scriptblock]$Progress)
+    if ($Progress) { & $Progress 'GPU: looking for an adapter' $null }
+    $info = & $Bench.RunBench 'gpuinfo' @('--quiet')
+    $gi = Get-AVDTuneProp $info 'info'
+    if (-not [bool](Get-AVDTuneProp $gi 'hardware')) { return [pscustomobject]@{ Present = $false; Measures = @(); Info = $gi } }
+    if ($Progress) { & $Progress 'GPU: measuring' $null }
+    $r = & $Bench.RunBench 'gpu' @('--quiet', '--scale', ([string]$Scale).Replace(',', '.'))
+    [pscustomobject]@{ Present = $true; Measures = @(ConvertFrom-AVDTuneBenchOutput $r); Info = $gi }
+}
+
+function Invoke-AVDTuneBenchFslogix {
+    <#
+        FSLogix measures (design 1.2) in a new test folder AVDTune-Bench-<guid> on the share: diskspd (fixed templates, file in that folder), the share test of the measure program
+        (open/close, round trip, metadata), and the profile container (VirtDisk): one cycle, then five at the same time. The folder is removed in a finally block.
+    #>
+    param([Parameter(Mandatory)]$Bench, [Parameter(Mandatory)]$Config, [Parameter(Mandatory)][string]$Share, [Parameter(Mandatory)][string]$WorkDir, [Parameter(Mandatory)][string]$DiskspdPath,
+        [ValidateSet('Full', 'Quick')][string]$Mode = 'Full', [switch]$WarmUp, [scriptblock]$Progress)
+    $f = $Config.fslogix
+    $quick = $WarmUp -or $Mode -eq 'Quick'
+    $seconds = if ($quick) { [int]$Config.diskspd.secondsShort } else { [int]$Config.diskspd.seconds }
+    $scale = if ($WarmUp) { 0.4 } elseif ($Mode -eq 'Quick') { 0.5 } else { 1.0 }
+    $out = @()
+    $mk = { param($id, $unit, $better, $value, $status, $reason) [pscustomobject]@{ id = $id; unit = $unit; better = $better; value = $value; status = $status; reason = $reason } }
+    $folder = & $Bench.ShareMakeFolder $Share
+    try {
+        $file = Join-Path $folder 'disk.dat'
+        foreach ($t in @($f.tests)) {
+            if ($Progress) { & $Progress "FSLogix: $($t.key)" $null }
+            $cliArgs = @(([string]$t.args).Replace('{d}', [string]$seconds).Split(' ', [StringSplitOptions]::RemoveEmptyEntries)) + @("-c$($f.fileSizeGiB)G", $file)
+            try {
+                $r = & $Bench.DiskspdRun $DiskspdPath $cliArgs
+                if ($r.ExitCode -ne 0) { throw "diskspd exit code $($r.ExitCode)" }
+                $parsed = ConvertFrom-AVDTuneDiskspdXml -Xml ([string]$r.Output)
+                foreach ($m in @($t.measures)) {
+                    $prop = $parsed.PSObject.Properties[[string]$m.metric]
+                    if ($prop -and $null -ne $prop.Value) { $out += & $mk $m.id $m.unit $m.better ([double]$prop.Value) 'ok' $null }
+                    else { $out += & $mk $m.id $m.unit $m.better $null 'failed' "diskspd XML: no value for $($m.metric)" }
+                }
+            }
+            catch { foreach ($m in @($t.measures)) { $out += & $mk $m.id $m.unit $m.better $null 'failed' $_.Exception.Message } }
+        }
+        if (Test-Path -LiteralPath $file) { Remove-Item -LiteralPath $file -Force -ErrorAction SilentlyContinue }
+        if ($Progress) { & $Progress 'FSLogix: open/close, round trip, metadata' $null }
+        try {
+            $shareArgs = @('--quiet', '--dir', $folder, '--scale', ([string]$scale).Replace(',', '.'))
+            $hostName = Get-AVDTuneBenchShareHost $Share
+            if ($hostName) { $shareArgs += @('--host', $hostName) }
+            $out += @(ConvertFrom-AVDTuneBenchOutput (& $Bench.RunBench 'share' $shareArgs))
+        }
+        catch { foreach ($id in 'fsl.openclose', 'fsl.rtt', 'fsl.meta.create', 'fsl.meta.stat', 'fsl.meta.delete') { $out += & $mk $id '' 'higher' $null 'failed' $_.Exception.Message } }
+        if ($Progress) { & $Progress 'FSLogix: profile container' $null }
+        $writeMB = if ($quick) { [int]$f.vhd.writeMBQuick } else { [int]$f.vhd.writeMB }
+        try {
+            $c = & $Bench.VhdCycle $folder $WorkDir 1 ([int]$f.vhd.sizeGiB) $writeMB
+            $out += & $mk 'fsl.vhd.create' 's' 'lower' ([double]$c.Create) 'ok' $null
+            $out += & $mk 'fsl.vhd.attach' 's' 'lower' ([double]$c.Attach) 'ok' $null
+            $out += & $mk 'fsl.vhd.write' 'MiB/s' 'higher' ([double]$c.WriteMBps) 'ok' $null
+            $out += & $mk 'fsl.vhd.detach' 's' 'lower' ([double]$c.Detach) 'ok' $null
+            $out += & $mk 'fsl.vhd.reattach' 's' 'lower' ([double]$c.Reattach) 'ok' $null
+        }
+        catch { foreach ($id in 'fsl.vhd.create', 'fsl.vhd.attach', 'fsl.vhd.write', 'fsl.vhd.detach', 'fsl.vhd.reattach') { $out += & $mk $id 's' 'lower' $null 'failed' $_.Exception.Message } }
+        try {
+            $p = & $Bench.VhdParallel $folder $WorkDir ([int]$f.vhd.parallel) ([int]$f.vhd.sizeGiB) $writeMB
+            $out += & $mk 'fsl.vhd.parallel5' 's' 'lower' ([double]$p.WallSeconds) 'ok' $null
+        }
+        catch { $out += & $mk 'fsl.vhd.parallel5' 's' 'lower' $null 'failed' $_.Exception.Message }
+    }
+    finally { try { & $Bench.ShareRemoveFolder $folder } catch { } }
+    $out
+}
+
+function Invoke-AVDTuneBenchCapacity {
+    # Capacity simulation (design 4): the measure program runs the probe and the load workers; returns the capacity block (levels, estimate) or throws
+    param([Parameter(Mandatory)]$Bench, [Parameter(Mandatory)][string]$WorkDir, [scriptblock]$Progress)
+    if ($Progress) { & $Progress 'Capacity simulation (about 30 minutes)' $null }
+    $r = & $Bench.RunApps 'capacity' @('--quiet', '--dir', $WorkDir) @('powershell')
+    $cap = Get-AVDTuneProp (Get-AVDTuneProp $r 'info') 'capacity'
+    if (-not $cap) { throw 'The capacity simulation gave no result.' }
+    $cap
+}
+
+function Compare-AVDTuneCapacity {
+    # Estimated users now against the last run of the same VM size (a number above the threshold of the benchmark: delta in percent)
+    param($Current, $Previous, [double]$ThresholdPercent = 10)
+    if (-not $Current -or -not $Previous) { return $null }
+    $c = Get-AVDTuneProp $Current 'estimatedUsers'; $p = Get-AVDTuneProp $Previous 'estimatedUsers'
+    if ($null -eq $c -or $null -eq $p -or [double]$p -le 0) { return [pscustomobject]@{ Current = $c; Previous = $p; DeltaPercent = $null; Class = 'side-by-side' } }
+    $d = [math]::Round(([double]$c / [double]$p - 1.0) * 100.0, 1)
+    [pscustomobject]@{ Current = $c; Previous = $p; DeltaPercent = $d; Class = $(if ($d -gt $ThresholdPercent) { 'better' } elseif ($d -lt -$ThresholdPercent) { 'worse' } else { 'same' }) }
+}
+
+#region report per image version (design 5.2)
+
+function Get-AVDTuneVersionSortKey([string]$Version) {
+    # 2026.11.001 sorts before 2026.11.002 and 2026.12.001: the digit groups padded
+    (@([regex]::Matches($Version, '\d+') | ForEach-Object { $_.Value.PadLeft(10, '0') }) -join '.') + '|' + $Version
+}
+
+function Get-AVDTuneBenchmarkVersionResults {
+    # Per image version the newest full result; oldest version first
+    param([Parameter(Mandatory)][string]$Root)
+    $by = @{}
+    foreach ($r in @(Get-AVDTuneBenchmarkResult -Root $Root)) {
+        if ($r.mode -ne 'full') { continue }
+        $v = [string](Get-AVDTuneProp (Get-AVDTuneProp $r 'system') 'imageVersion')
+        if (-not $v) { continue }
+        if (-not $by.ContainsKey($v) -or ([datetime]$r.started) -ge ([datetime]$by[$v].started)) { $by[$v] = $r }
+    }
+    @($by.Keys | Sort-Object { Get-AVDTuneVersionSortKey $_ } | ForEach-Object { $by[$_] })
+}
+
+function Get-AVDTunePreviousVersionResult {
+    # The result of the closest earlier image version with the same benchmark major version, or $null
+    param([Parameter(Mandatory)][string]$Root, [Parameter(Mandatory)][string]$ImageVersion)
+    $all = @(Get-AVDTuneBenchmarkVersionResults -Root $Root)
+    $key = Get-AVDTuneVersionSortKey $ImageVersion
+    $cur = @($all | Where-Object { $_.system.imageVersion -ceq $ImageVersion } | Select-Object -First 1)
+    $before = @($all | Where-Object { [string]::CompareOrdinal((Get-AVDTuneVersionSortKey ([string]$_.system.imageVersion)), $key) -lt 0 } | Where-Object { -not $cur -or $cur.Count -eq 0 -or ([string]$_.benchmarkVersion -split '\.')[0] -eq ([string]$cur[0].benchmarkVersion -split '\.')[0] })
+    if ($before.Count -gt 0) { $before[-1] } else { $null }
+}
+
+function Get-AVDTuneBenchDelta {
+    # Percent change of a score (higher is better) and its class against the threshold; $null when a side is missing
+    param($Current, $Previous, [double]$Threshold = 10)
+    if ($null -eq $Current -or $null -eq $Previous -or [double]$Previous -le 0) { return $null }
+    $d = [math]::Round(([double]$Current / [double]$Previous - 1.0) * 100.0, 1)
+    [pscustomobject]@{ DeltaPercent = $d; Class = $(if ($d -gt $Threshold) { 'better' } elseif ($d -lt -$Threshold) { 'worse' } else { 'same' }) }
+}
+
+function ConvertTo-AVDTuneHtml([string]$Text) { [Net.WebUtility]::HtmlEncode($Text) }
+
+function New-AVDTuneBenchmarkReport {
+    <#
+        One self-contained HTML page (no external resource, no script): the three scores with the change against the previous image version and the baseline, categories,
+        every measure with its previous value, capacity, run details. Every value from a result file is HTML-encoded (a result file can come from outside). Scores against
+        reference values that were not calibrated are labelled "nicht kalibriert".
+    #>
+    param([Parameter(Mandatory)]$Current, $Previous, $Baseline, [Parameter(Mandatory)]$Config)
+    $e = { param($t) ConvertTo-AVDTuneHtml ([string]$t) }
+    $thr = [double]$Config.run.deltaThresholdPercent
+    $deltaCell = {
+        param($d)
+        if (-not $d) { return '<td class="mute">no value</td>' }
+        $cls = switch ($d.Class) { 'better' { 'good' } 'worse' { 'bad' } default { 'mute' } }
+        '<td class="' + $cls + '">' + ('{0:+0.0;-0.0;0.0} %' -f [double]$d.DeltaPercent) + '</td>'
+    }
+    $sys = $Current.system
+    $ver = [string](Get-AVDTuneProp $sys 'imageVersion')
+    $prevVer = if ($Previous) { [string](Get-AVDTuneProp (Get-AVDTuneProp $Previous 'system') 'imageVersion') } else { '' }
+    $same = { param($a, $b) $a -and $b -and ([string]$a.benchmarkVersion -split '\.')[0] -eq ([string]$b.benchmarkVersion -split '\.')[0] -and $a.mode -eq $b.mode }
+    $usePrev = & $same $Current $Previous
+    $useBase = $Baseline -and $Baseline.runId -ne $Current.runId -and (& $same $Current $Baseline)
+    $h = New-Object System.Text.StringBuilder
+    [void]$h.AppendLine('<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">')
+    [void]$h.AppendLine("<title>AVDTune benchmark $(& $e $ver)</title>")
+    [void]$h.AppendLine('<style>:root{--bg:#fff;--fg:#1b1b1f;--mute:#6b6b76;--line:#d8d8e0;--good:#0f7b3f;--bad:#b3261e;--warn:#fff4d6}@media (prefers-color-scheme:dark){:root{--bg:#16161a;--fg:#ececf1;--mute:#a0a0ad;--line:#33333c;--good:#58c98b;--bad:#ff8a80;--warn:#3a3217}}body{background:var(--bg);color:var(--fg);font:15px/1.5 "Segoe UI",sans-serif;margin:0;padding:16px;max-width:1000px}h1{font-size:22px}h2{font-size:17px;margin-top:28px}table{border-collapse:collapse;width:100%}th,td{border-bottom:1px solid var(--line);padding:5px 8px;text-align:left}td.n,th.n{text-align:right}.big{font-size:34px;font-weight:600}.cards{display:flex;flex-wrap:wrap;gap:12px}.card{border:1px solid var(--line);border-radius:8px;padding:12px 16px;min-width:200px;flex:1}.mute{color:var(--mute)}.good{color:var(--good)}.bad{color:var(--bad)}.note{background:var(--warn);padding:8px 12px;border-radius:6px}</style></head><body>')
+    [void]$h.AppendLine("<h1>AVDTune benchmark, image version $(& $e $(if ($ver) { $ver } else { 'unknown' }))</h1>")
+    [void]$h.AppendLine("<p class=""mute"">$(& $e $Current.benchmarkVersion), $(& $e $Current.mode) run, $(& $e $Current.started), $(& $e $sys.vmSize), $(& $e $sys.cpuModel), $(& $e $sys.vCpu) vCPU, $(& $e $sys.ramGiB) GiB. 1000 = the reference host.</p>")
+    $refInfo = Get-AVDTuneProp $Current 'referenceInfo'
+    if ($Current.scores.host.provisional -or (Get-AVDTuneProp $Current.scores.host 'uncalibrated')) { [void]$h.AppendLine('<p class="note">Reference values: vorlaeufig, nicht gemessen, nicht kalibriert. The numbers show changes between runs of this version of the benchmark; they are not yet comparable with other systems.</p>') }
+    if ($usePrev) { [void]$h.AppendLine("<p>Compared with the previous image version <b>$(& $e $prevVer)</b> (run $(& $e $Previous.started)).</p>") }
+    elseif ($Previous) { [void]$h.AppendLine('<p class="mute">The previous image version was measured with another benchmark version or mode: no score comparison, the raw values are in the table.</p>') }
+    else { [void]$h.AppendLine('<p class="mute">No earlier image version has a full benchmark: nothing to compare with.</p>') }
+    [void]$h.AppendLine('<h2>Scores</h2><div class="cards">')
+    foreach ($s in @(@('host', 'Host score'), @('fslogix', 'FSLogix score'), @('gpu', 'GPU score'))) {
+        $sc = Get-AVDTuneProp $Current.scores $s[0]
+        $val = Get-AVDTuneProp $sc 'value'
+        $txt = if ($null -ne $val) { [string]$val } elseif ((Get-AVDTuneProp $sc 'reason')) { [string]$sc.reason } else { 'no score' }
+        $line = ''
+        $flags = @()
+        if ($sc -and (Get-AVDTuneProp $sc 'partial')) { $flags += 'Teilscore ohne ' + (@($sc.missingCategories) -join '/') }
+        if ($sc -and (Get-AVDTuneProp $sc 'uncalibrated')) { $flags += 'nicht kalibriert' }
+        if ($sc -and (Get-AVDTuneProp $sc 'unstable')) { $flags += 'instabil' }
+        $cells = ''
+        foreach ($pair in @(@($Previous, $usePrev, 'previous version'), @($Baseline, $useBase, 'baseline'))) {
+            if (-not $pair[1]) { continue }
+            $ov = Get-AVDTuneProp (Get-AVDTuneProp $pair[0].scores $s[0]) 'value'
+            $d = Get-AVDTuneBenchDelta $val $ov $thr
+            if ($d) { $cls = switch ($d.Class) { 'better' { 'good' } 'worse' { 'bad' } default { 'mute' } }; $cells += "<div class=""$cls"">$('{0:+0.0;-0.0;0.0} %' -f [double]$d.DeltaPercent) vs $(& $e $pair[2])</div>" }
+        }
+        [void]$h.AppendLine("<div class=""card""><div class=""mute"">$(& $e $s[1])</div><div class=""big"">$(& $e $txt)</div>$cells<div class=""mute"">$(& $e ($flags -join ', '))</div></div>")
+    }
+    [void]$h.AppendLine('</div>')
+    foreach ($set in @(@('host', 'Host score by category'), @('fslogix', 'FSLogix score by category'), @('gpu', 'GPU score by category'))) {
+        $sc = Get-AVDTuneProp $Current.scores $set[0]
+        $cats = Get-AVDTuneProp $sc 'categories'
+        if (-not $cats -or @($cats.PSObject.Properties).Count -eq 0) { continue }
+        $titles = Get-AVDTuneBenchCategorySet $Config $set[0]
+        [void]$h.AppendLine("<h2>$(& $e $set[1])</h2><table><tr><th>Category</th><th class=""n"">Index</th><th class=""n"">Weight</th><th>vs previous version</th><th>vs baseline</th></tr>")
+        foreach ($c in $cats.PSObject.Properties) {
+            $title = [string](Get-AVDTuneProp (Get-AVDTuneProp $titles $c.Name) 'title'); if (-not $title) { $title = $c.Name }
+            $cols = ''
+            foreach ($pair in @(@($Previous, $usePrev), @($Baseline, $useBase))) {
+                $d = $null
+                if ($pair[1]) { $oc = Get-AVDTuneProp (Get-AVDTuneProp (Get-AVDTuneProp $pair[0].scores $set[0]) 'categories') $c.Name; if ($oc) { $d = Get-AVDTuneBenchDelta $c.Value.index $oc.index $thr } }
+                $cols += & $deltaCell $d
+            }
+            [void]$h.AppendLine("<tr><td>$(& $e $title)</td><td class=""n"">$(& $e $c.Value.index)</td><td class=""n"">$(& $e $c.Value.weight)</td>$cols</tr>")
+        }
+        [void]$h.AppendLine('</table>')
+    }
+    [void]$h.AppendLine('<h2>Measures</h2><table><tr><th>Measure</th><th>Status</th><th class="n">Median</th><th>Unit</th><th class="n">CV %</th><th class="n">Reference</th><th class="n">Index</th><th class="n">Previous version</th><th>Change</th></tr>')
+    foreach ($m in @($Current.measures)) {
+        $pm = $null
+        if ($usePrev) { $pm = @($Previous.measures | Where-Object { $_.id -eq $m.id -and $_.status -eq 'ok' } | Select-Object -First 1)[0] }
+        $chg = $null
+        if ($pm -and $m.status -eq 'ok' -and $null -ne (Get-AVDTuneProp $m 'median') -and [double]$m.median -gt 0 -and [double]$pm.median -gt 0) {
+            $chg = if ($m.better -eq 'lower') { Get-AVDTuneBenchDelta $pm.median $m.median $thr } else { Get-AVDTuneBenchDelta $m.median $pm.median $thr }
+        }
+        $status = [string]$m.status; if ($m.status -ne 'ok' -and (Get-AVDTuneProp $m 'reason')) { $status += ': ' + [string]$m.reason }
+        if ((Get-AVDTuneProp $m 'unstable')) { $status += ' (instabil)' }
+        if ($m.status -eq 'ok' -and (Get-AVDTuneProp $m 'calibrated') -eq $false) { $status += ' (nicht kalibriert)' }
+        $med = if ($null -ne (Get-AVDTuneProp $m 'median')) { '{0:0.###}' -f [double]$m.median } else { '' }
+        $pmed = if ($pm) { '{0:0.###}' -f [double]$pm.median } else { '' }
+        [void]$h.AppendLine("<tr><td>$(& $e $m.id)</td><td>$(& $e $status)</td><td class=""n"">$(& $e $med)</td><td>$(& $e $m.unit)</td><td class=""n"">$(& $e (Get-AVDTuneProp $m 'cv'))</td><td class=""n"">$(& $e (Get-AVDTuneProp $m 'reference'))</td><td class=""n"">$(& $e (Get-AVDTuneProp $m 'index'))</td><td class=""n"">$(& $e $pmed)</td>$(& $deltaCell $chg)</tr>")
+    }
+    [void]$h.AppendLine('</table>')
+    $cap = Get-AVDTuneProp $Current 'capacity'
+    if ($cap) {
+        [void]$h.AppendLine('<h2>Capacity simulation</h2>')
+        $est = Get-AVDTuneProp $cap 'estimatedUsers'
+        $line = if ($null -ne $est) { "geschaetzte Nutzer (eigene Methode, an VSImax angelehnt, kein Login VSI Ergebnis): $est" } else { "Threshold not reached; at least $(Get-AVDTuneProp $cap 'atLeastUsers') users (own method, not a Login VSI result)" }
+        [void]$h.AppendLine("<p class=""big"">$(& $e $est)</p><p>$(& $e $line). Stopped: $(& $e (Get-AVDTuneProp $cap 'stopReason')).</p>")
+        $cc = Get-AVDTuneProp $Current 'capacityCompare'
+        if ($cc -and $null -ne (Get-AVDTuneProp $cc 'DeltaPercent')) { [void]$h.AppendLine("<p>Against the last run of the same VM size: $('{0:+0.0;-0.0;0.0} %' -f [double]$cc.DeltaPercent).</p>") }
+        [void]$h.AppendLine('<table><tr><th class="n">Users</th><th class="n">Median ms</th><th class="n">p95 ms</th><th class="n">CPU %</th><th class="n">Free MB</th><th class="n">Disk queue</th></tr>')
+        foreach ($l in @($cap.levels)) { [void]$h.AppendLine("<tr><td class=""n"">$(& $e $l.users)</td><td class=""n"">$(& $e $l.totalMedianMs)</td><td class=""n"">$(& $e $l.totalP95Ms)</td><td class=""n"">$(& $e (Get-AVDTuneProp $l 'cpuPercent'))</td><td class=""n"">$(& $e (Get-AVDTuneProp $l 'availableMemoryMB'))</td><td class=""n"">$(& $e (Get-AVDTuneProp $l 'diskQueue'))</td></tr>") }
+        [void]$h.AppendLine('</table>')
+    }
+    $gpu = Get-AVDTuneProp $sys 'gpu'
+    if ($gpu) { [void]$h.AppendLine("<h2>GPU</h2><p>$(& $e (Get-AVDTuneProp $gpu 'adapter')), driver $(& $e (Get-AVDTuneProp $gpu 'driver')), $(& $e (Get-AVDTuneProp $gpu 'vramMiB')) MiB.</p>") }
+    [void]$h.AppendLine('<h2>Run details</h2>')
+    $inf = Get-AVDTuneProp $Current 'info'
+    $errs = @((Get-AVDTuneProp $inf 'errors')); $warns = @((Get-AVDTuneProp $inf 'warnings'))
+    [void]$h.AppendLine("<p>Run $(& $e $Current.runId), kind $(& $e $Current.kind), $(& $e $Current.durationSec) s. Windows build $(& $e (Get-AVDTuneProp (Get-AVDTuneProp $sys 'windows') 'build')), Office $(& $e (Get-AVDTuneProp (Get-AVDTuneProp $sys 'office') 'build')). Warnings: $(& $e ($warns -join '; ')). Errors: $(& $e ($errs -join '; ')).</p>")
+    [void]$h.AppendLine('</body></html>')
+    $h.ToString()
+}
+
+function Save-AVDTuneBenchmarkReport {
+    # The report of an image version (its newest full result) with the comparison to the previous version; written like every file of AVDTune (admin-only, atomic)
+    param([Parameter(Mandatory)][string]$Root, [Parameter(Mandatory)][string]$ImageVersion, [string]$DataPath = $script:DataDefault)
+    if ($ImageVersion -notmatch '^[A-Za-z0-9._-]{1,40}$') { throw "The image version '$ImageVersion' cannot be used in a file name." }
+    $config = Get-AVDTuneBenchmarkConfig -DataPath $DataPath
+    $cur = @(Get-AVDTuneBenchmarkVersionResults -Root $Root | Where-Object { $_.system.imageVersion -ceq $ImageVersion })
+    if ($cur.Count -eq 0) { throw "No full benchmark result for image version $ImageVersion." }
+    $prev = Get-AVDTunePreviousVersionResult -Root $Root -ImageVersion $ImageVersion
+    $base = Get-AVDTuneBenchmarkBaseline -Root $Root
+    $cmp = $null
+    $html = New-AVDTuneBenchmarkReport -Current $cur[0] -Previous $prev -Baseline $base -Config $config
+    $path = Join-Path (Get-AVDTuneBenchmarkResultFolder $Root) "report-$ImageVersion.html"
+    Write-AVDTuneFile $path $html
+    $path
+}
+
+#endregion
+
 function ConvertFrom-AVDTuneBenchOutput {
     # Raw measures of a measure program command (parsed JSON) as plain objects
     param($Result)
@@ -837,7 +1341,7 @@ function ConvertFrom-AVDTuneBenchOutput {
 function Invoke-AVDTuneBenchRun {
     # One run: disk, CPU, memory, display, network, each group on its own so a failing group does not stop the rest. Returns @{ Measures; Errors }
     param([Parameter(Mandatory)]$Bench, [Parameter(Mandatory)]$Config, [Parameter(Mandatory)][string]$Root, [Parameter(Mandatory)][string]$WorkDir, [Parameter(Mandatory)][string]$DiskspdPath,
-        [ValidateSet('Full', 'Quick')][string]$Mode = 'Full', [switch]$WarmUp, [switch]$Sustained, [scriptblock]$Progress)
+        [ValidateSet('Full', 'Quick')][string]$Mode = 'Full', [switch]$WarmUp, [switch]$Sustained, [scriptblock]$Progress, [string]$Share, [string]$SiteDir)
     $scale = if ($WarmUp) { 0.4 } else { 1.0 }
     $diskSeconds = if ($WarmUp -or $Mode -eq 'Quick') { [int]$Config.diskspd.secondsShort } else { [int]$Config.diskspd.seconds }
     $all = @(); $errors = @()
@@ -854,7 +1358,13 @@ function Invoke-AVDTuneBenchRun {
         catch { $errors += "${cmd}: $($_.Exception.Message)" }
     }
     try { $all += @(Invoke-AVDTuneBenchNetwork -Bench $Bench -Config $Config -Mode $(if ($WarmUp) { 'Quick' } else { $Mode }) -Progress $Progress) } catch { $errors += "network: $($_.Exception.Message)" }
-    [pscustomobject]@{ Measures = @($all); Errors = @($errors) }
+    try { $all += @(Invoke-AVDTuneBenchApps -Bench $Bench -WorkDir $WorkDir -Mode $Mode -WarmUp:$WarmUp -SiteDir $SiteDir -Progress $Progress) } catch { $errors += "applications: $($_.Exception.Message)" }
+    $gpuInfo = $null; $gpuPresent = $false
+    try { $g = Invoke-AVDTuneBenchGpu -Bench $Bench -Scale $(if ($WarmUp -or $Mode -eq 'Quick') { 0.4 } else { 1.0 }) -Progress $Progress; $gpuInfo = $g.Info; $gpuPresent = $g.Present; $all += @($g.Measures) } catch { $errors += "gpu: $($_.Exception.Message)" }
+    if ($Share) {
+        try { $all += @(Invoke-AVDTuneBenchFslogix -Bench $Bench -Config $Config -Share $Share -WorkDir $WorkDir -DiskspdPath $DiskspdPath -Mode $Mode -WarmUp:$WarmUp -Progress $Progress) } catch { $errors += "fslogix: $($_.Exception.Message)" }
+    }
+    [pscustomobject]@{ Measures = @($all); Errors = @($errors); GpuInfo = $gpuInfo; GpuPresent = $gpuPresent }
 }
 
 #endregion
@@ -884,6 +1394,7 @@ function ConvertTo-AVDTuneBenchAggregate {
             $cv = [math]::Round((Get-AVDTuneBenchCv ([double[]]$vals)), 2)
             $entry.median = $med; $entry.cv = $cv; $entry.unstable = ($vals.Count -ge 2 -and $cv -gt $threshold)
             $entry.status = 'ok'
+            $entry.calibrated = -not ($ref -and (Get-AVDTuneProp $ref 'calibrated') -eq $false)
             if ($ref -and $med -gt 0) { $entry.reference = [double]$ref.value; $entry.index = Get-AVDTuneBenchRound (Get-AVDTuneBenchIndex $med ([double]$ref.value) ([string]$first.better)) }
             else { $entry.reference = $null; $entry.index = $null }
         }
@@ -1084,8 +1595,12 @@ function Invoke-AVDTuneBenchmark {
     param(
         [Parameter(Mandatory)]$Machine, [Parameter(Mandatory)]$Bench, [string]$Root = (Get-AVDTuneRoot),
         [ValidateSet('Full', 'Quick')][string]$Mode = 'Full', [ValidateSet('baseline', 'healthcheck', 'manual')][string]$Kind = 'manual',
-        [string]$User, [scriptblock]$Progress, [string]$DataPath = $script:DataDefault, [switch]$SkipIdleCheck
+        [string]$User, [scriptblock]$Progress, [string]$DataPath = $script:DataDefault, [switch]$SkipIdleCheck,
+        [string]$Share, [switch]$Capacity, [switch]$NoReport
     )
+    if ($Capacity -and $Mode -eq 'Quick') { throw 'The capacity simulation is not available in a quick run.' }
+    if (-not $PSBoundParameters.ContainsKey('Share')) { $Share = Get-AVDTuneBenchShare -Machine $Machine }
+    $siteDir = Join-Path $DataPath 'speedometer-3.1'
     $config = Get-AVDTuneBenchmarkConfig -DataPath $DataPath
     $reference = Get-AVDTuneBenchmarkReference -DataPath $DataPath -Name ([string]$config.reference)
     $userProgress = $Progress
@@ -1114,21 +1629,45 @@ function Invoke-AVDTuneBenchmark {
         $total = $runs + 1
         $done = 0
         & $say 'Warm-up run (not counted) ...' 10
-        $warm = Invoke-AVDTuneBenchRun -Bench $Bench -Config $config -Root $Root -WorkDir $work -DiskspdPath $diskspd -Mode $Mode -WarmUp -Progress ({ param($t, $p) & $say "Warm-up: $t" $null }.GetNewClosure())
+        $warm = Invoke-AVDTuneBenchRun -Bench $Bench -Config $config -Root $Root -WorkDir $work -DiskspdPath $diskspd -Mode $Mode -WarmUp -Share $Share -SiteDir $siteDir -Progress ({ param($t, $p) & $say "Warm-up: $t" $null }.GetNewClosure())
         $errors += @($warm.Errors | ForEach-Object { "warm-up $_" })
         $results = @()
+        $gpuInfo = $null
         for ($r = 1; $r -le $runs; $r++) {
             $pct = [int](12 + 80 * ($r - 1) / $runs)
             & $say "Run $r of $runs ..." $pct
-            $run = Invoke-AVDTuneBenchRun -Bench $Bench -Config $config -Root $Root -WorkDir $work -DiskspdPath $diskspd -Mode $Mode -Sustained:($r -eq 1) -Progress ({ param($t, $p) & $say "Run ${r} of ${runs}: $t" $pct }.GetNewClosure())
+            $run = Invoke-AVDTuneBenchRun -Bench $Bench -Config $config -Root $Root -WorkDir $work -DiskspdPath $diskspd -Mode $Mode -Sustained:($r -eq 1) -Share $Share -SiteDir $siteDir -Progress ({ param($t, $p) & $say "Run ${r} of ${runs}: $t" $pct }.GetNewClosure())
             $results += , @($run.Measures)
+            if ($run.GpuPresent) { $gpuInfo = $run.GpuInfo }
             $errors += @($run.Errors | ForEach-Object { "run $r $_" })
+        }
+        $capacityBlock = $null
+        if ($Capacity) {
+            try { $capacityBlock = Invoke-AVDTuneBenchCapacity -Bench $Bench -WorkDir $work -Progress ({ param($t, $p) & $say $t 93 }.GetNewClosure()) }
+            catch { $errors += "capacity: $($_.Exception.Message)" }
         }
         & $say 'Calculating the score ...' 94
         $measures = ConvertTo-AVDTuneBenchAggregate -Runs $results -Reference $reference -Config $config
-        $scores = Get-AVDTuneBenchmarkScores -Measures @($measures | ForEach-Object { [pscustomobject]@{ Id = $_.id; Status = $_.status; Index = (Get-AVDTuneProp $_ 'index'); Unstable = $_.unstable } }) -Config $config
+        $forScore = @($measures | ForEach-Object { [pscustomobject]@{ Id = $_.id; Status = $_.status; Index = (Get-AVDTuneProp $_ 'index'); Unstable = $_.unstable; Calibrated = (Get-AVDTuneProp $_ 'calibrated') } })
+        $scores = Get-AVDTuneBenchmarkScores -Measures $forScore -Config $config
+        $toBlock = {
+            param($sc)
+            $cats = [ordered]@{}
+            foreach ($k in $sc.Categories.Keys) { $c = $sc.Categories[$k]; $cats[$k] = [ordered]@{ index = $c.index; weight = $c.weight; measures = $c.measures; unstable = $c.unstable; uncalibrated = $c.uncalibrated } }
+            [ordered]@{ value = $sc.Host; unstable = $sc.Unstable; partial = $sc.Partial; missingCategories = @($sc.Missing); categories = $cats; provisional = $reference.Provisional; uncalibrated = $sc.Uncalibrated }
+        }.GetNewClosure()
         $categories = [ordered]@{}
-        foreach ($k in $scores.Categories.Keys) { $c = $scores.Categories[$k]; $categories[$k] = [ordered]@{ index = $c.index; weight = $c.weight; measures = $c.measures; unstable = $c.unstable } }
+        foreach ($k in $scores.Categories.Keys) { $c = $scores.Categories[$k]; $categories[$k] = [ordered]@{ index = $c.index; weight = $c.weight; measures = $c.measures; unstable = $c.unstable; uncalibrated = $c.uncalibrated } }
+        $fslScore = [ordered]@{ value = $null; status = 'skipped'; reason = 'no FSLogix share found (VHDLocations)' }
+        if ($Share) {
+            $fs = Get-AVDTuneBenchmarkScores -Measures $forScore -Config $config -Set fslogix
+            $fslScore = $(if ($null -ne $fs.Host) { & $toBlock $fs } else { [ordered]@{ value = $null; status = 'failed'; reason = 'no FSLogix measure worked' } })
+        }
+        $gpuScore = [ordered]@{ value = $null; status = 'unsupported'; reason = 'nicht vorhanden' }
+        if ($gpuInfo) {
+            $gs = Get-AVDTuneBenchmarkScores -Measures $forScore -Config $config -Set gpu
+            $gpuScore = $(if ($null -ne $gs.Host) { & $toBlock $gs } else { [ordered]@{ value = $null; status = 'failed'; reason = 'no GPU measure worked' } })
+        }
         $engine = & $Bench.EngineInfo
         $result = [ordered]@{
             schemaVersion = 1
@@ -1141,16 +1680,21 @@ function Invoke-AVDTuneBenchmark {
             started = $started.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ', [Globalization.CultureInfo]::InvariantCulture)
             durationSec = [int]((Get-Date) - $started).TotalSeconds
             system = Get-AVDTuneBenchmarkSystem -Machine $Machine -Bench $Bench -Root $Root
-            share = [ordered]@{ used = $false }
+            share = [ordered]@{ used = [bool]$Share; auth = $(if ($Share) { 'kerberos' } else { '' }) }
             scores = [ordered]@{
-                host = [ordered]@{ value = $scores.Host; unstable = $scores.Unstable; partial = $scores.Partial; missingCategories = @($scores.Missing); categories = $categories; provisional = $reference.Provisional }
-                fslogix = [ordered]@{ value = $null; status = 'skipped'; reason = 'not built yet' }
-                gpu = [ordered]@{ value = $null; status = 'skipped'; reason = 'not built yet' }
+                host = [ordered]@{ value = $scores.Host; unstable = $scores.Unstable; partial = $scores.Partial; missingCategories = @($scores.Missing); categories = $categories; provisional = $reference.Provisional; uncalibrated = $scores.Uncalibrated }
+                fslogix = $fslScore
+                gpu = $gpuScore
             }
             measures = @($measures)
             info = [ordered]@{ warnings = @($warnings); errors = @($errors); quiet = [ordered]@{ stopped = @($quiet.Stopped); failed = @($quiet.Failed) }; user = $User }
             tools = [ordered]@{ engine = $(if ($engine) { [ordered]@{ version = [string]$engine.Version; sha256 = [string]$engine.Sha256 } } else { $null }); diskspd = [ordered]@{ version = [string]$config.diskspd.version; sha256 = [string]$config.diskspd.exeSha256 } }
-            capacity = $null
+            capacity = $capacityBlock
+        }
+        if ($gpuInfo -and $gpuInfo.hardware) { $result.system.gpu = [ordered]@{ adapter = [string]$gpuInfo.adapter; driver = [string]$gpuInfo.driver; vramMiB = $gpuInfo.vramMiB } }
+        if ($capacityBlock) {
+            $prevCap = @(Get-AVDTuneBenchmarkResult -Root $Root | Where-Object { (Get-AVDTuneProp $_ 'capacity') -and $_.system.vmSize -ceq $result.system.vmSize } | Select-Object -Last 1)
+            if ($prevCap.Count -gt 0) { $result.capacityCompare = Compare-AVDTuneCapacity -Current $capacityBlock -Previous $prevCap[0].capacity -ThresholdPercent ([double]$config.run.deltaThresholdPercent) }
         }
         $result.integrity = [ordered]@{ sha256 = '' }
     }
@@ -1181,12 +1725,16 @@ function Invoke-AVDTuneBenchmark {
     if ($Kind -eq 'baseline' -and $Mode -eq 'Full' -and -not (Get-AVDTuneProp $state 'BaselineBenchmark')) { $values.BaselineBenchmark = $runId }
     [void](Set-AVDTuneState -Root $Root -Values $values)
     $logged = $false
+    $reportPath = $null
+    if ($state.ImageVersion -and -not $NoReport -and $Mode -eq 'Full') {
+        try { $reportPath = Save-AVDTuneBenchmarkReport -Root $Root -ImageVersion ([string]$state.ImageVersion) -DataPath $DataPath } catch { $warnings += "The report was not written: $($_.Exception.Message)" }
+    }
     if ($state.ImageVersion) {
         [void](Add-AVDTuneChangeLogEntry -Root $Root -Version ([string]$state.ImageVersion) -Category 'Benchmark' -Component 'Host' -ChangeType Note -Text $label -User $User -RunId $runId -Source Step)
         $logged = $true
     }
     & $say 'Done.' 100
-    [pscustomobject]@{ RunId = $runId; Path = $path; Result = $obj; Summary = $label; ChangeLogged = $logged; Errors = @($errors); Warnings = @($warnings) }
+    [pscustomobject]@{ RunId = $runId; Path = $path; Result = $obj; Summary = $label; ChangeLogged = $logged; ReportPath = $reportPath; Errors = @($errors); Warnings = @($warnings) }
 }
 
 function Get-AVDTuneBenchmarkSummaryText {
@@ -1196,15 +1744,22 @@ function Get-AVDTuneBenchmarkSummaryText {
     $cats = @($h.categories.PSObject.Properties | ForEach-Object { "$($_.Name) $($_.Value.index)" }) -join ', '
     $flags = @($Result.mode)
     if ($h.provisional) { $flags += 'vorlaeufige Referenz' }
+    if (Get-AVDTuneProp $h 'uncalibrated') { $flags += 'nicht kalibriert' }
     if ($h.partial) { $flags += 'Teilscore ohne ' + (@($h.missingCategories) -join '/') }
     if ($h.unstable) { $flags += 'instabil' }
     $val = if ($null -ne $h.value) { [string]$h.value } else { 'no score' }
-    "Benchmark $($Result.benchmarkVersion): Host $val ($(($flags) -join ', ')); $cats"
+    $extra = ''
+    $fsl = Get-AVDTuneProp $Result.scores 'fslogix'; $gpu = Get-AVDTuneProp $Result.scores 'gpu'
+    if ($null -ne (Get-AVDTuneProp $fsl 'value')) { $extra += "; FSLogix $($fsl.value)" }
+    if ($null -ne (Get-AVDTuneProp $gpu 'value')) { $extra += "; GPU $($gpu.value)" }
+    $cap = Get-AVDTuneProp $Result 'capacity'
+    if ($cap -and $null -ne (Get-AVDTuneProp $cap 'estimatedUsers')) { $extra += "; capacity about $($cap.estimatedUsers) users" }
+    "Benchmark $($Result.benchmarkVersion): Host $val ($(($flags) -join ', ')); $cats$extra"
 }
 
 #endregion
 
-Export-ModuleMember -Function Get-AVDTuneBenchRound, Get-AVDTuneBenchmarkConfig, Invoke-AVDTuneChildProcess, Initialize-AVDTuneBenchTemp, Get-AVDTuneChildEnvironment, Get-AVDTuneBenchmarkReference, Get-AVDTuneBenchCategoryKey, Get-AVDTuneBenchMedian, Get-AVDTuneBenchCv, Get-AVDTuneBenchIndex,
+Export-ModuleMember -Function Get-AVDTuneBenchShare, Get-AVDTuneBenchShareHost, Invoke-AVDTuneBenchApps, Invoke-AVDTuneBenchGpu, Invoke-AVDTuneBenchFslogix, Invoke-AVDTuneBenchCapacity, Compare-AVDTuneCapacity, Get-AVDTuneVersionSortKey, Get-AVDTuneBenchmarkVersionResults, Get-AVDTunePreviousVersionResult, Get-AVDTuneBenchDelta, New-AVDTuneBenchmarkReport, Save-AVDTuneBenchmarkReport, Get-AVDTuneAppProgramPath, Invoke-AVDTuneVhdCycle, Get-AVDTuneBenchCategorySet, Get-AVDTuneBenchRound, Get-AVDTuneBenchmarkConfig, Invoke-AVDTuneChildProcess, Initialize-AVDTuneBenchTemp, Get-AVDTuneChildEnvironment, Get-AVDTuneBenchmarkReference, Get-AVDTuneBenchCategoryKey, Get-AVDTuneBenchMedian, Get-AVDTuneBenchCv, Get-AVDTuneBenchIndex,
     Get-AVDTuneBenchGeometricMean, Get-AVDTuneBenchWeightedGeometricMean, Get-AVDTuneBenchPercentile, Get-AVDTuneBenchmarkScores, ConvertFrom-AVDTuneDiskspdXml, New-AVDTuneBenchAdapter,
     Get-AVDTuneDiskspd, Test-AVDTuneBenchmarkPreconditions, Wait-AVDTuneUpdateIdle, Get-AVDTuneBenchmarkJournalPath, Get-AVDTuneBenchmarkRestoreScriptPath, New-AVDTuneBenchmarkRestoreScript,
     Start-AVDTuneBenchmarkQuiet, Stop-AVDTuneBenchmarkQuiet, Get-AVDTuneBenchmarkCrash, Repair-AVDTuneBenchmarkCrash, Test-AVDTuneBenchmarkClean, Get-AVDTuneBenchRestoreAction, Remove-AVDTuneDiskspdCache, Invoke-AVDTuneBenchDisk, Invoke-AVDTuneBenchNetwork,

@@ -298,3 +298,16 @@ All recommendations of section 9 were accepted: D1 reference host D8s_v5 with Pr
 - Session host sizing: https://learn.microsoft.com/windows-server/remote/remote-desktop-services/virtual-machine-recs (2025-07-23; D8s_v5, D8as_v4 and others as examples).
 - .NET 10: https://github.com/dotnet/core/blob/main/release-notes/10.0/supported-os.md and `releases.json` (10.0.15 of 2026-11-10, end of support 2028-11-14).
 - FSLogix download: `aka.ms/fslogix_download` redirect and `Content-Length`, checked with `curl -I`.
+
+## 11. Status of round 2 (issue #14)
+
+Built: application starts and Speedometer (`apps`), FSLogix score (diskspd on the share, `share`, VirtDisk profile container), GPU score, optional capacity simulation (`capacity`), HTML report per image version with the comparison to the previous version. Not live-verified on a VM: all of it runs against fakes and unit tests only.
+
+Deviations from sections 1 to 4, each for a reason that does not need a decision of the user now:
+- No UI Automation (the self-contained runtime has no managed wrapper without a third-party library): "ready" is the window class visible (Word `OpusApp` with `_WwG`, Excel `XLMAIN` with `EXCEL7`, Explorer the new folder window by title, Edge the page call-back) plus `WaitForInputIdle`. The capacity probe is a fixed set of work steps with the cost pattern of each application (CPU burst, memory, small files, a PowerShell start), timed per action; it touches no window and sends no input.
+- Outlook (test profile and PST) and Teams (AUMID, window class not verified) are `skipped` with the reason. No HKCU policy values to suppress first-run dialogs (a change of the master, value names not verified).
+- GPU: 3D scene, DirectCompute; hardware encode and decode (async MFT) are `unsupported` ("not part of this version"), so the GPU score is a partial score and says so.
+- The Speedometer copy (62 MB, 1118 files) is not in the repository yet: without `Bench\data\speedometer-3.1\index.html` the measure is `skipped`.
+- Reference values of all new measures are placeholders with `calibrated: false`; results and the report say "nicht kalibriert".
+- Environment of the child: only the application starts and the capacity run get USERPROFILE, APPDATA, LOCALAPPDATA, USERNAME, USERDOMAIN, COMPUTERNAME, HOMEDRIVE, HOMEPATH (Office and Edge need a profile); the values come from the Windows folder API and the token, never from the inherited environment.
+- Programs of the application starts: path from HKLM App Paths or the Windows folders, admin-only folder, Authenticode of Microsoft (`Test-AVDTuneToolTrust`), file held open with `FileShare.Read` for the whole run; the measure program accepts only such a path below Windows or Program Files with the expected file name.
