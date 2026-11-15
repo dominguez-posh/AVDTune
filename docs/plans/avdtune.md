@@ -98,6 +98,66 @@ New:
 - The exact app id and AppUserModelID scheme of Edge and which policy options Edge honours (`custom_name`, `custom_icon`) are verified in a spike on a Windows 11 multi-session VM before the build: pinned icon, running window, Start menu, after a logon with FSLogix.
 - Migration: AVDTune reads the existing list (names, URLs, base64 icons) from such a script and offers to import it as web app entries.
 
+## 3b. Printer drivers from a print server (added 2026-11-15)
+
+Users must not install printer drivers themselves (Point and Print restriction since PrintNightmare), so every driver of the print server has to be in the image.
+
+Findings in the current script (`Install-PrinterDriver.ps1` of a customer environment):
+- `pnputil /export-driver *` exports every third-party driver of the server (network, storage, VM drivers of a domain controller), and all of them are added to the image's driver store.
+- The drivers are only added to the driver store (`pnputil /add-driver`), not installed as printer drivers (`Add-PrinterDriver`), so the version that Point and Print expects may still be missing.
+- `TrustedHosts` is overwritten (other entries lost) and stays set; WinRM over HTTP with a domain admin; the password as a placeholder in the script; `C:\PrinterdriverToImport` stays in the image.
+
+New (page "Drucker", identity models with a domain; with Entra only the page points to Universal Print):
+1. The user picks the print server (list of print servers found in AD, or a name). AVDTune reads its shared printers with driver name, version, architecture, package-aware or not, with the domain account of the start sequence (spooler RPC, no WinRM needed).
+2. The user selects printers (default: all shared); the needed drivers are the distinct drivers of those printers.
+3. Install per driver: package-aware drivers by a temporary printer connection as admin (`Add-Printer -ConnectionName`), which downloads exactly the server's driver package, then the connection is removed and the driver stays. Drivers that are not package-aware: only their own INF and files are exported on the server (`pnputil /export-driver <oem>.inf`, by WinRM only when needed, `TrustedHosts` appended and restored), copied, installed with `pnputil /add-driver` plus `Add-PrinterDriver`; temporary files removed on both sides.
+4. Point and Print policies in the image: `RestrictDriverInstallationToAdministrators=1`, package Point and Print limited to the chosen server(s) (`PackagePointAndPrintServerList`), so users connect printers without prompts and without driver installs.
+5. Check: each selected driver installed with the server's version; result in the change log (driver, version, server, printers that use it).
+
+Maintenance: the Updates page compares the driver versions on the print server with the installed ones, shows new and changed drivers and drivers of printers added on the server since the last run, and updates them like software (in maintenance mode, change log entry). Drivers no printer of the server uses any more can be removed.
+
+## 3c. Coverage of the hand-written Golden Master log (checked 2026-11-15)
+
+Every general step of the real change log and where it is in AVDTune. Customer software (DMS, accounting, ERP clients and their ini/registry details) is not built in; it comes as packages or as own steps.
+
+| Step in the log | In AVDTune |
+|---|---|
+| Base image from the Marketplace (Windows 11 25H2 multi-session + M365, NVMe) by Terraform | out of scope for building; the Overview and the change log record the source image (publisher, offer, SKU, version from the Instance Metadata Service), disk controller and VM size |
+| German language for all users, reboot test | Setup: language and region for all users, default user and welcome screen, reboot check |
+| Visual effects, transparency, power plan | Optimization |
+| Defender onboarding for non-persistent VDI (local scripts, rollout through Hydra) | VDI components: onboarding package from the library, check that it must not run on the master itself |
+| Benchmark before and after optimization | Benchmark (section 6, baseline and before every seal) |
+| VDOT | Optimization (data re-implemented) |
+| Defender exclusions | FSLogix (section 5a) |
+| Browser hardware acceleration, sleeping tabs | Optimization |
+| Widgets, news, Start ads, Bing search | Optimization |
+| Windows and Office updates | Updates |
+| Remove Xbox/gaming | Optimization |
+| 7-Zip, Adobe Reader, runtimes (x86/x64), password manager | Software (winget/Chocolatey/library) |
+| Printer drivers from the old DC | Printers (section 3b) |
+| Office reinstalled in German | Office page (language in the ODT form) |
+| NTFS of `C:\admin` adjusted | Cleanup: check of admin folders on C: (scripts, exports, installers) readable by users; AVDTune's own folders are admin-only; offer to remove or lock them before seal |
+| Windows Update and Update Orchestrator disabled | Update block (section 4; policy instead of disabled services, with reason) |
+| Public desktop shortcuts, PWAs, FSLogix hiding rules | Shortcuts and web apps (section 3a, 3d), App Masking (5b) |
+| Watermark for the pilot | Watermark (section 5) |
+| Windows update that failed (one KB) and DISM cleanup / RestoreHealth | Updates: result code per update with explanation, retry, `DISM /RestoreHealth` and `sfc` as repair steps offered on failure, component cleanup in Cleanup |
+| Host file entries for servers | Own steps: hosts file entries (section 3d) |
+| Wallpaper replaced (`img0.jpg`, owner TrustedInstaller) | User experience (with ownership restored), optional lock screen image |
+| Shortcuts with arguments and working folder on network shares, own icons | Shortcuts (section 3d) |
+| Folder structures for an application | Own steps |
+| Fonts installed | Fonts (section 3d) |
+| Shared computer activation for Microsoft 365 | Office page |
+| FSLogix `redirections.xml` (incl. the WAM/TokenBroker excludes that were added and removed again) | FSLogix (5a), WAM/TokenBroker never excluded, with reason |
+| Default user profile reset to a fresh Windows state | Cleanup: check of `C:\Users\Default` against a clean reference (size, extra folders, NTUSER.DAT changes), reset offered |
+| .NET Desktop Runtime as a dependency, .NET security updates | Software; Windows Update with "updates for other Microsoft products" (Microsoft Update service registered) so .NET, and other Microsoft products get updates |
+| Edge, Acrobat, password manager updates | Updates |
+
+## 3d. Shortcuts, fonts, own steps (added 2026-11-15)
+
+- **Shortcuts**: public desktop and/or Start menu; target, arguments, working folder (also UNC paths), icon (file from the library or extracted from the target), App Masking group. Listed with a check whether target and icon are reachable.
+- **Fonts**: install for all users from the library (`.ttf`/`.otf`), listed and removable.
+- **Own steps** for customer details without code in AVDTune: registry value, ini value, hosts file entry, folder with permissions, file copy from the library, script from the library (signed or with SHA256 from the library manifest). Each own step has Test/Apply like the built-in steps, runs again after a rollback, and is recorded in the change log.
+
 ## 4. Updates hidden for users, maintenance mode
 
 One switch with a clear state on the Overview. "Blocked" (normal state, also in the image):
@@ -161,6 +221,12 @@ Roles the admin needs: Reader on the storage account, Storage File Data Privileg
 
 The user wants a full rework, GPU included. Before building, the feature developer writes a short benchmark design (measures, method, score, report) for the user to approve. Fixed points so far:
 
+When it runs (user decision 2026-11-15):
+- **Baseline**: once at the very beginning, on the first run right after the snapshot gate and before AVDTune changes anything. It is the reference of the master.
+- **Before every seal**: required; the seal checklist stays red until a benchmark of the current image version exists and is not older than the last change.
+- Any time by hand in between (e.g. after optimization).
+- Every result goes into the protocol, the change log of the version and the SharePoint list, with the comparison to the baseline and to the benchmark of the previous sealed version (better/worse per area, threshold 10%).
+
 GPU (for NV/NC VMs, skipped with a note on VMs without GPU):
 - Detect: adapter, driver version, VRAM, vGPU partition (`Get-CimInstance Win32_VideoController`, `nvidia-smi`/AMD tools when present), whether the RDS policies use the hardware adapter, H.264/AVC444 and hardware encoding.
 - Render: a fixed off-screen Direct3D scene (WPF/D3D11 through a small included .NET program) with frames per second at a fixed resolution, and the same scene through the software renderer as a reference.
@@ -209,10 +275,10 @@ Elevated tool on a machine that becomes the image of all users: runs from a prot
 
 | Phase | Content |
 |---|---|
-| 1 | Shell in PackTune look, elevation, engine, state, protocol and change log, Overview; first-run question of the identity model (stored, used by the start sequence); start sequence: M365/Azure sign-in, DC connection and discovery when a DC is used, snapshot gate with name confirmation |
+| 1 | Shell in PackTune look, elevation, engine, state, protocol and change log, Overview (incl. source image); first-run question of the identity model (stored, used by the start sequence); start sequence: M365/Azure sign-in, DC connection and discovery when a DC is used, snapshot gate with name confirmation |
 | 2 | Updates page (Windows, Office, Edge/Teams/OneDrive/FSLogix/Defender, software) and update block with maintenance mode |
 | 3 | Environment wizard (identity model), FSLogix setup and function test, automatic storage setup (Premium account, share, private endpoint, identity, permissions), storage check; App Masking with groups in AD or Entra; SharePoint change log list; environment document |
-| 4 | Software from the library and catalog, web apps (PWA) with icon (spike first) |
+| 4 | Software from the library and catalog, web apps (PWA) with icon (spike first), printer drivers from a print server (also in maintenance), shortcuts, fonts, own steps |
 | 5 | Benchmark: design for approval, then new engine incl. GPU, comparison per version, AVD-Benchmark repo stand-alone |
 | 6 | Setup: Office, language, VDI components, optimizations, user experience, watermark |
 | 7 | Cleanup & seal (last button, checklist), export, docs and demo |
