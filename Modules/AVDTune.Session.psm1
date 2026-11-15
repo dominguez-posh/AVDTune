@@ -40,14 +40,14 @@ $script:GraphAppId = '00000003-0000-0000-c000-000000000000'
 $script:ArmAppId = '797f4846-ba00-4fd7-ba43-dac1f8f63013'   # Windows Azure Service Management API
 $script:AppName = 'AVDTune'
 $script:AppTag = 'AVDTune'
-$script:AppNote = 'Created by AVDTune for its own sign-in (public client, http://localhost, delegated permissions only). Not used by PackTune.'
+$script:AppNote = 'Created by AVDTune for its own sign-in (public client, http://localhost, delegated permissions only, assigned accounts only). Not used by PackTune.'
 # Delegated permissions of AVDTune's own registration per resource (openid and profile: the shared sign-in asks for them every time)
 $script:AppPermissions = [ordered]@{
     '00000003-0000-0000-c000-000000000000' = @('Group.Read.All', 'DeviceManagementApps.Read.All', 'Sites.Selected', 'offline_access', 'openid', 'profile')
     '797f4846-ba00-4fd7-ba43-dac1f8f63013' = @('user_impersonation')
 }
-$script:SetupConsentNote = "The consent for Application.ReadWrite.All and DelegatedPermissionGrant.ReadWrite.All that the setup sign-in gives Microsoft's app 'Microsoft Graph Command Line Tools' stays in the tenant afterwards; AVDTune used it only to create its own app registration. Remove it when it is not needed any more: Entra admin center > Enterprise applications > Microsoft Graph Command Line Tools > Permissions (Admin consent and User consent) > Revoke, or with Microsoft Graph PowerShell remove its oauth2PermissionGrant (Remove-MgOauth2PermissionGrant) or take these two permissions out of its scope (Update-MgOauth2PermissionGrant)."
-$script:RoleText = 'Creating the app registration needs the role Application Administrator or Cloud Application Administrator; the admin consent for Microsoft Graph needs Privileged Role Administrator (or Global Administrator).'
+$script:SetupConsentNote = "The setup sign-in gives Microsoft's app 'Microsoft Graph Command Line Tools' the permissions Application.ReadWrite.All and DelegatedPermissionGrant.ReadWrite.All for your account. At the end AVDTune takes these two out of your own consent for that app again; the rest of that consent (for example User.Read) and the grant itself stay. If you confirmed the consent for the whole organization in the sign-in window, that one stays: remove the two permissions there (Entra admin center > Enterprise applications > Microsoft Graph Command Line Tools > Permissions, or with Microsoft Graph PowerShell Update-MgOauth2PermissionGrant; never needed by AVDTune afterwards)."
+$script:RoleText = 'Creating the app registration and assigning your account needs the role Application Administrator or Cloud Application Administrator; the consent for Microsoft Graph permissions needs Privileged Role Administrator (or Global Administrator).'
 
 function Get-AVDTuneSetupConsentNote { $script:SetupConsentNote }
 
@@ -200,7 +200,7 @@ function Connect-AVDTuneSession {
     param([Parameter(Mandatory)]$Session, [string]$TenantId, [Parameter(Mandatory)][string]$ClientId, [string]$LoginHint)
     $TenantId = ([string]$TenantId).Trim()
     if ($TenantId -and -not (Test-AVDTuneTenantGuid $TenantId) -and -not (Test-AVDTuneDomainName $TenantId.ToLowerInvariant())) { throw 'The saved tenant is neither a tenant ID nor a domain name (first-run questions).' }
-    if ($ClientId -notmatch '^[0-9a-fA-F-]{36}$') { throw 'The client ID of the app registration is not set or not a GUID (first-run questions).' }
+    if (-not (Test-AVDTuneTenantGuid $ClientId)) { throw 'The client ID of the app registration is not set or not a GUID (first-run questions).' }
     if ($ClientId -ieq $script:SetupClientId) { throw "Microsoft's setup app is not allowed for AVDTune. Use the client ID of AVDTune's own app registration." }
     if ($LoginHint -and -not (Get-AVDTuneAccountDomain $LoginHint)) { throw 'The account must look like name@domain.' }
     Disconnect-AVDTuneSession $Session
@@ -362,18 +362,45 @@ function Get-AVDTuneGraphFilterPath([string]$Collection, [string]$Filter, [strin
     "/v1.0/$Collection`?`$filter=" + [Uri]::EscapeDataString($Filter) + $(if ($Select) { "&`$select=$Select" } else { '' })
 }
 
+function Get-AVDTuneAppRegistrationProblems {
+    <#
+        Why an existing app registration may not be used as AVDTune's (review of issue #11): anything that lets it work as more than a
+        public client of this tenant on http://localhost. Returns the problems as text (empty: usable).
+    #>
+    param($App, [object[]]$Federated)
+    $p = New-Object System.Collections.ArrayList
+    if (@(Get-AVDTuneProp $App 'passwordCredentials' | Where-Object { $_ }).Count -gt 0) { [void]$p.Add('it has a client secret') }
+    if (@(Get-AVDTuneProp $App 'keyCredentials' | Where-Object { $_ }).Count -gt 0) { [void]$p.Add('it has a certificate') }
+    if (@($Federated | Where-Object { $_ }).Count -gt 0) { [void]$p.Add('it has a federated credential') }
+    if (@(Get-AVDTuneProp (Get-AVDTuneProp $App 'web') 'redirectUris' | Where-Object { $_ }).Count -gt 0) { [void]$p.Add('it has web redirects') }
+    if (@(Get-AVDTuneProp (Get-AVDTuneProp $App 'spa') 'redirectUris' | Where-Object { $_ }).Count -gt 0) { [void]$p.Add('it has single-page-app redirects') }
+    if ([string](Get-AVDTuneProp $App 'signInAudience') -ne 'AzureADMyOrg') { [void]$p.Add("it is not limited to this tenant ($([string](Get-AVDTuneProp $App 'signInAudience')))") }
+    $public = @(Get-AVDTuneProp (Get-AVDTuneProp $App 'publicClient') 'redirectUris' | Where-Object { $_ })
+    if (($public -join '|') -ne 'http://localhost') { [void]$p.Add("its public client redirects are not only http://localhost ($($public -join ', '))") }
+    if (@(Get-AVDTuneProp $App 'identifierUris' | Where-Object { $_ }).Count -gt 0) { [void]$p.Add('it exposes an API (identifier URIs)') }
+    @($p)
+}
+
 function Install-AVDTuneAppRegistration {
     <#
-        Creates (or finds and updates) AVDTune's own app registration 'AVDTune' in the tenant of the administrator and grants the admin
-        consent. Setup sign-in: Microsoft's public client 'Microsoft Graph Command Line Tools' at 'organizations' (or the saved tenant) with
+        Creates AVDTune's own app registration 'AVDTune' in the tenant of the administrator, or checks and repairs the one whose client ID is
+        saved in environment.json (-ExistingClientId). A registration is never taken over by its name (anyone may create one named
+        'AVDTune' and make the admin its owner); others with that name are only named in the notes.
+        Setup sign-in: Microsoft's public client 'Microsoft Graph Command Line Tools' at 'organizations' (or the saved tenant) with
         Application.ReadWrite.All and DelegatedPermissionGrant.ReadWrite.All; the tid of that token is the tenant. Then through Graph:
-        registration (public client, redirect http://localhost, tag and note 'AVDTune', delegated permissions of $script:AppPermissions,
-        single tenant), service principal, oauth2PermissionGrant AllPrincipals per resource. A registration found by name is reused only
-        when it carries the tag, the redirect and the signed-in account is its only owner (anyone may name an app 'AVDTune').
-        No secret, no certificate. The setup token is dropped at the end. Returns TenantId (GUID), ClientId, Account, Created, Notes.
+          registration   public client, redirect http://localhost only, single tenant, tag, note (date, computer, account), the delegated
+                         permissions of $script:AppPermissions; no secret, no certificate, no web or SPA redirect, no API
+          enterprise app appRoleAssignmentRequired = true: only assigned accounts can sign in
+          assignment     the signed-in admin (default role 00000000-0000-0000-0000-000000000000)
+          consent        oauth2PermissionGrant consentType 'Principal' for the signed-in admin only, one per resource (Graph, Azure
+                         Service Management); no consent for the whole organization
+        Another administrator is added by running the setup as that administrator (sign-in step: "Set up again"), or by hand (docs).
+        At the end the two setup permissions are taken out of the admin's own consent for 'Microsoft Graph Command Line Tools' again
+        (the grant itself stays). No secret, no certificate. The setup token is dropped. Returns TenantId, ClientId, Account, Created, Notes.
     #>
     [CmdletBinding()]
-    param([Parameter(Mandatory)]$Auth, [string]$TenantId, [string]$LoginHint, [string]$TempRoot = [IO.Path]::GetTempPath(), [int]$RetryDelaySeconds = 5)
+    param([Parameter(Mandatory)]$Auth, [string]$TenantId, [string]$LoginHint, [string]$ExistingClientId, [string]$TempRoot = [IO.Path]::GetTempPath(), [int]$RetryDelaySeconds = 5,
+        [string]$Computer = $env:COMPUTERNAME)
     $TenantId = ([string]$TenantId).Trim()
     if ($LoginHint -and -not (Get-AVDTuneAccountDomain $LoginHint)) { throw 'The account must look like name@domain.' }
     $notes = New-Object System.Collections.ArrayList
@@ -383,6 +410,9 @@ function Install-AVDTuneAppRegistration {
     finally { [void](Remove-AVDTuneSignInLeftovers -TempRoot $TempRoot) }
     $token = [string](Get-AVDTuneProp $answer 'access_token'); $answer = $null
     if (-not $token) { throw 'The setup sign-in returned no access token.' }
+    $g = { param($Method, $Path, $Body, $Step) Invoke-AVDTuneSetupGraph -Auth $Auth -Token $token -Method $Method -Path $Path -Body $Body -Step $Step }
+    $list = { param($Path, $Step) $b = & $g GET $Path $null $Step; @(Get-AVDTuneProp $b 'value') | Where-Object { $null -ne $_ } }
+    $me = ''; $graphSpId = ''
     try {
         $claims = Get-AVDTuneTokenClaims $token
         $tid = ([string](Get-AVDTuneProp $claims 'tid')).ToLowerInvariant()
@@ -393,9 +423,8 @@ function Install-AVDTuneAppRegistration {
             if ($need -notin $have) { throw "The setup sign-in has no consent for $need. An administrator must confirm it in the sign-in window. $script:RoleText" }
         }
         $me = [string](Get-AVDTuneProp $claims 'oid')
+        if (-not $me) { throw 'The token of the setup sign-in names no account (oid).' }
         $account = [string]$(if (Get-AVDTuneProp $claims 'upn') { $claims.upn } else { Get-AVDTuneProp $claims 'preferred_username' })
-        $g = { param($Method, $Path, $Body, $Step) Invoke-AVDTuneSetupGraph -Auth $Auth -Token $token -Method $Method -Path $Path -Body $Body -Step $Step }
-        $list = { param($Path, $Step) $b = & $g GET $Path $null $Step; @(Get-AVDTuneProp $b 'value') | Where-Object { $null -ne $_ } }
 
         # The service principals of the resources and the IDs of the permissions
         $access = @(); $resourceSp = @{}
@@ -415,29 +444,31 @@ function Install-AVDTuneAppRegistration {
             }
             $access += @{ resourceAppId = $resApp; resourceAccess = @($ids) }
         }
+        $graphSpId = $resourceSp[$script:GraphAppId]
 
-        # An earlier registration of AVDTune: name, tag, redirect and the signed-in account as its only owner
+        # Only the registration saved in environment.json counts, and only after the check; never one found by its name
         $app = $null
-        foreach ($c in @(& $list (Get-AVDTuneGraphFilterPath 'applications' "displayName eq '$script:AppName'" 'id,appId,displayName,publicClient,tags') 'search the app registration')) {
-            if (-not $c) { continue }
-            $tagged = @($c.tags) -contains $script:AppTag
-            $redirect = @(Get-AVDTuneProp (Get-AVDTuneProp $c 'publicClient') 'redirectUris') -contains 'http://localhost'
-            $owners = @(@(& $list "/v1.0/applications/$($c.id)/owners?`$select=id" 'read the owners of the app registration') | ForEach-Object { [string]$_.id })
-            $mine = $me -and $owners.Count -gt 0 -and @($owners | Where-Object { $_ -ne $me }).Count -eq 0
-            if ($tagged -and $redirect -and $mine) { $app = $c; break }
-            [void]$notes.Add("The app registration '$($c.displayName)' ($($c.appId)) is not reused: $(if (-not $tagged) { 'it has no AVDTune tag' } elseif (-not $redirect) { 'it has no redirect http://localhost' } else { 'you are not its only owner' }).")
+        if ($ExistingClientId) {
+            $c = @(& $list (Get-AVDTuneGraphFilterPath 'applications' "appId eq '$ExistingClientId'" 'id,appId,displayName,signInAudience,passwordCredentials,keyCredentials,web,spa,publicClient,identifierUris') 'read the saved app registration') | Select-Object -First 1
+            if (-not $c) { [void]$notes.Add("Warning: the saved app registration $ExistingClientId was not found in the tenant; a new one is created.") }
+            else {
+                $fed = @(& $list "/v1.0/applications/$($c.id)/federatedIdentityCredentials" 'read the federated credentials of the saved app registration')
+                $problems = @(Get-AVDTuneAppRegistrationProblems $c $fed)
+                if ($problems.Count -eq 0) { $app = $c; [void]$notes.Add("The saved app registration $ExistingClientId was checked (public client on http://localhost only, this tenant only, no secret, certificate, federated credential or API) and is used.") }
+                else { [void]$notes.Add("Warning: the saved app registration $ExistingClientId is not used, because $($problems -join '; '). A new one is created; check the old one in the Entra admin center.") }
+            }
         }
+        $same = @(& $list (Get-AVDTuneGraphFilterPath 'applications' "displayName eq '$script:AppName'" 'id,appId') 'look for other registrations with the name' | Where-Object { -not $app -or $_.appId -ne $app.appId })
+        if ($same.Count -gt 0) { [void]$notes.Add("Note: $($same.Count) other app registration(s) named '$script:AppName' exist in the tenant ($(@($same | ForEach-Object { $_.appId }) -join ', ')). AVDTune does not use them; one you do not know may be an attempt to collect your consent, check it in the Entra admin center.") }
         $definition = @{
             displayName = $script:AppName; isFallbackPublicClient = $false; publicClient = @{ redirectUris = @('http://localhost') }
-            requiredResourceAccess = @($access); tags = @($script:AppTag); notes = $script:AppNote
+            requiredResourceAccess = @($access); tags = @($script:AppTag)
         }
         $created = $false
-        if ($app) {
-            [void](& $g PATCH "/v1.0/applications/$($app.id)" $definition 'update the app registration')
-            [void]$notes.Add("App registration 'AVDTune' found ($($app.appId)); its permissions were set again.")
-        }
+        if ($app) { [void](& $g PATCH "/v1.0/applications/$($app.id)" $definition 'update the app registration') }
         else {
             $definition.signInAudience = 'AzureADMyOrg'
+            $definition.notes = "$script:AppNote Created on $((Get-Date).ToString('yyyy-MM-dd')) on $(Remove-AVDTuneControlCharacters $Computer 60) by $(Remove-AVDTuneControlCharacters $account 120)."
             $app = & $g POST '/v1.0/applications' $definition 'create the app registration'
             $created = $true
             [void]$notes.Add("App registration 'AVDTune' created ($($app.appId)).")
@@ -445,26 +476,55 @@ function Install-AVDTuneAppRegistration {
         $clientId = [string]$app.appId
         if (-not (Test-AVDTuneTenantGuid $clientId) -or $clientId -ieq $script:SetupClientId) { throw "The app registration came back without a usable client ID; nothing was saved." }
 
-        # Service principal (enterprise app); Graph may not know a new registration for some seconds
+        # Enterprise app: only assigned accounts may sign in. Graph may not know a new registration for some seconds.
         $sp = $null
         for ($try = 1; -not $sp; $try++) {
-            $sp = @(& $list (Get-AVDTuneGraphFilterPath 'servicePrincipals' "appId eq '$clientId'" 'id') 'read the enterprise app') | Select-Object -First 1
+            $sp = @(& $list (Get-AVDTuneGraphFilterPath 'servicePrincipals' "appId eq '$clientId'" 'id,appRoleAssignmentRequired') 'read the enterprise app') | Select-Object -First 1
             if ($sp) { break }
-            try { $sp = & $g POST '/v1.0/servicePrincipals' @{ appId = $clientId; tags = @($script:AppTag) } 'create the enterprise app' }
+            try { $sp = & $g POST '/v1.0/servicePrincipals' @{ appId = $clientId; tags = @($script:AppTag); appRoleAssignmentRequired = $true } 'create the enterprise app' }
             catch { if ($try -ge 6 -or $_.Exception.Message -like 'Your account may not*') { throw }; if ($RetryDelaySeconds -gt 0) { Start-Sleep -Seconds ($RetryDelaySeconds * $try) } }
         }
+        if (-not [bool](Get-AVDTuneProp $sp 'appRoleAssignmentRequired')) { [void](& $g PATCH "/v1.0/servicePrincipals/$($sp.id)" @{ appRoleAssignmentRequired = $true } 'require an assignment for the enterprise app') }
+        $assigned = @(& $list "/v1.0/servicePrincipals/$($sp.id)/appRoleAssignedTo" 'read the assignments of the enterprise app' | Where-Object { [string]$_.principalId -eq $me })
+        if ($assigned.Count -eq 0) { [void](& $g POST "/v1.0/servicePrincipals/$($sp.id)/appRoleAssignedTo" @{ principalId = $me; resourceId = [string]$sp.id; appRoleId = '00000000-0000-0000-0000-000000000000' } 'assign your account to the enterprise app') }
 
-        # Admin consent for the whole organization, per resource
+        # Consent for the signed-in admin only (consentType Principal), per resource
         foreach ($resApp in $script:AppPermissions.Keys) {
             $scopeText = ($script:AppPermissions[$resApp] -join ' ')
-            $grant = @(& $list (Get-AVDTuneGraphFilterPath 'oauth2PermissionGrants' "clientId eq '$($sp.id)' and consentType eq 'AllPrincipals' and resourceId eq '$($resourceSp[$resApp])'" '') 'read the admin consent') | Select-Object -First 1
-            if ($grant) { [void](& $g PATCH "/v1.0/oauth2PermissionGrants/$($grant.id)" @{ scope = $scopeText } 'grant the admin consent') }
-            else { [void](& $g POST '/v1.0/oauth2PermissionGrants' @{ clientId = [string]$sp.id; consentType = 'AllPrincipals'; resourceId = $resourceSp[$resApp]; scope = $scopeText } 'grant the admin consent') }
+            $grant = @(& $list (Get-AVDTuneGraphFilterPath 'oauth2PermissionGrants' "clientId eq '$($sp.id)' and consentType eq 'Principal' and principalId eq '$me' and resourceId eq '$($resourceSp[$resApp])'" '') 'read the consent') | Select-Object -First 1
+            if ($grant) { [void](& $g PATCH "/v1.0/oauth2PermissionGrants/$($grant.id)" @{ scope = $scopeText } 'grant the consent') }
+            else { [void](& $g POST '/v1.0/oauth2PermissionGrants' @{ clientId = [string]$sp.id; consentType = 'Principal'; principalId = $me; resourceId = $resourceSp[$resApp]; scope = $scopeText } 'grant the consent') }
         }
-        [void]$notes.Add('Admin consent granted: ' + (@($script:AppPermissions.Keys | ForEach-Object { $script:AppPermissions[$_] -join ', ' }) -join '; ') + '.')
-        [pscustomobject]@{ TenantId = $tid; ClientId = $clientId.ToLowerInvariant(); Account = $account; Created = $created; Notes = @($notes) }
+        $orgWide = @(& $list (Get-AVDTuneGraphFilterPath 'oauth2PermissionGrants' "clientId eq '$($sp.id)' and consentType eq 'AllPrincipals'" '') 'read the consent')
+        if ($orgWide.Count -gt 0) { [void]$notes.Add("Note: the enterprise app 'AVDTune' also has a consent for the whole organization (from an earlier version). Only assigned accounts can sign in; remove that consent when it is not needed: Entra admin center > Enterprise applications > AVDTune > Permissions.") }
+        [void]$notes.Add("Consent granted for $account only (" + (@($script:AppPermissions.Keys | ForEach-Object { $script:AppPermissions[$_] -join ', ' }) -join '; ') + '); the enterprise app requires an assignment, your account is assigned.')
+        [pscustomobject]@{ TenantId = $tid; ClientId = $clientId.ToLowerInvariant(); Account = $account; Created = $created; Notes = $notes }   # the list itself: the finally block below adds to it
     }
-    finally { $token = $null }
+    finally {
+        # The setup permissions leave the admin's own consent for Microsoft Graph Command Line Tools again (the grant itself stays)
+        if ($me -and $graphSpId) {
+            try {
+                $cli = @(& $list (Get-AVDTuneGraphFilterPath 'servicePrincipals' "appId eq '$script:SetupClientId'" 'id') 'read Microsoft Graph Command Line Tools') | Select-Object -First 1
+                if ($cli) {
+                    $own = @(& $list (Get-AVDTuneGraphFilterPath 'oauth2PermissionGrants' "clientId eq '$($cli.id)' and consentType eq 'Principal' and principalId eq '$me' and resourceId eq '$graphSpId'" '') 'read your consent for Microsoft Graph Command Line Tools') | Select-Object -First 1
+                    if ($own) {
+                        $scopes = @(([string]$own.scope) -split ' ' | Where-Object { $_ })
+                        $keep = @($scopes | Where-Object { $_ -notin 'Application.ReadWrite.All', 'DelegatedPermissionGrant.ReadWrite.All' })
+                        if ($keep.Count -lt $scopes.Count) {
+                            if ($keep.Count -eq 0) { $keep = @('User.Read') }
+                            [void](& $g PATCH "/v1.0/oauth2PermissionGrants/$($own.id)" @{ scope = ($keep -join ' ') } 'take the setup permissions out of your consent for Microsoft Graph Command Line Tools')
+                            [void]$notes.Add("Application.ReadWrite.All and DelegatedPermissionGrant.ReadWrite.All were taken out of your own consent for 'Microsoft Graph Command Line Tools' again; the rest of it stays ($($keep -join ' ')).")
+                        }
+                    }
+                    $cliOrg = @(& $list (Get-AVDTuneGraphFilterPath 'oauth2PermissionGrants' "clientId eq '$($cli.id)' and consentType eq 'AllPrincipals' and resourceId eq '$graphSpId'" '') 'read the consent of Microsoft Graph Command Line Tools for the organization') |
+                        Where-Object { @(([string]$_.scope) -split ' ') -contains 'Application.ReadWrite.All' -or @(([string]$_.scope) -split ' ') -contains 'DelegatedPermissionGrant.ReadWrite.All' }
+                    if (@($cliOrg).Count -gt 0) { [void]$notes.Add("Note: 'Microsoft Graph Command Line Tools' has Application.ReadWrite.All or DelegatedPermissionGrant.ReadWrite.All for the whole organization. AVDTune does not change that consent (it may be older); see the note on the setup consent.") }
+                }
+            }
+            catch { [void]$notes.Add("Warning: the setup permissions could not be taken out of your consent for 'Microsoft Graph Command Line Tools' ($($_.Exception.Message)). Remove them by hand; see the note on the setup consent.") }
+        }
+        $token = $null
+    }
 }
 
 #endregion
@@ -550,4 +610,4 @@ function New-AVDTuneAuthAdapter {
 
 Export-ModuleMember -Function Get-AVDTuneAudience, Get-AVDTuneAudienceScopeUrls, Get-AVDTuneExpectedScopes, Get-AVDTuneSignInLeftovers, Remove-AVDTuneSignInLeftovers, ConvertTo-AVDTuneSecure, ConvertFrom-AVDTuneSecure, Get-AVDTuneTokenClaims, ConvertTo-AVDTuneAuthError,
     New-AVDTuneSession, Connect-AVDTuneSession, Get-AVDTuneAccessToken, Get-AVDTuneSessionInfo, Disconnect-AVDTuneSession, Test-AVDTuneSessionClear, New-AVDTuneAuthAdapter,
-    Test-AVDTuneTenantGuid, Test-AVDTuneDomainName, Get-AVDTuneAccountDomain, Resolve-AVDTuneTenantFromDomain, Install-AVDTuneAppRegistration, Get-AVDTuneSetupConsentNote
+    Test-AVDTuneTenantGuid, Test-AVDTuneDomainName, Get-AVDTuneAccountDomain, Resolve-AVDTuneTenantFromDomain, Install-AVDTuneAppRegistration, Get-AVDTuneAppRegistrationProblems, Get-AVDTuneSetupConsentNote

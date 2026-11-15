@@ -79,7 +79,7 @@ function Test-AVDTuneEnvironmentAnswers {
     $t = [string](Get-AVDTuneProp $Answers 'TenantId')
     if ($t -and $t -notmatch '^([0-9a-fA-F-]{36}|[A-Za-z0-9][A-Za-z0-9.-]{0,250}\.[A-Za-z]{2,})$') { [void]$errors.Add('The saved tenant must be a tenant ID (GUID) or a domain name.') }
     $c = [string](Get-AVDTuneProp $Answers 'ClientId')
-    if ($c -and $c -notmatch '^[0-9a-fA-F-]{36}$') { [void]$errors.Add('The client ID must be a GUID.') }
+    if ($c -and -not (Test-AVDTuneTenantGuid $c.Trim())) { [void]$errors.Add('The client ID must be a GUID.') }
     $pattern = [string](Get-AVDTuneProp $Answers 'SnapshotNamePattern')
     if ($pattern) { $problem = Test-AVDTuneSnapshotNamePattern $pattern; if ($problem) { [void]$errors.Add($problem) } }
     if ($c -ieq '14d82eec-204b-4c2f-b7e8-296a70dab67e') { [void]$errors.Add("That is Microsoft's setup app; AVDTune needs the client ID of its own app registration (leave the field empty and AVDTune creates it at the sign-in).") }
@@ -285,7 +285,9 @@ function Set-AVDTuneEnvironmentSignIn {
 function Invoke-AVDTuneStartSignIn {
     <#
         The sign-in step of the Overview. Tenant and client ID come from environment.json; what is missing comes from the sign-in:
-          no client ID   AVDTune's own app registration is created or found (Install-AVDTuneAppRegistration, setup sign-in through
+          -Setup         also with a saved client ID: that registration is checked (and replaced when it is not safe) and the signed-in
+                         administrator is assigned and gets the consent (how another administrator is added)
+          no client ID   AVDTune's own app registration is created (Install-AVDTuneAppRegistration, setup sign-in through
                          'Microsoft Graph Command Line Tools'); its tenant and client ID are saved, then the normal sign-in follows with the
                          account of the setup as login hint.
           no tenant      with an account (name@domain) the tenant of its domain (OpenID discovery); when that fails, 'organizations'.
@@ -293,7 +295,7 @@ function Invoke-AVDTuneStartSignIn {
         Returns Info (session summary, no token), Notes (lines for the protocol), Registration, ConsentNote. Throws readable text.
     #>
     [CmdletBinding()]
-    param([string]$Root = (Get-AVDTuneRoot), [Parameter(Mandatory)]$Session, [string]$Account, [string]$User, [int]$RetryDelaySeconds = 5)
+    param([string]$Root = (Get-AVDTuneRoot), [Parameter(Mandatory)]$Session, [string]$Account, [string]$User, [int]$RetryDelaySeconds = 5, [switch]$Setup)
     $envObj = Get-AVDTuneEnvironment $Root
     if (-not $envObj) { throw 'Answer the first-run questions first.' }
     $tenant = ([string](Get-AVDTuneProp $envObj.SignIn 'TenantId')).Trim()
@@ -302,8 +304,8 @@ function Invoke-AVDTuneStartSignIn {
     if ($Account -and -not (Get-AVDTuneAccountDomain $Account)) { throw 'The account must look like name@domain.' }
     $notes = New-Object System.Collections.ArrayList
     $registration = $null
-    if (-not $client) {
-        $registration = Install-AVDTuneAppRegistration -Auth $Session.Auth -TenantId $tenant -LoginHint $Account -TempRoot $Session.TempRoot -RetryDelaySeconds $RetryDelaySeconds
+    if (-not $client -or $Setup) {
+        $registration = Install-AVDTuneAppRegistration -Auth $Session.Auth -TenantId $tenant -LoginHint $Account -ExistingClientId $client -TempRoot $Session.TempRoot -RetryDelaySeconds $RetryDelaySeconds
         foreach ($n in @($registration.Notes)) { [void]$notes.Add($n) }
         foreach ($c in @(Set-AVDTuneEnvironmentSignIn -Root $Root -TenantId $registration.TenantId -ClientId $registration.ClientId -User $User -Account $registration.Account)) { [void]$notes.Add($c) }
         $client = $registration.ClientId; $tenant = $registration.TenantId

@@ -19,7 +19,9 @@ function New-FakeJwt([hashtable]$Claims) { (ConvertTo-FakeBase64Url '{"alg":"non
 # SingleTenant (a sign-in of AVDTune's app at 'organizations' fails with AADSTS50194, like a single-tenant registration), SetupNoConsent (the setup
 # token lacks Application.ReadWrite.All), Domains (domain -> tenant ID of the OpenID discovery; others: 400), DiscoveryOffline, DiscoveryIssuer (issuer
 # override). Graph: AppForbidden, GrantForbidden, GraphOffline, ArmSpMissing, SpCreateFailures (POSTs of the new service principal that fail first),
-# Apps (applications in the tenant: @{ id; appId; displayName; tags; publicClient; owners }), Grants, ServicePrincipals
+# AssignForbidden, NoCliGrant (no own consent for Graph CLI Tools), CliOrgGrant (Graph CLI Tools with setup scopes for the organization),
+# Apps (applications in the tenant: @{ id; appId; displayName; tags; publicClient; signInAudience; passwordCredentials; keyCredentials; web; spa;
+# identifierUris; owners; Federated }), Grants, ServicePrincipals
 function New-AVDTuneFakeAuth {
     param([hashtable]$Seed = @{})
     $graphSp = @{ id = 'sp-graph-0001'; appId = '00000003-0000-0000-c000-000000000000'; oauth2PermissionScopes = @(
@@ -29,10 +31,14 @@ function New-AVDTuneFakeAuth {
         Upn = 'admin.example@contoso.example'; Name = 'Alex Example'; Tenant = $script:FakeTenant; Log = (New-Object System.Collections.ArrayList); Counter = 0
         Consented = @{ 'https://graph.microsoft.com' = @('Group.Read.All', 'DeviceManagementApps.Read.All', 'Sites.Selected'); 'https://management.azure.com' = @('user_impersonation') }
         ExtraScopes = @{}; Domains = @{ 'contoso.example' = $script:FakeTenant }; DiscoveryOffline = $false; DiscoveryIssuer = ''
-        AppForbidden = $false; GrantForbidden = $false; GraphOffline = $false; ArmSpMissing = $false; SpCreateFailures = 0
+        AppForbidden = $false; GrantForbidden = $false; GraphOffline = $false; ArmSpMissing = $false; SpCreateFailures = 0; AssignForbidden = $false; NoCliGrant = $false; CliOrgGrant = $false
         Apps = (New-Object System.Collections.ArrayList); Grants = (New-Object System.Collections.ArrayList); ServicePrincipals = (New-Object System.Collections.ArrayList); NextId = 0 }
     foreach ($k in $Seed.Keys) { $store[$k] = $Seed[$k] }
     [void]$store.ServicePrincipals.Add($graphSp)
+    [void]$store.ServicePrincipals.Add(@{ id = 'sp-cli-0001'; appId = '14d82eec-204b-4c2f-b7e8-296a70dab67e'; oauth2PermissionScopes = @() })
+    # the admin's own consent for Graph CLI Tools as the setup sign-in leaves it; CliOrgGrant: one for the whole organization with the setup scopes
+    if (-not $store.NoCliGrant) { [void]$store.Grants.Add(@{ id = 'grant-cli-own'; clientId = 'sp-cli-0001'; consentType = 'Principal'; principalId = 'oid-fake'; resourceId = 'sp-graph-0001'; scope = 'openid profile User.Read Application.ReadWrite.All DelegatedPermissionGrant.ReadWrite.All' }) }
+    if ($store.CliOrgGrant) { [void]$store.Grants.Add(@{ id = 'grant-cli-org'; clientId = 'sp-cli-0001'; consentType = 'AllPrincipals'; principalId = $null; resourceId = 'sp-graph-0001'; scope = 'User.Read Application.ReadWrite.All' }) }
     if (-not $store.ArmSpMissing) { [void]$store.ServicePrincipals.Add($armSp) }
     $make = {
         param($Scopes)
@@ -89,46 +95,62 @@ function New-AVDTuneFakeAuth {
         param($Method, $Path, $Token, $Body)
         [void]$store.Log.Add("Graph $Method $Path")
         $ok = { param($b, $status = 200) [pscustomobject]@{ Status = $status; Body = (ConvertTo-FakeJson $b); Error = '' } }
+        $none = [pscustomobject]@{ Status = 204; Body = $null; Error = '' }
         $deny = [pscustomobject]@{ Status = 403; Body = (ConvertTo-FakeJson @{ error = @{ code = 'Authorization_RequestDenied'; message = 'Insufficient privileges to complete the operation.' } }); Error = '' }
         if (-not $Token) { return [pscustomobject]@{ Status = 401; Body = $null; Error = 'no token' } }
         if ($store.GraphOffline) { return [pscustomobject]@{ Status = 0; Body = $null; Error = 'The remote name could not be resolved: graph.microsoft.com' } }
         $p = $Path.Split('?')[0]
-        $filter = ''; if ($Path -match '\$filter=([^&]*)') { $filter = [Uri]::UnescapeDataString($Matches[1]) }
+        # $filter: every "<property> eq '<value>'" must match (enough for the filters of the setup)
+        $conds = @{}
+        if ($Path -match '\$filter=([^&]*)') { foreach ($m in [regex]::Matches([Uri]::UnescapeDataString($Matches[1]), "(\w+) eq '([^']*)'")) { $conds[$m.Groups[1].Value] = $m.Groups[2].Value } }
+        $match = { param($o) foreach ($k in $conds.Keys) { if ([string]$o[$k] -ne $conds[$k]) { return $false } }; $true }
         $newId = { $store.NextId++; '{0:d8}-aaaa-bbbb-cccc-{1:d12}' -f $store.NextId, $store.NextId }
         if ($p -eq '/v1.0/servicePrincipals') {
-            if ($Method -eq 'GET') { $appId = if ($filter -match "appId eq '([^']+)'") { $Matches[1] } else { '' }; return (& $ok @{ value = @($store.ServicePrincipals | Where-Object { $_.appId -eq $appId }) }) }
+            if ($Method -eq 'GET') { return (& $ok @{ value = @($store.ServicePrincipals | Where-Object { & $match $_ }) }) }
             if ($store.SpCreateFailures -gt 0 -and $Body.appId -ne '797f4846-ba00-4fd7-ba43-dac1f8f63013') { $store.SpCreateFailures--; return [pscustomobject]@{ Status = 400; Body = (ConvertTo-FakeJson @{ error = @{ message = 'The appId of the service principal does not reference a valid application object.' } }); Error = '' } }
-            $sp = @{ id = "sp-$(& $newId)"; appId = $Body.appId; oauth2PermissionScopes = @() }
+            $sp = @{ id = "sp-$(& $newId)"; appId = $Body.appId; oauth2PermissionScopes = @(); appRoleAssignmentRequired = [bool]$Body.appRoleAssignmentRequired; Assigned = (New-Object System.Collections.ArrayList) }
             if ($Body.appId -eq '797f4846-ba00-4fd7-ba43-dac1f8f63013') { $sp.oauth2PermissionScopes = @(@{ id = 'scope-user_impersonation'; value = 'user_impersonation' }) }
             [void]$store.ServicePrincipals.Add($sp); return (& $ok $sp 201)
         }
+        if ($p -match '^/v1\.0/servicePrincipals/([^/]+)/appRoleAssignedTo$') {
+            $sp = @($store.ServicePrincipals | Where-Object { $_.id -eq $Matches[1] })[0]
+            if (-not $sp.ContainsKey('Assigned')) { $sp.Assigned = New-Object System.Collections.ArrayList }
+            if ($Method -eq 'GET') { return (& $ok @{ value = @($sp.Assigned) }) }
+            if ($store.AssignForbidden) { return $deny }
+            $as = @{ id = "assign-$(& $newId)"; principalId = $Body.principalId; resourceId = $Body.resourceId; appRoleId = $Body.appRoleId }
+            [void]$sp.Assigned.Add($as); return (& $ok $as 201)
+        }
+        if ($p -match '^/v1\.0/servicePrincipals/([^/]+)$' -and $Method -eq 'PATCH') {
+            $sp = @($store.ServicePrincipals | Where-Object { $_.id -eq $Matches[1] })[0]
+            foreach ($k in $Body.Keys) { $sp[$k] = $Body[$k] }
+            return $none
+        }
         if ($p -eq '/v1.0/applications') {
-            if ($Method -eq 'GET') { $name = if ($filter -match "displayName eq '([^']+)'") { $Matches[1] } else { '' }; return (& $ok @{ value = @($store.Apps | Where-Object { $_.displayName -eq $name } | ForEach-Object { @{ id = $_.id; appId = $_.appId; displayName = $_.displayName; tags = @($_.tags); publicClient = $_.publicClient } }) }) }
+            if ($Method -eq 'GET') { return (& $ok @{ value = @($store.Apps | Where-Object { & $match $_ } | ForEach-Object { $x = @{}; foreach ($k in $_.Keys) { if ($k -notin 'owners', 'Definition', 'Federated', 'Patched') { $x[$k] = $_[$k] } }; $x }) }) }
             if ($store.AppForbidden) { return $deny }
             $id = & $newId
-            $app = @{ id = "app-$id"; appId = $id; displayName = $Body.displayName; tags = @($Body.tags); publicClient = $Body.publicClient; owners = @('oid-fake'); Definition = $Body }
+            $app = @{ id = "app-$id"; appId = $id; displayName = $Body.displayName; tags = @($Body.tags); publicClient = $Body.publicClient; signInAudience = $Body.signInAudience
+                passwordCredentials = @(); keyCredentials = @(); identifierUris = @(); web = @{ redirectUris = @() }; spa = @{ redirectUris = @() }; owners = @('oid-fake'); Definition = $Body; Federated = @() }
             [void]$store.Apps.Add($app); return (& $ok @{ id = $app.id; appId = $app.appId; displayName = $app.displayName } 201)
         }
-        if ($p -match '^/v1\.0/applications/([^/]+)/owners$') { $id = $Matches[1]; $app = @($store.Apps | Where-Object { $_.id -eq $id })[0]; return (& $ok @{ value = @(@($app.owners) | ForEach-Object { @{ id = $_ } }) }) }
+        if ($p -match '^/v1\.0/applications/([^/]+)/federatedIdentityCredentials$') { $id = $Matches[1]; $app = @($store.Apps | Where-Object { $_.id -eq $id })[0]; return (& $ok @{ value = @($app.Federated) }) }
         if ($p -match '^/v1\.0/applications/([^/]+)$' -and $Method -eq 'PATCH') {
             if ($store.AppForbidden) { return $deny }
             $id = $Matches[1]; $app = @($store.Apps | Where-Object { $_.id -eq $id })[0]
             $app.Definition = $Body; $app.tags = @($Body.tags); $app.publicClient = $Body.publicClient; $app.Patched = $true
-            return [pscustomobject]@{ Status = 204; Body = $null; Error = '' }
+            return $none
         }
         if ($p -eq '/v1.0/oauth2PermissionGrants') {
-            if ($Method -eq 'GET') {
-                $null = $filter -match "clientId eq '([^']+)'.*resourceId eq '([^']+)'"; $cid = $Matches[1]; $rid = $Matches[2]
-                return (& $ok @{ value = @($store.Grants | Where-Object { $_.clientId -eq $cid -and $_.resourceId -eq $rid -and $_.consentType -eq 'AllPrincipals' }) })
-            }
+            if ($Method -eq 'GET') { return (& $ok @{ value = @($store.Grants | Where-Object { & $match $_ }) }) }
             if ($store.GrantForbidden) { return $deny }
-            $g = @{ id = "grant-$(& $newId)"; clientId = $Body.clientId; consentType = $Body.consentType; resourceId = $Body.resourceId; scope = $Body.scope }
+            $g = @{ id = "grant-$(& $newId)"; clientId = $Body.clientId; consentType = $Body.consentType; principalId = $Body.principalId; resourceId = $Body.resourceId; scope = $Body.scope }
             [void]$store.Grants.Add($g); return (& $ok $g 201)
         }
         if ($p -match '^/v1\.0/oauth2PermissionGrants/([^/]+)$' -and $Method -eq 'PATCH') {
-            if ($store.GrantForbidden) { return $deny }
-            $id = $Matches[1]; $g = @($store.Grants | Where-Object { $_.id -eq $id })[0]; $g.scope = $Body.scope
-            return [pscustomobject]@{ Status = 204; Body = $null; Error = '' }
+            $id = $Matches[1]; $g = @($store.Grants | Where-Object { $_.id -eq $id })[0]
+            if ($store.GrantForbidden -and $g.clientId -ne 'sp-cli-0001') { return $deny }
+            $g.scope = $Body.scope
+            return $none
         }
         [pscustomobject]@{ Status = 404; Body = $null; Error = "fake: no route for $Method $Path" }
     }.GetNewClosure()

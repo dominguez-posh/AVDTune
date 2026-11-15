@@ -299,24 +299,29 @@ function Build-SignInForm {
     else {
         $ui.BtnStageAction.Content = 'Sign in'
         $f = $script:StartContext.Failures['SignIn']; if ($f) { Set-StageMessage ([string]$f) 'error' }
+        if ($client) {
+            # Another administrator: runs the setup with his account (assignment + his own consent); also checks the saved registration
+            $ui.BtnStageAction2.Content = 'Set up again (authorize this administrator)'; $ui.BtnStageAction2.Visibility = 'Visible'
+            $script:StageAction2 = { Invoke-SignIn -Setup }
+        }
     }
     $script:StageAction = { Invoke-SignIn }
 }
-function Invoke-SignIn {
+function Invoke-SignIn([switch]$Setup) {
     $e = Get-AVDTuneEnvironment $script:StateRoot
     if (-not $e) { throw 'Answer the first-run questions first.' }
     $account = if ($script:Form.Account) { ([string]$script:Form.Account.Text).Trim() } else { '' }
     if ($account -and -not (Get-AVDTuneAccountDomain $account)) { Set-StageMessage 'The account must look like name@domain (or leave it empty).' 'error'; return }
-    $setup = -not [string]$e.SignIn.ClientId
-    if ($setup -and -not (Confirm-Action "An administrator signs in with Microsoft's app 'Microsoft Graph Command Line Tools' and the permissions Application.ReadWrite.All and DelegatedPermissionGrant.ReadWrite.All. AVDTune uses them only to create (or find) its own app registration 'AVDTune' and to grant its admin consent.`n`n$(Get-AVDTuneSetupConsentNote)`n`nContinue?" 'Set up the AVDTune app registration')) { return }
+    $setup = $Setup -or -not [string]$e.SignIn.ClientId
+    if ($setup -and -not (Confirm-Action "An administrator signs in with Microsoft's app 'Microsoft Graph Command Line Tools' and the permissions Application.ReadWrite.All and DelegatedPermissionGrant.ReadWrite.All. AVDTune uses them only to $(if ($e.SignIn.ClientId) { "check its saved app registration $($e.SignIn.ClientId) (a new one replaces it when it is not safe)" } else { "create its own app registration 'AVDTune'" }), to assign your account to it and to grant the consent for your account only.`n`n$(Get-AVDTuneSetupConsentNote)`n`nContinue?" 'Set up the AVDTune app registration')) { return }
     $session = New-AVDTuneSession -Auth (Get-StartAuth) -TempRoot (Get-StartTempRoot)
     try {
         $result = Invoke-Busy $(if ($setup) { 'The setup sign-in window is open: sign in with an administrator account ...' } else { 'The sign-in window is open: sign in with the account that manages this master ...' }) {
-            Invoke-AVDTuneStartSignIn -Root $script:StateRoot -Session $session -Account $account -User ([string]$env:USERNAME) -RetryDelaySeconds $(if ($script:TestMode) { 0 } else { 5 }) }
+            Invoke-AVDTuneStartSignIn -Root $script:StateRoot -Session $session -Account $account -User ([string]$env:USERNAME) -RetryDelaySeconds $(if ($script:TestMode) { 0 } else { 5 }) -Setup:$setup }
         $info = $result.Info
-        foreach ($n in @($result.Notes)) { Add-StartProtocol 'Sign-in: tenant and app registration' $n }
+        foreach ($n in @($result.Notes)) { Add-StartProtocol $(if ($n -like 'Warning:*' -or $n -like 'Note:*') { 'Warning: app registration' } else { 'Sign-in: tenant and app registration' }) $n }
         # The full text was in the confirmation; the protocol keeps the short form (notes are cut at 200 characters)
-        if ($result.ConsentNote) { Add-StartProtocol 'Warning: setup consent stays in the tenant' "The consent of 'Microsoft Graph Command Line Tools' stays in the tenant. Remove it: Entra admin center > Enterprise applications > Microsoft Graph Command Line Tools > Permissions." }
+        if ($result.ConsentNote) { Add-StartProtocol 'Setup consent of Microsoft Graph Command Line Tools' "Your own consent loses the two setup permissions again. A consent for the whole organization stays: Entra admin center > Enterprise applications > Microsoft Graph Command Line Tools > Permissions." }
     }
     catch {
         $script:StartContext.Failures['SignIn'] = $_.Exception.Message
