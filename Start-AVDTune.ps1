@@ -24,9 +24,10 @@ if ($PSVersionTable.PSEdition -ne 'Desktop') {
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, System.Windows.Forms
 
 $script:AppRoot = $PSScriptRoot
-$script:ToolVersion = '0.1.0'
+$script:ToolVersion = (Get-Content -LiteralPath (Join-Path $PSScriptRoot 'VERSION') -Raw -Encoding UTF8).Trim()   # the file VERSION is also the version of the release
 Import-Module (Join-Path $PSScriptRoot 'Modules\AVDTune.psm1') -Force
-foreach ($part in 'Trust', 'Session', 'Snapshot', 'Directory', 'Start', 'UpdateBlock', 'Updates', 'Readiness', 'Benchmark') { Import-Module (Join-Path $PSScriptRoot "Modules\AVDTune.$part.psm1") -Force }
+foreach ($part in 'Trust', 'Session', 'Snapshot', 'Directory', 'Start', 'UpdateBlock', 'Updates', 'Readiness', 'Watermark', 'Benchmark') { Import-Module (Join-Path $PSScriptRoot "Modules\AVDTune.$part.psm1") -Force }
+Import-Module (Join-Path $PSScriptRoot 'Modules\AVDTune.Release.psm1') -Force
 . (Join-Path $PSScriptRoot 'AVDTune-Theme.ps1')
 
 # ---------------------------------------------------------------- test mode, elevation, one instance
@@ -34,13 +35,21 @@ $script:StateRoot = Get-AVDTuneRoot
 # Test mode needs the fake machine AND a state folder that is not the real one: nothing real can be touched
 $script:TestMode = [bool]($env:AVDTUNE_FAKE -and $env:AVDTUNE_ROOT -and -not (Test-AVDTuneDefaultRoot $script:StateRoot))
 function Stop-WithMessage([string]$Text) {
+    # In test mode never a dialog: it would appear on the developer's desktop and block an unattended run
+    if ($script:TestMode) { [Console]::Error.WriteLine("AVDTune: $Text"); exit 1 }
     [void][System.Windows.MessageBox]::Show($Text, 'AVDTune', 'OK', 'Error')
     exit 1
 }
 if (-not $script:TestMode -and -not (Test-AVDTuneElevated)) {
     Stop-WithMessage "AVDTune changes the Golden Master and must run as administrator.`nStart it again with 'Run as administrator'."
 }
-$mutexName = if ($script:TestMode) { 'Global\AVDTune-Test' } else { 'Global\AVDTune' }
+# Test runs of several checkouts can run at the same time: one test mutex per test state folder
+$mutexName = if ($script:TestMode) {
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try { $h = -join ($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes(([string]$script:StateRoot).ToLowerInvariant())) | Select-Object -First 8 | ForEach-Object { $_.ToString('x2') }) } finally { $sha.Dispose() }
+    "Global\AVDTune-Test-$h"
+} else { 'Global\AVDTune' }
+$script:MutexName = $mutexName
 $script:Mutex = New-Object System.Threading.Mutex($false, $mutexName)
 $script:MutexOwned = $false
 try { $script:MutexOwned = $script:Mutex.WaitOne(0) } catch [System.Threading.AbandonedMutexException] { $script:MutexOwned = $true }
@@ -179,11 +188,12 @@ foreach ($page in $script:PageTable) {
 
 function Show-Page([string]$Key) {
     $script:CurrentPage = $Key
-    $isPlaceholder = $Key -notin 'Overview', 'Protocol', 'Updates', 'UpdateBlock', 'Benchmark'
+    $isPlaceholder = $Key -notin 'Overview', 'Protocol', 'Updates', 'UpdateBlock', 'UserExperience', 'Benchmark'
     $ui.PageOverview.Visibility = ConvertTo-Vis ($Key -eq 'Overview')
     $ui.PageProtocol.Visibility = ConvertTo-Vis ($Key -eq 'Protocol')
     $ui.PageUpdates.Visibility = ConvertTo-Vis ($Key -eq 'Updates')
     $ui.PageUpdateBlock.Visibility = ConvertTo-Vis ($Key -eq 'UpdateBlock')
+    $ui.PageUserExperience.Visibility = ConvertTo-Vis ($Key -eq 'UserExperience')
     $ui.PageBenchmark.Visibility = ConvertTo-Vis ($Key -eq 'Benchmark')
     $ui.PagePlaceholder.Visibility = ConvertTo-Vis $isPlaceholder
     $ui["Nav$Key"].IsChecked = $true
@@ -198,6 +208,7 @@ function Show-Page([string]$Key) {
     elseif ($Key -eq 'Protocol') { Update-ProtocolView }
     elseif ($Key -eq 'Updates') { Update-UpdatesView }
     elseif ($Key -eq 'UpdateBlock') { Update-UpdateBlockView }
+    elseif ($Key -eq 'UserExperience') { Update-WatermarkView }
     elseif ($Key -eq 'Benchmark') { Update-BenchmarkView }
 }
 
@@ -411,6 +422,8 @@ Add-Click $ui.BtnProtocolCopy {
 . (Join-Path $PSScriptRoot 'AVDTune-Updates.ps1')
 $script:ReadyFakeArm = $(if ($script:TestMode) { $script:Services.Arm } else { $null })
 . (Join-Path $PSScriptRoot 'AVDTune-Readiness.ps1')
+. (Join-Path $PSScriptRoot 'AVDTune-UserExperience.ps1')
+. (Join-Path $PSScriptRoot 'AVDTune-Release.ps1')
 . (Join-Path $PSScriptRoot 'AVDTune-Benchmark.ps1')
 
 # ---------------------------------------------------------------- theme switch
@@ -508,6 +521,7 @@ Show-Page 'Overview'
 if (-not (Get-AVDTuneEnvironment $script:StateRoot)) { try { Open-Stage 'Environment' } catch { Show-Error $_.Exception.Message } }
 $script:Timer.Start()
 Start-OverviewRefresh
+Update-ReleaseView; Start-RelJob 'Start'   # integrity of the tool against its release and the update check, at every start (AVDTune-Release.ps1)
 Start-ReadyJob 'Start' ''   # the readiness analysis runs at every start (read only; Azure checks need the sign-in and run again after it)
 # A maintenance mode that never ended (closed or crashed in the middle) is reported at once; the repair is on the Update block page
 if (Get-AVDTuneMaintenanceCrash -Root $script:StateRoot) { Show-Toast 'The last maintenance mode did not end properly: the update block may be lifted. Open Update block and repair it.' }

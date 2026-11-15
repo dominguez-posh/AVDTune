@@ -1,3 +1,4 @@
 *.log
 /out/
 /.claude/settings.local.json
+/dist/

@@ -52,7 +52,7 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         Test-Smoke 'title bar chip shows image name and no version yet' ($ui.TxtChipName.Text -eq 'GM-TEST01' -and $ui.TxtChipVersion.Text -eq 'no image version') "$($ui.TxtChipName.Text) / $($ui.TxtChipVersion.Text)"
         Test-Smoke 'identity card lists image, source image, Windows build, Office' ($ui.PanelIdentity.Children.Count -ge 8 -and (Find-Text $ui.PanelIdentity 'microsoftwindowsdesktop:office-365:win11-25h2-avd-m365:latest') -and (Find-Text $ui.PanelIdentity 'Windows 11 Enterprise multi-session 25H2, build 26100.4652') -and (Find-Text $ui.PanelIdentity '16.0.19231.20138, Monthly Enterprise Channel, x64')) $ui.PanelIdentity.Children.Count
         Test-Smoke 'health card shows the 5 checks' ($ui.PanelHealth.Children.Count -eq 5) $ui.PanelHealth.Children.Count
-        Test-Smoke 'second instance is refused (mutex held, checked from another thread)' (-not (Start-Job -ScriptBlock { $m = New-Object System.Threading.Mutex($false, 'Global\AVDTune-Test'); $got = $m.WaitOne(0); if ($got) { $m.ReleaseMutex() }; $got } | Wait-Job | Receive-Job)) $null
+        Test-Smoke 'second instance is refused (mutex held, checked from another thread)' (-not (Start-Job -ArgumentList $script:MutexName -ScriptBlock { param($Name) $m = New-Object System.Threading.Mutex($false, $Name); $got = $m.WaitOne(0); if ($got) { $m.ReleaseMutex() }; $got } | Wait-Job | Receive-Job)) $null
         Save-SmokeShot '01-overview-light'
         $true } }
     @{ Name = 'dirty machine'; Do = {
@@ -79,7 +79,7 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         foreach ($page in $script:PageTable) {
             Show-Page $page.Key
             $window.UpdateLayout()
-            $placeholder = $page.Key -notin 'Overview', 'Protocol', 'Updates', 'UpdateBlock'
+            $placeholder = $page.Key -notin 'Overview', 'Protocol', 'Updates', 'UpdateBlock', 'UserExperience'
             $ok = ($script:CurrentPage -eq $page.Key -and $ui["Nav$($page.Key)"].IsChecked -and $ui.PagePlaceholder.Visibility -eq (ConvertTo-Vis $placeholder))
             if ($placeholder) { $ok = $ok -and $ui.TxtPhTitle.Text -eq $page.Title -and $ui.TxtPhPhase.Text -eq "Planned for phase $($page.Phase)" -and $ui.TxtPhText.Text.Length -gt 40 }
             Test-Smoke "page $($page.Key) shows" $ok $null
@@ -89,7 +89,7 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         $keepWidth = $window.Width
         foreach ($width in 1280, 960) {
             $window.Width = $width
-            foreach ($head in @(@('Overview', 'TxtOverviewSubtitle', 'PanelOverviewHead'), @('Updates', 'TxtUpdSubtitle', 'PanelUpdHead'), @('UpdateBlock', 'TxtBlockSubtitle', 'PanelBlockHead'), @('Protocol', 'TxtProtocolSubtitle', 'PanelProtocolHead'))) {
+            foreach ($head in @(@('Overview', 'TxtOverviewSubtitle', 'PanelOverviewHead'), @('Updates', 'TxtUpdSubtitle', 'PanelUpdHead'), @('UpdateBlock', 'TxtBlockSubtitle', 'PanelBlockHead'), @('UserExperience', 'TxtUxSubtitle', 'PanelUxHead'), @('Protocol', 'TxtProtocolSubtitle', 'PanelProtocolHead'))) {
                 Show-Page $head[0]; $window.UpdateLayout()
                 Test-Smoke "page $($head[0]) at $width px: the intro text does not run under the buttons" (Test-HeadClear $ui[$head[1]] $ui[$head[2]]) "$(Get-SmokeBounds $ui[$head[1]]) / $(Get-SmokeBounds $ui[$head[2]])"
             }
@@ -166,8 +166,9 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         $true } }
     @{ Name = 'start: questions'; Do = {
         # the first run opened the questions by itself
-        Test-Smoke 'first start without environment.json: the questions are open, 6 questions and the fields (snapshot name pattern with its default)' ($script:OpenStage -eq 'Environment' -and $ui.BoxStage.Visibility -eq 'Visible' -and $script:Form.Combos.Count -eq 6 -and $script:Form.Texts.Count -eq 5 -and $script:Form.Texts['SnapshotNamePattern'].Text -eq '{OsDisk}-{DD}.{MM}.{YYYY}-{N}' -and -not (Test-Path (Join-Path $script:StateRoot 'environment.json'))) $script:OpenStage
+        Test-Smoke 'first start without environment.json: the questions are open, 6 questions and the fields (snapshot name pattern with its default)' ($script:OpenStage -eq 'Environment' -and $ui.BoxStage.Visibility -eq 'Visible' -and $script:Form.Combos.Count -eq 6 -and $script:Form.Texts.Count -eq 4 -and $script:Form.Texts['SnapshotNamePattern'].Text -eq '{OsDisk}-{DD}.{MM}.{YYYY}-{N}' -and -not (Test-Path (Join-Path $script:StateRoot 'environment.json'))) $script:OpenStage
         Test-Smoke 'the four stages are listed: questions to do, the rest waiting' ($ui.PanelStages.Children.Count -eq 4 -and (($script:Stages | ForEach-Object Status) -join ',') -eq 'Pending,Locked,Locked,Locked') (($script:Stages | ForEach-Object Status) -join ',')
+        Test-Smoke 'no tenant in the questions (issue #11): no tenant field, no forget box before a tenant exists, the client ID is optional' (-not $script:Form.Texts.ContainsKey('TenantId') -and $null -eq $script:Form.ForgetTenant -and -not (Find-Text $ui.PanelStageBody 'Tenant (domain or ID)') -and (Find-Text $ui.PanelStageBody 'Client ID of the app registration (optional)') -and $script:Form.Texts['ClientId'].Text -eq '' -and $script:Form.Preview.Text -like "*No client ID: at the sign-in AVDTune creates*" -and $script:Form.Preview.Text -like '*tenant is not asked*') (@($script:Form.Texts.Keys) -join ',')
         Save-SmokeShot '11-start-questions'
         # an invalid combination is explained and cannot be saved
         $set = { param($key, $text) $script:Form.Combos[$key].Control.SelectedItem = $text }
@@ -176,14 +177,13 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         Save-SmokeShot '12-start-questions-problem'
         & $set 'Dc' 'AD DS on premises (VPN or ExpressRoute)'
         & $set 'Identities' 'Synchronized (Entra Connect / Cloud Sync)'
-        $script:Form.Texts['TenantId'].Text = 'contoso.example'
-        $script:Form.Texts['ClientId'].Text = '66666666-7777-8888-9999-000000000000'
+        # the client ID stays empty: the sign-in creates AVDTune's own app registration (fake Graph)
         $script:Form.Texts['VNet'].Text = 'vnet-example'; $script:Form.Texts['Subnet'].Text = 'snet-avd'
         Test-Smoke 'hybrid with an on-premises DC is valid and the preview names the domain step and Azure Files with AD DS' ($ui.BtnStageAction.IsEnabled -and $script:Form.Preview.Text -like '*Domain step*' -and $script:Form.Preview.Text -like '*Azure Files with AD DS*') $script:Form.Preview.Text
         Save-SmokeShot '13-start-questions-hybrid'
         $ui.BtnStageAction.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
         $env1 = Get-AVDTuneEnvironment $script:StateRoot
-        Test-Smoke 'saving writes environment.json (no secret), closes the form and moves on to the sign-in' ($env1.Answers.Join -eq 'Hybrid' -and $env1.Answers.Dc -eq 'AdDsOnPrem' -and $env1.SignIn.TenantId -eq 'contoso.example' -and $ui.BoxStage.Visibility -eq 'Collapsed' -and (($script:Stages | ForEach-Object Status) -join ',') -eq 'Done,Pending,Locked,Locked') (($script:Stages | ForEach-Object Status) -join ',')
+        Test-Smoke 'saving writes environment.json (no secret), closes the form and moves on to the sign-in' ($env1.Answers.Join -eq 'Hybrid' -and $env1.Answers.Dc -eq 'AdDsOnPrem' -and $env1.SignIn.TenantId -eq '' -and $env1.SignIn.ClientId -eq '' -and $ui.BoxStage.Visibility -eq 'Collapsed' -and (($script:Stages | ForEach-Object Status) -join ',') -eq 'Done,Pending,Locked,Locked') (($script:Stages | ForEach-Object Status) -join ',')
         Test-Smoke 'the protocol has the answered questions' (@($script:Protocol.Actions | Where-Object { $_.Subject -like 'First-run questions answered*' }).Count -eq 1) $null
         # no FSLogix: the two pages disappear from the navigation
         $none = Get-AVDTuneEnvironmentAnswers (Get-AVDTuneEnvironment $script:StateRoot); $none.Profiles = 'None'
@@ -195,11 +195,31 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
     @{ Name = 'start: sign-in'; Do = {
         Open-Stage 'SignIn'; $window.UpdateLayout()
         Test-Smoke 'sign-in form lists the three tokens with their permissions' ($ui.PanelStageBody.Children.Count -ge 5 -and (Find-Text $ui.PanelStageBody 'Sites') -and (Find-Text $ui.PanelStageBody 'Azure Resource Manager (snapshot, VM size, region): user_impersonation')) $null
+        Test-Smoke 'sign-in form without tenant and client ID: tenant from the sign-in, own app registration announced, account field' ((Find-Text $ui.PanelStageBody 'Taken from the sign-in (tid of the token) and saved') -and (Find-Text $ui.PanelStageBody "None yet: AVDTune creates its own app registration 'AVDTune' first") -and $script:Form.Account -and $script:Form.Account.Text -eq '') $null
         Save-SmokeShot '14-start-signin'
+        # a wrong account is refused before any sign-in window
+        $script:Form.Account.Text = 'admin'
         $ui.BtnStageAction.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
+        Test-Smoke 'an account that is not name@domain is refused in the form, nothing signed in' ($ui.TxtStageMessage.Text -like '*name@domain*' -and @($script:Services.Auth.Log | Where-Object { $_ -like 'SignIn*' }).Count -eq 0) $ui.TxtStageMessage.Text
+        $script:Form.Account.Text = 'admin.example@contoso.example'
+        $script:ConfirmAsked = ''
+        $ui.BtnStageAction.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
+        $envSigned = Get-AVDTuneEnvironment $script:StateRoot
+        $fakeApp = @($script:Services.Auth.Store.Apps)[0]
+        Test-Smoke 'setup asked first and named the consent that stays with Microsoft Graph Command Line Tools' ($script:ConfirmAsked -like "*Microsoft Graph Command Line Tools*Application.ReadWrite.All*consent for your account only*takes these two out of your own consent*whole organization*") $script:ConfirmAsked
+        Test-Smoke 'setup sign-in (fake) at organizations with the account, registration AVDTune created, then the normal sign-in with it' (@($script:Services.Auth.Log | Where-Object { $_ -like 'SignIn tenant=organizations client=setup hint=admin.example@contoso.example*' }).Count -eq 1 -and $fakeApp -and @($script:Services.Auth.Log | Where-Object { $_ -like "SignIn tenant=11111111-2222-3333-4444-555555555555 client=$($fakeApp.appId) hint=admin.example@contoso.example*" }).Count -eq 1) ($script:Services.Auth.Log -join ' | ')
+        Test-Smoke 'environment.json has the tenant of the token and the client ID of the new registration; the change log says so' ($envSigned.SignIn.TenantId -eq '11111111-2222-3333-4444-555555555555' -and $envSigned.SignIn.ClientId -eq $fakeApp.appId -and @(Get-AVDTuneChangeLog -Root $script:StateRoot | Where-Object { $_.Text -like 'Tenant taken from the sign-in: 11111111-*' }).Count -eq 1 -and @(Get-AVDTuneChangeLog -Root $script:StateRoot | Where-Object { $_.Text -like "Client ID of AVDTune's own app registration saved*" }).Count -eq 1) ($envSigned.SignIn | ConvertTo-Json -Compress)
+        Test-Smoke 'the protocol has the registration, the tenant and the warning about the setup consent' (@($script:Protocol.Actions | Where-Object { $_.Subject -eq 'Sign-in: tenant and app registration' -and $_.Note -like "*App registration 'AVDTune' created*" }).Count -eq 1 -and @($script:Protocol.Actions | Where-Object { $_.Subject -eq 'Setup consent of Microsoft Graph Command Line Tools' -and $_.Note -like '*whole organization stays*' }).Count -eq 1 -and @($script:Protocol.Actions | Where-Object { $_.Note -like "*taken out of your own consent for 'Microsoft Graph Command Line Tools'*" }).Count -eq 1) $null
+        $fakeSp = @($script:Services.Auth.Store.ServicePrincipals | Where-Object { $_.appId -eq $fakeApp.appId })[0]
+        Test-Smoke 'the enterprise app requires an assignment, the admin is assigned and consented for himself only' ($fakeSp.appRoleAssignmentRequired -eq $true -and @($fakeSp.Assigned).Count -eq 1 -and @($script:Services.Auth.Store.Grants | Where-Object { $_.clientId -eq $fakeSp.id -and $_.consentType -eq 'Principal' }).Count -eq 2 -and @($script:Services.Auth.Store.Grants | Where-Object { $_.consentType -eq 'AllPrincipals' }).Count -eq 0) $null
         $info = Get-AVDTuneSessionInfo $script:StartContext.Session
         Test-Smoke 'sign-in (fake): connected, three audiences, stage Done, domain stage open' ($info.Connected -and $info.Audiences.Count -eq 3 -and (($script:Stages | ForEach-Object Status) -join ',') -eq 'Done,Done,Pending,Locked') (($script:Stages | ForEach-Object Status) -join ',')
         Test-Smoke 'the protocol names the account and holds no token' (@($script:Protocol.Actions | Where-Object { $_.Subject -eq 'Microsoft 365 and Azure sign-in' -and $_.Note -like 'Signed in as admin.example@*' -and $_.Note -notmatch 'eyJ' }).Count -eq 1) $null
+        # the questions now show the saved tenant only as "forget"
+        Open-Stage 'Environment'; $window.UpdateLayout()
+        Test-Smoke 'with a saved tenant the questions offer only to forget it, still no tenant field' ($script:Form.ForgetTenant -and -not $script:Form.ForgetTenant.IsChecked -and [string]$script:Form.ForgetTenant.Content -like '*11111111-2222-3333-4444-555555555555*' -and -not $script:Form.Texts.ContainsKey('TenantId')) $null
+        Save-SmokeShot '14b-start-questions-tenant'
+        Close-Stage
         $true } }
     @{ Name = 'start: domain'; Do = {
         Open-Stage 'Domain'; $window.UpdateLayout()
@@ -338,6 +358,23 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         Save-SmokeShot '32-updates-repair-offer'
         $script:UpdLastRun = $null; Update-UpdatesView
         $true } }
+    @{ Name = 'benchmark page'; Do = {
+        if ($script:OverviewJob -or $script:ReadyJob) { return $false }
+        if (-not $script:BenchStep) {
+            $script:BenchStep = 1
+            Show-Page 'Benchmark'; $window.UpdateLayout()
+            Test-Smoke 'Benchmark page: no result yet, both start buttons there, no placeholder' ($ui.PageBenchmark.Visibility -eq 'Visible' -and $ui.PagePlaceholder.Visibility -eq 'Collapsed' -and $ui.TxtBenchScore.Text -like 'No benchmark yet*' -and $ui.BtnBenchFull.IsEnabled -and $ui.BtnBenchQuick.IsEnabled) $ui.TxtBenchScore.Text
+            $ui.BtnBenchQuick.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
+            Test-Smoke 'quick run: asks first, runs in the background, buttons locked meanwhile' ($script:ConfirmAsked -like '*quick benchmark*' -and $script:BenchJob -and -not $ui.BtnBenchFull.IsEnabled) $script:ConfirmAsked
+            return $false
+        }
+        if ($script:BenchJob) { return $false }
+        $window.UpdateLayout()
+        $r = @(Get-AVDTuneBenchmarkResult -Root $script:StateRoot)
+        Test-Smoke 'quick run done: result stored, score and five categories shown, provisional note, history row' ($r.Count -eq 1 -and $r[0].mode -eq 'quick' -and $ui.TxtBenchScore.Text -match '^\d+$' -and $ui.PanelBenchCats.Children.Count -eq 5 -and $ui.BoxBenchProvisional.Visibility -eq 'Visible' -and $ui.PanelBenchHistory.Children.Count -eq 1 -and $ui.BtnBenchFull.IsEnabled) "$($r.Count) $($ui.TxtBenchScore.Text)"
+        Test-Smoke 'the run is in the protocol and the change log, services are back' (@($script:Protocol.Actions | Where-Object { $_.Category -eq 'benchmark' }).Count -ge 1 -and @(Get-AVDTuneChangeLog -Root $script:StateRoot | Where-Object { $_.Category -eq 'Benchmark' }).Count -ge 1 -and (& $script:Machine.ServiceGet 'wuauserv').Status -eq 'Running') $null
+        Save-SmokeShot '35-benchmark'
+        $true } }
     @{ Name = 'update block page'; Do = {
         if ($script:OverviewJob -or $script:ReadyJob) { return $false }   # the fake machine is not thread safe: never change it while the overview job reads it
         if (-not $script:BlkStep) {
@@ -364,6 +401,53 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
             return $false
         }
         Test-Smoke 'repair from the page: block back, no record Active, change log entry' ($ui.TxtBlockPill.Text -eq 'Blocked' -and -not (Get-AVDTuneMaintenanceCrash -Root $script:StateRoot) -and @(Get-AVDTuneChangeLog -Root $script:StateRoot | Where-Object { $_.Text -like '*did not end properly*' }).Count -eq 1) $ui.TxtBlockPill.Text
+        $true } }
+    @{ Name = 'watermark page'; Do = {
+        if ($script:OverviewJob -or $script:ReadyJob) { return $false }   # the fake machine is not thread safe
+        $click = { param($b) $b.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent))) }
+        $keepName = & $script:Machine.ComputerName
+        Show-Page 'UserExperience'; $window.UpdateLayout()
+        Test-Smoke 'User experience page: own page, not installed, defaults in the form, name preview says no for this host' ($ui.PageUserExperience.Visibility -eq 'Visible' -and $ui.PagePlaceholder.Visibility -eq 'Collapsed' -and $ui.TxtWmPill.Text -eq 'Not installed' -and $ui.TxtWmPattern.Text -eq '^avd-pilot-' -and $ui.TxtWmText.Text -eq 'PILOTUMGEBUNG' -and $ui.TxtWmMatch.Text -like '*would show the watermark: no*') "$($ui.TxtWmPill.Text) / $($ui.TxtWmMatch.Text)"
+        $ui.TxtWmTryName.Text = 'avd-pilot-04'; $window.UpdateLayout()
+        Test-Smoke 'a name to try: the preview says yes for it' ($ui.TxtWmMatch.Text -like "*'avd-pilot-04': yes*") $ui.TxtWmMatch.Text
+        $ui.TxtWmPattern.Text = '('; $window.UpdateLayout()
+        Test-Smoke 'an invalid pattern: the reason is shown and Save is off' ($ui.TxtWmErrors.Text -like '*regular expression*' -and -not $ui.BtnWmSave.IsEnabled -and $ui.TxtWmMatch.Text -like 'Not a valid*') $ui.TxtWmErrors.Text
+        $ui.TxtWmPattern.Text = '^avd-pilot-'; $ui.TxtWmOpacity.Text = '5'; $window.UpdateLayout()
+        Test-Smoke 'opacity out of range: the reason is shown' ($ui.TxtWmErrors.Text -like '*opacity*10 to 100*') $ui.TxtWmErrors.Text
+        $ui.TxtWmOpacity.Text = '60'
+        $ui.CmbWmCorner.SelectedItem = 'TopLeft'; $window.UpdateLayout()
+        $left = [System.Windows.Controls.Canvas]::GetLeft($ui.TxtWmPreview); $top = [System.Windows.Controls.Canvas]::GetTop($ui.TxtWmPreview)
+        Test-Smoke 'preview: the label moves to the chosen corner (top left, 16 px at 30 percent)' ($left -eq 8 -and $top -eq 8 -and $ui.TxtWmErrors.Text -eq '') "$left,$top"
+        $ui.CmbWmCorner.SelectedItem = 'BottomRight'; $ui.TxtWmColor.Text = '#C62828'; $window.UpdateLayout()
+        $left = [System.Windows.Controls.Canvas]::GetLeft($ui.TxtWmPreview); $top = [System.Windows.Controls.Canvas]::GetTop($ui.TxtWmPreview)
+        Test-Smoke 'preview: bottom right sits inside the work area above the taskbar strip' (($left + $ui.TxtWmPreview.DesiredSize.Width) -le 480 -and ($top + $ui.TxtWmPreview.DesiredSize.Height) -le (270 - 20) -and $left -gt 240 -and $top -gt 130) "$left,$top"
+        & $click $ui.BtnWmSave
+        $saved = Read-AVDTuneJson (Join-Path $script:StateRoot 'config\watermark.json')
+        Test-Smoke 'Save writes config\watermark.json of the state folder' ($saved.Color -eq '#C62828' -and $saved.Corner -eq 'BottomRight') $null
+        $script:Machine.Store.ComputerName = 'AVD-PILOT-02'
+        Update-WatermarkView; $ui.TxtWmTryName.Text = 'AVD-PILOT-02'; $window.UpdateLayout()
+        Test-Smoke 'a host that matches: the page says the watermark would appear here' ($ui.TxtWmHost.Text -like '*would appear here: yes*') $ui.TxtWmHost.Text
+        # an old overlay on the master
+        $script:Machine.Store.Tasks['\pilotoverlay'] = [pscustomobject]@{ Path = '\'; Name = 'PilotOverlay'; Enabled = $true; Xml = '<Task xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task"><Triggers><LogonTrigger/></Triggers><Principals><Principal><GroupId>S-1-5-32-545</GroupId></Principal></Principals><Actions><Exec><Command>wscript.exe</Command><Arguments>x</Arguments></Exec></Actions></Task>' }
+        & $script:Machine.FileWrite 'X:\Fake\ProgramData\PilotOverlayLauncher.vbs' 'old' 'Admin'
+        Update-WatermarkView; $window.UpdateLayout()
+        Test-Smoke 'old overlay found: warning card with the task and the launcher, items marked Found' ($ui.BoxWmLegacy.Visibility -eq 'Visible' -and $ui.TxtWmLegacy.Text -like '*PilotOverlay*PilotOverlayLauncher.vbs*' -and (Find-Text $ui.PanelWmItems 'Found')) $ui.TxtWmLegacy.Text
+        Save-SmokeShot '40-watermark-settings'
+        $script:ConfirmAsked = ''
+        & $click $ui.BtnWmInstall
+        $st = Get-AVDTuneWatermarkStatus -Machine $script:Machine -Root $script:StateRoot -SourceRoot $script:WmSourceRoot
+        Test-Smoke 'Install asks first, then installs: pill Installed, task and files on the (fake) master, old overlay untouched' ($script:ConfirmAsked -like 'Install the watermark*old overlay is not touched*' -and $ui.TxtWmPill.Text -eq 'Installed' -and $st.State -eq 'Installed' -and $st.Legacy.Present) "$($ui.TxtWmPill.Text) / $script:ConfirmAsked"
+        Test-Smoke 'Install: change log entry and state' (@(Get-AVDTuneChangeLog -Root $script:StateRoot | Where-Object { $_.Component -eq 'Watermark' -and $_.ChangeType -eq 'Added' }).Count -eq 1 -and (Get-AVDTuneProp (Get-AVDTuneState $script:StateRoot) 'Watermark') -eq 'Installed') $null
+        Test-Smoke 'nothing under C:\ProgramData\AVDTune was written by the fake machine' (-not (@($script:Machine.Log | Where-Object { $_ -match 'ProgramData\\AVDTune[\\ ]' }).Count)) $null
+        $script:ConfirmAsked = ''
+        & $click $ui.BtnWmLegacy
+        Test-Smoke 'Remove the old overlay asks first and removes task and launcher' ($script:ConfirmAsked -like 'Remove the old overlay*' -and $ui.BoxWmLegacy.Visibility -eq 'Collapsed' -and -not (& $script:Machine.TaskDetail '\' 'PilotOverlay')) $script:ConfirmAsked
+        Save-SmokeShot '41-watermark-installed'
+        $script:ConfirmAsked = ''
+        & $click $ui.BtnWmRemove
+        Test-Smoke 'Remove asks first and takes everything away again' ($script:ConfirmAsked -like 'Remove the watermark*' -and $ui.TxtWmPill.Text -eq 'Not installed' -and -not (& $script:Machine.TaskDetail '\' 'AVDTune Watermark')) $ui.TxtWmPill.Text
+        $script:Machine.Store.ComputerName = $keepName
+        Show-Page 'Overview'
         $true } }
     @{ Name = 'overview shows the block'; Do = {
         if (-not $script:OvStep) { $script:OvStep = 1; Show-Page 'Overview'; Start-OverviewRefresh; return $false }
@@ -471,6 +555,9 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         Open-Stage 'SignIn'; $window.UpdateLayout()
         $ui.BtnStageAction2.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
         Test-Smoke 'sign out removes every token from memory (checked before Finish)' (Test-AVDTuneSessionClear $script:StartContext.Session) $null
+        Open-Stage 'SignIn'; $window.UpdateLayout()
+        Test-Smoke 'signed out with a saved registration: the sign-in offers to set up again for another administrator' ($ui.BtnStageAction2.Visibility -eq 'Visible' -and [string]$ui.BtnStageAction2.Content -eq 'Set up again (authorize this administrator)') ([string]$ui.BtnStageAction2.Content)
+        Close-Stage
         $allFiles = (Get-ChildItem $script:StateRoot -Recurse -File | ForEach-Object { [IO.File]::ReadAllText($_.FullName) }) -join "`n"
         Test-Smoke 'no token, refresh token or password in any file of the state folder' ($allFiles -notmatch 'eyJ[A-Za-z0-9_-]{10,}' -and $allFiles -notmatch 'fake-refresh' -and $allFiles -notmatch 'Not-A-Real-Password') $null
         Test-Smoke 'every service of the start sequence was a fake (no real adapter in test mode)' ($script:Services.Auth.Kind -eq 'Fake' -and $script:Services.Arm.Kind -eq 'Fake' -and $script:Services.Ldap.Kind -eq 'Fake') $null

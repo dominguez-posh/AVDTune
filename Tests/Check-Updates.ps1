@@ -287,7 +287,7 @@ try {
     $ps = Join-Path ([Environment]::GetFolderPath('System')) 'WindowsPowerShell\v1.0\powershell.exe'
     $pidFile = Join-Path $tmp 'child.pid'
     $enc = { param($Text) [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($Text)) }
-    $startChild = "`$c = [Diagnostics.Process]::Start((Join-Path ([Environment]::GetFolderPath('System')) 'PING.EXE'), '-n {0} 127.0.0.1'); Set-Content -LiteralPath '$pidFile' -Value `$c.Id; Start-Sleep -Seconds {1}"
+    $startChild = "`$si = New-Object Diagnostics.ProcessStartInfo((Join-Path ([Environment]::GetFolderPath('System')) 'PING.EXE'), '-n {0} 127.0.0.1'); `$si.UseShellExecute = `$false; `$si.CreateNoWindow = `$true; `$c = [Diagnostics.Process]::Start(`$si); Set-Content -LiteralPath '$pidFile' -Value `$c.Id; Start-Sleep -Seconds {1}"
     $childPids = @()
     try {
         $t0 = Get-Date

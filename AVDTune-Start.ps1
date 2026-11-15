@@ -192,11 +192,20 @@ function Build-EnvironmentForm {
     $auth.Add_SelectionChanged({ try { Update-EnvironmentPreview } catch { } })
     $f.AuthCombo = $auth; $f.AuthWanted = [string]$answers.AzureFilesAuth
     [void]$ui.PanelStageBody.Children.Add((New-FormRow 'Azure Files authentication' $auth))
-    foreach ($t in @(@('VNet', 'Network: virtual network of the session hosts'), @('Subnet', 'Network: subnet of the session hosts'), @('TenantId', 'Tenant (domain or ID)'), @('ClientId', 'Client ID of the app registration'), @('SnapshotNamePattern', 'Snapshot name: {OsDisk} {VM} {ImageVersion} {DD} {MM} {YYYY}, {N} = number of the day'))) {
+    # No tenant field: the tenant comes from the sign-in (issue #11). The client ID is optional: empty means AVDTune creates its own app registration.
+    foreach ($t in @(@('VNet', 'Network: virtual network of the session hosts'), @('Subnet', 'Network: subnet of the session hosts'), @('ClientId', 'Client ID of the app registration (optional)'), @('SnapshotNamePattern', 'Snapshot name: {OsDisk} {VM} {ImageVersion} {DD} {MM} {YYYY}, {N} = number of the day'))) {
         $tb = New-Object System.Windows.Controls.TextBox; $tb.Width = 430; $tb.Text = [string]$answers.($t[0]); $tb.MaxLength = 255; $tb.Name = "T$($t[0])"
         $tb.Add_TextChanged({ try { Update-EnvironmentPreview } catch { } })
         $f.Texts[$t[0]] = $tb
         [void]$ui.PanelStageBody.Children.Add((New-FormRow $t[1] $tb))
+    }
+    $f.ForgetTenant = $null
+    if ([string]$answers.TenantId) {
+        # The saved tenant is shown, not edited; forgetting it is the only way to change it (the next sign-in sets it again, change log)
+        $forget = New-Object System.Windows.Controls.CheckBox; $forget.Name = 'ChkForgetTenant'; $forget.VerticalAlignment = 'Center'
+        $forget.Content = "Forget the saved tenant $($answers.TenantId) (the next sign-in sets it again)"
+        $f.ForgetTenant = $forget
+        [void]$ui.PanelStageBody.Children.Add((New-FormRow 'Tenant (from the sign-in)' $forget 'Forget the saved tenant'))
     }
     $f.Preview = New-Text '' 'Hint' '0,10,0,0'
     [void]$ui.PanelStageBody.Children.Add($f.Preview)
@@ -235,6 +244,8 @@ function Update-EnvironmentPreview {
         $check = Test-AVDTuneEnvironmentAnswers $a
         $plan = Resolve-AVDTuneEnvironmentPlan $a
         $lines = @($plan.Notes) + @($check.Warnings | ForEach-Object { "Note: $_" }) + @($check.Errors | ForEach-Object { "Problem: $_" })
+        if (-not ([string]$a.ClientId).Trim()) { $lines += "No client ID: at the sign-in AVDTune creates (or finds) its own app registration 'AVDTune' with admin consent; an administrator signs in for that once." }
+        $lines += 'The tenant is not asked: it comes from the sign-in and is saved.'
         $f.Preview.Text = $lines -join "`n"
         Set-Brush $f.Preview ([System.Windows.Controls.TextBlock]::ForegroundProperty) $(if ($check.Errors.Count -gt 0) { 'Danger' } else { 'MutedText' })
         $ui.BtnStageAction.IsEnabled = ($check.Errors.Count -eq 0)
@@ -243,7 +254,9 @@ function Update-EnvironmentPreview {
 }
 function Save-EnvironmentForm {
     $a = Get-EnvironmentFormAnswers
-    $result = Save-AVDTuneEnvironment -Root $script:StateRoot -Answers $a -User ([string]$env:USERNAME)
+    $forget = [bool]($script:Form.ForgetTenant -and $script:Form.ForgetTenant.IsChecked)
+    $result = Save-AVDTuneEnvironment -Root $script:StateRoot -Answers $a -User ([string]$env:USERNAME) -ForgetTenant:$forget
+    if ($forget -and $script:StartContext.Session) { Disconnect-AVDTuneSession $script:StartContext.Session }   # a session of the old tenant does not stay
     $note = if ($result.Changes.Count -gt 0) { 'changed: ' + ($result.Changes -join '; ') } else { 'saved' }
     Add-StartProtocol 'First-run questions answered (identity model)' $note
     Show-Toast 'The answers are saved.'
@@ -262,9 +275,20 @@ function Build-SignInForm {
         [void]$ui.PanelStageBody.Children.Add((New-InfoRow $key ("$($a.Purpose): " + ($a.Scopes -join ', '))))
     }
     $e = Get-AVDTuneEnvironment $script:StateRoot
-    [void]$ui.PanelStageBody.Children.Add((New-InfoRow 'Tenant' $(if ($e) { [string]$e.SignIn.TenantId } else { '' })))
-    [void]$ui.PanelStageBody.Children.Add((New-InfoRow 'App registration' $(if ($e) { [string]$e.SignIn.ClientId } else { '' })))
-    $ui.PanelStageBody.Children.Add((New-Text 'The app registration needs these permissions with admin consent, Azure Service Management user_impersonation included: see docs\start-sequence.md.' 'Hint' '0,8,0,0')) | Out-Null
+    $tenant = if ($e) { [string]$e.SignIn.TenantId } else { '' }
+    $client = if ($e) { [string]$e.SignIn.ClientId } else { '' }
+    [void]$ui.PanelStageBody.Children.Add((New-InfoRow 'Tenant' $(if ($tenant) { $tenant } else { 'Taken from the sign-in (tid of the token) and saved' })))
+    [void]$ui.PanelStageBody.Children.Add((New-InfoRow 'App registration' $(if ($client) { $client } else { "None yet: AVDTune creates its own app registration 'AVDTune' first" })))
+    $f = $script:Form
+    $f.Account = New-Object System.Windows.Controls.TextBox; $f.Account.Width = 320; $f.Account.MaxLength = 254; $f.Account.Name = 'TxtSignInAccount'
+    $f.Account.Text = if ($session -and $session.Account) { [string]$session.Account } else { '' }
+    [void]$ui.PanelStageBody.Children.Add((New-FormRow 'Account (name@domain, optional)' $f.Account 'Account for the sign-in'))
+    $hint = if (-not $client) {
+        "First sign-in: you sign in with an administrator account through Microsoft's app 'Microsoft Graph Command Line Tools' (Application.ReadWrite.All, DelegatedPermissionGrant.ReadWrite.All). AVDTune creates or finds its own app registration 'AVDTune' (public client, http://localhost, no secret), grants the admin consent for the permissions above and then signs you in with it. Needs Application Administrator or Cloud Application Administrator, and Privileged Role Administrator (or Global Administrator) for the consent."
+    }
+    elseif (-not $tenant) { 'With the account AVDTune finds the tenant of its domain; without it the sign-in goes through organizations (only for a multi-tenant app registration). The tenant of the sign-in is saved.' }
+    else { 'The app registration needs these permissions with admin consent, Azure Service Management user_impersonation included: see docs\start-sequence.md.' }
+    $ui.PanelStageBody.Children.Add((New-Text $hint 'Hint' '0,8,0,0')) | Out-Null
     if ($session -and $session.Connected) {
         $info = Get-AVDTuneSessionInfo $session
         Set-StageMessage ("Signed in as $($info.Account)" + $(if ($info.Name) { " ($($info.Name))" }) + '. Tokens: ' + (($info.Audiences | ForEach-Object { "$($_.Audience) until $(([datetime]$_.ExpiresOn).ToLocalTime().ToString('HH:mm'))" }) -join ', ') + '.') 'ok'
@@ -275,15 +299,29 @@ function Build-SignInForm {
     else {
         $ui.BtnStageAction.Content = 'Sign in'
         $f = $script:StartContext.Failures['SignIn']; if ($f) { Set-StageMessage ([string]$f) 'error' }
+        if ($client) {
+            # Another administrator: runs the setup with his account (assignment + his own consent); also checks the saved registration
+            $ui.BtnStageAction2.Content = 'Set up again (authorize this administrator)'; $ui.BtnStageAction2.Visibility = 'Visible'
+            $script:StageAction2 = { Invoke-SignIn -Setup }
+        }
     }
     $script:StageAction = { Invoke-SignIn }
 }
-function Invoke-SignIn {
+function Invoke-SignIn([switch]$Setup) {
     $e = Get-AVDTuneEnvironment $script:StateRoot
     if (-not $e) { throw 'Answer the first-run questions first.' }
+    $account = if ($script:Form.Account) { ([string]$script:Form.Account.Text).Trim() } else { '' }
+    if ($account -and -not (Get-AVDTuneAccountDomain $account)) { Set-StageMessage 'The account must look like name@domain (or leave it empty).' 'error'; return }
+    $setup = $Setup -or -not [string]$e.SignIn.ClientId
+    if ($setup -and -not (Confirm-Action "An administrator signs in with Microsoft's app 'Microsoft Graph Command Line Tools' and the permissions Application.ReadWrite.All and DelegatedPermissionGrant.ReadWrite.All. AVDTune uses them only to $(if ($e.SignIn.ClientId) { "check its saved app registration $($e.SignIn.ClientId) (a new one replaces it when it is not safe)" } else { "create its own app registration 'AVDTune'" }), to assign your account to it and to grant the consent for your account only.`n`n$(Get-AVDTuneSetupConsentNote)`n`nContinue?" 'Set up the AVDTune app registration')) { return }
     $session = New-AVDTuneSession -Auth (Get-StartAuth) -TempRoot (Get-StartTempRoot)
     try {
-        $info = Invoke-Busy 'The sign-in window is open: sign in with the account that manages this master ...' { Connect-AVDTuneSession -Session $session -TenantId ([string]$e.SignIn.TenantId) -ClientId ([string]$e.SignIn.ClientId) }
+        $result = Invoke-Busy $(if ($setup) { 'The setup sign-in window is open: sign in with an administrator account ...' } else { 'The sign-in window is open: sign in with the account that manages this master ...' }) {
+            Invoke-AVDTuneStartSignIn -Root $script:StateRoot -Session $session -Account $account -User ([string]$env:USERNAME) -RetryDelaySeconds $(if ($script:TestMode) { 0 } else { 5 }) -Setup:$setup }
+        $info = $result.Info
+        foreach ($n in @($result.Notes)) { Add-StartProtocol $(if ($n -like 'Warning:*' -or $n -like 'Note:*') { 'Warning: app registration' } else { 'Sign-in: tenant and app registration' }) $n }
+        # The full text was in the confirmation; the protocol keeps the short form (notes are cut at 200 characters)
+        if ($result.ConsentNote) { Add-StartProtocol 'Setup consent of Microsoft Graph Command Line Tools' "Your own consent loses the two setup permissions again. A consent for the whole organization stays: Entra admin center > Enterprise applications > Microsoft Graph Command Line Tools > Permissions." }
     }
     catch {
         $script:StartContext.Failures['SignIn'] = $_.Exception.Message
