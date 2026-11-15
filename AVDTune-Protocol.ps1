@@ -12,14 +12,14 @@ $script:ProtocolText = @{
         none = 'No actions in this session.'; unknown = 'unknown'; minutes = 'min'; hours = 'h'; seconds = 's'
         ok = 'done'; failed = 'failed'; skipped = 'skipped'; passed = 'passed'; testfailed = 'failed'
         setup = 'Setup'; update = 'Updates'; software = 'Software'; optimization = 'Optimization'; fslogix = 'FSLogix'; vdi = 'VDI components'
-        userexperience = 'User experience'; updateblock = 'Update block for users'; benchmark = 'Benchmark'; seal = 'Cleanup and seal'; other = 'Other'
+        userexperience = 'User experience'; updateblock = 'Update block for users'; benchmark = 'Benchmark'; seal = 'Cleanup and finish'; other = 'Other'
     }
     de = @{
         title = 'AVDTune-Sitzungsprotokoll'; date = 'Datum'; time = 'Zeit'; duration = 'Dauer'; admin = 'Administrator'; tenant = 'Image'; actions = 'Aktionen'
         none = 'Keine Aktionen in dieser Sitzung.'; unknown = 'unbekannt'; minutes = 'Min'; hours = 'Std'; seconds = 's'
         ok = 'erledigt'; failed = 'fehlgeschlagen'; skipped = '%uebersprungen'; passed = 'bestanden'; testfailed = 'nicht bestanden'
         setup = 'Einrichtung'; update = 'Updates'; software = 'Software'; optimization = 'Optimierung'; fslogix = 'FSLogix'; vdi = 'VDI-Komponenten'
-        userexperience = 'Benutzererlebnis'; updateblock = 'Update-Sperre f%uer Benutzer'; benchmark = 'Benchmark'; seal = 'Aufr%aeumen und Versiegeln'; other = 'Sonstiges'
+        userexperience = 'Benutzererlebnis'; updateblock = 'Update-Sperre f%uer Benutzer'; benchmark = 'Benchmark'; seal = 'Aufr%aeumen und Abschliessen'; other = 'Sonstiges'
     }
 }
 

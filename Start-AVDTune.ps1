@@ -145,7 +145,7 @@ $script:PageTable = @(
     @{ Key = 'UserExperience'; Title = 'User experience'; Glyph = 0xE771; Phase = 6; Text = 'Wallpaper, watermark, Start and taskbar layout and default apps for new profiles, public desktop shortcuts and web apps with App Masking rules per group.' }
     @{ Key = 'UpdateBlock'; Title = 'Update block'; Glyph = 0xE72E; Phase = 2 }
     @{ Key = 'Benchmark'; Title = 'Benchmark'; Glyph = 0xE9D2; Phase = 5; Text = 'Measures CPU, memory, disk and GPU per image version and compares versions.' }
-    @{ Key = 'Seal'; Title = 'Cleanup and seal'; Glyph = 0xE74D; Phase = 7; Text = 'The last button of a version: a checklist that must be green (no pending restart, update block on, FSLogix test passed, no AVD agent, no join, no tokens), cleanup, a snapshot reminder and sysprep with a typed confirmation.' }
+    @{ Key = 'Seal'; Title = 'Cleanup and finish'; Glyph = 0xE74D; Phase = 7; Text = 'The last button of a version, Finish: the health check must be green or acknowledged and the benchmark done; cleanup that keeps the master usable; tokens, sign-in caches and local step images removed; a pending restart first; the change log of the version closed and sent to SharePoint; then log off or shut down. The master is never sysprepped: the image is made by your imaging tool afterwards (sysprep only as an expert option without one).' }
     @{ Key = 'Protocol'; Title = 'Protocol and change log'; Glyph = 0xE8A5 }
 )
 $script:PageKeys = @($script:PageTable | ForEach-Object { $_.Key })

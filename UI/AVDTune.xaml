@@ -91,12 +91,11 @@
                             <ScrollViewer Style="{DynamicResource PageScroll}">
                                 <StackPanel Margin="40,32,40,28" MaxWidth="1000" HorizontalAlignment="Left">
                                     <Grid>
+                                        <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
                                         <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-                                        <StackPanel>
-                                            <TextBlock Text="Overview" Style="{DynamicResource PageTitle}"/>
-                                            <TextBlock x:Name="TxtOverviewSubtitle" Style="{DynamicResource Subtitle}" Text="This Golden Master at a glance: image, builds and what stands in the way of a seal."/>
-                                        </StackPanel>
-                                        <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Bottom">
+                                        <TextBlock Text="Overview" Style="{DynamicResource PageTitle}"/>
+                                        <TextBlock Grid.Row="1" Grid.ColumnSpan="2" x:Name="TxtOverviewSubtitle" Style="{DynamicResource Subtitle}" Text="This Golden Master at a glance: image, builds and what stands in the way of finishing the version."/>
+                                        <StackPanel x:Name="PanelOverviewHead" Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center" Margin="24,0,0,0">
                                             <Button x:Name="BtnNewVersion" Content="Start new version" Margin="0,0,8,0" AutomationProperties.Name="Start new image version"/>
                                             <Button x:Name="BtnRefresh" Style="{DynamicResource PrimaryButton}" Content="Refresh" Tag="&#xE72C;" AutomationProperties.Name="Refresh the overview"/>
                                         </StackPanel>
@@ -148,12 +147,11 @@
                         <Grid x:Name="PageProtocol" Visibility="Collapsed" Margin="32,24,32,0">
                             <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
                             <Grid>
+                                <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
                                 <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-                                <StackPanel>
-                                    <TextBlock Text="Protocol and change log" Style="{DynamicResource PageTitle}"/>
-                                    <TextBlock x:Name="TxtProtocolSubtitle" Style="{DynamicResource Subtitle}"/>
-                                </StackPanel>
-                                <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Bottom">
+                                <TextBlock Text="Protocol and change log" Style="{DynamicResource PageTitle}"/>
+                                <TextBlock Grid.Row="1" Grid.ColumnSpan="2" x:Name="TxtProtocolSubtitle" Style="{DynamicResource Subtitle}"/>
+                                <StackPanel x:Name="PanelProtocolHead" Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center" Margin="24,0,0,0">
                                     <ComboBox x:Name="CmbProtocolLanguage" Width="120" Margin="0,0,8,0" AutomationProperties.Name="Language of the protocol"/>
                                     <ComboBox x:Name="CmbVersion" Width="140" Margin="0,0,8,0" Visibility="Collapsed" AutomationProperties.Name="Image version"/>
                                     <Button x:Name="BtnProtocolSave" Content="Save as file" Margin="0,0,8,0"/>
@@ -186,12 +184,11 @@
                             <ScrollViewer Style="{DynamicResource PageScroll}">
                                 <StackPanel Margin="40,32,40,28" MaxWidth="1000" HorizontalAlignment="Left">
                                     <Grid>
+                                        <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
                                         <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-                                        <StackPanel>
-                                            <TextBlock Text="Updates" Style="{DynamicResource PageTitle}"/>
-                                            <TextBlock Style="{DynamicResource Subtitle}" Text="One list for Windows, Microsoft 365 Apps, Edge, Teams, OneDrive, FSLogix, Defender and your apps. A run lifts the update block for itself and puts it back."/>
-                                        </StackPanel>
-                                        <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Bottom">
+                                        <TextBlock Text="Updates" Style="{DynamicResource PageTitle}"/>
+                                        <TextBlock x:Name="TxtUpdSubtitle" Grid.Row="1" Grid.ColumnSpan="2" Style="{DynamicResource Subtitle}" Text="One list for Windows, Microsoft 365 Apps, Edge, Teams, OneDrive, FSLogix, Defender and your apps. A run lifts the update block for itself and puts it back."/>
+                                        <StackPanel x:Name="PanelUpdHead" Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center" Margin="24,0,0,0">
                                             <Button x:Name="BtnUpdScan" Content="Search" Margin="0,0,8,0" AutomationProperties.Name="Search for updates"/>
                                             <Button x:Name="BtnUpdSelected" Content="Update selected" Margin="0,0,8,0" AutomationProperties.Name="Update the selected items"/>
                                             <Button x:Name="BtnUpdAll" Style="{DynamicResource PrimaryButton}" Content="Update all" AutomationProperties.Name="Update all items"/>
@@ -246,12 +243,11 @@
                             <ScrollViewer Style="{DynamicResource PageScroll}">
                                 <StackPanel Margin="40,32,40,28" MaxWidth="1000" HorizontalAlignment="Left">
                                     <Grid>
+                                        <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
                                         <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-                                        <StackPanel>
-                                            <TextBlock Text="Update block" Style="{DynamicResource PageTitle}"/>
-                                            <TextBlock Style="{DynamicResource Subtitle}" Text="Everything that offers or runs updates is hidden and off for users. Maintenance mode lifts it for the own AVDTune run only."/>
-                                        </StackPanel>
-                                        <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Bottom">
+                                        <TextBlock Text="Update block" Style="{DynamicResource PageTitle}"/>
+                                        <TextBlock x:Name="TxtBlockSubtitle" Grid.Row="1" Grid.ColumnSpan="2" Style="{DynamicResource Subtitle}" Text="Everything that offers or runs updates is hidden and off for users. Maintenance mode lifts it for the own AVDTune run only."/>
+                                        <StackPanel x:Name="PanelBlockHead" Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center" Margin="24,0,0,0">
                                             <Button x:Name="BtnBlockOff" Content="Switch off" Margin="0,0,8,0" AutomationProperties.Name="Switch the update block off"/>
                                             <Button x:Name="BtnBlockOn" Style="{DynamicResource PrimaryButton}" Content="Switch on" AutomationProperties.Name="Switch the update block on"/>
                                         </StackPanel>

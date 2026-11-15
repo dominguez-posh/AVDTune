@@ -37,7 +37,7 @@ try {
     Test-Check 'English text: AVDTune title, image label, groups' ($en -like 'AVDTune session protocol*' -and $en -like '*Image: GM-TEST01 2026.11.001*' -and $en -like '*Optimization:*' -and $en -like '*Windows updates: failed (Download failed)*' -and $en -notlike '*PackTune*') $en
     $de = ConvertTo-PackTuneProtocolText -Protocol $p -Language de -Format Markdown -End ([datetime]'2026-11-20T10:30:00')
     $ue = [string][char]0xFC; $ae = [string][char]0xE4
-    Test-Check 'German markdown: umlauts, groups, Datum' ($de -like '# AVDTune-Sitzungsprotokoll*' -and $de -like "*Aufr*umen und Versiegeln*" -and (Get-PackTuneProtocolLabels "de").updateblock -eq "Update-Sperre f${ue}r Benutzer" -and $de -like "*Optimierung*" -and $de -like '*20.11.2026*' -and $de -like "*${ue}bersprungen*") $de
+    Test-Check 'German markdown: umlauts, groups, Datum' ($de -like '# AVDTune-Sitzungsprotokoll*' -and $de -like "*Aufr*umen und Abschliessen*" -and (Get-PackTuneProtocolLabels "de").updateblock -eq "Update-Sperre f${ue}r Benutzer" -and $de -like "*Optimierung*" -and $de -like '*20.11.2026*' -and $de -like "*${ue}bersprungen*") $de
     Test-Check 'German texts are plain ASCII in the script file' (-not ([IO.File]::ReadAllText((Join-Path $repo 'AVDTune-Protocol.ps1')) -match '[^\x00-\x7F]')) $null
 
     $json = Save-PackTuneProtocol -Protocol $p -Language en

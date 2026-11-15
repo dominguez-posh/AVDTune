@@ -23,6 +23,12 @@ function Save-SmokeShot([string]$Name) {
     $fs = [IO.File]::Create((Join-Path $script:SmokeOut "shot-$Name.png"))
     try { $enc.Save($fs) } finally { $fs.Dispose() }
 }
+function Get-SmokeBounds($Element) { $Element.TransformToAncestor($window).TransformBounds((New-Object System.Windows.Rect(0, 0, $Element.ActualWidth, $Element.ActualHeight))) }
+function Test-HeadClear($Subtitle, $Buttons) {
+    # The intro text of a page must not reach under or against the buttons of the head: below them, or at least 16 px to the left
+    $s = Get-SmokeBounds $Subtitle; $b = Get-SmokeBounds $Buttons
+    ($s.Top -ge $b.Bottom) -or ($s.Bottom -le $b.Top) -or ($s.Right + 16 -le $b.Left)
+}
 function Get-ThemeColor([string]$Key) { ([System.Windows.Application]::Current.Resources.MergedDictionaries[0][$Key]).Color.ToString() }
 function Find-Text($Parent, [string]$Text) {
     # True when a TextBlock with this text is below $Parent
@@ -79,6 +85,17 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
             Test-Smoke "page $($page.Key) shows" $ok $null
             if ($page.Key -in 'Updates', 'UpdateBlock', 'Seal') { Save-SmokeShot ('{0:00}-page-{1}-dark' -f $index, $page.Key.ToLower()); $index++ }
         }
+        Test-Smoke 'last page is "Cleanup and finish" (the master is never sysprepped)' ((($script:PageTable | Where-Object Key -eq 'Seal').Title -eq 'Cleanup and finish') -and -not (Find-Text $ui.NavList 'Cleanup and seal') -and (Find-Text $ui.NavList 'Cleanup and finish') -and $ui.TxtPhText.Text -like '*never sysprepped*') $ui.TxtPhText.Text
+        $keepWidth = $window.Width
+        foreach ($width in 1280, 960) {
+            $window.Width = $width
+            foreach ($head in @(@('Overview', 'TxtOverviewSubtitle', 'PanelOverviewHead'), @('Updates', 'TxtUpdSubtitle', 'PanelUpdHead'), @('UpdateBlock', 'TxtBlockSubtitle', 'PanelBlockHead'), @('Protocol', 'TxtProtocolSubtitle', 'PanelProtocolHead'))) {
+                Show-Page $head[0]; $window.UpdateLayout()
+                Test-Smoke "page $($head[0]) at $width px: the intro text does not run under the buttons" (Test-HeadClear $ui[$head[1]] $ui[$head[2]]) "$(Get-SmokeBounds $ui[$head[1]]) / $(Get-SmokeBounds $ui[$head[2]])"
+            }
+            if ($width -eq 960) { Show-Page 'Updates'; Save-SmokeShot '06-page-updates-narrow' }
+        }
+        $window.Width = $keepWidth
         Show-Page 'Overview'
         $ui.BtnTheme.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
         Test-Smoke 'switch back to light' ($script:Settings.Theme -eq 'Light' -and (Get-ThemeColor 'WindowBackground') -eq '#FFF3F3F3' -and $window.Background.Color.ToString() -eq '#FFF3F3F3') $null

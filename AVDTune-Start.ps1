@@ -255,7 +255,7 @@ function Save-EnvironmentForm {
 # ---------------------------------------------------------------- 2. sign-in
 function Build-SignInForm {
     $ui.TxtStageTitle.Text = '2. Microsoft 365 and Azure sign-in'
-    $ui.TxtStageIntro.Text = 'One normal Microsoft sign-in in an embedded window: you sign in yourself. AVDTune gets three tokens from it, one for Microsoft Graph, one for the SharePoint site and one for Azure Resource Manager. Microsoft puts every consented permission of a resource into its token, so both Graph tokens carry all Graph permissions listed here; extra permissions are reported as a warning. The tokens live in memory only and are removed on closing, on sign out and before seal.'
+    $ui.TxtStageIntro.Text = 'One normal Microsoft sign-in in an embedded window: you sign in yourself. AVDTune gets three tokens from it, one for Microsoft Graph, one for the SharePoint site and one for Azure Resource Manager. Microsoft puts every consented permission of a resource into its token, so both Graph tokens carry all Graph permissions listed here; extra permissions are reported as a warning. The tokens live in memory only and are removed on closing, on sign out and by Finish.'
     $session = $script:StartContext.Session
     foreach ($key in (Get-AVDTuneAudience).Keys) {
         $a = (Get-AVDTuneAudience)[$key]

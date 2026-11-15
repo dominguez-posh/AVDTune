@@ -79,7 +79,7 @@ $script:WuaErrors = @{
     '0x8024200B' = @{ Repair = $true; Text = 'The installer of the update failed.'; Fix = 'Look at C:\Windows\Logs\CBS\CBS.log, run DISM /RestoreHealth and sfc, then try again.' }
     '0x800F0922' = @{ Repair = $false; Text = 'The installation was rolled back (servicing stack problem, too little space on the system partition, or a VPN).'; Fix = 'Check free disk space, restart the master, try again.' }
     '0x80070005' = @{ Repair = $false; Text = 'Access denied.'; Fix = 'AVDTune must run as administrator; look for a virus scanner or another installer that blocks the update.' }
-    '0x80070070' = @{ Repair = $false; Text = 'Not enough disk space.'; Fix = 'Free space on C: (component cleanup comes with Cleanup and seal), then try again.' }
+    '0x80070070' = @{ Repair = $false; Text = 'Not enough disk space.'; Fix = 'Free space on C: (component cleanup comes with Cleanup and finish), then try again.' }
     '0x80070422' = @{ Repair = $false; Text = 'The Windows Update service is disabled.'; Fix = 'Set the service back to Manual (never disable it: policies block the users, see Update block). Then try again.' }
     '0x8024402C' = @{ Repair = $false; Text = 'The update service could not be reached (name could not be resolved).'; Fix = 'Check the network, DNS and the proxy of the master, then try again.' }
     '0x80072EE7' = @{ Repair = $false; Text = 'The name of the update server could not be resolved (no network).'; Fix = 'Check the network, DNS and the proxy of the master, then try again.' }
