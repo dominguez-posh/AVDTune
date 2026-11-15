@@ -1,6 +1,6 @@
 # Plan: AVDTune, Golden Master management for Azure Virtual Desktop
 
-Status: PLAN, no product code yet. Lead: AVDTune CTO. Private repo `dominguez-posh/AVDTune`. Replaces the "Golden Master mode inside PackTune" idea of PackTune's `docs/plans/golden-master.md`: same engine ideas (step contract, Test/Apply/Undo, state file, dry run), but as its own tool in PackTune's look, for AVD only.
+Status: PLAN, phase 1 in progress. Lead: AVDTune CTO. Public repo `dominguez-posh/AVDTune` (public since 2026-11-15; no customer names, hosts, tenant data or IDs, ever). Replaces the "Golden Master mode inside PackTune" idea of PackTune's `docs/plans/golden-master.md`: same engine ideas (step contract, Test/Apply/Undo, state file, dry run), but as its own tool in PackTune's look, for AVD only.
 
 Decisions of the user (2026-11-15): own repository (private); shared code copied from PackTune by a sync script; first phase is Updates plus the update block for users; watermark stays bound to a machine name pattern; the benchmark engine lives in AVDTune and the AVD-Benchmark repo stays as its stand-alone version.
 
@@ -318,9 +318,17 @@ New benchmark in AVDTune:
 - The master reads the PackTune package store with the same sign-in (Sites.Selected). Trust anchor stays Intune: the manifest hash in the app notes; AVDTune reads it with read-only Intune access. Packages that are only in the library and not in Intune need their own anchor: open question.
 - Before seal every token, refresh token and cache of AVDTune and the sign-in is removed and checked; a captured image must not carry an admin session.
 
+## 9a. Self-update and integrity against GitHub (user decision 2026-11-15)
+
+- Releases on GitHub (public repo): a ZIP of the tool plus `manifest.json` with version, release date, and SHA256 and size of every file. Built by a GitHub Actions workflow from the tagged commit, never by hand.
+- Integrity at every start: AVDTune compares its installed files with the manifest of its own version (fetched from the GitHub release over HTTPS, cached copy when offline). Missing, changed or extra files: red on the Overview with the file list, AVDTune runs read only until repaired; "Reparieren" downloads the release again and replaces the files after the same check.
+- Update check at every start and on demand: newest release (stable; early access only when switched on), release notes shown. Update only on the user's click, never during a run or in maintenance mode: download ZIP and manifest, check SHA256 of the ZIP and of every file, install side by side into `C:\Program Files\AVDTune\<version>`, switch, keep the previous version for "Zurueck zur vorigen Version". Entry in the protocol and the change log (tool version is part of every change log entry).
+- Limit, stated in the UI and README: the hash manifest proves that the files are the ones published on GitHub and unchanged on the master; it does not protect against a compromised GitHub account or repository. Code signing (Authenticode, e.g. Azure Trusted Signing) can be added later without changing the flow: then the publisher is pinned as well.
+- Repository hygiene for the public repo: `Tests\Check-PublicContent.ps1` fails on tenant IDs, GUIDs in non-test files, storage account or host names, IP addresses outside documentation ranges, and on names from a local deny list that lives outside the repo (`%LOCALAPPDATA%\AVDTune\deny-list.txt`, never committed); run before every commit and in CI.
+
 ## 9. Security
 
-Elevated tool on a machine that becomes the image of all users: runs from a protected copy (`C:\Program Files\AVDTune`, admin-only ACL) with signature check of its files; downloads only from Microsoft/known hosts over HTTPS with Authenticode or hash check; no command lines built from data; the Sicherheitspruefer reviews update block, seal, sign-in on the master and the downloader.
+Elevated tool on a machine that becomes the image of all users: runs from a protected copy (`C:\Program Files\AVDTune`, admin-only ACL) with a hash check of its files (section 9a); downloads only from Microsoft/known hosts over HTTPS with Authenticode or hash check; no command lines built from data; the Sicherheitspruefer reviews update block, seal, sign-in on the master and the downloader.
 
 ## 10. Checks
 
