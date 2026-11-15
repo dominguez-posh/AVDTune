@@ -74,6 +74,8 @@ try {
     Test-Check 'Test: NonCompliant, nothing written' ($t.Status -eq 'NonCompliant' -and $m.Log.Count -eq 0) $t.Status
     $w = Invoke-AVDTuneStep -Step $step -Machine $m -Mode Apply -WhatIf
     Test-Check 'Apply -WhatIf: WhatIf, nothing written' ($w.Status -eq 'WhatIf' -and $m.Log.Count -eq 0 -and $w.WhatIf) $w.Status
+    Test-Check 'Apply without the snapshot gate is refused, nothing written (read only)' (-not (Test-AVDTuneWriteAllowed) -and (Test-Throws { Invoke-AVDTuneStep -Step $step -Machine $m -Mode Apply }) -and (Test-Throws { Invoke-AVDTuneStep -Step $step -Machine $m -Mode Undo }) -and $m.Log.Count -eq 0) $null
+    Open-AVDTuneWriteGate -SnapshotId 'snap-check' -ConfirmedBy 'Check Runner'
     $a = Invoke-AVDTuneStep -Step $step -Machine $m -Mode Apply
     Test-Check 'Apply: Changed with before and after, reboot flag from the step' ($a.Status -eq 'Changed' -and $null -eq $a.Before -and $a.After -eq 1 -and $a.Reboot -and $m.Log.Count -eq 1) "$($a.Status) $($a.After)"
     $a2 = Invoke-AVDTuneStep -Step $step -Machine $m -Mode Apply

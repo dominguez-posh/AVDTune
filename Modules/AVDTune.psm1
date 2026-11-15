@@ -276,6 +276,23 @@ function Get-AVDTuneRun {
 
 #endregion
 
+#region write gate
+
+# The snapshot gate (AVDTune.Snapshot.psm1) opens this when a snapshot of today is confirmed by name. Until then the engine refuses every
+# change of the master (Apply and Undo without -WhatIf); reading and dry runs always work. The gate is held in memory only: a new
+# start of AVDTune starts closed.
+$script:WriteGate = $null
+
+function Open-AVDTuneWriteGate {
+    param([Parameter(Mandatory)][string]$SnapshotId, [Parameter(Mandatory)][string]$ConfirmedBy)
+    $script:WriteGate = [pscustomobject]@{ SnapshotId = $SnapshotId; ConfirmedBy = $ConfirmedBy; At = (Get-Date).ToString('o') }
+}
+function Close-AVDTuneWriteGate { $script:WriteGate = $null }
+function Get-AVDTuneWriteGate { $script:WriteGate }
+function Test-AVDTuneWriteAllowed { $null -ne $script:WriteGate }
+
+#endregion
+
 #region steps
 
 function New-AVDTuneStep {
@@ -312,6 +329,9 @@ function Invoke-AVDTuneStep {
     #>
     [CmdletBinding()]
     param([Parameter(Mandatory)]$Step, [Parameter(Mandatory)]$Machine, [ValidateSet('Test', 'Apply', 'Undo')][string]$Mode = 'Test', [switch]$WhatIf)
+    if (($Mode -in 'Apply', 'Undo') -and -not $WhatIf -and -not (Test-AVDTuneWriteAllowed)) {
+        throw 'The snapshot gate is not confirmed: AVDTune is read only until a snapshot of today is confirmed on the Overview.'
+    }
     $started = & $Machine.Now
     $result = [ordered]@{
         Id = $Step.Id; Section = $Step.Section; Title = $Step.Title; Mode = $Mode; Status = 'Failed'; Before = $null; After = $null; Message = ''
@@ -694,4 +714,5 @@ Export-ModuleMember -Function Get-AVDTuneProp, Test-AVDTuneElevated, Get-AVDTune
     New-AVDTuneStateSecurity, Initialize-AVDTuneState, Get-AVDTuneState, Set-AVDTuneState, Test-AVDTuneImageVersion, Get-AVDTuneNextImageVersion, Start-AVDTuneImageVersion,
     Add-AVDTuneRun, Get-AVDTuneRun, New-AVDTuneStep, Invoke-AVDTuneStep, New-AVDTuneStepFromData, Get-AVDTuneStepCatalog, Invoke-AVDTune,
     Add-AVDTuneChangeLogEntry, Get-AVDTuneChangeLog, Get-AVDTuneChangeLogVersions, ConvertTo-AVDTuneChangeLogDocument, Export-AVDTuneChangeLog,
-    Get-AVDTuneWindowsInfo, Get-AVDTuneOfficeInfo, Get-AVDTuneSourceImage, Get-AVDTuneHealth, Get-AVDTuneOverview, Write-AVDTuneFile, Read-AVDTuneJson
+    Get-AVDTuneWindowsInfo, Get-AVDTuneOfficeInfo, Get-AVDTuneSourceImage, Get-AVDTuneHealth, Get-AVDTuneOverview, Write-AVDTuneFile, Read-AVDTuneJson,
+    Open-AVDTuneWriteGate, Close-AVDTuneWriteGate, Get-AVDTuneWriteGate, Test-AVDTuneWriteAllowed, Remove-AVDTuneControlCharacters
