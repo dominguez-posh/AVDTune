@@ -25,6 +25,10 @@ param([string]$Root, [string]$DenyListPath)
 # GUIDs that are public and may appear in code and docs (lower case). Every entry says what it is.
 $script:AllowedGuids = @{
     'ae6d2014-e692-45fa-a88b-ee552567cdc1' = 'Path of the public FSLogix download on download.microsoft.com (target of aka.ms/fslogix_download), used by the network benchmark'
+    '0c867c2a-1d8c-454a-a3db-ab2ea1bdc8bb' = 'Azure built-in role Storage File Data SMB Share Contributor (Microsoft Learn, built-in roles)'
+    'a7264617-510b-434b-a828-9731dc254ea7' = 'Azure built-in role Storage File Data SMB Share Elevated Contributor'
+    '69566ab7-960f-475b-8e7c-b3118f30c6bd' = 'Azure built-in role Storage File Data Privileged Contributor'
+    'b8eda974-7b85-4f76-af95-65846b26df6d' = 'Azure built-in role Storage File Data Privileged Reader'
     '7971f918-a847-4430-9279-4a52d1efe18d' = 'Microsoft Update service ID (Windows Update Agent)'
     '56eb18f8-b008-4cbd-b6d2-8c97fe7e9062' = 'Microsoft Edge product ID (EdgeUpdate registry key)'
     '492350f6-3a01-4f97-b9c0-c7c6ddf67d60' = 'Microsoft 365 Apps update channel: Current Channel'

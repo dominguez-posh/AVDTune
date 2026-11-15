@@ -299,6 +299,147 @@
                             </ScrollViewer>
                         </Grid>
 
+                        <!-- ============ FSLogix ============ -->
+                        <Grid x:Name="PageFSLogix" Visibility="Collapsed">
+                            <ScrollViewer Style="{DynamicResource PageScroll}">
+                                <StackPanel Margin="40,32,40,28" MaxWidth="1000" HorizontalAlignment="Left">
+                                    <Grid>
+                                        <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+                                        <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                                        <TextBlock Text="FSLogix" Style="{DynamicResource PageTitle}"/>
+                                        <TextBlock x:Name="TxtFslSubtitle" Grid.Row="1" Grid.ColumnSpan="2" Style="{DynamicResource Subtitle}" Text="Install and update FSLogix, set the profile container with Microsoft's recommended values, edit redirections.xml, set the Defender exclusions and test that profiles will work. Everything that changes the master is behind the snapshot gate."/>
+                                        <StackPanel x:Name="PanelFslHead" Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center" Margin="24,0,0,0">
+                                            <Button x:Name="BtnFslTestWrite" Content="Test with write tests" Margin="0,0,8,0" AutomationProperties.Name="Run the function test including the write tests on the share"/>
+                                            <Button x:Name="BtnFslTest" Style="{DynamicResource PrimaryButton}" Content="Run test" AutomationProperties.Name="Run the FSLogix function test"/>
+                                        </StackPanel>
+                                    </Grid>
+                                    <TextBlock x:Name="TxtFslState" Style="{DynamicResource Hint}" Margin="0,12,0,0" TextWrapping="Wrap"/>
+
+                                    <Border Style="{DynamicResource CardBox}" Margin="0,16,0,0" Background="{DynamicResource Card}" Padding="20,16">
+                                        <StackPanel>
+                                            <TextBlock Text="Installation" Style="{DynamicResource CardTitle}"/>
+                                            <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
+                                                <Border x:Name="PillFslInstall" Style="{DynamicResource Pill}" Padding="10,2" VerticalAlignment="Center"><TextBlock x:Name="TxtFslInstallPill" FontSize="12" FontWeight="SemiBold"/></Border>
+                                                <TextBlock x:Name="TxtFslVersion" Margin="12,0,0,0" VerticalAlignment="Center" TextWrapping="Wrap"/>
+                                            </StackPanel>
+                                            <TextBlock x:Name="TxtFslLatest" Style="{DynamicResource Hint}" Margin="0,8,0,0" TextWrapping="Wrap"/>
+                                            <Button x:Name="BtnFslInstall" Content="Install or update FSLogix" HorizontalAlignment="Left" Margin="0,12,0,0" AutomationProperties.Name="Install or update FSLogix from Microsoft"/>
+                                        </StackPanel>
+                                    </Border>
+
+                                    <Border Style="{DynamicResource CardBox}" Margin="0,16,0,0" Background="{DynamicResource Card}" Padding="20,16">
+                                        <StackPanel>
+                                            <TextBlock Text="Profile container settings" Style="{DynamicResource CardTitle}"/>
+                                            <TextBlock Style="{DynamicResource Hint}" Margin="0,4,0,0" TextWrapping="Wrap" Text="Each value has Microsoft's recommendation and a reason. A value left empty is not touched. Press Test first: it shows what would change and writes nothing."/>
+                                            <StackPanel x:Name="PanelFslSettings" Margin="0,10,0,0"/>
+                                            <StackPanel Orientation="Horizontal" Margin="0,12,0,0">
+                                                <Button x:Name="BtnFslFill" Content="Fill in recommended" Margin="0,0,8,0" AutomationProperties.Name="Fill in Microsoft's recommended values"/>
+                                                <Button x:Name="BtnFslSettingsTest" Content="Test" Margin="0,0,8,0" AutomationProperties.Name="Show what would change"/>
+                                                <Button x:Name="BtnFslSettingsApply" Style="{DynamicResource PrimaryButton}" Content="Apply" Margin="0,0,8,0" AutomationProperties.Name="Write the settings"/>
+                                                <Button x:Name="BtnFslSettingsUndo" Content="Undo last change" AutomationProperties.Name="Put the previous values back"/>
+                                            </StackPanel>
+                                            <TextBlock x:Name="TxtFslSettingsState" Style="{DynamicResource Hint}" Margin="0,10,0,0" TextWrapping="Wrap"/>
+                                        </StackPanel>
+                                    </Border>
+
+                                    <Border Style="{DynamicResource CardBox}" Margin="0,16,0,0" Background="{DynamicResource Card}" Padding="20,16">
+                                        <StackPanel>
+                                            <TextBlock Text="Include and exclude lists" Style="{DynamicResource CardTitle}"/>
+                                            <TextBlock Style="{DynamicResource Hint}" Margin="0,4,0,0" TextWrapping="Wrap" Text="Local groups that decide who FSLogix processes. The exclude list is empty by default; the include list contains Everyone. Administrators should be excluded so that an admin sign-in does not lock a container."/>
+                                            <TextBox x:Name="TxtFslGroups" Style="{DynamicResource SelectableText}" Margin="0,8,0,0" Height="80" AcceptsReturn="True" VerticalScrollBarVisibility="Auto" FontFamily="Cascadia Mono, Consolas" FontSize="12" Padding="10,8" Foreground="{DynamicResource Text}" AutomationProperties.Name="Members of the include and exclude lists"/>
+                                            <StackPanel Orientation="Horizontal" Margin="0,10,0,0">
+                                                <ComboBox x:Name="CmbFslList" Width="110" Margin="0,0,8,0" AutomationProperties.Name="Which list"/>
+                                                <ComboBox x:Name="CmbFslGroup" Width="260" Margin="0,0,8,0" IsEditable="True" AutomationProperties.Name="Group from the domain, or a SID"/>
+                                                <Button x:Name="BtnFslGroupAdd" Content="Add" Margin="0,0,8,0"/>
+                                                <Button x:Name="BtnFslGroupRemove" Content="Remove" Margin="0,0,8,0"/>
+                                                <Button x:Name="BtnFslExcludeAdmins" Content="Exclude local administrators" AutomationProperties.Name="Put the local Administrators group into the exclude list"/>
+                                            </StackPanel>
+                                            <TextBlock x:Name="TxtFslGroupHint" Style="{DynamicResource Hint}" Margin="0,8,0,0" TextWrapping="Wrap"/>
+                                        </StackPanel>
+                                    </Border>
+
+                                    <Border Style="{DynamicResource CardBox}" Margin="0,16,0,0" Background="{DynamicResource Card}" Padding="20,16">
+                                        <StackPanel>
+                                            <TextBlock Text="redirections.xml" Style="{DynamicResource CardTitle}"/>
+                                            <TextBlock Style="{DynamicResource Hint}" Margin="0,4,0,0" TextWrapping="Wrap" Text="Keeps cache folders out of the profile container. Single sign-on folders (the token broker, WAM) are never excluded: that breaks sign-in. Only Teams comes from Microsoft Learn; the other groups are the usual cache folders and are marked."/>
+                                            <Grid Margin="0,10,0,0">
+                                                <Grid.ColumnDefinitions><ColumnDefinition Width="250"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                                                <TextBlock Text="Folder of the file (RedirXMLSourceFolder)" VerticalAlignment="Center" TextWrapping="Wrap"/>
+                                                <TextBox x:Name="TxtFslRedirFolder" Grid.Column="1" Padding="8,6" AutomationProperties.Name="Folder that holds redirections.xml"/>
+                                            </Grid>
+                                            <StackPanel x:Name="PanelFslTemplate" Margin="0,10,0,0"/>
+                                            <TextBox x:Name="TxtFslRedirXml" Style="{DynamicResource SelectableText}" Margin="0,10,0,0" Height="200" AcceptsReturn="True" IsReadOnly="False" VerticalScrollBarVisibility="Auto" FontFamily="Cascadia Mono, Consolas" FontSize="12" Padding="10,8" Foreground="{DynamicResource Text}" AutomationProperties.Name="redirections.xml text"/>
+                                            <StackPanel Orientation="Horizontal" Margin="0,10,0,0">
+                                                <Button x:Name="BtnFslRedirGenerate" Content="Generate from template" Margin="0,0,8,0"/>
+                                                <Button x:Name="BtnFslRedirValidate" Content="Validate" Margin="0,0,8,0"/>
+                                                <Button x:Name="BtnFslRedirSave" Style="{DynamicResource PrimaryButton}" Content="Save to the folder" Margin="0,0,8,0"/>
+                                                <Button x:Name="BtnFslRedirUndo" Content="Undo last save"/>
+                                            </StackPanel>
+                                            <TextBlock x:Name="TxtFslRedirState" Style="{DynamicResource Hint}" Margin="0,10,0,0" TextWrapping="Wrap"/>
+                                        </StackPanel>
+                                    </Border>
+
+                                    <Border Style="{DynamicResource CardBox}" Margin="0,16,0,0" Background="{DynamicResource Card}" Padding="20,16">
+                                        <StackPanel>
+                                            <TextBlock Text="Microsoft Defender exclusions" Style="{DynamicResource CardTitle}"/>
+                                            <TextBlock Style="{DynamicResource Hint}" Margin="0,4,0,0" TextWrapping="Wrap" Text="Microsoft's list for FSLogix (Learn, prerequisites). Registry keys and the mount points are on that list but are not Defender exclusion types: they are for other antivirus or DLP tools."/>
+                                            <StackPanel x:Name="PanelFslDefender" Margin="0,8,0,0"/>
+                                            <StackPanel Orientation="Horizontal" Margin="0,10,0,0">
+                                                <Button x:Name="BtnFslDefAdd" Style="{DynamicResource PrimaryButton}" Content="Add the missing exclusions" Margin="0,0,8,0"/>
+                                                <Button x:Name="BtnFslDefUndo" Content="Undo"/>
+                                            </StackPanel>
+                                            <TextBlock x:Name="TxtFslDefState" Style="{DynamicResource Hint}" Margin="0,10,0,0" TextWrapping="Wrap"/>
+                                        </StackPanel>
+                                    </Border>
+
+                                    <Border Style="{DynamicResource CardBox}" Margin="0,16,0,0" Background="{DynamicResource Card}" Padding="20,16">
+                                        <StackPanel>
+                                            <TextBlock Text="Function test" Style="{DynamicResource CardTitle}"/>
+                                            <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
+                                                <Border x:Name="PillFslTest" Style="{DynamicResource Pill}" Padding="10,2" VerticalAlignment="Center"><TextBlock x:Name="TxtFslTestPill" FontSize="12" FontWeight="SemiBold"/></Border>
+                                                <TextBlock x:Name="TxtFslTestSummary" Margin="12,0,0,0" VerticalAlignment="Center" TextWrapping="Wrap"/>
+                                            </StackPanel>
+                                            <StackPanel x:Name="PanelFslTest" Margin="0,8,0,0"/>
+                                            <TextBlock Style="{DynamicResource Hint}" Margin="0,8,0,0" TextWrapping="Wrap" Text="The test is part of the healthcheck: a master with a red or missing FSLogix test cannot be finished."/>
+                                        </StackPanel>
+                                    </Border>
+
+                                    <Border Style="{DynamicResource CardBox}" Margin="0,16,0,0" Background="{DynamicResource Card}" Padding="20,16">
+                                        <StackPanel>
+                                            <TextBlock Text="Storage check (Azure)" Style="{DynamicResource CardTitle}"/>
+                                            <TextBlock Style="{DynamicResource Hint}" Margin="0,4,0,0" TextWrapping="Wrap" Text="Reads the storage account behind VHDLocations with your Azure sign-in (no key): identity, SMB settings, private endpoint, roles and the NTFS rights of the share root. The domain account is used for the comparison with the domain controller and for the access test as a domain user; its password stays in memory."/>
+                                            <Grid Margin="0,10,0,0">
+                                                <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+                                                <Grid.ColumnDefinitions><ColumnDefinition Width="250"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                                                <TextBlock Text="Subscription ids (comma separated)" VerticalAlignment="Center" Margin="0,3,0,3"/>
+                                                <TextBox x:Name="TxtFslSubs" Grid.Column="1" Padding="8,6" Margin="0,3,0,3" AutomationProperties.Name="Subscription ids to search for the storage account"/>
+                                                <TextBlock Grid.Row="1" Text="Users group / administrators group" VerticalAlignment="Center" Margin="0,3,0,3"/>
+                                                <StackPanel Grid.Row="1" Grid.Column="1" Orientation="Horizontal" Margin="0,3,0,3">
+                                                    <ComboBox x:Name="CmbFslUsersGroup" Width="230" IsEditable="True" Margin="0,0,8,0" AutomationProperties.Name="Users group (name or SID)"/>
+                                                    <ComboBox x:Name="CmbFslAdminsGroup" Width="230" IsEditable="True" AutomationProperties.Name="Administrators group (name or SID)"/>
+                                                </StackPanel>
+                                                <TextBlock Grid.Row="2" Text="Domain controller" VerticalAlignment="Center" Margin="0,3,0,3"/>
+                                                <TextBox x:Name="TxtFslDc" Grid.Row="2" Grid.Column="1" Padding="8,6" Margin="0,3,0,3" AutomationProperties.Name="Domain controller"/>
+                                                <TextBlock Grid.Row="3" Text="Domain account (test user)" VerticalAlignment="Center" Margin="0,3,0,3"/>
+                                                <StackPanel Grid.Row="3" Grid.Column="1" Orientation="Horizontal" Margin="0,3,0,3">
+                                                    <TextBox x:Name="TxtFslUser" Width="230" Padding="8,6" Margin="0,0,8,0" AutomationProperties.Name="Domain account"/>
+                                                    <PasswordBox x:Name="PwdFslPassword" Width="230" Padding="8,6" AutomationProperties.Name="Password of the domain account"/>
+                                                </StackPanel>
+                                                <CheckBox x:Name="ChkFslKey" Grid.Row="4" Grid.ColumnSpan="2" Margin="0,6,0,0" Content="Allow the storage account key for this run, only if the role for the ACL is missing (full access; used in memory only, never saved)"/>
+                                            </Grid>
+                                            <StackPanel Orientation="Horizontal" Margin="0,12,0,0">
+                                                <Button x:Name="BtnFslStorage" Style="{DynamicResource PrimaryButton}" Content="Run storage check" Margin="0,0,8,0" AutomationProperties.Name="Run the storage check"/>
+                                                <Button x:Name="BtnFslAclSet" Content="Set the recommended ACL" Visibility="Collapsed" AutomationProperties.Name="Set the recommended ACL on the share root"/>
+                                            </StackPanel>
+                                            <TextBlock x:Name="TxtFslStorageSummary" Margin="0,10,0,0" TextWrapping="Wrap"/>
+                                            <StackPanel x:Name="PanelFslStorage" Margin="0,8,0,0"/>
+                                            <TextBox x:Name="TxtFslAclDiff" Style="{DynamicResource SelectableText}" Margin="0,10,0,0" Height="120" AcceptsReturn="True" VerticalScrollBarVisibility="Auto" FontFamily="Cascadia Mono, Consolas" FontSize="12" Padding="10,8" Foreground="{DynamicResource Text}" Visibility="Collapsed" AutomationProperties.Name="ACL diff"/>
+                                        </StackPanel>
+                                    </Border>
+                                </StackPanel>
+                            </ScrollViewer>
+                        </Grid>
+
                         <!-- ============ Update block ============ -->
                         <Grid x:Name="PageUpdateBlock" Visibility="Collapsed">
                             <ScrollViewer Style="{DynamicResource PageScroll}">

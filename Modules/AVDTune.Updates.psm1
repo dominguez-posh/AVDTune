@@ -188,7 +188,7 @@ function Invoke-AVDTuneLocked {
 # Every native tool AVDTune starts elevated: who must have signed it and the original file name it must carry (VersionInfo; '.mui' is ignored).
 $script:ToolTrust = @{
     'winget.exe' = 'Microsoft'; 'teamsbootstrapper.exe' = 'Microsoft'; 'OfficeC2RClient.exe' = 'Microsoft'; 'MicrosoftEdgeUpdate.exe' = 'Microsoft'
-    'Dism.exe' = 'Microsoft'; 'sfc.exe' = 'Microsoft'; 'choco.exe' = 'Chocolatey'
+    'Dism.exe' = 'Microsoft'; 'sfc.exe' = 'Microsoft'; 'choco.exe' = 'Chocolatey'; 'FSLogixAppsSetup.exe' = 'Microsoft'; 'frx.exe' = 'Microsoft'
 }
 
 function Get-AVDTuneDnPart([string]$Dn, [string]$Key) {
@@ -343,7 +343,14 @@ function Get-AVDTuneUpdateList {
 
     # ---- FSLogix: detect only
     $fs = [string](& $Machine.RegGet 'HKLM:\SOFTWARE\FSLogix\Apps' 'InstallVersion')
-    if ($fs) { [void]$items.Add((New-AVDTuneUpdateItem -Id 'fslogix' -Group 'FSLogix' -Title 'FSLogix Apps' -Installed $fs -Status 'DetectOnly' -Detail 'Only detected here. The update comes with the FSLogix page (phase 3).')) }
+    $fsl = $null; $fslGet = $U.PSObject.Properties['GetFSLogix']
+    if ($fslGet -and (Get-Command Get-AVDTuneFSLogixLatest -ErrorAction SilentlyContinue)) { $fsl = & $U.GetFSLogix }
+    if ($fs -and $fsl) {
+        $lat = Get-AVDTuneFSLogixLatest -F $fsl
+        if ($lat.Ok) { [void]$items.Add((New-AVDTuneUpdateItem -Id 'fslogix' -Group 'FSLogix' -Title 'FSLogix Apps' -Installed $fs -Available $lat.Version -Status 'Check' -Detail "Newest release on the Microsoft download page: $($lat.FileName). The update downloads it, checks the Microsoft signature and installs it only when it is newer; a restart follows.")) }
+        else { [void]$items.Add((New-AVDTuneUpdateItem -Id 'fslogix' -Group 'FSLogix' -Title 'FSLogix Apps' -Installed $fs -Status 'DetectOnly' -Detail "The newest release could not be read: $($lat.Error)")) }
+    }
+    elseif ($fs) { [void]$items.Add((New-AVDTuneUpdateItem -Id 'fslogix' -Group 'FSLogix' -Title 'FSLogix Apps' -Installed $fs -Status 'DetectOnly' -Detail 'Only detected here. The update comes with the FSLogix page (phase 3).')) }
     else { [void]$items.Add((New-AVDTuneUpdateItem -Id 'fslogix' -Group 'FSLogix' -Title 'FSLogix Apps' -Status 'Missing' -Detail 'Not installed.')) }
 
     # ---- Defender signatures
@@ -465,6 +472,14 @@ function Update-AVDTuneNativeItem {
             $now = [string](& $U.AppxVersion 'MSTeams')
             if ($now -ne $before) { return & $new 'Changed' "Updated from $before to $now." '' $now $false '' }
             return & $new 'Unchanged' 'Teams is up to date.' '' $before $false ''
+        }
+        'fslogix' {
+            $get = $U.PSObject.Properties['GetFSLogix']
+            if (-not $get -or -not (Get-Command Invoke-AVDTuneFSLogixInstall -ErrorAction SilentlyContinue)) { return & $new 'Failed' 'The FSLogix installer is not available in this build.' 'NotAvailable' '' $false '' }
+            $f = & $U.GetFSLogix
+            if (-not $f) { return & $new 'Failed' 'The FSLogix adapter is not available.' 'NotAvailable' '' $false '' }
+            $r = Invoke-AVDTuneFSLogixInstall -Machine $Machine -F $f -Root $Root -Progress $Progress
+            return & $new $r.Status $r.Message $r.Code $r.After $r.Reboot $(if ($r.Status -eq 'Failed') { 'Nothing was changed by the failed step. Check the message, the network and the protected download folder, then try again.' } else { '' })
         }
         'defender' {
             $before = [string](& $U.DefenderStatus).Version
@@ -905,6 +920,7 @@ function New-AVDTuneUpdateAdapter {
         }
         catch { @{ Ok = $false; ResultCode = 4; HResult = $_.Exception.HResult; RebootRequired = $false } }
     }.GetNewClosure()
+    $u.GetFSLogix = { New-AVDTuneFSLogixAdapter }
     $u.DefenderStatus = {
         try { $s = Get-MpComputerStatus -ErrorAction Stop; @{ Version = [string]$s.AntivirusSignatureVersion; LastUpdated = [datetime]$s.AntivirusSignatureLastUpdated } } catch { $null }
     }

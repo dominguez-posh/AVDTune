@@ -80,10 +80,12 @@ function New-AVDTuneFakeMachine {
         param($File, [string[]]$Arguments, [int]$TimeoutSeconds = 120)
         $key = (@($File) + @($Arguments)) -join ' '
         [void]$store.Log.Add("Run $key")
-        if ($store.Native.ContainsKey($key)) {
-            $answer = $store.Native[$key]
+        $hitKey = $null
+        if ($store.Native.ContainsKey($key)) { $hitKey = $key } else { foreach ($nk in $store.Native.Keys) { if ($nk.Contains('*') -and $key -like $nk) { $hitKey = $nk; break } } }
+        if ($hitKey) {
+            $answer = $store.Native[$hitKey]
             $result = [pscustomobject]$answer
-            if ($answer -is [System.Collections.IDictionary] -and $answer.Contains('Registry') -and $answer['ExitCode'] -eq 0) { foreach ($k in $answer['Registry'].Keys) { $store.Registry[([string]$k).ToLowerInvariant()] = $answer['Registry'][$k] } }
+            if ($answer -is [System.Collections.IDictionary] -and $answer.Contains('Registry') -and $answer['ExitCode'] -in 0, 3010) { foreach ($k in $answer['Registry'].Keys) { $store.Registry[([string]$k).ToLowerInvariant()] = $answer['Registry'][$k] } }
             $result
         } else { [pscustomobject]@{ ExitCode = 1; Output = "fake: no answer for $key" } }
     }.GetNewClosure()
@@ -95,6 +97,7 @@ function New-AVDTuneFakeMachine {
         foreach ($k in @($store.Keys.Keys) + @($store.Registry.Keys | ForEach-Object { $_.Split('|')[0] })) { if ($k.StartsWith($prefix)) { $names[$k.Substring($prefix.Length).Split('\')[0]] = $true } }
         @($names.Keys)
     }.GetNewClosure()
+    $m.RegNames = { param($Path) $prefix = ([string]$Path).ToLowerInvariant() + '|'; $orig = @{}; foreach ($k in $store.Registry.Keys) { if ($k.StartsWith($prefix)) { $orig[$k.Substring($prefix.Length)] = $true } }; @($orig.Keys) }.GetNewClosure()
     $m.PathExists = { param($Path) $k = ([string]$Path).ToLowerInvariant(); (@($store.Paths) | Where-Object { $_ -eq $Path }).Count -gt 0 -or $store.Files.ContainsKey($k) -or $store.Folders.ContainsKey($k.TrimEnd([char]92)) }.GetNewClosure()
     $m.DirList = { param($Path, $Filter = '*') @(@($store.Dirs[$Path]) | Where-Object { $_ -and $_ -like $Filter }) }.GetNewClosure()
     $m.Hotfixes = { $store.Hotfixes }.GetNewClosure()

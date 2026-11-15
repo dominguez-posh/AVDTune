@@ -261,6 +261,14 @@ function New-AVDTuneMachine {
         if (-not (Test-Path -LiteralPath $Path)) { return @() }
         @(Get-ChildItem -LiteralPath $Path -ErrorAction SilentlyContinue | ForEach-Object { $_.PSChildName })
     }
+    $m.RegNames = {
+        # Names of the values directly in a key (FSLogix typo check); empty when the key is not there
+        param($Path)
+        if (-not (Test-Path -LiteralPath $Path)) { return @() }
+        $item = Get-ItemProperty -LiteralPath $Path -ErrorAction SilentlyContinue
+        if ($null -eq $item) { return @() }
+        @($item.PSObject.Properties | Where-Object { $_.Name -notlike 'PS*' } | ForEach-Object { $_.Name })
+    }
     $m.PathExists = { param($Path) Test-Path -LiteralPath $Path }
     $m.DirList = {
         # Names of the files and folders directly in a folder; empty when the folder is not there
