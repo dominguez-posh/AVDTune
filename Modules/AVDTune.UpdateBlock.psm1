@@ -162,6 +162,8 @@ function Set-AVDTuneUpdateBlock {
     )
     if (-not $WhatIf -and -not (Test-AVDTuneWriteAllowed)) { throw 'The snapshot gate is not confirmed: AVDTune is read only until a snapshot of today is confirmed on the Overview.' }
     $stepMode = if ($Mode -eq 'On') { 'Apply' } else { 'Undo' }
+    $changeOwner = $false; if (-not $WhatIf) { $changeOwner = Start-AVDTuneChange -Root $Root }   # marker: the first change of the version starts here, no new version or snapshot counts while it runs (#27)
+    try {
     $results = New-Object System.Collections.ArrayList
     foreach ($entry in Get-AVDTuneUpdateBlockCatalog) {
         if ($entry.Applies -and -not (& $entry.Applies $Machine)) { continue }
@@ -186,6 +188,8 @@ function Set-AVDTuneUpdateBlock {
         [void](Add-AVDTuneChangeLogEntry -Root $Root -Version $state.ImageVersion -Category 'Update block' -Component 'Update block' -ChangeType Changed -Text $text -User $User -SnapshotId $SnapshotId -RunId $run.Id -Source Step)
     }
     $summary
+    }
+    finally { Stop-AVDTuneChange -Root $Root -Owner $changeOwner }
 }
 
 #endregion
@@ -214,6 +218,8 @@ function Start-AVDTuneMaintenance {
     if (-not (Test-AVDTuneWriteAllowed)) { throw 'The snapshot gate is not confirmed: AVDTune is read only until a snapshot of today is confirmed on the Overview.' }
     if (Get-AVDTuneMaintenanceCrash -Root $Root) { throw 'An earlier maintenance mode did not end properly. Repair it on the Update block page first.' }
     $status = Get-AVDTuneUpdateBlockStatus $Machine
+    $changeOwner = $false; if ($true) { $changeOwner = Start-AVDTuneChange -Root $Root }   # marker: the first change of the version starts here, no new version or snapshot counts while it runs (#27)
+    try {
     $before = @($status.Items | Where-Object { $_.Applicable -and $_.Compliant } | ForEach-Object { $_.Id })
     $id = (& $Machine.Now).ToString('yyyyMMdd-HHmmss', [Globalization.CultureInfo]::InvariantCulture) + '-' + [guid]::NewGuid().ToString('N').Substring(0, 4)
     $record = [pscustomobject][ordered]@{
@@ -249,6 +255,8 @@ function Start-AVDTuneMaintenance {
         throw "The maintenance mode did not start: $cause The update block is not fully back ($($r.Failed -join ', ')). Repair it on the Update block page."
     }
     [pscustomobject]@{ Id = $id; BlockBefore = $before; Lift = @($lift); LiftFailed = $failed.Count; User = $User; SnapshotId = $SnapshotId }
+    }
+    finally { Stop-AVDTuneChange -Root $Root -Owner $changeOwner }
 }
 
 function Restore-AVDTuneBlockSettings {
@@ -275,6 +283,8 @@ function Stop-AVDTuneMaintenance {
     [CmdletBinding()]
     param([Parameter(Mandatory)]$Machine, [string]$Root = (Get-AVDTuneRoot), [Parameter(Mandatory)]$Context)
     $record = Get-AVDTuneMaintenanceRecord $Root
+    $changeOwner = $false; if ($true) { $changeOwner = Start-AVDTuneChange -Root $Root }   # marker: the first change of the version starts here, no new version or snapshot counts while it runs (#27)
+    try {
     $r = Restore-AVDTuneBlockSettings -Machine $Machine -Ids @($Context.BlockBefore)
     $live = Get-AVDTuneUpdateBlockStatus $Machine
     $ok = ($r.Failed.Count -eq 0)
@@ -291,6 +301,8 @@ function Stop-AVDTuneMaintenance {
         [void](Add-AVDTuneChangeLogEntry -Root $Root -Version $state.ImageVersion -Category 'Update block' -Component 'Maintenance mode' -ChangeType Changed -Text $text -User ([string]$Context.User) -SnapshotId ([string]$Context.SnapshotId) -Source Step)
     }
     [pscustomobject]@{ Restored = $ok; Count = $r.Restored; Failed = @($r.Failed); State = $live.State }
+    }
+    finally { Stop-AVDTuneChange -Root $Root -Owner $changeOwner }
 }
 
 function Invoke-AVDTuneMaintenance {
@@ -317,6 +329,8 @@ function Repair-AVDTuneMaintenanceCrash {
     param([Parameter(Mandatory)]$Machine, [string]$Root = (Get-AVDTuneRoot), [string]$User)
     if (-not (Test-AVDTuneWriteAllowed)) { throw 'The snapshot gate is not confirmed: AVDTune is read only until a snapshot of today is confirmed on the Overview.' }
     $record = Get-AVDTuneMaintenanceCrash -Root $Root
+    $changeOwner = $false; if ($true) { $changeOwner = Start-AVDTuneChange -Root $Root }   # marker: the first change of the version starts here, no new version or snapshot counts while it runs (#27)
+    try {
     if (-not $record) { return [pscustomobject]@{ Repaired = $false; Count = 0; Failed = @(); State = (Get-AVDTuneUpdateBlockStatus $Machine).State; Message = 'No interrupted maintenance mode.' } }
     $r = Restore-AVDTuneBlockSettings -Machine $Machine -Ids @($record.BlockBefore)
     $live = Get-AVDTuneUpdateBlockStatus $Machine
@@ -332,6 +346,8 @@ function Repair-AVDTuneMaintenanceCrash {
     $message = "The maintenance mode of $($record.Started) (by $($record.User)) did not end properly: AVDTune was closed or stopped in the middle. " + $(if ($ok) { "The update block was repaired ($($r.Restored) setting(s) set back)." } else { 'The update block could NOT be repaired completely: ' + ($r.Failed -join ', ') })
     if ($state.ImageVersion) { [void](Add-AVDTuneChangeLogEntry -Root $Root -Version $state.ImageVersion -Category 'Update block' -Component 'Maintenance mode' -ChangeType Changed -Text $message -User $User -Source Step) }
     [pscustomobject]@{ Repaired = $ok; Count = $r.Restored; Failed = @($r.Failed); State = $live.State; Message = $message }
+    }
+    finally { Stop-AVDTuneChange -Root $Root -Owner $changeOwner }
 }
 
 #endregion

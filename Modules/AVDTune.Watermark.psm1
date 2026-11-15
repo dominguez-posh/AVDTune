@@ -348,6 +348,8 @@ function Set-AVDTuneWatermark {
     )
     if (-not $WhatIf -and -not (Test-AVDTuneWriteAllowed)) { throw 'The snapshot gate is not confirmed: AVDTune is read only until a snapshot of today is confirmed on the Overview.' }
     $saved = Get-AVDTuneWatermarkSettings -Root $Root
+    $changeOwner = $false; if (-not $WhatIf) { $changeOwner = Start-AVDTuneChange -Root $Root }   # marker: the first change of the version starts here, no new version or snapshot counts while it runs (#27)
+    try {
     if ($Mode -eq 'On' -and $saved.Errors.Count -gt 0) { throw ('The saved settings are not valid: ' + ($saved.Errors -join ' ')) }
     $catalog = @(Get-AVDTuneWatermarkCatalog -Settings $saved.Settings -SourceRoot $SourceRoot -Root $Root -ForRemoval:($Mode -eq 'Off'))
     $by = @{}; foreach ($e in $catalog) { $by[$e.Id] = $e }
@@ -402,6 +404,8 @@ function Set-AVDTuneWatermark {
         [void](Add-AVDTuneChangeLogEntry -Root $Root -Version $state.ImageVersion -Category 'User experience' -Component $component -ChangeType $type -Text $text -User $User -SnapshotId $SnapshotId -RunId $run.Id -Source Step)
     }
     $summary
+    }
+    finally { Stop-AVDTuneChange -Root $Root -Owner $changeOwner }
 }
 
 #endregion

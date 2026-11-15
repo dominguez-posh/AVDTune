@@ -642,11 +642,11 @@ function Invoke-SnapshotConfirm {
         if (-not $f.ImageVersion) { Set-StageMessage 'The confirmation is recorded in an image version: start a new version first.' 'error'; return }
     }
     try {
-        $record = Confirm-AVDTuneSnapshotGate -Root $script:StateRoot -Snapshot $snapshot -TypedName $f.NameBox.Text -SignedInAccount $(if ($session) { [string]$session.Account } else { '' }) -WindowsAccount "$env:USERDOMAIN\$env:USERNAME" -ImageVersion $f.ImageVersion -Machine $script:Machine
+        $record = Confirm-AVDTuneSnapshotGate -Root $script:StateRoot -Snapshot $snapshot -TypedName $f.NameBox.Text -SignedInAccount $(if ($session) { [string]$session.Account } else { '' }) -WindowsAccount "$env:USERDOMAIN\$env:USERNAME" -ImageVersion $f.ImageVersion -Machine $script:Machine -Arm (Get-StartArm) -Token (Get-ArmToken) -Vm $f.Vm
     }
     catch { Set-StageMessage $_.Exception.Message 'error'; return }
     $made = if ($record.CreatedByAVDTune) { 'yes' } else { 'no' }
-    Add-StartProtocol 'Snapshot gate confirmed' "$($record.SnapshotName), created $(([datetime]$record.SnapshotCreated).ToString('yyyy-MM-dd HH:mm')), by AVDTune: $made, confirmed by $($record.ConfirmedBy) (Microsoft account $($record.SignedInAccount), Windows account $($record.WindowsAccount)), ID $($record.SnapshotId)"
+    Add-StartProtocol 'Snapshot gate confirmed' "$($record.SnapshotName), created $(([datetime]$record.SnapshotCreated).ToString('yyyy-MM-dd HH:mm')), by AVDTune: $made, confirmed by $($record.ConfirmedBy) (Microsoft account $($record.SignedInAccount), Windows account $($record.WindowsAccount)), ID $($record.SnapshotId); $($record.Mode) in version $($record.ImageVersion), snapshot kind $($record.SnapshotKind)$(if ($record.FirstChange) { ", first change of the version $(([datetime]$record.FirstChange).ToString('yyyy-MM-dd HH:mm'))" })"
     $script:StartContext.Failures.Remove('Snapshot')
     Show-Toast 'Snapshot confirmed. The pages can change the master now.'
     Close-Stage

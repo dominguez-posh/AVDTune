@@ -149,12 +149,19 @@ function ConvertTo-AVDTuneSnapshotInfo {
     $state = [string](Get-AVDTuneProp $p 'provisioningState')
     $byTool = ([string](Get-AVDTuneProp $tags 'CreatedWith') -eq 'AVDTune')
     $id = [string](Get-AVDTuneProp $Item 'id')
-    $fit = if ($state -ne 'Succeeded') { [pscustomobject]@{ Valid = $false; Kind = ''; Reason = "Not finished (state $(if ($state) { $state } else { 'unknown' }))." } } else { Test-AVDTuneSnapshotInWindow -Created $created -Id $id -Window $Window }
+    # Finished: Succeeded and, when Azure reports them (Premium SSD v2 / Ultra snapshots may be Succeeded before the data is usable), completionPercent 100
+    # and snapshotAccessState Available; a field that is not there counts as before
+    $pct = Get-AVDTuneProp $p 'completionPercent'; $access = [string](Get-AVDTuneProp $p 'snapshotAccessState')
+    $notReady = if ($state -ne 'Succeeded') { "Not finished (state $(if ($state) { $state } else { 'unknown' }))." }
+    elseif ($null -ne $pct -and [double]$pct -lt 100) { "Not finished ($([int][double]$pct) percent)." }
+    elseif ($access -and $access -ne 'Available') { "Not usable yet (access state $access)." }
+    else { '' }
+    $fit = if ($notReady) { [pscustomobject]@{ Valid = $false; Kind = ''; Reason = $notReady } } else { Test-AVDTuneSnapshotInWindow -Created $created -Id $id -Window $Window }
     [pscustomobject]@{
         Name = [string](Get-AVDTuneProp $Item 'name'); Id = [string](Get-AVDTuneProp $Item 'id'); Created = $created; State = $state
         Incremental = [bool](Get-AVDTuneProp $p 'incremental'); ByAVDTune = $byTool
         ImageVersion = [string](Get-AVDTuneProp $tags 'ImageVersion'); CreatedBy = [string](Get-AVDTuneProp $tags 'CreatedBy')
-        Finished = ($state -eq 'Succeeded')
+        Finished = (-not $notReady)
         Valid = [bool]$fit.Valid; Reason = [string]$fit.Reason; Kind = [string]$fit.Kind
     }
 }
@@ -210,7 +217,7 @@ function Get-AVDTuneSnapshotState {
     $b = Invoke-AVDTuneArm -Arm $Arm -Method GET -Path "${Id}?api-version=$($script:ComputeApi)" -Token $Token -Action 'Microsoft.Compute/snapshots/read' -Scope 'the snapshot'
     $p = Get-AVDTuneProp $b 'properties'
     $percent = Get-AVDTuneProp $p 'completionPercent'
-    [pscustomobject]@{ Id = $Id; State = [string](Get-AVDTuneProp $p 'provisioningState'); Percent = $(if ($null -ne $percent) { [double]$percent } else { $null }); Info = (ConvertTo-AVDTuneSnapshotInfo -Item $b -Window $null) }
+    [pscustomobject]@{ Id = $Id; State = $($st = [string](Get-AVDTuneProp $p 'provisioningState'); $inf = ConvertTo-AVDTuneSnapshotInfo -Item $b -Window $null; if ($st -eq 'Succeeded' -and -not $inf.Finished) { 'Creating' } else { $st }); Percent = $(if ($null -ne $percent) { [double]$percent } else { $null }); Info = (ConvertTo-AVDTuneSnapshotInfo -Item $b -Window $null) }
 }
 
 function Wait-AVDTuneSnapshot {
@@ -267,6 +274,25 @@ function Get-AVDTuneGateStatus {
     [pscustomobject]@{ Status = 'NoValidSnapshot'; Mode = $mode; Detail = "No snapshot of the OS disk $since.$(if ($reconnect) { ' Choose another one or create one now (it is the current state).' } else { ' Create one now.' })"; Chosen = $null; Snapshots = $list }
 }
 
+function Get-AVDTuneVerifiedSnapshot {
+    <#
+        Reads one snapshot from Azure by ID and checks that it is a snapshot of THIS OS disk: sourceResourceId equals the OS disk ID and, when both are
+        there, the snapshot's sourceUniqueId equals the uniqueId of the disk (a disk deleted and created again under the same name is another disk).
+        Returns the snapshot info (state, creation time from Azure); throws otherwise.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)]$Arm, [Parameter(Mandatory)][string]$Token, [Parameter(Mandatory)]$Vm, [Parameter(Mandatory)][string]$Id)
+    if ($Id -notmatch '^/subscriptions/[0-9a-fA-F-]{36}/resourceGroups/[A-Za-z0-9._()-]+/providers/Microsoft\.Compute/snapshots/[A-Za-z0-9._-]+$') { throw 'Not a snapshot resource ID.' }
+    $body = Invoke-AVDTuneArm -Arm $Arm -Method GET -Path "${Id}?api-version=$($script:ComputeApi)" -Token $Token -Action 'Microsoft.Compute/snapshots/read' -Scope 'the snapshot'
+    if ([string](Get-AVDTuneProp $body 'id') -ine $Id) { throw 'Azure answered with another snapshot than the one asked for.' }
+    $cd = Get-AVDTuneProp (Get-AVDTuneProp $body 'properties') 'creationData'
+    if ([string](Get-AVDTuneProp $cd 'sourceResourceId') -ine $Vm.OsDiskId) { throw 'The snapshot is not a snapshot of the OS disk of this VM.' }
+    $disk = Invoke-AVDTuneArm -Arm $Arm -Method GET -Path "$($Vm.OsDiskId)?api-version=$($script:ComputeApi)" -Token $Token -Action 'Microsoft.Compute/disks/read' -Scope "the OS disk $($Vm.OsDiskName)"
+    $diskUnique = [string](Get-AVDTuneProp (Get-AVDTuneProp $disk 'properties') 'uniqueId'); $snapUnique = [string](Get-AVDTuneProp $cd 'sourceUniqueId')
+    if ($diskUnique -and $snapUnique -and $diskUnique -ine $snapUnique) { throw 'The snapshot was made from another disk of the same name (the unique ID of the source differs).' }
+    ConvertTo-AVDTuneSnapshotInfo -Item $body -Window $null
+}
+
 function Confirm-AVDTuneSnapshotGate {
     <#
         Confirmation of a valid snapshot by the typed name. Checks again that the snapshot is finished, newer than the last change of the previous
@@ -278,14 +304,20 @@ function Confirm-AVDTuneSnapshotGate {
     [CmdletBinding()]
     param(
         [string]$Root = (Get-AVDTuneRoot), [Parameter(Mandatory)]$Snapshot, [Parameter(Mandatory)][string]$TypedName, [string]$SignedInAccount,
-        [string]$WindowsAccount = "$env:USERDOMAIN\$env:USERNAME", [Parameter(Mandatory)][string]$ImageVersion, [Parameter(Mandatory)]$Machine
+        [string]$WindowsAccount = "$env:USERDOMAIN\$env:USERNAME", [Parameter(Mandatory)][string]$ImageVersion, [Parameter(Mandatory)]$Machine,
+        $Arm, [string]$Token, $Vm
     )
-    if ([string]$Snapshot.State -ne 'Succeeded' -or -not $Snapshot.Created) { throw 'Only a finished snapshot can be confirmed.' }
+    # With -Arm (the window always passes it): the snapshot is read from Azure again now and what the caller says about it (time, state, source) is not used
+    if ($Arm) {
+        if (-not $Vm -or -not $Token) { throw 'The snapshot cannot be read again: the VM and the token are needed.' }
+        $Snapshot = Get-AVDTuneVerifiedSnapshot -Arm $Arm -Token $Token -Vm $Vm -Id ([string]$Snapshot.Id)
+    }
+    if ([string]$Snapshot.State -ne 'Succeeded' -or -not $Snapshot.Created -or ($Snapshot.PSObject.Properties['Finished'] -and -not $Snapshot.Finished)) { throw 'Only a finished snapshot can be confirmed.' }
     $last = Get-AVDTuneLastChange -Root $Root
     $window = Get-AVDTuneSnapshotWindow -Root $Root
     $fit = Test-AVDTuneSnapshotInWindow -Created $Snapshot.Created -Id ([string]$Snapshot.Id) -Window $window
     if (-not $fit.Valid) {
-        throw "The snapshot $($Snapshot.Name) ($(([datetime]$Snapshot.Created).ToString('yyyy-MM-dd HH:mm'))) does not count: $($fit.Reason)' Choose another snapshot or create a new one.'"
+        throw "The snapshot $($Snapshot.Name) ($(([datetime]$Snapshot.Created).ToString('yyyy-MM-dd HH:mm'))) does not count: $($fit.Reason) Choose another snapshot or create a new one."
     }
     $check = Test-AVDTuneConfirmationName -Typed $TypedName
     if (-not $check.Ok) { throw $check.Message }
@@ -298,13 +330,13 @@ function Confirm-AVDTuneSnapshotGate {
         ConfirmedBy = $name; SignedInAccount = $ms; WindowsAccount = $win; ConfirmedAt = $now.ToString('o'); ImageVersion = $ImageVersion
         LastChange = $(if ($last) { $last.ToString('o') } else { $null }); Mode = $window.Mode; SnapshotKind = $fit.Kind
         FirstChange = $(if ($window.FirstChange) { ([datetime]$window.FirstChange).ToString('o') } else { $null })
-        PreviousVersionLastChange = $(if ($window.Lower) { ([datetime]$window.Lower).ToString('o') } else { $null }); Text = $script:ConfirmationText
+        PreviousVersionEnd = $(if ($window.Lower) { ([datetime]$window.Lower).ToString('o') } else { $null }); Text = $script:ConfirmationText
     }
     [void](Set-AVDTuneState -Root $Root -Values @{ SnapshotGate = $record })
     $made = if ($Snapshot.ByAVDTune) { 'yes' } else { 'no' }
     $text = "Snapshot $($Snapshot.Name) confirmed by $name (Microsoft account $ms, Windows account $win) at $($now.ToString('yyyy-MM-dd HH:mm')); created $(([datetime]$Snapshot.Created).ToString('yyyy-MM-dd HH:mm')); created by AVDTune: $made; $(if ($window.Mode -eq 'Reconnect') { "reconnect in version $ImageVersion (first change $(([datetime]$window.FirstChange).ToString('yyyy-MM-dd HH:mm'))): $(if ($fit.Kind -eq 'CurrentState') { 'snapshot of the current state after the last change, rollback goes back to this current state' } else { 'rollback goes back to the start of the version' })" } else { "start of version $ImageVersion" })"
     [void](Add-AVDTuneChangeLogEntry -Root $Root -Version $ImageVersion -Category 'Snapshot' -Component 'OS disk' -ChangeType $(if ($Snapshot.ByAVDTune) { 'Added' } else { 'Note' }) -Text $text -User $name -SnapshotId $Snapshot.Id -Source Step -At $now)
-    Open-AVDTuneWriteGate -SnapshotId $Snapshot.Id -ConfirmedBy $name
+    Open-AVDTuneWriteGate -SnapshotId $Snapshot.Id -ConfirmedBy $name -SnapshotCreated ([datetime]$Snapshot.Created).ToString('o')
     $record
 }
 
@@ -354,5 +386,5 @@ function New-AVDTuneArmAdapter {
 
 #endregion
 
-Export-ModuleMember -Function Get-AVDTuneSnapshotClockBuffer, Get-AVDTuneGateText, Invoke-AVDTuneArm, ConvertTo-AVDTuneArmPath, Get-AVDTuneVmIdentity, Get-AVDTuneDefaultSnapshotNamePattern, Test-AVDTuneSnapshotNamePattern, Get-AVDTuneSnapshotName, Get-AVDTuneOsDiskSnapshots, Start-AVDTuneSnapshot,
+Export-ModuleMember -Function Get-AVDTuneVerifiedSnapshot, Get-AVDTuneSnapshotClockBuffer, Get-AVDTuneGateText, Invoke-AVDTuneArm, ConvertTo-AVDTuneArmPath, Get-AVDTuneVmIdentity, Get-AVDTuneDefaultSnapshotNamePattern, Test-AVDTuneSnapshotNamePattern, Get-AVDTuneSnapshotName, Get-AVDTuneOsDiskSnapshots, Start-AVDTuneSnapshot,
     Get-AVDTuneSnapshotState, Wait-AVDTuneSnapshot, Test-AVDTuneConfirmationName, Get-AVDTuneGateStatus, Confirm-AVDTuneSnapshotGate, New-AVDTuneArmAdapter

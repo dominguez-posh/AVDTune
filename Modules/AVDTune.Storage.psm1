@@ -266,6 +266,8 @@ function Set-AVDTuneStorageRootAcl {
     param([Parameter(Mandatory)]$Files, [Parameter(Mandatory)][string]$Account, [Parameter(Mandatory)][string]$Share, [Parameter(Mandatory)][string]$Token, [Parameter(Mandatory)][string]$UsersSid, [Parameter(Mandatory)][string]$AdminsSid,
         [Parameter(Mandatory)][string]$ConfirmedHash, [string]$Root = (Get-AVDTuneRoot), [string]$User, [string]$SnapshotId)
     if (-not (Test-AVDTuneWriteAllowed)) { return [pscustomobject]@{ Status = 'Failed'; Message = 'Read only: confirm a snapshot of today on the Overview first. Nothing was set.' } }
+    $changeOwner = $false; if ($true) { $changeOwner = Start-AVDTuneChange -Root $Root }   # marker: the first change of the version starts here, no new version or snapshot counts while it runs (#27)
+    try {
     $now = Get-AVDTuneStorageShareAcl -Files $Files -Account $Account -Share $Share -Token $Token
     if (-not $now.Ok) { return [pscustomobject]@{ Status = 'Failed'; Message = "The current ACL cannot be read, so nothing is set: $($now.Error)" } }
     $diff = Get-AVDTuneStorageAclDiff -FoundSddl $now.Sddl -UsersSid $UsersSid -AdminsSid $AdminsSid -Account $Account -Share $Share
@@ -282,6 +284,8 @@ function Set-AVDTuneStorageRootAcl {
     $state = Get-AVDTuneState $Root
     if ($state.ImageVersion) { [void](Add-AVDTuneChangeLogEntry -Root $Root -Version $state.ImageVersion -Category 'FSLogix' -Component 'Storage ACL' -ChangeType Changed -Text "NTFS ACL of the root of share $Share on storage account $Account set to Microsoft's FSLogix recommendation ($(@($diff.Findings).Count) finding(s) fixed)" -User $User -SnapshotId $SnapshotId -Source Step) }
     [pscustomobject]@{ Status = 'Changed'; Message = "The recommended ACL was set on the root of $Share." }
+    }
+    finally { Stop-AVDTuneChange -Root $Root -Owner $changeOwner }
 }
 
 #endregion

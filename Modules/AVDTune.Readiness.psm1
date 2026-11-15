@@ -830,6 +830,8 @@ function Invoke-AVDTuneReadinessFix {
     $fixes = Get-AVDTuneReadinessFixes
     if (-not $fixes.ContainsKey($FixId)) { throw "Unknown fix '$FixId'." }
     $step = $fixes[$FixId]
+    $changeOwner = $false; if (-not $WhatIf) { $changeOwner = Start-AVDTuneChange -Root $Root }   # marker: the first change of the version starts here, no new version or snapshot counts while it runs (#27)
+    try {
     $result = Invoke-AVDTuneStep -Step $step -Machine $Machine -Mode Apply -WhatIf:$WhatIf
     if ($WhatIf) { return [pscustomobject]@{ FixId = $FixId; Status = [string]$result.Status; Message = [string]$result.Message; Reboot = $false; Results = @($result) } }
     $state = Get-AVDTuneState $Root
@@ -844,6 +846,8 @@ function Invoke-AVDTuneReadinessFix {
         [void](Add-AVDTuneChangeLogEntry -Root $Root -Version $state.ImageVersion -Category 'Readiness fix' -Component 'Readiness' -ChangeType Changed -Text $text -User $User -SnapshotId $SnapshotId -RunId $run.Id -Source Step)
     }
     [pscustomobject]@{ FixId = $FixId; Status = [string]$result.Status; Message = [string]$result.Message; Reboot = [bool]$result.Reboot; Results = @($result) }
+    }
+    finally { Stop-AVDTuneChange -Root $Root -Owner $changeOwner }
 }
 
 #endregion

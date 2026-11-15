@@ -527,6 +527,8 @@ function Invoke-AVDTuneUpdateRun {
     if (-not (Test-AVDTuneWriteAllowed)) { throw 'The snapshot gate is not confirmed: AVDTune is read only until a snapshot of today is confirmed on the Overview.' }
     if ($selected.Count -eq 0) { return [pscustomobject]@{ WhatIf = $false; Results = @(); Run = $null; RepairOffered = $false; Reboot = $false } }
     $started = & $Machine.Now
+    $changeOwner = $false; if ($true) { $changeOwner = Start-AVDTuneChange -Root $Root }   # marker: the first change of the version starts here, no new version or snapshot counts while it runs (#27)
+    try {
     # LastChange for the snapshot gate before the first item (also when the block was already off and the maintenance mode lifts nothing)
     [void](Set-AVDTuneState -Root $Root -Values @{ LastChange = $started.ToString('o') })
     $results = New-Object System.Collections.ArrayList
@@ -574,6 +576,8 @@ function Invoke-AVDTuneUpdateRun {
     }
     if ($maintError) { throw $maintError }
     $summary
+    }
+    finally { Stop-AVDTuneChange -Root $Root -Owner $changeOwner }
 }
 
 #endregion
@@ -588,6 +592,8 @@ function Invoke-AVDTuneRepair {
     $title = if ($Kind -eq 'Dism') { 'DISM /Online /Cleanup-Image /RestoreHealth' } else { 'sfc /scannow' }
     if ($Progress) { & $Progress "Running $title (this takes a while) ..." }
     $started = & $Machine.Now
+    $changeOwner = $false; if ($true) { $changeOwner = Start-AVDTuneChange -Root $Root }   # marker: the first change of the version starts here, no new version or snapshot counts while it runs (#27)
+    try {
     $t = Resolve-AVDTuneTool -U $U -Name $(if ($Kind -eq 'Dism') { 'Dism.exe' } else { 'sfc.exe' }) -PathName $Kind
     # LastChange for the snapshot gate before the repair starts (DISM and sfc change system files, also when they end with an error)
     if ($t.Path) { [void](Set-AVDTuneState -Root $Root -Values @{ LastChange = $started.ToString('o') }) }
@@ -607,6 +613,8 @@ function Invoke-AVDTuneRepair {
     [void](Add-AVDTuneRun -Root $Root -Run $run)
     if ($state.ImageVersion) { [void](Add-AVDTuneChangeLogEntry -Root $Root -Version $state.ImageVersion -Category 'Windows' -Component 'Repair' -ChangeType Note -Text "${title}: $(if ($ok) { 'finished without errors' } else { 'FAILED (exit code ' + $r.ExitCode + ')' })" -User $User -SnapshotId $SnapshotId -RunId $run.Id -Source Step) }
     $result
+    }
+    finally { Stop-AVDTuneChange -Root $Root -Owner $changeOwner }
 }
 
 function Get-AVDTuneUpdateHistory {
