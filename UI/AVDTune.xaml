@@ -101,6 +101,25 @@
                                         </StackPanel>
                                     </Grid>
                                     <TextBlock x:Name="TxtOverviewState" Style="{DynamicResource Hint}" Margin="0,12,0,0"/>
+                                    <Border x:Name="BoxRelease" Style="{DynamicResource CardBox}" Margin="0,16,0,0" Background="{DynamicResource Card}" Padding="20,16">
+                                        <StackPanel>
+                                            <StackPanel Orientation="Horizontal">
+                                                <TextBlock Text="Integrity and updates" Style="{DynamicResource CardTitle}" VerticalAlignment="Center"/>
+                                                <Border x:Name="PillRelease" Style="{DynamicResource Pill}" Padding="10,2" Margin="12,0,0,0" VerticalAlignment="Center"><TextBlock x:Name="TxtRelStatus" FontSize="12" FontWeight="SemiBold"/></Border>
+                                            </StackPanel>
+                                            <TextBlock x:Name="TxtRelDetail" Margin="0,8,0,0" TextWrapping="Wrap"/>
+                                            <TextBox x:Name="TxtRelFiles" Visibility="Collapsed" IsReadOnly="True" TextWrapping="NoWrap" AcceptsReturn="True" MaxHeight="150" Margin="0,8,0,0" Padding="8,6" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto" AutomationProperties.Name="Files that differ from the release"/>
+                                            <TextBlock x:Name="TxtRelNotes" Margin="0,10,0,0" TextWrapping="Wrap"/>
+                                            <StackPanel Orientation="Horizontal" Margin="0,12,0,0">
+                                                <Button x:Name="BtnRelRepair" Style="{DynamicResource PrimaryButton}" Content="Repair" Visibility="Collapsed" Margin="0,0,8,0" AutomationProperties.Name="Repair the files of AVDTune from the release"/>
+                                                <Button x:Name="BtnRelInstall" Style="{DynamicResource PrimaryButton}" Content="Install update" Visibility="Collapsed" Margin="0,0,8,0" AutomationProperties.Name="Install the newer version side by side"/>
+                                                <Button x:Name="BtnRelBack" Content="Back to the previous version" Visibility="Collapsed" Margin="0,0,8,0" AutomationProperties.Name="Switch back to the previous version"/>
+                                                <Button x:Name="BtnRelCheck" Content="Check for updates" Margin="0,0,16,0" AutomationProperties.Name="Check GitHub for a newer version"/>
+                                                <CheckBox x:Name="ChkRelEarly" Content="Include early access releases" VerticalAlignment="Center" AutomationProperties.Name="Include early access releases in the update check"/>
+                                            </StackPanel>
+                                            <TextBlock x:Name="TxtRelLimit" Style="{DynamicResource Hint}" Margin="0,10,0,0" TextWrapping="Wrap" Text="Limit: the check proves that the files are the ones published on GitHub for this version and unchanged on this master. It does not protect against a compromised GitHub account or repository. Updates are installed only when you click, never during a run or the maintenance mode."/>
+                                        </StackPanel>
+                                    </Border>
                                     <Border x:Name="BoxStart" Style="{DynamicResource CardBox}" Margin="0,16,0,0" Background="{DynamicResource Card}" Padding="20,16">
                                         <StackPanel>
                                             <TextBlock Text="Start sequence" Style="{DynamicResource CardTitle}"/>

@@ -17,6 +17,9 @@ Set-StrictMode -Version 2.0
 $script:StateSchema = 1
 $script:ImageVersionPattern = '^\d{4}\.(0[1-9]|1[0-2])\.\d{3}$'
 $script:ChangeTypes = @('Added', 'Changed', 'Updated', 'Removed', 'Note')
+# The version of the tool (file VERSION next to Modules\) is part of every change log entry
+$script:ToolVersion = ''
+try { $versionFile = Join-Path (Split-Path $PSScriptRoot -Parent) 'VERSION'; if (Test-Path -LiteralPath $versionFile) { $script:ToolVersion = ([IO.File]::ReadAllText($versionFile)).Trim() } } catch { }
 $script:StepSections = @('Setup', 'Updates', 'Software', 'Office', 'Optimization', 'FSLogix', 'AppMasking', 'VdiComponents', 'UserExperience', 'UpdateBlock', 'Benchmark', 'Seal')
 $script:StepModes = @('Test', 'Apply', 'Undo')
 
@@ -506,13 +509,21 @@ function Get-AVDTuneRun {
 # start of AVDTune starts closed.
 $script:WriteGate = $null
 
+# A block (integrity check of the tool failed, AVDTune.Release.psm1) keeps the gate shut and closes it when it is open: AVDTune is read only until the
+# tool is repaired and started again. Only the integrity check sets it; there is no function that lifts it inside a running process on purpose.
+$script:WriteBlock = $null
+function Set-AVDTuneWriteBlock([string]$Reason) { $script:WriteBlock = $Reason; $script:WriteGate = $null }
+function Clear-AVDTuneWriteBlock { $script:WriteBlock = $null }
+function Get-AVDTuneWriteBlock { $script:WriteBlock }
+
 function Open-AVDTuneWriteGate {
     param([Parameter(Mandatory)][string]$SnapshotId, [Parameter(Mandatory)][string]$ConfirmedBy)
+    if ($script:WriteBlock) { throw "AVDTune is read only: $($script:WriteBlock)" }
     $script:WriteGate = [pscustomobject]@{ SnapshotId = $SnapshotId; ConfirmedBy = $ConfirmedBy; At = (Get-Date).ToString('o') }
 }
 function Close-AVDTuneWriteGate { $script:WriteGate = $null }
 function Get-AVDTuneWriteGate { $script:WriteGate }
-function Test-AVDTuneWriteAllowed { $null -ne $script:WriteGate }
+function Test-AVDTuneWriteAllowed { $null -ne $script:WriteGate -and -not $script:WriteBlock }
 
 #endregion
 
@@ -728,7 +739,7 @@ function Add-AVDTuneChangeLogEntry {
         Id = [guid]::NewGuid().ToString('N').Substring(0, 12); Version = $Version; At = $At.ToString('o')
         Category = (Remove-AVDTuneControlCharacters $Category 40); Component = (Remove-AVDTuneControlCharacters $Component 80); ChangeType = $ChangeType
         Text = (Remove-AVDTuneControlCharacters $Text 500); User = (Remove-AVDTuneControlCharacters $User 80); SnapshotId = (Remove-AVDTuneControlCharacters $SnapshotId 300)
-        RunId = (Remove-AVDTuneControlCharacters $RunId 60); Source = $Source
+        RunId = (Remove-AVDTuneControlCharacters $RunId 60); Source = $Source; ToolVersion = $script:ToolVersion
     }
     $log.Entries = @(@($log.Entries) | Where-Object { $_ }) + $entry
     Write-AVDTuneFile $path ($log | ConvertTo-Json -Depth 6)
@@ -954,4 +965,4 @@ Export-ModuleMember -Function Get-AVDTuneProp, Test-AVDTuneElevated, Get-AVDTune
     Add-AVDTuneRun, Get-AVDTuneRun, Get-AVDTuneLastChange, New-AVDTuneStep, Invoke-AVDTuneStep, New-AVDTuneStepFromData, Get-AVDTuneStepCatalog, Invoke-AVDTune,
     Add-AVDTuneChangeLogEntry, Get-AVDTuneChangeLog, Get-AVDTuneChangeLogVersions, ConvertTo-AVDTuneChangeLogDocument, Export-AVDTuneChangeLog,
     Get-AVDTuneWindowsInfo, Get-AVDTuneOfficeInfo, Get-AVDTuneSourceImage, Get-AVDTuneHealth, Get-AVDTuneOverview, Write-AVDTuneFile, Read-AVDTuneJson,
-    Open-AVDTuneWriteGate, Close-AVDTuneWriteGate, Get-AVDTuneWriteGate, Test-AVDTuneWriteAllowed, Remove-AVDTuneControlCharacters, ConvertTo-AVDTuneTestResult
+    Open-AVDTuneWriteGate, Close-AVDTuneWriteGate, Set-AVDTuneWriteBlock, Clear-AVDTuneWriteBlock, Get-AVDTuneWriteBlock, Get-AVDTuneWriteGate, Test-AVDTuneWriteAllowed, Remove-AVDTuneControlCharacters, ConvertTo-AVDTuneTestResult

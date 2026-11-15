@@ -24,9 +24,10 @@ if ($PSVersionTable.PSEdition -ne 'Desktop') {
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, System.Windows.Forms
 
 $script:AppRoot = $PSScriptRoot
-$script:ToolVersion = '0.1.0'
+$script:ToolVersion = (Get-Content -LiteralPath (Join-Path $PSScriptRoot 'VERSION') -Raw -Encoding UTF8).Trim()   # the file VERSION is also the version of the release
 Import-Module (Join-Path $PSScriptRoot 'Modules\AVDTune.psm1') -Force
 foreach ($part in 'Trust', 'Session', 'Snapshot', 'Directory', 'Start', 'UpdateBlock', 'Updates', 'Readiness') { Import-Module (Join-Path $PSScriptRoot "Modules\AVDTune.$part.psm1") -Force }
+Import-Module (Join-Path $PSScriptRoot 'Modules\AVDTune.Release.psm1') -Force
 . (Join-Path $PSScriptRoot 'AVDTune-Theme.ps1')
 
 # ---------------------------------------------------------------- test mode, elevation, one instance
@@ -409,6 +410,7 @@ Add-Click $ui.BtnProtocolCopy {
 . (Join-Path $PSScriptRoot 'AVDTune-Updates.ps1')
 $script:ReadyFakeArm = $(if ($script:TestMode) { $script:Services.Arm } else { $null })
 . (Join-Path $PSScriptRoot 'AVDTune-Readiness.ps1')
+. (Join-Path $PSScriptRoot 'AVDTune-Release.ps1')
 
 # ---------------------------------------------------------------- theme switch
 function Update-ThemeButton { $ui.BtnTheme.Content = [string][char]$(if ($script:Settings.Theme -eq 'Dark') { 0xE706 } else { 0xE708 }) }
@@ -505,6 +507,7 @@ Show-Page 'Overview'
 if (-not (Get-AVDTuneEnvironment $script:StateRoot)) { try { Open-Stage 'Environment' } catch { Show-Error $_.Exception.Message } }
 $script:Timer.Start()
 Start-OverviewRefresh
+Update-ReleaseView; Start-RelJob 'Start'   # integrity of the tool against its release and the update check, at every start (AVDTune-Release.ps1)
 Start-ReadyJob 'Start' ''   # the readiness analysis runs at every start (read only; Azure checks need the sign-in and run again after it)
 # A maintenance mode that never ended (closed or crashed in the middle) is reported at once; the repair is on the Update block page
 if (Get-AVDTuneMaintenanceCrash -Root $script:StateRoot) { Show-Toast 'The last maintenance mode did not end properly: the update block may be lifted. Open Update block and repair it.' }
