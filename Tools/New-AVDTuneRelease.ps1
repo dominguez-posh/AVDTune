@@ -23,9 +23,15 @@
     Fails when the tag does not match the VERSION file (v<version>).
 .PARAMETER NotesPath
     Release notes (text file). Default: the commit subjects since the last tag.
+.PARAMETER BenchExe
+    The measure program AVDTune.Bench.exe as built by Bench\build.ps1 (the release workflow builds it). It goes into the ZIP as Bench/bin/AVDTune.Bench.exe and its
+    size and SHA256 are in the manifest twice: in Files (checked at every start of AVDTune) and as Bench {Path, Size, Sha256}, the entry AVDTune checks before every
+    start of the program (issue #19).
+.PARAMETER RequireBench
+    Fails when -BenchExe is missing (the workflow sets it: a release without the measure program is not published).
 #>
 [CmdletBinding()]
-param([string]$Root, [Parameter(Mandatory)][string]$OutDir, [string]$ExpectTag, [string]$NotesPath, [string]$Commit, [datetime]$CommitDate, [switch]$AllowDirty)
+param([string]$Root, [Parameter(Mandatory)][string]$OutDir, [string]$ExpectTag, [string]$NotesPath, [string]$Commit, [datetime]$CommitDate, [switch]$AllowDirty, [string]$BenchExe, [switch]$RequireBench)
 
 $ErrorActionPreference = 'Stop'
 if (-not $Root) { $Root = Split-Path $PSScriptRoot -Parent }
@@ -81,10 +87,25 @@ if ($notes.Length -gt 8000) { $notes = $notes.Substring(0, 8000) }
 
 $files = @($all | Where-Object { $rel = $_; -not ($excluded | Where-Object { $rel -like $_ }) } | Sort-Object { $_ } -CaseSensitive)
 if ($files.Count -eq 0) { throw 'No files to release.' }
+
+# The measure program (issue #19): built by the workflow from Bench\, never committed. Same path as in Modules\AVDTune.Release.psm1 ($script:BenchExePath).
+$benchPath = 'Bench/bin/AVDTune.Bench.exe'
+$extraSources = @{}
+if ($RequireBench -and -not $BenchExe) { throw 'The measure program is required (-RequireBench) but -BenchExe was not given: a release without AVDTune.Bench.exe is not built.' }
+if ($BenchExe) {
+    $benchFull = (Resolve-Path -LiteralPath $BenchExe).Path
+    $benchItem = Get-Item -LiteralPath $benchFull -Force
+    if ($benchItem.PSIsContainer -or ($benchItem.Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw "-BenchExe is not a plain file: $benchFull" }
+    if ($benchItem.Length -le 0 -or $benchItem.Length -gt 150MB) { throw "-BenchExe has an implausible size ($($benchItem.Length) bytes): $benchFull" }
+    if (@($all | Where-Object { $_ -ieq $benchPath }).Count -gt 0) { throw "$benchPath is tracked in git; the measure program is built by the workflow and never committed." }
+    $extraSources[$benchPath] = $benchFull
+    $files = @(@($files) + $benchPath | Sort-Object { $_ } -CaseSensitive)
+}
+function Get-SourcePath([string]$Rel) { if ($extraSources.ContainsKey($Rel)) { $extraSources[$Rel] } else { Join-Path $Root $Rel.Replace('/', '\') } }
 foreach ($f in $files) {
     # the same rule as AVDTune.Release.psm1 (Test-AVDTuneSafeRelativePath): the tool refuses any other path in a manifest
     if ($f -notmatch '^[A-Za-z0-9._ -]+(/[A-Za-z0-9._ -]+)*$' -or $f -match '(^|/)\.{1,2}(/|$)' -or $f -match '[. ](/|$)' -or $f -match '(?i)(^|/)(con|prn|aux|nul|com\d|lpt\d)(\.[^/]*)?(/|$)') { throw "Unsafe path in the file list: $f" }
-    $full = Join-Path $Root $f.Replace('/', '\')
+    $full = Get-SourcePath $f
     if (-not (Test-Path -LiteralPath $full -PathType Leaf)) { throw "Listed file does not exist: $f" }
     if ((Get-Item -LiteralPath $full -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) { throw "A link is not released: $f" }
 }
@@ -100,12 +121,19 @@ $entries = New-Object System.Collections.ArrayList
 $zip = [IO.Compression.ZipFile]::Open($zipPath, [IO.Compression.ZipArchiveMode]::Create)
 try {
     foreach ($f in $files) {
-        $full = Join-Path $Root $f.Replace('/', '\')
+        $full = Get-SourcePath $f
         $entry = $zip.CreateEntry($f, [IO.Compression.CompressionLevel]::Optimal)
         $entry.LastWriteTime = $stamp
-        $in = [IO.File]::OpenRead($full); $out = $entry.Open()
-        try { $in.CopyTo($out) } finally { $out.Dispose(); $in.Dispose() }
-        [void]$entries.Add([ordered]@{ Path = $f; Size = (Get-Item -LiteralPath $full).Length; Sha256 = (Get-Sha256 $full) })
+        # size and SHA256 of exactly the bytes that go into the ZIP (one read, no gap between copying and hashing)
+        $sha = [Security.Cryptography.SHA256]::Create(); $size = [int64]0
+        $in = [IO.File]::Open($full, 'Open', 'Read', 'Read'); $out = $entry.Open()
+        try {
+            $buffer = New-Object byte[] 81920
+            while ($n = $in.Read($buffer, 0, $buffer.Length)) { $out.Write($buffer, 0, $n); [void]$sha.TransformBlock($buffer, 0, $n, $null, 0); $size += $n }
+            [void]$sha.TransformFinalBlock((New-Object byte[] 0), 0, 0)
+        }
+        finally { $out.Dispose(); $in.Dispose() }
+        [void]$entries.Add([ordered]@{ Path = $f; Size = $size; Sha256 = ([BitConverter]::ToString($sha.Hash) -replace '-', '').ToLowerInvariant() }); $sha.Dispose()
     }
 }
 finally { $zip.Dispose() }
@@ -116,6 +144,10 @@ $manifest = [ordered]@{
     Prerelease = $version.Contains('-'); Notes = $notes
     Zip = [ordered]@{ Name = $zipName; Size = (Get-Item -LiteralPath $zipPath).Length; Sha256 = (Get-Sha256 $zipPath) }
     Files = @($entries)
+}
+if ($BenchExe) {
+    $be = @($entries | Where-Object { $_.Path -ceq $benchPath })[0]
+    $manifest.Bench = [ordered]@{ Path = $benchPath; Size = $be.Size; Sha256 = $be.Sha256 }
 }
 $manifestPath = Join-Path $OutDir 'manifest.json'
 [IO.File]::WriteAllText($manifestPath, ($manifest | ConvertTo-Json -Depth 6), (New-Object Text.UTF8Encoding $false))

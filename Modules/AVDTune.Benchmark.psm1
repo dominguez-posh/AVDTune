@@ -16,6 +16,7 @@
 
 Set-StrictMode -Version 2.0
 Import-Module (Join-Path $PSScriptRoot 'AVDTune.psm1')
+Import-Module (Join-Path $PSScriptRoot 'AVDTune.Release.psm1')   # Open-AVDTuneVerifiedBenchExe: the measure program is only started after the check against the release manifest (issue #19)
 
 $script:DataDefault = Join-Path (Split-Path $PSScriptRoot -Parent) 'Bench\data'
 $script:RestoreTaskName = 'AVDTune-BenchmarkRestore'
@@ -189,13 +190,17 @@ function New-AVDTuneBenchAdapter {
     <#
         The real benchmark adapter. Reading members change nothing. Writing members: Download (a file under the tool folder), Expand, RestoreTaskRegister /
         RestoreTaskRemove (one scheduled task), Lock (a named mutex), DiskspdRun and RunBench (load on this computer). Tests use New-AVDTuneFakeBench.
+        The measure program (issue #19) is never searched for: it is the file of the release this copy of AVDTune runs from (<install folder>\<version>\Bench\bin),
+        and before every start Open-AVDTuneVerifiedBenchExe checks it against the release manifest of that version and holds it open while the process starts.
+        A development checkout or a copy outside the install folder cannot run it. -InstallRoot, -StateRoot and -Manifest exist for the checks and only work
+        together with AVDTUNE_FAKE (the test mode).
     #>
-    param([string]$ExePath)
-    $app = Split-Path $PSScriptRoot -Parent
-    if (-not $ExePath) {
-        foreach ($c in (Join-Path $app 'Bench\out\AVDTune.Bench.exe'), (Join-Path $app 'tools\AVDTune.Bench.exe')) { if (Test-Path -LiteralPath $c) { $ExePath = $c; break } }
-    }
-    $exe = $ExePath
+    param([string]$AppRoot, [string]$InstallRoot, [string]$StateRoot, $Manifest)
+    if (-not $AppRoot) { $AppRoot = Split-Path $PSScriptRoot -Parent }
+    if (-not $InstallRoot) { $InstallRoot = Get-AVDTuneInstallRoot }
+    if (-not $StateRoot) { $StateRoot = Get-AVDTuneRoot }
+    if (($PSBoundParameters.ContainsKey('AppRoot') -or $PSBoundParameters.ContainsKey('Manifest') -or $PSBoundParameters.ContainsKey('StateRoot') -or $PSBoundParameters.ContainsKey('InstallRoot')) -and -not $env:AVDTUNE_FAKE) { throw 'The measure program is always the one of the release this copy runs from (the parameters are for the checks).' }
+    $engineState = @{ Problem = '' }
     $b = [ordered]@{ Kind = 'Real' }
     $b.Elevated = { Test-AVDTuneElevated }
     $b.OtherSessions = {
@@ -246,20 +251,28 @@ function New-AVDTuneBenchAdapter {
     }
     $b.Unlock = { param($Handle) if ($Handle) { try { $Handle.ReleaseMutex() } catch { }; $Handle.Dispose() } }
     $b.EngineInfo = {
-        if (-not $exe -or -not (Test-Path -LiteralPath $exe)) { return $null }
-        # the SHA256 goes into the result; checking it against the release manifest is plan 9a (not part of this round)
-        [pscustomobject]@{ Path = $exe; Version = (Get-Item -LiteralPath $exe).VersionInfo.FileVersion; Sha256 = (Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash.ToLowerInvariant() }
+        # $null when the measure program cannot be started (EngineProblem says why); otherwise its SHA256 is the one the release manifest names (checked just now)
+        $v = $null
+        try {
+            $v = Open-AVDTuneVerifiedBenchExe -AppRoot $AppRoot -InstallRoot $InstallRoot -StateRoot $StateRoot -Manifest $Manifest
+            $engineState.Problem = ''
+            [pscustomobject]@{ Path = $v.Path; Version = $v.Version; Sha256 = $v.Sha256; Verified = $true }
+        }
+        catch { $engineState.Problem = $_.Exception.Message; $null }
+        finally { if ($v) { $v.Stream.Dispose() } }
     }.GetNewClosure()
+    $b.EngineProblem = { [string]$engineState.Problem }.GetNewClosure()
     $b.RunBench = {
         # Runs the measure program and parses its JSON. Arguments are fixed words and numbers made by this module, never user text
         param([string]$Command, [string[]]$Arguments)
         if ($Command -notmatch '^[a-z]+$') { throw "Invalid command '$Command'." }
-        if (-not $exe -or -not (Test-Path -LiteralPath $exe)) { throw 'AVDTune.Bench.exe was not found.' }
+        # checked against the release manifest right before this start, and held open (no write, delete or rename) until the process has started
+        $verified = Open-AVDTuneVerifiedBenchExe -AppRoot $AppRoot -InstallRoot $InstallRoot -StateRoot $StateRoot -Manifest $Manifest
         $psi = New-Object System.Diagnostics.ProcessStartInfo
-        $psi.FileName = $exe
+        $psi.FileName = $verified.Path
         $psi.Arguments = (@($Command) + @($Arguments) | ForEach-Object { ConvertTo-AVDTuneArgument ([string]$_) }) -join ' '
         $psi.UseShellExecute = $false; $psi.RedirectStandardOutput = $true; $psi.RedirectStandardError = $true; $psi.CreateNoWindow = $true
-        $p = [System.Diagnostics.Process]::Start($psi)
+        try { $p = [System.Diagnostics.Process]::Start($psi) } finally { $verified.Stream.Dispose() }
         try {
             $out = $p.StandardOutput.ReadToEnd(); $err = $p.StandardError.ReadToEnd()
             [void]$p.WaitForExit(600000)
@@ -463,7 +476,8 @@ function Test-AVDTuneBenchmarkPreconditions {
     $items = New-Object System.Collections.ArrayList
     $add = { param($Id, $Level, $Ok, $Text) [void]$items.Add([pscustomobject]@{ Id = $Id; Level = $Level; Ok = [bool]$Ok; Text = $Text }) }
     $engine = & $Bench.EngineInfo
-    & $add 'engine' 'Blocker' ($null -ne $engine) $(if ($engine) { 'The measure program is there.' } else { 'AVDTune.Bench.exe was not found (build it with Bench\build.ps1 or use a release).' })
+    $engineWhy = $(if ($Bench.PSObject.Properties['EngineProblem']) { [string](& $Bench.PSObject.Properties['EngineProblem'].Value) } else { '' })
+    & $add 'engine' 'Blocker' ($null -ne $engine) $(if ($engine) { 'The measure program is there and matches the release manifest.' } elseif ($engineWhy) { $engineWhy } else { 'AVDTune.Bench.exe was not found or is not checked (install a release of AVDTune that carries it).' })
     $elev = & $Bench.Elevated
     & $add 'elevated' 'Blocker' $elev $(if ($elev) { 'Running as administrator.' } else { 'The benchmark needs an administrator session.' })
     $sessions = & $Bench.OtherSessions
