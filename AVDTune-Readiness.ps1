@@ -108,7 +108,7 @@ function Start-ReadyJob([string]$Kind, [string]$FixId) {
                 Invoke-AVDTuneReadinessFix -Machine $m -Root $Root -FixId $FixId -User $User -SnapshotId $Gate.SnapshotId
             }
             else { Invoke-AVDTuneReadiness -Machine $m -Arm (New-AVDTuneArmAdapter) -Token $Token -NoTokenReason $Reason -GalleryImageId $Gallery -FSLogixApplies $FslApplies -FSLogixTest $FslTest -Root $Root }
-        }).AddArgument($script:AppRoot).AddArgument($script:StateRoot).AddArgument($Kind).AddArgument($FixId).AddArgument($tok.Token).AddArgument($tok.Reason).AddArgument($gallery).AddArgument($gate).AddArgument([string]$env:USERNAME).AddArgument((Test-FslApplies)).AddArgument((Get-AVDTuneFSLogixTestRecord -Root $script:StateRoot))
+        }).AddArgument($script:AppRoot).AddArgument($script:StateRoot).AddArgument($Kind).AddArgument($FixId).AddArgument($tok.Token).AddArgument($tok.Reason).AddArgument($gallery).AddArgument($gate).AddArgument([string]$env:USERNAME).AddArgument((Test-FslApplies)).AddArgument((Get-AVDTuneFSLogixTestRecord -Root $script:StateRoot))
     $script:ReadyJob = @{ PS = $ps; Handle = $ps.BeginInvoke(); Kind = $Kind; FixId = $FixId; Task = (New-ReadyTask $Kind $FixId) }
     Set-ReadyBusy $true
     Update-ReadyView

@@ -399,6 +399,13 @@ try {
     $adapterSources = (Get-Content -Raw (Join-Path $repo 'Modules\AVDTune.Snapshot.psm1')) + (Get-Content -Raw (Join-Path $repo 'Modules\AVDTune.Storage.psm1'))
     Test-Check 'the ARM and the Files adapter read error answers through Get-AVDTuneWebResponse, not from the outer exception' (([regex]::Matches($adapterSources, 'Get-AVDTuneWebResponse \$_\.Exception')).Count -eq 2 -and $adapterSources -notmatch "Get-AVDTuneProp \`$_\.Exception 'Response'") $null
 
+    # ---------------------------------------------------------------- no lone CR in any script (#35)
+    # PowerShell ends a line at a lone CR that editors and git do not show: a method chain split there runs as two statements
+    # (AVDTune-Readiness.ps1 lost the last two AddArgument calls; the real start failed, the test mode runs that path inline)
+    $loneCr = @(Get-ChildItem -LiteralPath $repo -Recurse -File -Include '*.ps1', '*.psm1', '*.psd1' | Where-Object { $_.FullName -notmatch '\\\.git\\' } |
+        Where-Object { [regex]::IsMatch([IO.File]::ReadAllText($_.FullName), "`r(?!`n)") } | ForEach-Object { $_.FullName.Substring($repo.Length + 1) })
+    Test-Check 'no script contains a lone CR (it splits a statement for PowerShell but not in the editor)' ($loneCr.Count -eq 0) ($loneCr -join ', ')
+
     # ---------------------------------------------------------------- the real machine, read only
     $real = New-AVDTuneMachine
     $rw = Get-AVDTuneWindowsInfo $real
