@@ -22,8 +22,8 @@ Import-Module (Join-Path $PSScriptRoot 'AVDTune.UpdateBlock.psm1')
 $script:ComputeApi = '2024-07-01'
 $script:NetworkApi = '2024-01-01'
 $script:GalleryApi = '2023-07-03'
-$script:GalleryPattern = '^/subscriptions/[0-9a-fA-F-]{36}/resourceGroups/[^/]+/providers/Microsoft\.Compute/galleries/[^/]+/images/[^/]+$'
-$script:NicPattern = '^/subscriptions/[0-9a-fA-F-]{36}/resourceGroups/[^/]+/providers/Microsoft\.Network/networkInterfaces/[^/]+$'
+$script:GalleryPattern = '^/subscriptions/[0-9a-fA-F-]{36}/resourceGroups/[A-Za-z0-9._()-]+/providers/Microsoft\.Compute/galleries/[A-Za-z0-9._()-]+/images/[A-Za-z0-9._()-]+$'
+$script:NicPattern = '^/subscriptions/[0-9a-fA-F-]{36}/resourceGroups/[A-Za-z0-9._()-]+/providers/Microsoft\.Network/networkInterfaces/[A-Za-z0-9._()-]+$'
 $script:Kinds = @('Start', 'Erstanalyse', 'Healthcheck', 'Manual')
 
 #region data
@@ -448,6 +448,33 @@ function Invoke-AVDTuneReadiness {
 
 #region storing, confirmation, finish gate
 
+function Set-AVDTuneReadinessCarryOver {
+    <#
+        A red item stays red until a reading shows it green: when the earlier record had it red and this run could not check it ("not checkable",
+        e.g. signed out of Azure), the row is red again with the earlier finding named. So a later run without Azure access cannot turn a red into
+        "not checkable" and get it confirmed. Changes $Result in place (rows, counts, overall, OpenIds, RedIds) and returns the carried ids.
+    #>
+    param([Parameter(Mandatory)]$Result, $Previous)
+    $carried = New-Object System.Collections.ArrayList
+    $prevRed = @(if ($Previous) { @($Previous.RedIds) } else { @() })
+    if ($prevRed.Count -eq 0) { return @() }
+    foreach ($row in @($Result.Rows)) {
+        if ($row.Status -eq 'unknown' -and $row.Id -in $prevRed) {
+            $row.Reason = "Still red from the check of $([string]$Previous.At): it could not be checked now and stays red until a reading shows it green. Now: $($row.Reason)"
+            $row.Status = 'red'
+            [void]$carried.Add($row.Id)
+        }
+    }
+    if ($carried.Count -gt 0) {
+        $c = $Result.Counts
+        $c.Red = @($Result.Rows | Where-Object Status -eq 'red').Count; $c.Unknown = @($Result.Rows | Where-Object Status -eq 'unknown').Count
+        $Result.Overall = 'red'
+        $Result.OpenIds = @($Result.Rows | Where-Object { $_.Status -in 'yellow', 'unknown' } | ForEach-Object { $_.Id })
+        $Result.RedIds = @($Result.Rows | Where-Object { $_.Status -eq 'red' } | ForEach-Object { $_.Id })
+    }
+    @($carried)
+}
+
 function Save-AVDTuneReadinessRun {
     <#
         Stores a result: run record (append only), state.json Readiness (a new analysis clears an earlier confirmation) and, for every kind except 'Start',
@@ -456,6 +483,7 @@ function Save-AVDTuneReadinessRun {
     [CmdletBinding()]
     param([string]$Root = (Get-AVDTuneRoot), [Parameter(Mandatory)]$Result, [Parameter(Mandatory)][ValidateSet('Start', 'Erstanalyse', 'Healthcheck', 'Manual')][string]$Kind, [string]$User, [string]$SnapshotId, [datetime]$At = (Get-Date))
     $state = Get-AVDTuneState $Root
+    [void](Set-AVDTuneReadinessCarryOver -Result $Result -Previous (Get-AVDTuneReadinessRecord -Root $Root))
     $slim = @($Result.Rows | ForEach-Object { [pscustomobject]@{ Id = $_.Id; Group = $_.Group; Title = $_.Title; Status = $_.Status; Reason = $_.Reason; Fix = $_.Fix; FixId = $_.FixId; Source = $_.Source; Stand = $_.Stand; Verified = $_.Verified } })
     $run = [pscustomobject][ordered]@{
         Id = $null; Plan = "Readiness analysis ($Kind)"; Kind = $Kind; Started = $Result.At; Ended = $At.ToString('o'); User = $User; SnapshotId = $SnapshotId; WhatIf = $false
@@ -466,7 +494,9 @@ function Save-AVDTuneReadinessRun {
         RunId = $run.Id; At = $Result.At; Kind = $Kind; Overall = $Result.Overall; Green = $Result.Counts.Green; Yellow = $Result.Counts.Yellow; Red = $Result.Counts.Red; Unknown = $Result.Counts.Unknown
         OpenIds = @($Result.OpenIds); RedIds = @($Result.RedIds); Acknowledged = @(); AcknowledgedBy = ''; AcknowledgedAt = $null
     }
-    [void](Set-AVDTuneState -Root $Root -Values @{ Readiness = $record })
+    $previous = Get-AVDTuneReadinessRecord -Root $Root
+    $keepPrevious = ($Kind -eq 'Start' -and $previous -and [string]$previous.Kind -in 'Erstanalyse', 'Healthcheck')   # a start run never replaces a healthcheck record
+    if (-not $keepPrevious) { [void](Set-AVDTuneState -Root $Root -Values @{ Readiness = $record }) }
     if ($Kind -ne 'Start' -and $state.ImageVersion) {
         $label = if ($Kind -eq 'Manual') { 'Readiness analysis' } else { $Kind }
         $names = @($Result.Rows | Where-Object { $_.Status -in 'red', 'yellow', 'unknown' } | ForEach-Object { "$($_.Id) ($($_.Status))" })
@@ -490,6 +520,7 @@ function Confirm-AVDTuneReadinessAcknowledgement {
     param([string]$Root = (Get-AVDTuneRoot), [Parameter(Mandatory)][string]$Typed, [Parameter(Mandatory)][string]$User, [datetime]$At = (Get-Date))
     $rec = Get-AVDTuneReadinessRecord -Root $Root
     if (-not $rec) { throw 'There is no analysis to confirm: run the readiness analysis first.' }
+    if ([string]$rec.Kind -notin 'Erstanalyse', 'Healthcheck') { throw 'Only the Erstanalyse or a healthcheck can be confirmed: run the readiness analysis.' }
     if ([int]$rec.Red -gt 0) { throw "$($rec.Red) red item(s) must be fixed first ($(@($rec.RedIds) -join ', ')); red cannot be confirmed. Fix them and run the analysis again." }
     $open = @($rec.OpenIds)
     if ($open.Count -eq 0) { throw 'Nothing to confirm: there are no yellow or not checkable items.' }
@@ -513,6 +544,7 @@ function Get-AVDTuneFinishReadiness {
     $reasons = New-Object System.Collections.ArrayList
     $rec = Get-AVDTuneReadinessRecord -Root $Root
     if (-not $rec) { return [pscustomobject]@{ Allowed = $false; Reasons = @('No healthcheck yet: run the readiness analysis.'); Overall = ''; At = '' } }
+    if ([string]$rec.Kind -notin 'Erstanalyse', 'Healthcheck') { [void]$reasons.Add("The last analysis is of the kind '$([string]$rec.Kind)': only an Erstanalyse or a healthcheck counts, run the readiness analysis.") }
     if ([int]$rec.Red -gt 0) { [void]$reasons.Add("$($rec.Red) red item(s): $(@($rec.RedIds) -join ', ').") }
     $open = @($rec.OpenIds); $ack = @($rec.Acknowledged)
     $unconfirmed = @($open | Where-Object { $_ -notin $ack })
@@ -572,6 +604,7 @@ function Invoke-AVDTuneReadinessFix {
         ImageVersion = $state.ImageVersion; Reboot = [bool]$result.Reboot; Results = @($result)
     }
     [void](Add-AVDTuneRun -Root $Root -Run $run)
+    if ($result.Status -in 'Changed', 'Failed') { [void](Set-AVDTuneState -Root $Root -Values @{ LastChange = (& $Machine.Now).ToString('o') }) }   # a failed fix may have changed part of the master
     if ($state.ImageVersion -and $result.Status -in 'Changed', 'Failed') {
         $text = if ($result.Status -eq 'Changed') { "$($step.Title): changed (before: $($result.Before), after: $($result.After))$(if ($result.Reboot) { '; restart needed' })" } else { "$($step.Title): FAILED ($($result.Message))" }
         [void](Add-AVDTuneChangeLogEntry -Root $Root -Version $state.ImageVersion -Category 'Readiness fix' -Component 'Readiness' -ChangeType Changed -Text $text -User $User -SnapshotId $SnapshotId -RunId $run.Id -Source Step)

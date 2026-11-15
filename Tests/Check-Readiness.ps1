@@ -252,10 +252,11 @@ try {
     Test-Check 'a run is stored: run record with rows and families, state.json Readiness, change log entry' ($runs.Count -eq 1 -and $runs[0].Kind -eq 'Healthcheck' -and $runs[0].Overall -eq 'red' -and @($runs[0].Results).Count -eq $red.Rows.Count -and @($runs[0].Families).Count -eq 52 -and $state.Readiness.RunId -eq $saved.RunId -and $state.Readiness.Red -eq 1 -and $log.Count -eq 1 -and $log[0].Category -eq 'Readiness' -and $log[0].Text -like '*overall red*hw.stornvme (red)*') ($log | ForEach-Object Text)
     $quiet = Invoke-Readiness (New-Master) (New-Arm)
     [void](Save-AVDTuneReadinessRun -Root $tmp -Result $quiet -Kind Start -User 'admin1' -At $now.AddMinutes(1))
-    Test-Check 'the run at every start is stored but writes no change log entry' (@(Get-AVDTuneRun -Root $tmp).Count -eq 2 -and @(Get-AVDTuneChangeLog -Root $tmp).Count -eq 1 -and (Get-AVDTuneState $tmp).Readiness.Kind -eq 'Start') $null
+    Test-Check 'the run at every start is stored but writes no change log entry, and does not replace the healthcheck record' (@(Get-AVDTuneRun -Root $tmp).Count -eq 2 -and @(Get-AVDTuneChangeLog -Root $tmp).Count -eq 1 -and (Get-AVDTuneState $tmp).Readiness.Kind -eq 'Healthcheck' -and (Get-AVDTuneState $tmp).Readiness.Overall -eq 'red') $null
     Test-Check 'an unknown kind is refused' (Test-Throws { Save-AVDTuneReadinessRun -Root $tmp -Result $quiet -Kind Weekly }) $null
 
     # ---------------------------------------------------------------- finish gate and confirmation by name
+    [void](Save-AVDTuneReadinessRun -Root $tmp -Result $quiet -Kind Healthcheck -User 'admin1' -At $now.AddMinutes(1))
     $g = Get-AVDTuneFinishReadiness -Root $tmp
     Test-Check 'finish gate: a green analysis opens it' ($g.Allowed -and $g.Overall -eq 'green' -and $g.Reasons.Count -eq 0) ($g.Reasons -join '|')
     [void](Set-AVDTuneState -Root $tmp -Values @{ Readiness = $null })
@@ -285,6 +286,46 @@ try {
     Test-Check 'finish gate: a new analysis after the change opens it; a note is no change' ((Get-AVDTuneFinishReadiness -Root $tmp).Allowed) ((Get-AVDTuneFinishReadiness -Root $tmp).Reasons -join '|')
     Test-Check 'nothing to confirm on a green analysis' (Test-Throws { Confirm-AVDTuneReadinessAcknowledgement -Root $tmp -Typed 'x' -User 'admin1' }) $null
 
+    # ---------------------------------------------------------------- finding 1: a red from Azure survives a run without Azure, only a start/manual run never opens the gate
+    $badDef = New-Arm @{} @{ def1 = @{ Features = @(@{ name = 'DiskControllerTypes'; value = 'SCSI' }); Architecture = 'x64'; HyperV = 'V2' } }
+    $redAz = Invoke-Readiness (New-Master) $badDef
+    Test-Check 'precondition: the gallery definition without NVMe is a red from Azure' ((Get-Row $redAz 'hw.gallery').Status -eq 'red') $null
+    [void](Save-AVDTuneReadinessRun -Root $tmp -Result $redAz -Kind Healthcheck -User 'admin1' -At $now.AddMinutes(30))
+    $noAz = Invoke-Readiness (New-Master) $null ''
+    Test-Check 'precondition: without Azure the same row is only not checkable' ((Get-Row $noAz 'hw.gallery').Status -eq 'unknown') $null
+    [void](Save-AVDTuneReadinessRun -Root $tmp -Result $noAz -Kind Healthcheck -User 'admin1' -At $now.AddMinutes(31))
+    $g = Get-AVDTuneFinishReadiness -Root $tmp; $rec = Get-AVDTuneReadinessRecord -Root $tmp
+    Test-Check 'a later run without Azure keeps the red: the row is red again, counted, named in the gate' ((Get-Row $noAz 'hw.gallery').Status -eq 'red' -and (Get-Row $noAz 'hw.gallery').Reason -like '*Still red*' -and $rec.RedIds -contains 'hw.gallery' -and $noAz.Overall -eq 'red' -and -not $g.Allowed -and ($g.Reasons -join ' ') -like '*hw.gallery*') ($g.Reasons -join '|')
+    $miss = Get-ThrownText { Confirm-AVDTuneReadinessAcknowledgement -Root $tmp -Typed ((@($rec.OpenIds) + 'hw.gallery') -join ' ') -User 'admin1' }
+    Test-Check 'the carried red cannot be confirmed away, naming it does not help' ($miss -like '*red cannot be confirmed*' -and -not (Get-AVDTuneFinishReadiness -Root $tmp).Allowed) $miss
+    $noAz2 = Invoke-Readiness (New-Master) $null ''
+    [void](Save-AVDTuneReadinessRun -Root $tmp -Result $noAz2 -Kind Healthcheck -User 'admin1' -At $now.AddMinutes(32))
+    Test-Check 'the red survives any number of runs without Azure' ((Get-Row $noAz2 'hw.gallery').Status -eq 'red' -and -not (Get-AVDTuneFinishReadiness -Root $tmp).Allowed) $null
+    $greenAz = Invoke-Readiness (New-Master @{ Now = $now.AddMinutes(33) }) (New-Arm)
+    [void](Save-AVDTuneReadinessRun -Root $tmp -Result $greenAz -Kind Healthcheck -User 'admin1' -At $now.AddMinutes(33))
+    Test-Check 'a successful Azure reading that shows it green clears the red' ((Get-Row $greenAz 'hw.gallery').Status -eq 'green' -and (Get-AVDTuneFinishReadiness -Root $tmp).Allowed) ((Get-AVDTuneFinishReadiness -Root $tmp).Reasons -join '|')
+    [void](Save-AVDTuneReadinessRun -Root $tmp -Result (Invoke-Readiness (New-Master) (New-Arm)) -Kind Manual -User 'admin1' -At $now.AddMinutes(34))
+    $g = Get-AVDTuneFinishReadiness -Root $tmp
+    Test-Check 'a manual run is no healthcheck: the gate stays locked and says so' (-not $g.Allowed -and ($g.Reasons -join ' ') -like "*kind 'Manual'*only an Erstanalyse or a healthcheck counts*") ($g.Reasons -join '|')
+    $startOnly = Get-ThrownText { Confirm-AVDTuneReadinessAcknowledgement -Root $tmp -Typed 'x' -User 'admin1' }
+    Test-Check 'a record of another kind cannot be confirmed' ($startOnly -like '*Only the Erstanalyse or a healthcheck*') $startOnly
+    [void](Save-AVDTuneReadinessRun -Root $tmp -Result (Invoke-Readiness (New-Master @{ Now = $now.AddMinutes(35) }) (New-Arm)) -Kind Healthcheck -User 'admin1' -At $now.AddMinutes(35))
+    [void](Save-AVDTuneReadinessRun -Root $tmp -Result (Invoke-Readiness (New-Master) $null '') -Kind Start -User 'admin1' -At $now.AddMinutes(36))
+    Test-Check 'a start run after a healthcheck does not replace it: the gate stays open' ((Get-AVDTuneReadinessRecord -Root $tmp).Kind -eq 'Healthcheck' -and (Get-AVDTuneFinishReadiness -Root $tmp).Allowed) ((Get-AVDTuneFinishReadiness -Root $tmp).Reasons -join '|')
+
+    # ---------------------------------------------------------------- finding 4: analysis and confirmation are no change of the master
+    $lcBefore = Get-AVDTuneLastChange -Root $tmp
+    [void](Add-AVDTuneChangeLogEntry -Root $tmp -Version (Get-AVDTuneState $tmp).ImageVersion -Category 'Readiness' -Component 'Confirmation' -ChangeType Note -Text 'x' -User 'admin1' -Source Step -At $now.AddHours(5))
+    Test-Check 'a Readiness change log entry does not move LastChange' ((Get-AVDTuneLastChange -Root $tmp) -eq $lcBefore) "$lcBefore / $(Get-AVDTuneLastChange -Root $tmp)"
+    [void](Add-AVDTuneChangeLogEntry -Root $tmp -Version (Get-AVDTuneState $tmp).ImageVersion -Category 'Readiness fix' -Component 'Readiness' -ChangeType Changed -Text 'x' -User 'admin1' -Source Step -At $now.AddHours(6))
+    Test-Check 'a real fix entry (Readiness fix) does move LastChange' ((Get-AVDTuneLastChange -Root $tmp) -gt $lcBefore) $null
+
+    # ---------------------------------------------------------------- finding 3: resource ID segments
+    foreach ($bad in @('/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg1/providers/Microsoft.Compute/galleries/g1/images/def1?x=1', '/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg 1/providers/Microsoft.Compute/galleries/g1/images/def1', '/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg1/providers/Microsoft.Compute/galleries/g1/images/def1#x', '/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg1/providers/Microsoft.Compute/galleries/g%2f1/images/def1')) {
+        Test-Check "gallery ID with a character outside [A-Za-z0-9._()-] is refused: $bad" ($null -eq (ConvertTo-AVDTuneGalleryImageId $bad)) $null
+    }
+    Test-Check 'a normal ID with dots, brackets and dashes is accepted' ($null -ne (ConvertTo-AVDTuneGalleryImageId '/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-1.a(b)/providers/Microsoft.Compute/galleries/g_1/images/def-1')) $null
+
     # ---------------------------------------------------------------- the fix behind the write gate
     $ok = @{ 'sc.exe config stornvme start=boot' = @{ ExitCode = 0; Output = '[SC] ChangeServiceConfig SUCCESS'; Registry = @{ 'HKLM:\SYSTEM\CurrentControlSet\Services\stornvme|Start' = 0 } } }
     $m = New-Master @{ Native = $ok } -Reg @{ 'HKLM:\SYSTEM\CurrentControlSet\Services\stornvme|Start' = 3 }
@@ -294,13 +335,14 @@ try {
     Test-Check 'dry run says it would change and changes nothing' ($wi.Status -eq 'WhatIf' -and $m.Store.Registry['hklm:\system\currentcontrolset\services\stornvme|start'] -eq 3 -and -not (@($m.Log | Where-Object { $_ -like 'Run sc.exe*' }))) $null
     Open-AVDTuneWriteGate -SnapshotId 'snap1' -ConfirmedBy 'admin1'
     $fix = Invoke-AVDTuneReadinessFix -Machine $m -Root $tmp -FixId 'readiness.stornvme-boot' -User 'admin1' -SnapshotId 'snap1'
-    $entry = @(Get-AVDTuneChangeLog -Root $tmp | Where-Object Category -eq 'Readiness fix')
+    $entry = @(Get-AVDTuneChangeLog -Root $tmp | Where-Object { $_.Category -eq 'Readiness fix' -and $_.Text -ne 'x' })
     Test-Check 'fix with the open gate: changed with the documented command, restart needed, run record and change log entry' ($fix.Status -eq 'Changed' -and $fix.Reboot -and $m.Store.Registry['hklm:\system\currentcontrolset\services\stornvme|start'] -eq 0 -and (@($m.Log | Where-Object { $_ -eq 'Run sc.exe config stornvme start=boot' }).Count -eq 1) -and @(Get-AVDTuneRun -Root $tmp).Count -eq ($before + 1) -and $entry.Count -eq 1 -and $entry[0].Text -like '*changed (before: 3, after: 0)*restart needed*') ($entry | ForEach-Object Text)
     $again = Invoke-AVDTuneReadinessFix -Machine $m -Root $tmp -FixId 'readiness.stornvme-boot' -User 'admin1' -SnapshotId 'snap1'
     Test-Check 'the fix is idempotent (already at boot: unchanged)' ($again.Status -eq 'Unchanged') $again.Status
     Test-Check 'after a fix the finish gate asks for a new analysis' (-not (Get-AVDTuneFinishReadiness -Root $tmp).Allowed -and ((Get-AVDTuneFinishReadiness -Root $tmp).Reasons -join ' ') -like '*changed after the check*') ((Get-AVDTuneFinishReadiness -Root $tmp).Reasons -join '|')
     $failM = New-Master @{ Native = @{ 'sc.exe config stornvme start=boot' = @{ ExitCode = 5; Output = 'Access is denied.' } } } -Reg @{ 'HKLM:\SYSTEM\CurrentControlSet\Services\stornvme|Start' = 3 }
     $ff = Invoke-AVDTuneReadinessFix -Machine $failM -Root $tmp -FixId 'readiness.stornvme-boot' -User 'admin1' -SnapshotId 'snap1'
+    Test-Check 'finding 5: a failed fix also sets state.json LastChange' ((Get-AVDTuneState $tmp).PSObject.Properties['LastChange'] -and $ff.Status -eq 'Failed') $null
     Test-Check 'a failing command is reported as Failed with its exit code and logged' ($ff.Status -eq 'Failed' -and $ff.Message -like '*exit code 5*' -and (@(Get-AVDTuneChangeLog -Root $tmp | Where-Object { $_.Category -eq 'Readiness fix' -and $_.Text -like '*FAILED*' }).Count -eq 1)) $ff.Message
     $noDriver = New-Master @{ Native = $ok }; $noDriver.Store.Registry.Remove('hklm:\system\currentcontrolset\services\stornvme|start'); [void]$noDriver.Store.Keys.Remove('hklm:\system\currentcontrolset\services\stornvme')
     $nd = Invoke-AVDTuneReadinessFix -Machine $noDriver -Root $tmp -FixId 'readiness.stornvme-boot' -User 'admin1' -SnapshotId 'snap1'

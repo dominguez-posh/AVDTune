@@ -94,7 +94,7 @@ function Complete-ReadyJob {
             Save-Protocol
             Show-Toast $text
             Start-OverviewRefresh
-            $script:ReadyQueued = @{ Kind = 'Manual'; FixId = '' }   # the analysis is stale after a fix
+            $script:ReadyQueued = @{ Kind = (Get-ReadyKind); FixId = '' }   # the analysis is stale after a fix
         }
     }
     elseif ($err -or -not $result) { $ui.TxtReadySummary.Text = "The analysis failed: $err"; Show-Error "The readiness analysis failed: $err" }

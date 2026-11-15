@@ -472,7 +472,7 @@ function Get-AVDTuneLastChange {
     <#
         When AVDTune last changed the master (Apply or Undo that changed something), as a local [datetime], or $null when it never did.
         The newest of: state.json LastChange, the end of every run record with a Changed/Reverted result, every automatic change log
-        entry (Source Step) except the snapshot confirmations themselves.
+        entry (Source Step) except the snapshot confirmations and the readiness analyses and confirmations (analysis is no change; a fix has the category "Readiness fix").
     #>
     param([string]$Root = (Get-AVDTuneRoot))
     $times = New-Object System.Collections.ArrayList
@@ -483,7 +483,7 @@ function Get-AVDTuneLastChange {
         if (-not $run -or (Get-AVDTuneProp $run 'WhatIf')) { continue }
         if (@(@(Get-AVDTuneProp $run 'Results') | Where-Object { $_ -and $_.Status -in 'Changed', 'Reverted' }).Count -gt 0) { & $parse (Get-AVDTuneProp $run 'Ended') }
     }
-    foreach ($e in @(Get-AVDTuneChangeLog -Root $Root)) { if ($e.Source -eq 'Step' -and $e.Category -ne 'Snapshot') { & $parse $e.At } }
+    foreach ($e in @(Get-AVDTuneChangeLog -Root $Root)) { if ($e.Source -eq 'Step' -and $e.Category -notin 'Snapshot', 'Readiness') { & $parse $e.At } }
     if ($times.Count -eq 0) { return $null }
     (@($times | Sort-Object)[-1]).ToLocalTime()
 }
