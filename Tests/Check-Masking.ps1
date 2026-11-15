@@ -211,6 +211,16 @@ try {
     Test-Check 'source: reading refuses links and files over 4 MB; the LDAP filter value is escaped and the group name validated before it' ($adapter -match 'is a link: not read' -and $adapter -match '4MB' -and $src -match 'ConvertTo-AVDTuneLdapFilterValue \$Name' -and $src -match "if \(-not \(Test-AVDTuneMaskingGroupName \`$Name\)\) \{ throw ") $null
     Test-Check 'source: no password or token is handled in this module (the connection comes from the start sequence)' ($src -notmatch 'Password|SecureString|token|Credential') $null
     Test-Check 'source: the group is created only behind the Confirmed switch (AD and local)' (([regex]::Matches($src, 'needs your confirmation')).Count -eq 2) $null
+
+    # ---------------------------------------------------------------- source checks of the page
+    $page = [IO.File]::ReadAllText((Join-Path $repo 'AVDTune-AppMasking.ps1'))
+    $perr = $null; [void][System.Management.Automation.Language.Parser]::ParseInput($page, [ref]$null, [ref]$perr)
+    Test-Check 'page: the page file parses and the hooks in Start-AVDTune.ps1 are there (import, dot-source, page switch)' (@($perr).Count -eq 0 -and ([IO.File]::ReadAllText((Join-Path $repo 'Start-AVDTune.ps1'))) -match "'Masking'\) \{ Import-Module" -and ([IO.File]::ReadAllText((Join-Path $repo 'Start-AVDTune.ps1'))) -match 'AVDTune-AppMasking.ps1' -and ([IO.File]::ReadAllText((Join-Path $repo 'Start-AVDTune.ps1'))) -match 'Update-MaskView') ($perr | ForEach-Object Message)
+    $saveFn = $page.Substring($page.IndexOf('function Invoke-MaskSave'), $page.IndexOf('function Remove-MaskSet') - $page.IndexOf('function Invoke-MaskSave'))
+    Test-Check 'page: a group is only created after Confirm-Action that names group, OU and domain; -Confirmed is set after it, never before' ($saveFn.IndexOf('Confirm-Action') -gt 0 -and $saveFn.IndexOf('Confirm-Action') -lt $saveFn.IndexOf('$p.Confirmed = $true') -and $saveFn -match 'Create the group' -and $saveFn.Contains('OU $($p.CreateGroup.OuDn)') -and $saveFn.Contains('domain $($p.Directory.DnsName)')) $null
+    Test-Check 'page: every change asks the write gate first and runs as a task; the password box is cleared in finally; the password is not put into any text' (([regex]::Matches($page, 'Assert-MaskWrite')).Count -ge 5 -and ([regex]::Matches($page, 'Invoke-MaskChange -Title')).Count -eq 4 -and ([regex]::Matches($page, 'finally \{ if \(\$lc\) \{ & \$lc.Close \}; \$ui.PwdMask.Clear\(\) \}')).Count -eq 2 -and $page -notmatch 'PwdMask\.(Password\b|SecurePassword\.)' -or ($page -match 'SecurePassword.Length' -and $page -notmatch 'Password = ')) $null
+    Test-Check 'page: no Retry for the changes of the master and of AD' ($page -notmatch '-Retry|Retry =') $null
+    Test-Check 'page: the connection to the domain controller is the pinned one (Connect-AVDTuneDirectory with the pins), no own TLS or bind code' ($page -match 'Connect-AVDTuneDirectory .*-Pins' -and $page -notmatch 'LdapConnection|NetworkCredential|SslStream') $null
 }
 finally {
     Close-AVDTuneWriteGate
