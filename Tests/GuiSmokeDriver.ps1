@@ -166,8 +166,9 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         $true } }
     @{ Name = 'start: questions'; Do = {
         # the first run opened the questions by itself
-        Test-Smoke 'first start without environment.json: the questions are open, 6 questions and the fields (snapshot name pattern with its default)' ($script:OpenStage -eq 'Environment' -and $ui.BoxStage.Visibility -eq 'Visible' -and $script:Form.Combos.Count -eq 6 -and $script:Form.Texts.Count -eq 5 -and $script:Form.Texts['SnapshotNamePattern'].Text -eq '{OsDisk}-{DD}.{MM}.{YYYY}-{N}' -and -not (Test-Path (Join-Path $script:StateRoot 'environment.json'))) $script:OpenStage
+        Test-Smoke 'first start without environment.json: the questions are open, 6 questions and the fields (snapshot name pattern with its default)' ($script:OpenStage -eq 'Environment' -and $ui.BoxStage.Visibility -eq 'Visible' -and $script:Form.Combos.Count -eq 6 -and $script:Form.Texts.Count -eq 4 -and $script:Form.Texts['SnapshotNamePattern'].Text -eq '{OsDisk}-{DD}.{MM}.{YYYY}-{N}' -and -not (Test-Path (Join-Path $script:StateRoot 'environment.json'))) $script:OpenStage
         Test-Smoke 'the four stages are listed: questions to do, the rest waiting' ($ui.PanelStages.Children.Count -eq 4 -and (($script:Stages | ForEach-Object Status) -join ',') -eq 'Pending,Locked,Locked,Locked') (($script:Stages | ForEach-Object Status) -join ',')
+        Test-Smoke 'no tenant in the questions (issue #11): no tenant field, no forget box before a tenant exists, the client ID is optional' (-not $script:Form.Texts.ContainsKey('TenantId') -and $null -eq $script:Form.ForgetTenant -and -not (Find-Text $ui.PanelStageBody 'Tenant (domain or ID)') -and (Find-Text $ui.PanelStageBody 'Client ID of the app registration (optional)') -and $script:Form.Texts['ClientId'].Text -eq '' -and $script:Form.Preview.Text -like "*No client ID: at the sign-in AVDTune creates*" -and $script:Form.Preview.Text -like '*tenant is not asked*') (@($script:Form.Texts.Keys) -join ',')
         Save-SmokeShot '11-start-questions'
         # an invalid combination is explained and cannot be saved
         $set = { param($key, $text) $script:Form.Combos[$key].Control.SelectedItem = $text }
@@ -176,14 +177,13 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         Save-SmokeShot '12-start-questions-problem'
         & $set 'Dc' 'AD DS on premises (VPN or ExpressRoute)'
         & $set 'Identities' 'Synchronized (Entra Connect / Cloud Sync)'
-        $script:Form.Texts['TenantId'].Text = 'contoso.example'
-        $script:Form.Texts['ClientId'].Text = '66666666-7777-8888-9999-000000000000'
+        # the client ID stays empty: the sign-in creates AVDTune's own app registration (fake Graph)
         $script:Form.Texts['VNet'].Text = 'vnet-example'; $script:Form.Texts['Subnet'].Text = 'snet-avd'
         Test-Smoke 'hybrid with an on-premises DC is valid and the preview names the domain step and Azure Files with AD DS' ($ui.BtnStageAction.IsEnabled -and $script:Form.Preview.Text -like '*Domain step*' -and $script:Form.Preview.Text -like '*Azure Files with AD DS*') $script:Form.Preview.Text
         Save-SmokeShot '13-start-questions-hybrid'
         $ui.BtnStageAction.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
         $env1 = Get-AVDTuneEnvironment $script:StateRoot
-        Test-Smoke 'saving writes environment.json (no secret), closes the form and moves on to the sign-in' ($env1.Answers.Join -eq 'Hybrid' -and $env1.Answers.Dc -eq 'AdDsOnPrem' -and $env1.SignIn.TenantId -eq 'contoso.example' -and $ui.BoxStage.Visibility -eq 'Collapsed' -and (($script:Stages | ForEach-Object Status) -join ',') -eq 'Done,Pending,Locked,Locked') (($script:Stages | ForEach-Object Status) -join ',')
+        Test-Smoke 'saving writes environment.json (no secret), closes the form and moves on to the sign-in' ($env1.Answers.Join -eq 'Hybrid' -and $env1.Answers.Dc -eq 'AdDsOnPrem' -and $env1.SignIn.TenantId -eq '' -and $env1.SignIn.ClientId -eq '' -and $ui.BoxStage.Visibility -eq 'Collapsed' -and (($script:Stages | ForEach-Object Status) -join ',') -eq 'Done,Pending,Locked,Locked') (($script:Stages | ForEach-Object Status) -join ',')
         Test-Smoke 'the protocol has the answered questions' (@($script:Protocol.Actions | Where-Object { $_.Subject -like 'First-run questions answered*' }).Count -eq 1) $null
         # no FSLogix: the two pages disappear from the navigation
         $none = Get-AVDTuneEnvironmentAnswers (Get-AVDTuneEnvironment $script:StateRoot); $none.Profiles = 'None'
@@ -195,11 +195,29 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
     @{ Name = 'start: sign-in'; Do = {
         Open-Stage 'SignIn'; $window.UpdateLayout()
         Test-Smoke 'sign-in form lists the three tokens with their permissions' ($ui.PanelStageBody.Children.Count -ge 5 -and (Find-Text $ui.PanelStageBody 'Sites') -and (Find-Text $ui.PanelStageBody 'Azure Resource Manager (snapshot, VM size, region): user_impersonation')) $null
+        Test-Smoke 'sign-in form without tenant and client ID: tenant from the sign-in, own app registration announced, account field' ((Find-Text $ui.PanelStageBody 'Taken from the sign-in (tid of the token) and saved') -and (Find-Text $ui.PanelStageBody "None yet: AVDTune creates its own app registration 'AVDTune' first") -and $script:Form.Account -and $script:Form.Account.Text -eq '') $null
         Save-SmokeShot '14-start-signin'
+        # a wrong account is refused before any sign-in window
+        $script:Form.Account.Text = 'admin'
         $ui.BtnStageAction.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
+        Test-Smoke 'an account that is not name@domain is refused in the form, nothing signed in' ($ui.TxtStageMessage.Text -like '*name@domain*' -and @($script:Services.Auth.Log | Where-Object { $_ -like 'SignIn*' }).Count -eq 0) $ui.TxtStageMessage.Text
+        $script:Form.Account.Text = 'admin.example@contoso.example'
+        $script:ConfirmAsked = ''
+        $ui.BtnStageAction.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
+        $envSigned = Get-AVDTuneEnvironment $script:StateRoot
+        $fakeApp = @($script:Services.Auth.Store.Apps)[0]
+        Test-Smoke 'setup asked first and named the consent that stays with Microsoft Graph Command Line Tools' ($script:ConfirmAsked -like "*Microsoft Graph Command Line Tools*Application.ReadWrite.All*stays in the tenant*Revoke*") $script:ConfirmAsked
+        Test-Smoke 'setup sign-in (fake) at organizations with the account, registration AVDTune created, then the normal sign-in with it' (@($script:Services.Auth.Log | Where-Object { $_ -like 'SignIn tenant=organizations client=setup hint=admin.example@contoso.example*' }).Count -eq 1 -and $fakeApp -and @($script:Services.Auth.Log | Where-Object { $_ -like "SignIn tenant=11111111-2222-3333-4444-555555555555 client=$($fakeApp.appId) hint=admin.example@contoso.example*" }).Count -eq 1) ($script:Services.Auth.Log -join ' | ')
+        Test-Smoke 'environment.json has the tenant of the token and the client ID of the new registration; the change log says so' ($envSigned.SignIn.TenantId -eq '11111111-2222-3333-4444-555555555555' -and $envSigned.SignIn.ClientId -eq $fakeApp.appId -and @(Get-AVDTuneChangeLog -Root $script:StateRoot | Where-Object { $_.Text -like 'Tenant taken from the sign-in: 11111111-*' }).Count -eq 1 -and @(Get-AVDTuneChangeLog -Root $script:StateRoot | Where-Object { $_.Text -like "Client ID of AVDTune's own app registration saved*" }).Count -eq 1) ($envSigned.SignIn | ConvertTo-Json -Compress)
+        Test-Smoke 'the protocol has the registration, the tenant and the warning about the setup consent' (@($script:Protocol.Actions | Where-Object { $_.Subject -eq 'Sign-in: tenant and app registration' -and $_.Note -like "*App registration 'AVDTune' created*" }).Count -eq 1 -and @($script:Protocol.Actions | Where-Object { $_.Subject -eq 'Warning: setup consent stays in the tenant' -and $_.Note -like '*Microsoft Graph Command Line Tools*' }).Count -eq 1) $null
         $info = Get-AVDTuneSessionInfo $script:StartContext.Session
         Test-Smoke 'sign-in (fake): connected, three audiences, stage Done, domain stage open' ($info.Connected -and $info.Audiences.Count -eq 3 -and (($script:Stages | ForEach-Object Status) -join ',') -eq 'Done,Done,Pending,Locked') (($script:Stages | ForEach-Object Status) -join ',')
         Test-Smoke 'the protocol names the account and holds no token' (@($script:Protocol.Actions | Where-Object { $_.Subject -eq 'Microsoft 365 and Azure sign-in' -and $_.Note -like 'Signed in as admin.example@*' -and $_.Note -notmatch 'eyJ' }).Count -eq 1) $null
+        # the questions now show the saved tenant only as "forget"
+        Open-Stage 'Environment'; $window.UpdateLayout()
+        Test-Smoke 'with a saved tenant the questions offer only to forget it, still no tenant field' ($script:Form.ForgetTenant -and -not $script:Form.ForgetTenant.IsChecked -and [string]$script:Form.ForgetTenant.Content -like '*11111111-2222-3333-4444-555555555555*' -and -not $script:Form.Texts.ContainsKey('TenantId')) $null
+        Save-SmokeShot '14b-start-questions-tenant'
+        Close-Stage
         $true } }
     @{ Name = 'start: domain'; Do = {
         Open-Stage 'Domain'; $window.UpdateLayout()

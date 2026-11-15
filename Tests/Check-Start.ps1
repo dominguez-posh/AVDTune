@@ -123,12 +123,148 @@ try {
     Test-Check 'missing consent for Azure Service Management: names the audience and the scope, no tokens kept' ($e -like '*no consent*audience Arm*user_impersonation*' -and (Test-AVDTuneSessionClear $s3)) $e
     $s4 = New-AVDTuneSession -TempRoot $signTemp -Auth (New-AVDTuneFakeAuth -Seed @{ WrongTenant = $true })
     $e = Get-ThrownText { Connect-AVDTuneSession -Session $s4 -TenantId $tenant -ClientId $clientId }
-    Test-Check 'a token of another tenant is refused and nothing is kept' ($e -like '*another tenant*' -and (Test-AVDTuneSessionClear $s4)) $e
+    Test-Check 'a token of another tenant is refused, the message points to the first-run questions, nothing is kept' ($e -like '*signed in to tenant 99999999-*belongs to tenant*' -and $e -like '*first-run questions*' -and (Test-AVDTuneSessionClear $s4)) $e
     $s5 = New-AVDTuneSession -TempRoot $signTemp -Auth (New-AVDTuneFakeAuth -Seed @{ Cancel = $true })
     Test-Check 'cancelled sign-in' ((Get-ThrownText { Connect-AVDTuneSession -Session $s5 -TenantId $tenant -ClientId $clientId }) -like 'Sign-in cancelled*') $null
     $s6 = New-AVDTuneSession -TempRoot $signTemp -Auth (New-AVDTuneFakeAuth -Seed @{ NoRefreshToken = $true })
     Test-Check 'no refresh token (offline_access missing) is an error' ($null -ne (Get-ThrownText { Connect-AVDTuneSession -Session $s6 -TenantId $tenant -ClientId $clientId })) $null
     Test-Check 'the setup app of Microsoft and a non-GUID client are refused before any sign-in' ((Get-ThrownText { Connect-AVDTuneSession -Session $s5 -TenantId $tenant -ClientId '14d82eec-204b-4c2f-b7e8-296a70dab67e' }) -like '*setup app*' -and (Get-ThrownText { Connect-AVDTuneSession -Session $s5 -TenantId $tenant -ClientId 'x' }) -like '*GUID*') $null
+
+    # ---------------------------------------------------------------- tenant from the sign-in, own app registration (issue #11)
+    $otherTenant = '22222222-3333-4444-5555-666666666666'
+    $n11 = 0
+    $newRoot = {
+        param([string]$Tenant, [string]$Client)
+        $script:n11++
+        $r = Join-Path $tmp "issue11-$script:n11"; [void](Initialize-AVDTuneState -Root $r)
+        $x = Get-AVDTuneEnvironmentDefaults; $x.TenantId = $Tenant; $x.ClientId = $Client
+        [void](Save-AVDTuneEnvironment -Root $r -Answers $x -User 'admin1')
+        [void](Start-AVDTuneImageVersion -Root $r -Date ([datetime]'2026-11-15') -User 'admin1')
+        $r
+    }
+    $q = Get-AVDTuneEnvironmentDefaults
+    Test-Check 'the tenant is no first-run question and no default answer has one' (@(Get-AVDTuneQuestions | Where-Object { $_.Key -like '*Tenant*' }).Count -eq 0 -and $q.TenantId -eq '' -and (Test-AVDTuneEnvironmentAnswers $q).Errors.Count -eq 0) $null
+    # discovery
+    $ad = New-AVDTuneFakeAuth
+    $found = Resolve-AVDTuneTenantFromDomain -Auth $ad -Domain 'Contoso.Example'
+    Test-Check 'discovery: the tenant GUID comes from the issuer of the OpenID configuration of the domain' ($found -eq $tenant -and @($ad.Log) -contains 'Discover contoso.example') ($ad.Log -join ' | ')
+    $badDomains = @('contoso', 'evil.example/x', 'a@b.example', '10.0.0.1', 'host.example:443', 'x..example', '-x.example', 'x.example%2f', 'login.microsoftonline.com#.example', '', ' ', ('a' * 64 + '.example'), 'x.example?y=1', 'x.example\y', 'x_y.example')
+    $badOk = @($badDomains | Where-Object { (Get-ThrownText { Resolve-AVDTuneTenantFromDomain -Auth $ad -Domain $_ }) -notlike '*not a valid domain name*' })
+    Test-Check 'discovery: an invalid domain is refused before any request (path, port, IP, @, %, #, ?, backslash, long label)' ($badOk.Count -eq 0 -and @($ad.Log | Where-Object { $_ -like 'Discover*' }).Count -eq 1) ($badOk -join ' | ')
+    $e = Get-ThrownText { Resolve-AVDTuneTenantFromDomain -Auth (New-AVDTuneFakeAuth -Seed @{ DiscoveryOffline = $true }) -Domain 'contoso.example' }
+    Test-Check 'discovery without network: readable text' ($e -like 'No connection to Microsoft sign-in*contoso.example*') $e
+    $e = Get-ThrownText { Resolve-AVDTuneTenantFromDomain -Auth $ad -Domain 'unknown.example' }
+    Test-Check 'discovery of a domain Microsoft does not know: readable text' ($e -like '*knows no tenant for the domain unknown.example*') $e
+    $badIssuers = @('https://evil.example/11111111-2222-3333-4444-555555555555/v2.0', 'http://login.microsoftonline.com/11111111-2222-3333-4444-555555555555/v2.0', 'https://login.microsoftonline.com/common/v2.0', 'https://login.microsoftonline.com/11111111-2222-3333-4444-555555555555/v2.0/x')
+    $issOk = @($badIssuers | Where-Object { (Get-ThrownText { Resolve-AVDTuneTenantFromDomain -Auth (New-AVDTuneFakeAuth -Seed @{ DiscoveryIssuer = $_ }) -Domain 'contoso.example' }) -notlike '*names no tenant AVDTune accepts*' })
+    Test-Check 'discovery: an issuer that is not https://login.microsoftonline.com/<guid>/v2.0 is refused' ($issOk.Count -eq 0) ($issOk -join ' | ')
+
+    # client ID given, no tenant: account -> discovery -> sign-in at that tenant with the login hint -> tid saved
+    $r1 = & $newRoot '' $clientId
+    $a1 = New-AVDTuneFakeAuth
+    $res1 = Invoke-AVDTuneStartSignIn -Root $r1 -Session (New-AVDTuneSession -TempRoot $signTemp -Auth $a1) -Account 'admin.example@contoso.example' -User 'admin1'
+    $e1 = Get-AVDTuneEnvironment $r1
+    Test-Check 'no saved tenant: the tenant of the account domain is used, with the account as login hint' (@($a1.Log | Where-Object { $_ -like "SignIn tenant=$tenant client=$clientId hint=admin.example@contoso.example*" }).Count -eq 1 -and @($a1.Log | Where-Object { $_ -like "Refresh tenant=$tenant*" }).Count -eq 3) ($a1.Log -join ' | ')
+    Test-Check 'the tid of the token is saved in environment.json with a change log entry' ($e1.SignIn.TenantId -eq $tenant -and $e1.SignIn.ClientId -eq $clientId -and @(Get-AVDTuneChangeLog -Root $r1 | Where-Object { $_.Text -like "Tenant taken from the sign-in: $tenant (account admin.example@contoso.example)" }).Count -eq 1 -and $res1.Info.TenantId -eq $tenant) (Get-AVDTuneChangeLog -Root $r1 | ConvertTo-Json -Compress)
+    # tid differs from the discovery
+    $r2 = & $newRoot '' $clientId
+    $a2 = New-AVDTuneFakeAuth -Seed @{ Domains = @{ 'contoso.example' = $otherTenant } }
+    $s2b = New-AVDTuneSession -TempRoot $signTemp -Auth $a2
+    $e = Get-ThrownText { Invoke-AVDTuneStartSignIn -Root $r2 -Session $s2b -Account 'admin.example@contoso.example' -User 'admin1' }
+    Test-Check 'the tid of the token must match the tenant of the discovery; nothing is saved, no token kept' ($e -like "*signed in to tenant $tenant*belongs to tenant $otherTenant*" -and (Get-AVDTuneEnvironment $r2).SignIn.TenantId -eq '' -and (Test-AVDTuneSessionClear $s2b)) $e
+    # discovery fails: 'organizations'; single-tenant registration gives a readable message
+    $r3 = & $newRoot '' $clientId
+    $a3 = New-AVDTuneFakeAuth -Seed @{ DiscoveryOffline = $true }
+    $res3 = Invoke-AVDTuneStartSignIn -Root $r3 -Session (New-AVDTuneSession -TempRoot $signTemp -Auth $a3) -Account 'admin.example@contoso.example' -User 'admin1'
+    Test-Check 'discovery network error: the sign-in goes through organizations, the note says why, the tid is saved' (@($a3.Log | Where-Object { $_ -like 'SignIn tenant=organizations*' }).Count -eq 1 -and (@($res3.Notes) -join ' ') -like '*not found (No connection*organizations*' -and (Get-AVDTuneEnvironment $r3).SignIn.TenantId -eq $tenant) (@($res3.Notes) -join ' | ')
+    $r4 = & $newRoot '' $clientId
+    $e = Get-ThrownText { Invoke-AVDTuneStartSignIn -Root $r4 -Session (New-AVDTuneSession -TempRoot $signTemp -Auth (New-AVDTuneFakeAuth -Seed @{ SingleTenant = $true })) -User 'admin1' }
+    Test-Check 'no tenant, no account, single-tenant registration: the message says to enter the account or let AVDTune create its registration' ($e -like '*limited to its own tenant*name@domain*' -and (Get-AVDTuneEnvironment $r4).SignIn.TenantId -eq '') $e
+    Test-Check 'an account that is not name@domain is refused before any sign-in' ((Get-ThrownText { Invoke-AVDTuneStartSignIn -Root $r4 -Session (New-AVDTuneSession -TempRoot $signTemp -Auth $a3) -Account 'admin' }) -like '*name@domain*' -and (Get-ThrownText { Invoke-AVDTuneStartSignIn -Root $r4 -Session (New-AVDTuneSession -TempRoot $signTemp -Auth $a3) -Account 'a@evil.example/x' }) -like '*name@domain*') $null
+    # saved tenant (older environment.json): GUID must match; a domain is replaced by the GUID of the sign-in
+    $r5 = & $newRoot $tenant $clientId
+    $a5 = New-AVDTuneFakeAuth -Seed @{ WrongTenant = $true }
+    $e = Get-ThrownText { Invoke-AVDTuneStartSignIn -Root $r5 -Session (New-AVDTuneSession -TempRoot $signTemp -Auth $a5) -Account 'admin.example@contoso.example' -User 'admin1' }
+    Test-Check 'saved tenant: an account of another tenant is refused with the hint to change the first-run questions; no discovery, file unchanged' ($e -like '*belongs to tenant*first-run questions*' -and @($a5.Log | Where-Object { $_ -like 'Discover*' }).Count -eq 0 -and (Get-AVDTuneEnvironment $r5).SignIn.TenantId -eq $tenant) $e
+    $a5b = New-AVDTuneFakeAuth
+    $res5 = Invoke-AVDTuneStartSignIn -Root $r5 -Session (New-AVDTuneSession -TempRoot $signTemp -Auth $a5b) -User 'admin1'
+    Test-Check 'saved tenant that matches: sign-in at that tenant, no change log entry' ($res5.Info.Connected -and @($a5b.Log | Where-Object { $_ -like "SignIn tenant=$tenant *" }).Count -eq 1 -and @(Get-AVDTuneChangeLog -Root $r5 | Where-Object { $_.Text -like 'Tenant taken*' }).Count -eq 0) ($a5b.Log -join ' | ')
+    $r6 = Join-Path $tmp 'issue11-old'; [void](Initialize-AVDTuneState -Root $r6); [void](Start-AVDTuneImageVersion -Root $r6 -Date ([datetime]'2026-11-15') -User 'admin1')
+    # an environment.json of the version before #11 (tenant typed in as a domain)
+    [IO.File]::WriteAllText((Join-Path $r6 'environment.json'), (@{ Schema = 1; Answers = @{ Join = 'EntraOnly'; Dc = 'None'; Identities = 'CloudOnly'; Profiles = 'AzureFiles'; AzureFilesAuth = 'EntraKerberos'; Network = @{ Endpoint = 'Private'; VNet = ''; Subnet = ''; DnsZone = 'Azure' } }; SignIn = @{ TenantId = 'contoso.example'; ClientId = $clientId }; Snapshot = @{ NamePattern = '{OsDisk}-{DD}.{MM}.{YYYY}-{N}' }; Dc = @{ Server = ''; User = ''; Pins = @{}; Discovery = $null }; Updated = '2026-11-01T00:00:00Z'; UpdatedBy = 'admin1' } | ConvertTo-Json -Depth 6))
+    $old6 = Get-AVDTuneEnvironmentAnswers (Get-AVDTuneEnvironment $r6)
+    Test-Check 'an environment.json with a typed-in tenant stays valid' ((Test-AVDTuneEnvironmentAnswers $old6).Errors.Count -eq 0 -and $old6.TenantId -eq 'contoso.example' -and (Get-AVDTuneStartStages -Context (New-AVDTuneStartContext) -Root $r6)[0].Status -eq 'Done') $null
+    $a6 = New-AVDTuneFakeAuth
+    [void](Invoke-AVDTuneStartSignIn -Root $r6 -Session (New-AVDTuneSession -TempRoot $signTemp -Auth $a6) -User 'admin1')
+    Test-Check 'a saved domain: sign-in at that domain, then the tenant GUID of the token is saved (change log old -> new)' (@($a6.Log | Where-Object { $_ -like 'SignIn tenant=contoso.example *' }).Count -eq 1 -and (Get-AVDTuneEnvironment $r6).SignIn.TenantId -eq $tenant -and @(Get-AVDTuneChangeLog -Root $r6 | Where-Object { $_.Text -like "Tenant taken from the sign-in: contoso.example -> $tenant*" }).Count -eq 1) ($a6.Log -join ' | ')
+    # the questions keep the tenant; only "forget" removes it
+    $keep = Get-AVDTuneEnvironmentAnswers (Get-AVDTuneEnvironment $r5); $keep.TenantId = ''; $keep.VNet = 'vnet-2'
+    [void](Save-AVDTuneEnvironment -Root $r5 -Answers $keep -User 'admin1')
+    $kept = (Get-AVDTuneEnvironment $r5).SignIn.TenantId
+    $forgot = Save-AVDTuneEnvironment -Root $r5 -Answers $keep -User 'admin1' -ForgetTenant
+    Test-Check 'saving the questions keeps the saved tenant; forgetting it is a change log entry' ($kept -eq $tenant -and $forgot.Environment.SignIn.TenantId -eq '' -and @($forgot.Changes) -contains "TenantId: $tenant -> ") (@($forgot.Changes) -join ' | ')
+
+    # no client ID: AVDTune's own app registration through the setup sign-in
+    $r7 = & $newRoot '' ''
+    $a7 = New-AVDTuneFakeAuth
+    $res7 = Invoke-AVDTuneStartSignIn -Root $r7 -Session (New-AVDTuneSession -TempRoot $signTemp -Auth $a7) -User 'admin1' -RetryDelaySeconds 0
+    $e7 = Get-AVDTuneEnvironment $r7
+    $app7 = @($a7.Store.Apps)[0]
+    $setupLine = @($a7.Log | Where-Object { $_ -like 'SignIn*client=setup*' })
+    Test-Check 'setup sign-in: Microsoft Graph Command Line Tools at organizations with Application.ReadWrite.All and DelegatedPermissionGrant.ReadWrite.All' ($setupLine.Count -eq 1 -and $setupLine[0] -like 'SignIn tenant=organizations client=setup*' -and $setupLine[0] -like '*Application.ReadWrite.All*DelegatedPermissionGrant.ReadWrite.All*' -and $a7.Log.IndexOf($setupLine[0]) -eq 0) ($a7.Log -join ' | ')
+    $def = $app7.Definition
+    $graphAccess = @($def.requiredResourceAccess | Where-Object { $_.resourceAppId -eq '00000003-0000-0000-c000-000000000000' })[0]
+    $armAccess = @($def.requiredResourceAccess | Where-Object { $_.resourceAppId -eq '797f4846-ba00-4fd7-ba43-dac1f8f63013' })[0]
+    Test-Check "registration 'AVDTune' created: public client, redirect http://localhost only, single tenant, tag and note, no secret or certificate" ($a7.Store.Apps.Count -eq 1 -and $def.displayName -eq 'AVDTune' -and (@($def.publicClient.redirectUris) -join ',') -eq 'http://localhost' -and $def.signInAudience -eq 'AzureADMyOrg' -and $def.isFallbackPublicClient -eq $false -and @($def.tags) -contains 'AVDTune' -and $def.notes -like 'Created by AVDTune*' -and -not $def.ContainsKey('passwordCredentials') -and -not $def.ContainsKey('keyCredentials') -and -not $def.ContainsKey('web')) ($def | ConvertTo-Json -Depth 6 -Compress)
+    Test-Check 'its permissions: Graph Group.Read.All, DeviceManagementApps.Read.All, Sites.Selected, offline_access (+ openid, profile); Azure Service Management user_impersonation; delegated only' ((@($graphAccess.resourceAccess | ForEach-Object { $_.id }) -join ',') -eq 'scope-Group.Read.All,scope-DeviceManagementApps.Read.All,scope-Sites.Selected,scope-offline_access,scope-openid,scope-profile' -and (@($armAccess.resourceAccess | ForEach-Object { $_.id }) -join ',') -eq 'scope-user_impersonation' -and @($def.requiredResourceAccess | ForEach-Object { $_.resourceAccess } | Where-Object { $_.type -ne 'Scope' }).Count -eq 0 -and @($def.requiredResourceAccess).Count -eq 2) ($def.requiredResourceAccess | ConvertTo-Json -Depth 5 -Compress)
+    $sp7 = @($a7.Store.ServicePrincipals | Where-Object { $_.appId -eq $app7.appId })
+    $grants7 = @($a7.Store.Grants)
+    Test-Check 'service principal and admin consent (AllPrincipals) for Graph and Azure Service Management' ($sp7.Count -eq 1 -and $grants7.Count -eq 2 -and @($grants7 | Where-Object { $_.consentType -ne 'AllPrincipals' -or $_.clientId -ne $sp7[0].id }).Count -eq 0 -and @($grants7 | Where-Object { $_.resourceId -eq 'sp-graph-0001' -and $_.scope -eq 'Group.Read.All DeviceManagementApps.Read.All Sites.Selected offline_access openid profile' }).Count -eq 1 -and @($grants7 | Where-Object { $_.resourceId -eq 'sp-arm-0001' -and $_.scope -eq 'user_impersonation' }).Count -eq 1) ($grants7 | ConvertTo-Json -Compress)
+    $normal7 = @($a7.Log | Where-Object { $_ -like "SignIn tenant=$tenant client=$($app7.appId) hint=admin.example@contoso.example*" })
+    Test-Check 'client ID and tenant (tid of the setup token) saved, then the normal sign-in with the new app at that tenant and the setup account as hint' ($e7.SignIn.ClientId -eq $app7.appId -and $e7.SignIn.TenantId -eq $tenant -and $normal7.Count -eq 1 -and $res7.Info.Connected -and @(Get-AVDTuneChangeLog -Root $r7 | Where-Object { $_.Text -like "Client ID of AVDTune's own app registration saved: $($app7.appId)" }).Count -eq 1 -and @(Get-AVDTuneChangeLog -Root $r7 | Where-Object { $_.Text -like "Tenant taken from the sign-in: $tenant*" }).Count -eq 1) ($a7.Log -join ' | ')
+    Test-Check "the note about the consent that stays with 'Microsoft Graph Command Line Tools' comes with the result (as in PackTune)" ($res7.ConsentNote -like "*Microsoft Graph Command Line Tools*stays in the tenant*Revoke*Remove-MgOauth2PermissionGrant*" -and (@($res7.Notes) -join ' ') -like "*App registration 'AVDTune' created*") $res7.ConsentNote
+    Test-Check 'the setup token is nowhere in the log, the notes or environment.json' (($a7.Log -join ' ') -notmatch 'eyJ|fake-refresh' -and (@($res7.Notes) -join ' ') -notmatch 'eyJ' -and [IO.File]::ReadAllText((Join-Path $r7 'environment.json')) -notmatch 'eyJ|refresh') $null
+    # a second setup (client ID removed again) finds the registration: no second one
+    $again = Get-AVDTuneEnvironmentAnswers (Get-AVDTuneEnvironment $r7); $again.ClientId = ''
+    [void](Save-AVDTuneEnvironment -Root $r7 -Answers $again -User 'admin1')
+    $a7.Log.Clear()
+    $res7b = Invoke-AVDTuneStartSignIn -Root $r7 -Session (New-AVDTuneSession -TempRoot $signTemp -Auth $a7) -User 'admin1' -RetryDelaySeconds 0
+    Test-Check 'an existing AVDTune registration of the same owner is reused and updated, grants updated, nothing doubled' ($a7.Store.Apps.Count -eq 1 -and $app7.Patched -and @($a7.Log | Where-Object { $_ -like 'Graph POST /v1.0/applications' }).Count -eq 0 -and @($a7.Store.Grants).Count -eq 2 -and (Get-AVDTuneEnvironment $r7).SignIn.ClientId -eq $app7.appId -and (@($res7b.Notes) -join ' ') -like '*found*') ($a7.Log -join ' | ')
+    # a registration with that name of someone else, or without the tag, is not taken
+    $foreign = @{ id = 'app-foreign'; appId = '77777777-0000-0000-0000-000000000001'; displayName = 'AVDTune'; tags = @('AVDTune'); publicClient = @{ redirectUris = @('http://localhost') }; owners = @('oid-someone-else', 'oid-fake') }
+    $untagged = @{ id = 'app-untagged'; appId = '77777777-0000-0000-0000-000000000002'; displayName = 'AVDTune'; tags = @(); publicClient = @{ redirectUris = @('http://localhost') }; owners = @('oid-fake') }
+    $a8 = New-AVDTuneFakeAuth -Seed @{ Apps = [System.Collections.ArrayList]@($foreign, $untagged) }
+    $r8 = & $newRoot '' ''
+    $res8 = Invoke-AVDTuneStartSignIn -Root $r8 -Session (New-AVDTuneSession -TempRoot $signTemp -Auth $a8) -User 'admin1' -RetryDelaySeconds 0
+    Test-Check "a registration named 'AVDTune' with another owner or without the tag is not reused; a new one is created" ($a8.Store.Apps.Count -eq 3 -and (Get-AVDTuneEnvironment $r8).SignIn.ClientId -notin @($foreign.appId, $untagged.appId) -and (@($res8.Notes) -join ' ') -like '*not its only owner*' -and (@($res8.Notes) -join ' ') -like '*no AVDTune tag*') (@($res8.Notes) -join ' | ')
+    # missing roles, missing consent, retries, Azure Service Management missing
+    $r9 = & $newRoot '' ''
+    $e = Get-ThrownText { Invoke-AVDTuneStartSignIn -Root $r9 -Session (New-AVDTuneSession -TempRoot $signTemp -Auth (New-AVDTuneFakeAuth -Seed @{ AppForbidden = $true })) -User 'admin1' -RetryDelaySeconds 0 }
+    Test-Check 'no right to create app registrations: the message names the step and the roles; nothing saved' ($e -like 'Your account may not do this: create the app registration*403*Application Administrator or Cloud Application Administrator*' -and (Get-AVDTuneEnvironment $r9).SignIn.ClientId -eq '') $e
+    $e = Get-ThrownText { Invoke-AVDTuneStartSignIn -Root $r9 -Session (New-AVDTuneSession -TempRoot $signTemp -Auth (New-AVDTuneFakeAuth -Seed @{ GrantForbidden = $true })) -User 'admin1' -RetryDelaySeconds 0 }
+    Test-Check 'no right to grant the admin consent: the message names Privileged Role Administrator; nothing saved' ($e -like '*grant the admin consent*Privileged Role Administrator*' -and (Get-AVDTuneEnvironment $r9).SignIn.ClientId -eq '') $e
+    $e = Get-ThrownText { Invoke-AVDTuneStartSignIn -Root $r9 -Session (New-AVDTuneSession -TempRoot $signTemp -Auth (New-AVDTuneFakeAuth -Seed @{ SetupNoConsent = $true })) -User 'admin1' -RetryDelaySeconds 0 }
+    Test-Check 'setup sign-in without the consent for Application.ReadWrite.All: readable text, no Graph call' ($e -like '*no consent for Application.ReadWrite.All*' -and (Get-AVDTuneEnvironment $r9).SignIn.ClientId -eq '') $e
+    $e = Get-ThrownText { Invoke-AVDTuneStartSignIn -Root $r9 -Session (New-AVDTuneSession -TempRoot $signTemp -Auth (New-AVDTuneFakeAuth -Seed @{ GraphOffline = $true })) -User 'admin1' -RetryDelaySeconds 0 }
+    Test-Check 'setup without a connection to Graph: readable text' ($e -like 'No connection to Microsoft Graph*') $e
+    $e = Get-ThrownText { Invoke-AVDTuneStartSignIn -Root $r9 -Session (New-AVDTuneSession -TempRoot $signTemp -Auth (New-AVDTuneFakeAuth -Seed @{ Cancel = $true })) -User 'admin1' }
+    Test-Check 'setup sign-in cancelled: readable text' ($e -like 'Setup sign-in (Microsoft Graph Command Line Tools): Sign-in cancelled*') $e
+    $a10 = New-AVDTuneFakeAuth -Seed @{ SpCreateFailures = 2; ArmSpMissing = $true }
+    $res10 = Invoke-AVDTuneStartSignIn -Root $r9 -Session (New-AVDTuneSession -TempRoot $signTemp -Auth $a10) -User 'admin1' -RetryDelaySeconds 0
+    Test-Check 'the new enterprise app is retried while Graph does not know the registration yet; Azure Service Management is added when missing' ($res10.Info.Connected -and @($a10.Log | Where-Object { $_ -eq 'Graph POST /v1.0/servicePrincipals' }).Count -eq 4 -and (@($res10.Notes) -join ' ') -like '*Azure Service Management was added*') ($a10.Log -join ' | ')
+    $r11 = & $newRoot $tenant ''
+    $e = Get-ThrownText { Invoke-AVDTuneStartSignIn -Root $r11 -Session (New-AVDTuneSession -TempRoot $signTemp -Auth (New-AVDTuneFakeAuth -Seed @{ WrongTenant = $true })) -User 'admin1' -RetryDelaySeconds 0 }
+    Test-Check 'setup with a saved tenant: an admin of another tenant is refused before any Graph call' ($e -like '*belongs to tenant*' -and (Get-AVDTuneEnvironment $r11).SignIn.ClientId -eq '') $e
+    # Graph only through the adapter, only graph.microsoft.com
+    $sessSrc = [IO.File]::ReadAllText((Join-Path $repo 'Modules\AVDTune.Session.psm1'))
+    $hosts = @([regex]::Matches($sessSrc, 'https?://(?>([A-Za-z0-9.-]+))(?!\\)') | ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique)
+    Test-Check 'the session module talks to graph.microsoft.com, login.microsoftonline.com and names management.azure.com only; no Invoke-RestMethod or WebRequest of its own' (@($hosts | Where-Object { $_ -notin 'graph.microsoft.com', 'login.microsoftonline.com', 'management.azure.com', 'localhost' }).Count -eq 0 -and $sessSrc -notmatch 'Invoke-RestMethod|Invoke-WebRequest|WebClient') ($hosts -join ',')
+    $real = New-AVDTuneAuthAdapter -CacheFolder (Join-Path $tmp 'wv2-unused')
+    $refused = @(
+        (& $real.Graph 'GET' '/beta/applications' 'x' $null), (& $real.Graph 'DELETE' '/v1.0/applications/x' 'x' $null), (& $real.Graph 'GET' '/v1.0/../x' 'x' $null),
+        (& $real.Graph 'GET' '/v1.0/x#y' 'x' $null), (& $real.Graph 'GET' '//evil.example/v1.0/x' 'x' $null), (& $real.Graph 'GET' '/v1.0/x@evil.example' 'x' $null),
+        (& $real.Discover 'evil.example/x'), (& $real.Discover 'evil.example:8443'), (& $real.Discover '10.0.0.1'))
+    Test-Check 'real adapter: Graph paths outside /v1.0, other methods and odd domains are refused without a request' (@($refused | Where-Object { $_.Status -ne 0 -or $_.Error -notlike 'Refused*' }).Count -eq 0) ($refused | ConvertTo-Json -Compress)
 
     # ---------------------------------------------------------------- snapshot gate
     $machine = New-AVDTuneFakeMachine
@@ -424,7 +560,7 @@ try {
     $kvHits = @($own | Where-Object { [IO.File]::ReadAllText($_.FullName) -match $kvPattern } | ForEach-Object { $_.FullName.Substring($repo.Length + 1) })
     Test-Check 'no AVDTune code outside Shared\ calls a Keevault function' ($own.Count -gt 10 -and $kvHits.Count -eq 0) ($kvHits -join ', ')
     $sessCode = [IO.File]::ReadAllText((Join-Path $repo 'Modules\AVDTune.Session.psm1'))
-    Test-Check 'the sign-in imports only the normal sign-in functions of the shared module and fills in nothing' ($sessCode -match 'Import-Module \$shared -Force -Function Invoke-PackTuneBrowserSignIn, Request-PackTuneToken, Set-PackTuneSignInLog\r?\n' -and $sessCode -match 'Invoke-PackTuneBrowserSignIn -TenantID' -and $sessCode -notmatch '(?i)-Fill\b|-Passkey\b|-HasOtp\b') $null
+    Test-Check 'the sign-in imports only the normal sign-in functions of the shared module and fills in nothing' ($sessCode -match 'Import-Module \$shared -Force -Function Invoke-PackTuneBrowserSignIn, Request-PackTuneToken, Set-PackTuneSignInLog\r?\n' -and $sessCode -match 'Invoke-PackTuneBrowserSignIn @params' -and $sessCode -match '\$params = @\{ TenantID = \$TenantId; ClientID = \$ClientId; CacheFolder' -and $sessCode -notmatch '(?i)-Fill\b|-Passkey\b|-HasOtp\b|\b(Fill|Passkey|HasOtp)\s*=|params\.(Fill|Passkey|HasOtp)') $null
 
     # ---------------------------------------------------------------- nothing secret on disk, source rules
     $allText = (Get-ChildItem $tmp -Recurse -File | ForEach-Object { [IO.File]::ReadAllText($_.FullName) }) -join "`n"
