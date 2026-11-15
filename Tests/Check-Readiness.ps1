@@ -4,7 +4,7 @@
     Checks the readiness analysis and image hygiene (Modules\AVDTune.Readiness.psm1, readiness.json) against the fake machine, the fake Azure
     Resource Manager and a temporary state folder: the data (sources, dates, Verified), every check green and in its failure paths (no Azure
     access, 403, offline, VM on SCSI, stornvme not at boot, paths on D:, no MANA, Generation 1, Arm64, gallery definition without NVMe, Windows out of
-    service, hygiene findings), a check that throws, the families, storing the run, the confirmation by name, the seal gate and the fix behind the
+    service, hygiene findings), a check that throws, the families, storing the run, the confirmation by name, the finish gate and the fix behind the
     write gate. Nothing touches the registry, services or tasks of this computer, nothing is written to Azure (only GET is allowed).
 #>
 $ErrorActionPreference = 'Stop'
@@ -255,34 +255,34 @@ try {
     Test-Check 'the run at every start is stored but writes no change log entry' (@(Get-AVDTuneRun -Root $tmp).Count -eq 2 -and @(Get-AVDTuneChangeLog -Root $tmp).Count -eq 1 -and (Get-AVDTuneState $tmp).Readiness.Kind -eq 'Start') $null
     Test-Check 'an unknown kind is refused' (Test-Throws { Save-AVDTuneReadinessRun -Root $tmp -Result $quiet -Kind Weekly }) $null
 
-    # ---------------------------------------------------------------- seal gate and confirmation by name
-    $g = Get-AVDTuneSealReadiness -Root $tmp
-    Test-Check 'seal gate: a green analysis opens it' ($g.Allowed -and $g.Overall -eq 'green' -and $g.Reasons.Count -eq 0) ($g.Reasons -join '|')
+    # ---------------------------------------------------------------- finish gate and confirmation by name
+    $g = Get-AVDTuneFinishReadiness -Root $tmp
+    Test-Check 'finish gate: a green analysis opens it' ($g.Allowed -and $g.Overall -eq 'green' -and $g.Reasons.Count -eq 0) ($g.Reasons -join '|')
     [void](Set-AVDTuneState -Root $tmp -Values @{ Readiness = $null })
-    Test-Check 'seal gate: no analysis yet locks it' (-not (Get-AVDTuneSealReadiness -Root $tmp).Allowed -and (Get-AVDTuneSealReadiness -Root $tmp).Reasons[0] -like '*No healthcheck yet*') $null
+    Test-Check 'finish gate: no analysis yet locks it' (-not (Get-AVDTuneFinishReadiness -Root $tmp).Allowed -and (Get-AVDTuneFinishReadiness -Root $tmp).Reasons[0] -like '*No healthcheck yet*') $null
     [void](Save-AVDTuneReadinessRun -Root $tmp -Result $red -Kind Healthcheck -User 'admin1' -At $now.AddMinutes(2))
-    $g = Get-AVDTuneSealReadiness -Root $tmp
-    Test-Check 'seal gate: red locks it and names the item' (-not $g.Allowed -and ($g.Reasons -join ' ') -like '*1 red item(s)*hw.stornvme*') ($g.Reasons -join '|')
+    $g = Get-AVDTuneFinishReadiness -Root $tmp
+    Test-Check 'finish gate: red locks it and names the item' (-not $g.Allowed -and ($g.Reasons -join ' ') -like '*1 red item(s)*hw.stornvme*') ($g.Reasons -join '|')
     $ackText = Get-ThrownText { Confirm-AVDTuneReadinessAcknowledgement -Root $tmp -Typed 'hw.stornvme' -User 'admin1' }
     Test-Check 'red cannot be confirmed' ($ackText -like '*red cannot be confirmed*') $ackText
     $yellow = Invoke-Readiness (New-Master @{ Keys = @('HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending'); Native = @{ 'manage-bde.exe -status C:' = @{ ExitCode = 0; Output = 'Protection Status:    Protection On' } } }) (New-Arm @{ DiskControllerType = 'SCSI' })
     [void](Save-AVDTuneReadinessRun -Root $tmp -Result $yellow -Kind Healthcheck -User 'admin1' -At $now.AddMinutes(3))
     Test-Check 'yellow analysis: overall yellow, three open items' ($yellow.Overall -eq 'yellow' -and (@($yellow.OpenIds) -join ',') -eq 'hw.disk-controller,hy.bitlocker,hy.reboot') (@($yellow.OpenIds) -join ',')
-    $g = Get-AVDTuneSealReadiness -Root $tmp
-    Test-Check 'seal gate: unconfirmed yellow locks it' (-not $g.Allowed -and ($g.Reasons -join ' ') -like '*3 yellow*not confirmed by name*') ($g.Reasons -join '|')
+    $g = Get-AVDTuneFinishReadiness -Root $tmp
+    Test-Check 'finish gate: unconfirmed yellow locks it' (-not $g.Allowed -and ($g.Reasons -join ' ') -like '*3 yellow*not confirmed by name*') ($g.Reasons -join '|')
     $miss = Get-ThrownText { Confirm-AVDTuneReadinessAcknowledgement -Root $tmp -Typed 'hy.bitlocker, hw.disk-controller' -User 'admin1' }
     Test-Check 'confirmation needs every name; the missing one is named' ($miss -like '*Missing: hy.reboot*') $miss
     Test-Check 'a general "ok" is not a confirmation' (Test-Throws { Confirm-AVDTuneReadinessAcknowledgement -Root $tmp -Typed 'ok' -User 'admin1' }) $null
     [void](Confirm-AVDTuneReadinessAcknowledgement -Root $tmp -Typed 'HY.REBOOT hw.disk-controller;hy.bitlocker' -User 'admin1' -At $now.AddMinutes(4))
-    $g = Get-AVDTuneSealReadiness -Root $tmp
+    $g = Get-AVDTuneFinishReadiness -Root $tmp
     $rec = Get-AVDTuneReadinessRecord -Root $tmp
-    Test-Check 'seal gate: confirmed by name opens it; who and when are recorded; a change log entry names the items' ($g.Allowed -and $rec.AcknowledgedBy -eq 'admin1' -and @($rec.Acknowledged).Count -eq 3 -and (@(Get-AVDTuneChangeLog -Root $tmp | Where-Object Component -eq 'Confirmation')[0].Text -like '*confirmed by admin1*hy.reboot*')) ($g.Reasons -join '|')
+    Test-Check 'finish gate: confirmed by name opens it; who and when are recorded; a change log entry names the items' ($g.Allowed -and $rec.AcknowledgedBy -eq 'admin1' -and @($rec.Acknowledged).Count -eq 3 -and (@(Get-AVDTuneChangeLog -Root $tmp | Where-Object Component -eq 'Confirmation')[0].Text -like '*confirmed by admin1*hy.reboot*')) ($g.Reasons -join '|')
     [void](Add-AVDTuneChangeLogEntry -Root $tmp -Version (Get-AVDTuneState $tmp).ImageVersion -Category 'Updates' -ChangeType Updated -Text 'KB5132061 installed' -User 'admin1' -Source Step -At $now.AddMinutes(10))
-    $g = Get-AVDTuneSealReadiness -Root $tmp
-    Test-Check 'seal gate: a change after the check locks it again' (-not $g.Allowed -and ($g.Reasons -join ' ') -like '*changed after the check*run the analysis again*') ($g.Reasons -join '|')
+    $g = Get-AVDTuneFinishReadiness -Root $tmp
+    Test-Check 'finish gate: a change after the check locks it again' (-not $g.Allowed -and ($g.Reasons -join ' ') -like '*changed after the check*run the analysis again*') ($g.Reasons -join '|')
     $later = Invoke-Readiness (New-Master @{ Now = $now.AddMinutes(20) }) (New-Arm)
     [void](Save-AVDTuneReadinessRun -Root $tmp -Result $later -Kind Healthcheck -User 'admin1' -At $now.AddMinutes(20))
-    Test-Check 'seal gate: a new analysis after the change opens it; a note is no change' ((Get-AVDTuneSealReadiness -Root $tmp).Allowed) ((Get-AVDTuneSealReadiness -Root $tmp).Reasons -join '|')
+    Test-Check 'finish gate: a new analysis after the change opens it; a note is no change' ((Get-AVDTuneFinishReadiness -Root $tmp).Allowed) ((Get-AVDTuneFinishReadiness -Root $tmp).Reasons -join '|')
     Test-Check 'nothing to confirm on a green analysis' (Test-Throws { Confirm-AVDTuneReadinessAcknowledgement -Root $tmp -Typed 'x' -User 'admin1' }) $null
 
     # ---------------------------------------------------------------- the fix behind the write gate
@@ -298,7 +298,7 @@ try {
     Test-Check 'fix with the open gate: changed with the documented command, restart needed, run record and change log entry' ($fix.Status -eq 'Changed' -and $fix.Reboot -and $m.Store.Registry['hklm:\system\currentcontrolset\services\stornvme|start'] -eq 0 -and (@($m.Log | Where-Object { $_ -eq 'Run sc.exe config stornvme start=boot' }).Count -eq 1) -and @(Get-AVDTuneRun -Root $tmp).Count -eq ($before + 1) -and $entry.Count -eq 1 -and $entry[0].Text -like '*changed (before: 3, after: 0)*restart needed*') ($entry | ForEach-Object Text)
     $again = Invoke-AVDTuneReadinessFix -Machine $m -Root $tmp -FixId 'readiness.stornvme-boot' -User 'admin1' -SnapshotId 'snap1'
     Test-Check 'the fix is idempotent (already at boot: unchanged)' ($again.Status -eq 'Unchanged') $again.Status
-    Test-Check 'after a fix the seal gate asks for a new analysis' (-not (Get-AVDTuneSealReadiness -Root $tmp).Allowed -and ((Get-AVDTuneSealReadiness -Root $tmp).Reasons -join ' ') -like '*changed after the check*') ((Get-AVDTuneSealReadiness -Root $tmp).Reasons -join '|')
+    Test-Check 'after a fix the finish gate asks for a new analysis' (-not (Get-AVDTuneFinishReadiness -Root $tmp).Allowed -and ((Get-AVDTuneFinishReadiness -Root $tmp).Reasons -join ' ') -like '*changed after the check*') ((Get-AVDTuneFinishReadiness -Root $tmp).Reasons -join '|')
     $failM = New-Master @{ Native = @{ 'sc.exe config stornvme start=boot' = @{ ExitCode = 5; Output = 'Access is denied.' } } } -Reg @{ 'HKLM:\SYSTEM\CurrentControlSet\Services\stornvme|Start' = 3 }
     $ff = Invoke-AVDTuneReadinessFix -Machine $failM -Root $tmp -FixId 'readiness.stornvme-boot' -User 'admin1' -SnapshotId 'snap1'
     Test-Check 'a failing command is reported as Failed with its exit code and logged' ($ff.Status -eq 'Failed' -and $ff.Message -like '*exit code 5*' -and (@(Get-AVDTuneChangeLog -Root $tmp | Where-Object { $_.Category -eq 'Readiness fix' -and $_.Text -like '*FAILED*' }).Count -eq 1)) $ff.Message

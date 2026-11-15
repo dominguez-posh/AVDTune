@@ -383,7 +383,7 @@ function Invoke-AVDTuneReadiness {
         if ($rename -and @($rename).Count -gt 0) { [void]$pending.Add('file operations') }
         $setup = & $Machine.RegGet 'HKLM:\SYSTEM\Setup' 'SystemSetupInProgress'
         if ($null -ne $setup -and [string]$setup -eq '1') { Add-Row 'hy.reboot' $hy 'red' 'A Windows setup operation is still running (SystemSetupInProgress=1).' 'Let setup finish and restart.'; return }
-        if ($pending.Count -gt 0) { Add-Row 'hy.reboot' $hy 'yellow' ('A restart is waiting: ' + ($pending -join ', ') + '.') 'Restart the master (the seal step restarts and continues).' -Found ($pending -join ', ') }
+        if ($pending.Count -gt 0) { Add-Row 'hy.reboot' $hy 'yellow' ('A restart is waiting: ' + ($pending -join ', ') + '.') 'Restart the master (the Finish step restarts and continues).' -Found ($pending -join ', ') }
         else { Add-Row 'hy.reboot' $hy 'green' 'No restart is waiting.' }
     }
     Invoke-Check 'hy.update-block' $hy {
@@ -446,7 +446,7 @@ function Invoke-AVDTuneReadiness {
 
 #endregion
 
-#region storing, confirmation, seal gate
+#region storing, confirmation, finish gate
 
 function Save-AVDTuneReadinessRun {
     <#
@@ -503,7 +503,7 @@ function Confirm-AVDTuneReadinessAcknowledgement {
     $rec
 }
 
-function Get-AVDTuneSealReadiness {
+function Get-AVDTuneFinishReadiness {
     <#
         Is "Abschliessen" allowed? Needs an analysis (healthcheck) with no red item, every yellow or not checkable item confirmed by name, and no change
         of the master after it (a change log entry made by a step, except the readiness entries themselves). Allowed + Reasons (why not).
@@ -582,4 +582,4 @@ function Invoke-AVDTuneReadinessFix {
 #endregion
 
 Export-ModuleMember -Function Get-AVDTuneReadinessDataPath, Get-AVDTuneReadinessData, ConvertTo-AVDTuneGalleryImageId, Get-AVDTuneReadinessArm, Get-AVDTuneReadinessFamilies, Invoke-AVDTuneReadiness,
-    Save-AVDTuneReadinessRun, Get-AVDTuneReadinessRecord, Confirm-AVDTuneReadinessAcknowledgement, Get-AVDTuneSealReadiness, Get-AVDTuneReadinessFixes, Invoke-AVDTuneReadinessFix
+    Save-AVDTuneReadinessRun, Get-AVDTuneReadinessRecord, Confirm-AVDTuneReadinessAcknowledgement, Get-AVDTuneFinishReadiness, Get-AVDTuneReadinessFixes, Invoke-AVDTuneReadinessFix

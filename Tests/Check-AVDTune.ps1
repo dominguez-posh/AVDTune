@@ -84,13 +84,13 @@ try {
     [IO.File]::WriteAllText((Join-Path $qRoot 'FOREIGN'), 'x')
     [IO.File]::WriteAllText((Join-Path $qRoot 'environment.json'), '{"Schema":1,"SignIn":{"TenantId":"attacker.example","ClientId":"00000000-0000-0000-0000-000000000001"},"Dc":{"Server":"10.0.0.66","Pins":{}}}')
     [IO.File]::WriteAllText((Join-Path $qRoot 'state.json'), '{"Schema":1,"LastChange":"2020-01-01T00:00:00Z"}')
-    [IO.File]::WriteAllText((Join-Path $qRoot 'config\webview2-trust.json'), '{"Files":[]}')
+    [IO.File]::WriteAllText((Join-Path $qRoot 'config\planted.json'), '{"Files":[]}')
     New-Item -ItemType Junction -Path (Join-Path $qRoot 'logs') -Value $qTarget | Out-Null
     $rep = $null; $e = $null
     try { [void](Initialize-AVDTuneState -Root $qRoot -Protect -ReadAcl $readQ -CreateRoot $createPlain); $rep = Get-AVDTuneStateSecurityReport } catch { $e = $_.Exception.Message }
     $aside = @(Get-ChildItem -LiteralPath $qParent -Directory | Where-Object { $_.Name -like 'AVDTune.untrusted-*' })
     Test-Check 'attack: a prepared state folder is set aside as AVDTune.untrusted-<time> and a new one is created' (-not $e -and $aside.Count -eq 1 -and $aside[0].Name -match '^AVDTune\.untrusted-\d{8}-\d{6}$' -and (Test-Path (Join-Path $qRoot 'state.json')) -and @($rep.Quarantined).Count -eq 1) "$e / $(@($aside | ForEach-Object Name) -join ',')"
-    Test-Check 'N2: nothing of the prepared folder is taken over (no environment.json, no LastChange, no WebView2 trust record)' (-not (Test-Path (Join-Path $qRoot 'environment.json')) -and -not (Test-Path (Join-Path $qRoot 'config\webview2-trust.json')) -and $null -eq (Get-AVDTuneState $qRoot).PSObject.Properties['LastChange'] -and (Test-Path (Join-Path $aside[0].FullName 'environment.json'))) $null
+    Test-Check 'N2: nothing of the prepared folder is taken over (no environment.json, no LastChange, no planted config file)' (-not (Test-Path (Join-Path $qRoot 'environment.json')) -and -not (Test-Path (Join-Path $qRoot 'config\planted.json')) -and $null -eq (Get-AVDTuneState $qRoot).PSObject.Properties['LastChange'] -and (Test-Path (Join-Path $aside[0].FullName 'environment.json'))) $null
     Test-Check 'the quarantine is in logs\security.log of the new folder and in the report for the protocol and the warning' ((Test-Path (Join-Path $qRoot 'logs\security.log')) -and ([IO.File]::ReadAllText((Join-Path $qRoot 'logs\security.log')) -like '*prepared by someone else*set aside as*AVDTune.untrusted-*nothing taken over*') -and -not ((Get-Item -LiteralPath (Join-Path $qRoot 'logs')).Attributes -band [IO.FileAttributes]::ReparsePoint)) $null
     Test-Check 'the junction in the prepared folder was not followed: its target is unchanged' ((Get-Content -LiteralPath (Join-Path $qTarget 'system-file.txt') -Raw).Trim() -eq 'must stay as it is' -and @(Get-ChildItem -LiteralPath $qTarget -Force).Count -eq 1 -and (Get-Acl -LiteralPath $qTarget).Sddl -eq $targetAcl) (@(Get-ChildItem -LiteralPath $qTarget -Force -Name) -join ',')
     Get-ChildItem -LiteralPath $qParent -Force | ForEach-Object { Remove-AVDTuneTestTree $_.FullName }

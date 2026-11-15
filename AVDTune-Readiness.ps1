@@ -178,12 +178,12 @@ function Update-ReadyView {
     $r = $script:Ready
     $ui.PanelReadyRows.Children.Clear()
     if (-not $ui.TxtReadyGallery.IsKeyboardFocused) { $ui.TxtReadyGallery.Text = (Get-ReadySettings).GalleryImageId }
-    $seal = Get-AVDTuneSealReadiness -Root $script:StateRoot
+    $finish = Get-AVDTuneFinishReadiness -Root $script:StateRoot
     $pair = if ($script:ReadyJob) { @('AccentSubtle', 'Primary', 'Running') } elseif (-not $r) { @('Hover', 'MutedText', 'Not run') } else { $script:ReadyPill[[string]$r.Overall] }
     Set-Brush $ui.PillReady ([System.Windows.Controls.Border]::BackgroundProperty) $pair[0]
     $ui.TxtReadyPill.Text = $pair[2]; Set-Brush $ui.TxtReadyPill ([System.Windows.Controls.TextBlock]::ForegroundProperty) $pair[1]
-    $ui.TxtReadyGate.Text = $(if ($seal.Allowed) { 'Seal: allowed. The healthcheck is green or confirmed, and nothing changed after it.' } else { 'Seal: locked. ' + (@($seal.Reasons) -join ' ') })
-    Set-Brush $ui.TxtReadyGate ([System.Windows.Controls.TextBlock]::ForegroundProperty) $(if ($seal.Allowed) { 'Success' } else { 'Danger' })
+    $ui.TxtReadyGate.Text = $(if ($finish.Allowed) { 'Finish: allowed. The healthcheck is green or confirmed, and nothing changed after it.' } else { 'Finish: locked. ' + (@($finish.Reasons) -join ' ') })
+    Set-Brush $ui.TxtReadyGate ([System.Windows.Controls.TextBlock]::ForegroundProperty) $(if ($finish.Allowed) { 'Success' } else { 'Danger' })
     $rec = Get-AVDTuneReadinessRecord -Root $script:StateRoot
     if (-not $r) {
         $ui.TxtReadySummary.Text = $(if ($script:ReadyJob) { 'Analysing ...' } else { 'Not run in this window yet.' })
@@ -205,7 +205,7 @@ function Update-ReadyView {
     $open = if ($rec) { @($rec.OpenIds) } else { @() }
     $needAck = ($rec -and [int]$rec.Red -eq 0 -and $open.Count -gt 0 -and @($open | Where-Object { $_ -notin @($rec.Acknowledged) }).Count -gt 0)
     $ui.PanelReadyAck.Visibility = ConvertTo-Vis $needAck
-    if ($needAck) { $ui.TxtReadyAckHint.Text = "To seal, confirm every yellow and not checkable item by typing its name (separated by spaces or commas): $($open -join ', ')" }
+    if ($needAck) { $ui.TxtReadyAckHint.Text = "To finish, confirm every yellow and not checkable item by typing its name (separated by spaces or commas): $($open -join ', ')" }
 }
 function Start-ReadyFix([string]$FixId) {
     if (-not (Test-AVDTuneWriteAllowed)) { throw 'Read only: confirm a snapshot of today on the Overview first.' }

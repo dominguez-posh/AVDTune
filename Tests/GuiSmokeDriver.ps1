@@ -400,7 +400,7 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         Test-Smoke 'the card shows the red pill, the counts and the criteria date' ($ui.TxtReadyPill.Text -eq 'Red' -and $ui.TxtReadySummary.Text -like '*red*yellow*not checkable*green*Criteria of 2026-11-15*Azure was read*') $ui.TxtReadySummary.Text
         Test-Smoke 'rows are grouped (Hardware generation, Image hygiene), one row per check' ($ui.PanelReadyRows.Children.Count -ge 28 -and (Find-Text $ui.PanelReadyRows 'Hardware generation') -and (Find-Text $ui.PanelReadyRows 'Image hygiene') -and (Find-Text $ui.PanelReadyRows 'Windows NVMe driver (stornvme) starts at boot')) $ui.PanelReadyRows.Children.Count
         Test-Smoke 'the family list says what is ready, what needs fixes and what is not possible (Arm64)' ($ui.TxtReadyFamilies.Text -like '*After fixing the items above*Ddsv6*Not possible with this master (6): 6 x needs an Arm64 image*') $ui.TxtReadyFamilies.Text
-        Test-Smoke 'the seal is locked and says why' ($ui.TxtReadyGate.Text -like 'Seal: locked*red item(s)*') $ui.TxtReadyGate.Text
+        Test-Smoke 'Finish is locked and says why' ($ui.TxtReadyGate.Text -like 'Finish: locked*red item(s)*') $ui.TxtReadyGate.Text
         $rec = $state.Readiness
         $log = @(Get-AVDTuneChangeLog -Root $script:StateRoot | Where-Object { $_.Category -eq 'Readiness' })
         Test-Smoke 'the result is stored: run record (Erstanalyse), state.json and a change log entry; the start run wrote none' (@(Get-AVDTuneRun -Root $script:StateRoot | Where-Object { $_.PSObject.Properties['Kind'] -and $_.Kind -eq 'Erstanalyse' }).Count -eq 1 -and $rec.Kind -eq 'Erstanalyse' -and $rec.Overall -eq 'red' -and $log.Count -eq 1 -and $log[0].Text -like 'Erstanalyse: overall red*') ($log | ForEach-Object Text)
@@ -432,7 +432,7 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         Test-Smoke 'the fix ran with the documented command, the value is 0, the change log and the protocol have it' ($reg -eq 0 -and (@($script:Machine.Log | Where-Object { $_ -eq 'Run sc.exe config stornvme start=boot' }).Count -eq 1) -and $entry.Count -eq 1 -and $entry[0].Text -like '*restart needed*' -and @($script:Protocol.Actions | Where-Object { $_.Subject -eq 'Readiness fix' }).Count -eq 1) ($entry | ForEach-Object Text)
         $rows = @{}; foreach ($x in $script:Ready.Rows) { $rows[$x.Id] = $x }
         Test-Smoke 'the analysis ran again by itself: stornvme is green now, the page file is still red' ($rows['hw.stornvme'].Status -eq 'green' -and $rows['hw.pagefile-d'].Status -eq 'red') $rows['hw.stornvme'].Status
-        Test-Smoke 'the seal is still locked (red left)' ($ui.TxtReadyGate.Text -like 'Seal: locked*') $ui.TxtReadyGate.Text
+        Test-Smoke 'Finish is still locked (red left)' ($ui.TxtReadyGate.Text -like 'Finish: locked*') $ui.TxtReadyGate.Text
         $true } }
     @{ Name = 'readiness: confirm by name'; Do = {
         if ($script:OverviewJob -or $script:ReadyJob -or $script:ReadyQueued) { return $false }
@@ -447,17 +447,17 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         $r = $script:Ready
         $rec = (Get-AVDTuneState $script:StateRoot).Readiness
         Test-Smoke 'second run is the Healthcheck: nothing red, yellow and not checkable left, overall yellow' ($rec.Kind -eq 'Healthcheck' -and $r.Overall -eq 'yellow' -and $r.Counts.Red -eq 0 -and $r.Counts.Yellow -ge 1 -and $ui.TxtReadyPill.Text -eq 'Yellow') (($r.Rows | Where-Object { $_.Status -in 'red', 'yellow', 'unknown' } | ForEach-Object { "$($_.Id)=$($_.Status)" }) -join ',')
-        Test-Smoke 'the confirmation box is there and names the open items; the seal is locked for them' ($ui.PanelReadyAck.Visibility -eq 'Visible' -and $ui.TxtReadyAckHint.Text -like '*hw.disk-controller*' -and $ui.TxtReadyGate.Text -like 'Seal: locked*not confirmed by name*') "$($ui.TxtReadyAckHint.Text) / $($ui.TxtReadyGate.Text)"
+        Test-Smoke 'the confirmation box is there and names the open items; Finish is locked for them' ($ui.PanelReadyAck.Visibility -eq 'Visible' -and $ui.TxtReadyAckHint.Text -like '*hw.disk-controller*' -and $ui.TxtReadyGate.Text -like 'Finish: locked*not confirmed by name*') "$($ui.TxtReadyAckHint.Text) / $($ui.TxtReadyGate.Text)"
         $ui.BoxReady.BringIntoView(); $window.UpdateLayout()
         Save-SmokeShot '42-readiness-yellow-light'
         $ui.TxtReadyAck.Text = 'ok'
         $ui.BtnReadyAck.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
-        Test-Smoke 'a general ok is refused and names what is missing' ($script:LastToast -like '*Type the name of every open item*Missing*' -and $ui.TxtReadyGate.Text -like 'Seal: locked*') $script:LastToast
+        Test-Smoke 'a general ok is refused and names what is missing' ($script:LastToast -like '*Type the name of every open item*Missing*' -and $ui.TxtReadyGate.Text -like 'Finish: locked*') $script:LastToast
         $ui.TxtReadyAck.Text = (@($rec.OpenIds) -join ' ')
         $ui.BtnReadyAck.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
         $window.UpdateLayout()
-        $g = Get-AVDTuneSealReadiness -Root $script:StateRoot
-        Test-Smoke 'every open item named: the seal is allowed, who confirmed it is stored, the protocol and the change log have it' ($g.Allowed -and $ui.TxtReadyGate.Text -like 'Seal: allowed*' -and $ui.PanelReadyAck.Visibility -eq 'Collapsed' -and (Get-AVDTuneState $script:StateRoot).Readiness.AcknowledgedBy -eq $env:USERNAME -and @($script:Protocol.Actions | Where-Object { $_.Subject -like 'Readiness: open items confirmed' }).Count -eq 1 -and @(Get-AVDTuneChangeLog -Root $script:StateRoot | Where-Object Component -eq 'Confirmation').Count -eq 1) $ui.TxtReadyGate.Text
+        $g = Get-AVDTuneFinishReadiness -Root $script:StateRoot
+        Test-Smoke 'every open item named: Finish is allowed, who confirmed it is stored, the protocol and the change log have it' ($g.Allowed -and $ui.TxtReadyGate.Text -like 'Finish: allowed*' -and $ui.PanelReadyAck.Visibility -eq 'Collapsed' -and (Get-AVDTuneState $script:StateRoot).Readiness.AcknowledgedBy -eq $env:USERNAME -and @($script:Protocol.Actions | Where-Object { $_.Subject -like 'Readiness: open items confirmed' }).Count -eq 1 -and @(Get-AVDTuneChangeLog -Root $script:StateRoot | Where-Object Component -eq 'Confirmation').Count -eq 1) $ui.TxtReadyGate.Text
         $wasLight = ($script:Settings.Theme -eq 'Light')
         if ($wasLight) { $ui.BtnTheme.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent))) }
         $window.UpdateLayout(); $ui.BoxReady.BringIntoView(); $window.UpdateLayout(); $ui.BoxReady.BringIntoView(); $window.UpdateLayout()
@@ -465,7 +465,7 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         if ($wasLight) { $ui.BtnTheme.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent))) }
         [void](Add-AVDTuneChangeLogEntry -Root $script:StateRoot -Version (Get-AVDTuneState $script:StateRoot).ImageVersion -Category 'Updates' -ChangeType Updated -Text 'smoke change' -User 'smoke' -Source Step)
         Update-ReadyView
-        Test-Smoke 'a change after the check locks the seal again' ($ui.TxtReadyGate.Text -like 'Seal: locked*changed after the check*') $ui.TxtReadyGate.Text
+        Test-Smoke 'a change after the check locks Finish again' ($ui.TxtReadyGate.Text -like 'Finish: locked*changed after the check*') $ui.TxtReadyGate.Text
         $true } }
     @{ Name = 'start: sign-out and dark'; Do = {
         Open-Stage 'SignIn'; $window.UpdateLayout()
