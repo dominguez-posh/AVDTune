@@ -12,6 +12,22 @@
             <Setter Property="FontFamily" Value="Segoe Fluent Icons, Segoe MDL2 Assets"/><Setter Property="FontSize" Value="16"/><Setter Property="VerticalAlignment" Value="Center"/>
             <Setter Property="Margin" Value="0,0,12,0"/><Setter Property="Width" Value="18"/>
         </Style>
+        <Style TargetType="PasswordBox">
+            <Setter Property="Padding" Value="9,6"/><Setter Property="BorderThickness" Value="1"/><Setter Property="MinWidth" Value="240"/>
+            <Setter Property="BorderBrush" Value="{DynamicResource Border}"/><Setter Property="Background" Value="{DynamicResource Card}"/><Setter Property="Foreground" Value="{DynamicResource Text}"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="PasswordBox">
+                        <Border x:Name="Bd" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="6" SnapsToDevicePixels="True">
+                            <ScrollViewer x:Name="PART_ContentHost" Margin="{TemplateBinding Padding}" VerticalAlignment="Center"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsKeyboardFocused" Value="True"><Setter TargetName="Bd" Property="BorderBrush" Value="{DynamicResource Primary}"/></Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
     </Window.Resources>
 
     <Grid x:Name="RootGrid" Background="{DynamicResource WindowBackground}">
@@ -56,6 +72,16 @@
                 <!-- Content surface -->
                 <Border Grid.Column="1" Background="{DynamicResource Surface}" BorderBrush="{DynamicResource SurfaceBorder}" BorderThickness="1,1,0,0" CornerRadius="8,0,0,0" ClipToBounds="True">
                     <Grid>
+                        <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+                        <!-- Read only until the snapshot gate is confirmed: shown on every page that could change the master -->
+                        <Border x:Name="BoxReadOnly" Grid.Row="0" Visibility="Collapsed" Background="{DynamicResource WarningBg}" Padding="40,10">
+                            <Grid>
+                                <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                                <TextBlock x:Name="TxtReadOnly" TextWrapping="Wrap" VerticalAlignment="Center" Foreground="{DynamicResource Warning}" FontWeight="SemiBold" Text="Read only: confirm a snapshot of today on the Overview first. Nothing on this page changes the master until then."/>
+                                <Button x:Name="BtnReadOnlyGo" Grid.Column="1" Content="Go to the Overview" Margin="16,0,0,0" AutomationProperties.Name="Go to the Overview to finish the start sequence"/>
+                            </Grid>
+                        </Border>
+                        <Grid Grid.Row="1">
                         <Border x:Name="BoxToast" Panel.ZIndex="60" Visibility="Collapsed" VerticalAlignment="Bottom" HorizontalAlignment="Center" Margin="24,0,24,20" Background="{DynamicResource Text}" CornerRadius="8" Padding="16,10">
                             <TextBlock x:Name="TxtToast" Foreground="{DynamicResource Surface}" TextWrapping="Wrap" MaxWidth="700"/>
                         </Border>
@@ -76,6 +102,32 @@
                                         </StackPanel>
                                     </Grid>
                                     <TextBlock x:Name="TxtOverviewState" Style="{DynamicResource Hint}" Margin="0,12,0,0"/>
+                                    <Border x:Name="BoxStart" Style="{DynamicResource CardBox}" Margin="0,16,0,0" Background="{DynamicResource Card}" Padding="20,16">
+                                        <StackPanel>
+                                            <TextBlock Text="Start sequence" Style="{DynamicResource CardTitle}"/>
+                                            <TextBlock x:Name="TxtStartHint" Style="{DynamicResource Hint}" Margin="0,4,0,0" Text="Nothing changes the master before these steps are done. Every page stays read only until the snapshot is confirmed."/>
+                                            <StackPanel x:Name="PanelStages" Margin="0,8,0,0"/>
+                                        </StackPanel>
+                                    </Border>
+                                    <Border x:Name="BoxStage" Visibility="Collapsed" Style="{DynamicResource CardBox}" Margin="0,16,0,0" Background="{DynamicResource Card}" Padding="20,16">
+                                        <StackPanel>
+                                            <TextBlock x:Name="TxtStageTitle" Style="{DynamicResource CardTitle}"/>
+                                            <TextBlock x:Name="TxtStageIntro" Style="{DynamicResource Hint}" Margin="0,4,0,0"/>
+                                            <StackPanel x:Name="PanelStageBody" Margin="0,12,0,0"/>
+                                            <TextBlock x:Name="TxtStageMessage" TextWrapping="Wrap" Margin="0,12,0,0"/>
+                                            <StackPanel Orientation="Horizontal" Margin="0,14,0,0">
+                                                <Button x:Name="BtnStageAction" Style="{DynamicResource PrimaryButton}" Margin="0,0,8,0"/>
+                                                <Button x:Name="BtnStageAction2" Margin="0,0,8,0" Visibility="Collapsed"/>
+                                                <Button x:Name="BtnStageClose" Content="Close"/>
+                                            </StackPanel>
+                                        </StackPanel>
+                                    </Border>
+                                    <Border x:Name="BoxRollback" Visibility="Collapsed" Style="{DynamicResource CardBox}" Margin="0,16,0,0" Background="{DynamicResource Card}" Padding="20,16">
+                                        <StackPanel>
+                                            <TextBlock Text="Rollback" Style="{DynamicResource CardTitle}"/>
+                                            <TextBlock x:Name="TxtRollback" TextWrapping="Wrap" Margin="0,8,0,0"/>
+                                        </StackPanel>
+                                    </Border>
                                     <Border Style="{DynamicResource CardBox}" Margin="0,16,0,0" Background="{DynamicResource Card}" Padding="20,16">
                                         <StackPanel>
                                             <TextBlock Text="Image" Style="{DynamicResource CardTitle}"/>
@@ -146,6 +198,7 @@
                                     </Border>
                                 </StackPanel>
                             </ScrollViewer>
+                        </Grid>
                         </Grid>
                     </Grid>
                 </Border>

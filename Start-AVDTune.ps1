@@ -26,6 +26,7 @@ Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, Sys
 $script:AppRoot = $PSScriptRoot
 $script:ToolVersion = '0.1.0'
 Import-Module (Join-Path $PSScriptRoot 'Modules\AVDTune.psm1') -Force
+foreach ($part in 'Session', 'Snapshot', 'Directory', 'Start') { Import-Module (Join-Path $PSScriptRoot "Modules\AVDTune.$part.psm1") -Force }
 . (Join-Path $PSScriptRoot 'AVDTune-Theme.ps1')
 
 # ---------------------------------------------------------------- test mode, elevation, one instance
@@ -45,7 +46,13 @@ $script:MutexOwned = $false
 try { $script:MutexOwned = $script:Mutex.WaitOne(0) } catch [System.Threading.AbandonedMutexException] { $script:MutexOwned = $true }
 if (-not $script:MutexOwned) { Stop-WithMessage 'AVDTune is already running on this computer (one instance at a time).' }
 
-if ($script:TestMode) { . $env:AVDTUNE_FAKE; $script:Machine = New-AVDTuneFakeMachine } else { $script:Machine = New-AVDTuneMachine }
+if ($script:TestMode) {
+    . $env:AVDTUNE_FAKE; $script:Machine = New-AVDTuneFakeMachine
+    # sign-in, Azure Resource Manager and LDAP are fakes in test mode (Tests\Fakes\FakeServices.ps1 next to the fake machine): no real sign-in, tenant or domain controller
+    . (Join-Path (Split-Path $env:AVDTUNE_FAKE -Parent) 'FakeServices.ps1')
+    $script:Services = @{ Auth = (New-AVDTuneFakeAuth); Arm = (New-AVDTuneFakeArm); Ldap = (New-AVDTuneFakeLdap) }
+}
+else { $script:Machine = New-AVDTuneMachine }
 [void](Initialize-AVDTuneState -Root $script:StateRoot)
 $script:WorkRoot = $script:StateRoot
 . (Join-Path $PSScriptRoot 'AVDTune-Protocol.ps1')
@@ -174,13 +181,14 @@ function Show-Page([string]$Key) {
     $ui.PageProtocol.Visibility = ConvertTo-Vis ($Key -eq 'Protocol')
     $ui.PagePlaceholder.Visibility = ConvertTo-Vis $isPlaceholder
     $ui["Nav$Key"].IsChecked = $true
+    Update-ReadOnlyBanner
     if ($isPlaceholder) {
         $page = $script:PageTable | Where-Object { $_.Key -eq $Key } | Select-Object -First 1
         $ui.TxtPhTitle.Text = $page.Title
         $ui.TxtPhPhase.Text = "Planned for phase $($page.Phase)"
         $ui.TxtPhText.Text = $page.Text
     }
-    elseif ($Key -eq 'Overview') { Update-OverviewView }
+    elseif ($Key -eq 'Overview') { Update-OverviewView; Update-StartView }
     elseif ($Key -eq 'Protocol') { Update-ProtocolView }
 }
 
@@ -389,6 +397,8 @@ Add-Click $ui.BtnProtocolCopy {
     Show-Toast 'Copied.'
 }
 
+. (Join-Path $PSScriptRoot 'AVDTune-Start.ps1')
+
 # ---------------------------------------------------------------- theme switch
 function Update-ThemeButton { $ui.BtnTheme.Content = [string][char]$(if ($script:Settings.Theme -eq 'Dark') { 0xE706 } else { 0xE708 }) }
 function Switch-Theme {
@@ -415,6 +425,8 @@ Add-Click $ui.BtnClose { $window.Close() }
 
 $window.Add_Closed({
     $script:Timer.Stop()
+    try { $script:SnapTimer.Stop() } catch { }
+    try { if ($script:StartContext.Session) { Disconnect-AVDTuneSession $script:StartContext.Session } } catch { }   # tokens leave the memory with the window
     if ($script:OverviewJob) { try { [void]$script:OverviewJob.PS.BeginStop($null, $null) } catch { } }
     try { if ($script:MutexOwned) { $script:Mutex.ReleaseMutex() } } catch { }
     [System.Windows.Application]::Current.Shutdown()
@@ -424,6 +436,8 @@ $window.Add_Closed({
 Set-ProtocolImage
 Update-Chip
 Show-Page 'Overview'
+# First run: the questions open by themselves
+if (-not (Get-AVDTuneEnvironment $script:StateRoot)) { try { Open-Stage 'Environment' } catch { Show-Error $_.Exception.Message } }
 $script:Timer.Start()
 Start-OverviewRefresh
 # Test hook: AVDTUNE_SMOKE names a script that drives the window off-screen and renders every page (only in test mode).

@@ -276,13 +276,13 @@ function Get-AVDTuneStartStages {
     # 3 domain
     if ($envObj -and -not $plan.UsesDc) { & $add 'Domain' 'Domain controller' 'Skipped' 'Not needed: no domain controller in this environment (groups come from Microsoft Entra ID).' }
     elseif ($Context.Directory) { & $add 'Domain' 'Domain controller' 'Done' "$($Context.Directory.DnsName) ($($Context.Directory.NetBiosName)), $($Context.Directory.OuCount) OUs, $(@($Context.Directory.Groups).Count) groups, site $($Context.Directory.Site); $($Context.DirectorySecurity)" }
-    elseif ($open) { & $add 'Domain' 'Domain controller' 'Locked' 'Finish the steps before first.' }
+    elseif ($open) { & $add 'Domain' 'Domain controller' 'Locked' 'Finish the earlier steps first.' }
     else { & $add 'Domain' 'Domain controller' $(if (& $fail 'Domain') { 'Failed' } else { 'Pending' }) $(if (& $fail 'Domain') { & $fail 'Domain' } else { 'IP or name of a domain controller and a domain account. LDAPS first, certificate pinned.' }) }
     if ($envObj -and $plan.UsesDc -and -not $Context.Directory) { $open = $true }
 
     # 4 snapshot gate
     if (Test-AVDTuneWriteAllowed) { $g = Get-AVDTuneWriteGate; & $add 'Snapshot' 'Snapshot gate' 'Done' "Confirmed by $($g.ConfirmedBy). The pages can change the master." }
-    elseif ($open) { & $add 'Snapshot' 'Snapshot gate' 'Locked' 'Finish the steps before first.' }
+    elseif ($open) { & $add 'Snapshot' 'Snapshot gate' 'Locked' 'Finish the earlier steps first.' }
     else { & $add 'Snapshot' 'Snapshot gate' $(if (& $fail 'Snapshot') { 'Failed' } else { 'Pending' }) $(if (& $fail 'Snapshot') { & $fail 'Snapshot' } else { 'A snapshot of the OS disk from today, confirmed by your full name. Until then every page is read only.' }) }
     @($stages)
 }
