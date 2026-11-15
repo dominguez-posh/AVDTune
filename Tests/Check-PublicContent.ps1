@@ -2,13 +2,17 @@
 <#
 .SYNOPSIS
     Repository hygiene for the public repo (docs\plans\avdtune.md, section 9a). Fails on:
-      - GUIDs outside Tests\ that are not on the allowlist of public IDs below (tenant, subscription, object IDs),
-      - host names *.file.core.windows.net with a real storage account name (placeholders and privatelink are fine),
+      - GUIDs (also inside Tests\) that are not on the allowlist of public IDs below or obvious fake values (one repeated digit, like 11111111-1111-...),
+      - host names *.file.core.windows.net, *.blob.core.windows.net, *.vault.azure.net, *.onmicrosoft.com and *.sharepoint.com with a real name
+        (placeholders like contoso, example, fabrikam and privatelink are fine),
+      - e-mail addresses and UPNs (placeholder domains: example.*, contoso.*, fabrikam.*, *.invalid),
+      - IPv6 addresses other than the documentation range 2001:db8::/32 and ::1,
       - IPv4 addresses outside the documentation ranges (192.0.2.0/24, 198.51.100.0/24, 203.0.113.0/24) and a few well-known public ones
         (private ranges 10/8, 172.16/12, 192.168/16 only inside Tests\, where the fakes use them),
       - names from the local deny list %LOCALAPPDATA%\AVDTune\deny-list.txt (one name per line, # comments). The list lives outside the repo and is never
         committed; without it the check only notes that it was not run (no failure). The output never prints a deny-list name, only the entry number.
-    A line that carries the marker "public-content-ok" is skipped (for a documented exception).
+    A line that carries the marker "public-content-ok: <reason>" is skipped (a documented exception); a marker without a reason is a finding.
+    Not covered, by design of a text scan: images (screenshots, the animated preview) and commit messages. Look at those by hand before they go public.
     Run before every commit and in the release workflow. Reads files only.
 .PARAMETER Root
     Folder to scan (default: the repo). Tracked files are scanned when it is a git checkout, otherwise every text file below it.
@@ -36,7 +40,9 @@ $script:AllowedGuids = @{
 }
 $script:DocIpPrefixes = @('192.0.2.', '198.51.100.', '203.0.113.')
 $script:PublicIps = @{ '169.254.169.254' = 'Azure instance metadata service (link-local, same everywhere)'; '168.63.129.16' = 'Azure wire server / platform DNS (same everywhere)'; '0.0.0.0' = 'any'; '255.255.255.255' = 'broadcast' }
-$script:StorageHostPlaceholders = '^(example|contoso\w*|fabrikam\w*|account|accountname|storageaccount|yourstorageaccount|mystorageaccount|sample|privatelink)$'
+$script:HostSuffixes = 'file\.core\.windows\.net|blob\.core\.windows\.net|vault\.azure\.net|onmicrosoft\.com|sharepoint\.com'
+$script:HostPlaceholders = '^(example|contoso[\w-]*|fabrikam[\w-]*|account|accountname|storageaccount|yourstorageaccount|mystorageaccount|sample|privatelink|tenant|yourtenant|vaultname|yourvault|myvault|name)$'
+$script:MailPlaceholderDomain = '(?i)(^|\.)(example\.(com|org|net|invalid)|contoso\.[a-z.]+|fabrikam\.[a-z.]+|[a-z0-9-]+\.invalid|[a-z0-9.-]*\.(example|test|localhost)|odata\.bind)$'
 $script:TextExtensions = '\.(ps1|psm1|psd1|json|md|xaml|xml|yml|yaml|txt|cmd|bat|html|css|csv|gitignore|gitattributes)$'
 
 function Get-ScanFiles([string]$Folder) {
@@ -53,6 +59,17 @@ function Get-ScanFiles([string]$Folder) {
     @($files | Where-Object { $_ -match $script:TextExtensions -or [IO.Path]::GetFileName($_) -like '.git*' })
 }
 
+function Test-FakeGuid([string]$Guid) {
+    # An obvious fake: every group is one repeated character (aaaaaaaa-bbbb-..., 11111111-2222-...), the last group may end in a counter (000000000001)
+    $g = $Guid.Split('-')
+    for ($i = 0; $i -lt 5; $i++) {
+        if ($g[$i] -match '^([0-9a-f])\1*$') { continue }
+        if ($i -eq 4 -and $g[$i] -match '^0{11}[0-9a-f]$') { continue }
+        return $false
+    }
+    $true
+}
+
 function Read-DenyList([string]$Path) {
     if (-not (Test-Path -LiteralPath $Path)) { return $null }
     $entries = @(Get-Content -LiteralPath $Path -Encoding UTF8 | ForEach-Object { $_.Trim() } | Where-Object { $_ -and -not $_.StartsWith('#') })
@@ -60,27 +77,44 @@ function Read-DenyList([string]$Path) {
 }
 
 function Find-PublicContentFindings {
-    # Returns objects with Rule, File, Line, Detail. Pure with respect to the repo: reads only.
+    # Returns objects with Rule, File, Line, Detail. Reads only.
     param([Parameter(Mandatory)][string]$Folder, [string[]]$Deny = @())
     $findings = New-Object System.Collections.ArrayList
     $base = (Resolve-Path -LiteralPath $Folder).Path
+    $guidPattern = '(?i)(?<![0-9a-f])[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(?![0-9a-f])'
+    $hostPattern = "(?i)\b([a-z0-9][a-z0-9-]*)\.($($script:HostSuffixes))\b"
+    $mailPattern = '(?i)(?<![\w.%+-])[a-z0-9][a-z0-9._%+-]*@([a-z0-9-]+(?:\.[a-z0-9-]+)*\.[a-z]{2,})\b'
+    $v6Pattern = '(?i)(?<![\w:.])(?:(?:[0-9a-f]{1,4}:){7}[0-9a-f]{1,4}|(?:[0-9a-f]{1,4}:){1,7}:(?:[0-9a-f]{1,4}(?::[0-9a-f]{1,4}){0,6})?|::(?:[0-9a-f]{1,4}(?::[0-9a-f]{1,4}){1,6}))(?![\w:.])'
+    $v4Pattern = '(?<![\w.])(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})(?![\w]|\.\d)'
     foreach ($rel in (Get-ScanFiles $Folder)) {
+        if ($rel -eq 'Tests/Check-PublicContent.ps1') { continue }   # its own patterns and placeholders
         $full = Join-Path $base ($rel.Replace('/', '\'))
         if (-not (Test-Path -LiteralPath $full -PathType Leaf)) { continue }
         $inTests = $rel -like 'Tests/*'
         $n = 0
         foreach ($line in [IO.File]::ReadAllLines($full)) {
             $n++
-            if ($line -match 'public-content-ok') { continue }
-            if (-not $inTests) {
-                foreach ($m in [regex]::Matches($line, '(?i)(?<![0-9a-f])[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(?![0-9a-f])')) {
-                    if (-not $script:AllowedGuids.ContainsKey($m.Value.ToLowerInvariant())) { [void]$findings.Add([pscustomobject]@{ Rule = 'guid'; File = $rel; Line = $n; Detail = $m.Value }) }
-                }
+            if ($line -match 'public-content-ok') {
+                if ($line -notmatch 'public-content-ok:\s*\S') { [void]$findings.Add([pscustomobject]@{ Rule = 'marker'; File = $rel; Line = $n; Detail = 'the marker public-content-ok needs a reason after it (public-content-ok: reason)' }) }
+                continue
             }
-            foreach ($m in [regex]::Matches($line, '(?i)\b([a-z0-9][a-z0-9-]*)\.file\.core\.windows\.net\b')) {
-                if ($m.Groups[1].Value -notmatch $script:StorageHostPlaceholders) { [void]$findings.Add([pscustomobject]@{ Rule = 'storage-host'; File = $rel; Line = $n; Detail = $m.Value }) }
+            foreach ($m in [regex]::Matches($line, $guidPattern)) {
+                $g = $m.Value.ToLowerInvariant()
+                if ($script:AllowedGuids.ContainsKey($g) -or (Test-FakeGuid $g)) { continue }
+                [void]$findings.Add([pscustomobject]@{ Rule = 'guid'; File = $rel; Line = $n; Detail = $m.Value })
             }
-            foreach ($m in [regex]::Matches($line, '(?<![\w.])(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})(?![\w]|\.\d)')) {
+            foreach ($m in [regex]::Matches($line, $hostPattern)) {
+                if ($m.Groups[1].Value -notmatch $script:HostPlaceholders) { [void]$findings.Add([pscustomobject]@{ Rule = 'storage-host'; File = $rel; Line = $n; Detail = $m.Value }) }
+            }
+            foreach ($m in [regex]::Matches($line, $mailPattern)) {
+                if ($m.Groups[1].Value -notmatch $script:MailPlaceholderDomain) { [void]$findings.Add([pscustomobject]@{ Rule = 'mail'; File = $rel; Line = $n; Detail = $m.Value }) }
+            }
+            foreach ($m in [regex]::Matches($line, $v6Pattern)) {
+                $v6 = $m.Value.ToLowerInvariant()
+                if ($v6 -match '^2001:0?db8:' -or $v6 -eq '::1') { continue }
+                [void]$findings.Add([pscustomobject]@{ Rule = 'ipv6'; File = $rel; Line = $n; Detail = $m.Value })
+            }
+            foreach ($m in [regex]::Matches($line, $v4Pattern)) {
                 $octets = 1..4 | ForEach-Object { [int]$m.Groups[$_].Value }
                 if (($octets | Where-Object { $_ -gt 255 }).Count -gt 0) { continue }
                 $ip = $m.Value
@@ -103,7 +137,7 @@ if ($MyInvocation.InvocationName -ne '.') {
     if (-not $DenyListPath) { $DenyListPath = Join-Path $env:LOCALAPPDATA 'AVDTune\deny-list.txt' }
     $deny = Read-DenyList $DenyListPath
     $found = @(Find-PublicContentFindings -Folder $Root -Deny $(if ($null -ne $deny) { $deny } else { @() }))
-    foreach ($rule in 'guid', 'storage-host', 'ip', 'deny-list') {
+    foreach ($rule in 'guid', 'storage-host', 'mail', 'ipv6', 'ip', 'marker', 'deny-list') {
         $hits = @($found | Where-Object { $_.Rule -eq $rule })
         if ($rule -eq 'deny-list' -and $null -eq $deny) { 'NOTE deny list not found, names not checked (create it to check names: one per line)'; continue }
         if ($hits.Count -eq 0) { "PASS public content: no $rule findings" }

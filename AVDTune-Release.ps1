@@ -4,7 +4,7 @@
 # A failed integrity check sets the write block of the engine (Modules\AVDTune.psm1): the write gate stays shut and AVDTune is read only until it is repaired
 # and started again. Test mode: fake HTTP adapter (Tests\Fakes\FakeRelease.ps1) and an install folder inside the test state, never GitHub or Program Files.
 
-$script:Rel = @{ Status = $null; Latest = $null; CheckError = ''; Job = $null; Restart = ''; Info = $null }
+$script:Rel = @{ ComputerName = [string](& $script:Machine.ComputerName); Status = $null; Latest = $null; CheckError = ''; Job = $null; Restart = ''; Info = $null }
 $script:RelFakeHttp = $null   # test hook: a fake HTTP adapter for the smoke driver
 $script:RelInstallRoot = $(if ($script:TestMode) { Join-Path $script:StateRoot 'install-test' } else { Get-AVDTuneInstallRoot })
 $script:RelOriginalBanner = [string]$ui.TxtReadOnly.Text
@@ -14,9 +14,9 @@ $script:RelPill = @{
 }
 if ($script:TestMode) { . (Join-Path (Split-Path $env:AVDTUNE_FAKE -Parent) 'FakeRelease.ps1') }
 
-# Until the check has run, a protected install is read only (the check is in the background and takes a moment)
-$script:Rel.Info = Get-AVDTuneInstallInfo -AppRoot $script:AppRoot -InstallRoot $script:RelInstallRoot
-if ($script:Rel.Info.Mode -eq 'Installed') { Set-AVDTuneWriteBlock 'the integrity check of the tool is still running.' }
+# Until the check has run, everything but the test mode's development copy is read only (the check is in the background and takes a moment)
+$script:Rel.Info = Get-AVDTuneInstallInfo -AppRoot $script:AppRoot -InstallRoot $script:RelInstallRoot -AllowDevelopment:$script:TestMode
+if ($script:Rel.Info.Mode -ne 'Development') { Set-AVDTuneWriteBlock 'the integrity check of the tool is still running.' }
 
 function Get-RelHttp {
     if (-not $script:TestMode) { return $null }   # the runspace creates the real adapter itself
@@ -38,7 +38,7 @@ $script:RelWork = {
     $h = if ($C.Http) { $C.Http } else { New-AVDTuneReleaseHttp }
     $out = @{ Kind = $C.Kind; Error = '' }
     if ($C.Kind -in 'Start') {
-        try { $out.Status = Get-AVDTuneIntegrityStatus -AppRoot $C.AppRoot -InstallRoot $C.InstallRoot -StateRoot $C.StateRoot -Http $h } catch { $out.Error = $_.Exception.Message }
+        try { $out.Status = Get-AVDTuneIntegrityStatus -AppRoot $C.AppRoot -InstallRoot $C.InstallRoot -StateRoot $C.StateRoot -Http $h -AllowDevelopment:$C.AllowDev } catch { $out.Error = $_.Exception.Message }
     }
     if ($C.Kind -in 'Start', 'Check') {
         try { $out.Latest = Get-AVDTuneLatestRelease -Http $h -CurrentVersion $C.Version -EarlyAccess:$C.EarlyAccess } catch { $out.CheckError = $_.Exception.Message }
@@ -64,7 +64,7 @@ function Start-RelJob([string]$Kind, [string]$Argument = '') {
     $ctx = @{
         Kind = $Kind; Argument = $Argument; AppRoot = $script:AppRoot; InstallRoot = $script:RelInstallRoot; StateRoot = $script:StateRoot; User = [string]$env:USERNAME
         Version = $(if ($script:Rel.Info.Version) { $script:Rel.Info.Version } else { [string]$script:ToolVersion }); EarlyAccess = [bool](Get-AVDTuneReleaseSettings $script:StateRoot).EarlyAccess
-        RunActive = (Test-RelRunActive); Http = (Get-RelHttp); Import = (-not $script:TestMode)
+        RunActive = (Test-RelRunActive); Http = (Get-RelHttp); Import = (-not $script:TestMode); AllowDev = [bool]$script:TestMode
     }
     Set-RelBusy $true
     if ($script:TestMode) {
@@ -96,12 +96,18 @@ function Update-ReleaseView {
     if ($script:Rel.Restart) { $detail = $script:Rel.Restart + "`r`n" + $detail }
     $ui.TxtRelDetail.Text = $detail
     $files = @()
+    if ($s -and ($s.Status -eq 'bad' -or @($s.Acl).Count -gt 0)) {
+        $files += @($s.Acl | ForEach-Object { "folder    $_" })
+    }
     if ($s -and $s.Status -eq 'bad') {
         $files += @($s.Changed | ForEach-Object { "changed   $_" }) + @($s.Missing | ForEach-Object { "missing   $_" }) + @($s.Extra | ForEach-Object { "extra     $_" })
     }
     $ui.TxtRelFiles.Text = ($files -join "`r`n")
     $ui.TxtRelFiles.Visibility = ConvertTo-Vis ($files.Count -gt 0)
     $ui.BtnRelRepair.Visibility = ConvertTo-Vis ([bool]($s -and $s.Status -eq 'bad' -and $mode -eq 'Installed' -and -not $script:Rel.Restart))
+    $skip = [bool]($s -and $s.Status -eq 'unverified' -and $mode -eq 'Installed' -and $s.Blocked)
+    $ui.PanelRelSkip.Visibility = ConvertTo-Vis $skip
+    if ($skip) { $ui.TxtRelSkipHint.Text = "To continue without the check, type the name of this computer ($($script:Rel.ComputerName)). This is written to the protocol and the change log." }
     $latest = $script:Rel.Latest
     $notes = ''
     if ($latest) {
@@ -124,7 +130,7 @@ function Update-ReleaseView {
     $ui.ChkRelEarly.IsChecked = [bool](Get-AVDTuneReleaseSettings $script:StateRoot).EarlyAccess
     # the banner on the other pages says why AVDTune is read only
     $block = Get-AVDTuneWriteBlock
-    $ui.TxtReadOnly.Text = $(if ($block) { "Read only: $block Repair it on the Overview." } else { $script:RelOriginalBanner })
+    $ui.TxtReadOnly.Text = $(if ($block) { "Read only: $block (see the card Integrity and updates on the Overview)" } else { $script:RelOriginalBanner })
 }
 
 function Complete-RelResult($Job, $Res, [string]$Err) {
@@ -199,4 +205,13 @@ Add-Click $ui.BtnRelBack {
     $p = [string](Get-AVDTuneInstallState $script:RelInstallRoot).Previous
     if (-not (Confirm-Action "Go back to version $p? Its files are checked against the saved manifest first. It takes effect when AVDTune is started again." 'Previous version')) { return }
     Start-RelJob 'Back'; if ($script:Rel.Job.Inline) { Complete-RelJob }
+}
+Add-Click $ui.BtnRelSkip {
+    $r = Confirm-AVDTuneUnverified -StateRoot $script:StateRoot -Name $ui.TxtRelSkipName.Text -Expected $script:Rel.ComputerName -User ([string]$env:USERNAME)
+    Add-RelProtocol 'AVDTune continued without the integrity check' $r.Text 'skipped'
+    $script:Rel.Status.Blocked = $false
+    $script:Rel.Status.Message = $script:Rel.Status.Message + ' Continued without the check on request.'
+    $ui.TxtRelSkipName.Text = ''
+    Show-Toast 'AVDTune continues without the integrity check. It is in the protocol.'
+    Update-ReleaseView
 }

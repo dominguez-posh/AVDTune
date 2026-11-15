@@ -29,10 +29,12 @@
 
 Set-StrictMode -Version 2.0
 Import-Module (Join-Path $PSScriptRoot 'AVDTune.psm1')
+Import-Module (Join-Path $PSScriptRoot 'AVDTune.Trust.psm1')   # Remove-AVDTuneFolderNoFollow
 
 $script:Repo = 'dominguez-posh/AVDTune'
 $script:AllowedHosts = @('github.com', 'objects.githubusercontent.com', 'release-assets.githubusercontent.com')
-$script:VersionPattern = '^\d+\.\d+\.\d+(-ea\.\d+)?$'
+$script:VersionPattern = '^\d+\.\d+\.\d+(-ea\.\d+)?\z'
+$script:AclReader = $null   # test hook (Set-AVDTuneReleaseAclReader): replaces the real ACL reader of the folder checks
 $script:MaxManifestBytes = 4MB
 $script:MaxZipBytes = 200MB
 $script:MaxFiles = 2000
@@ -249,7 +251,7 @@ $script:LauncherText = @'
 # AVDTune launcher. Written by AVDTune, not part of a release: starts the version named in current.json (one level up from the version folders).
 $ErrorActionPreference = 'Stop'
 $current = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'current.json') -Raw -Encoding UTF8 | ConvertFrom-Json
-if ([string]$current.Version -notmatch '^\d+\.\d+\.\d+(-ea\.\d+)?$') { throw 'current.json does not name a valid version.' }
+if ([string]$current.Version -notmatch '^\d+\.\d+\.\d+(-ea\.\d+)?\z') { throw 'current.json does not name a valid version.' }
 & (Join-Path $PSScriptRoot "$($current.Version)\Start-AVDTune.ps1") @args
 '@
 
@@ -261,18 +263,61 @@ function Write-AVDTuneLauncher([string]$InstallRoot) {
 
 function Get-AVDTuneInstallInfo {
     <#
-        Where is this copy running? Installed (a version folder directly below the install folder, folder name = VERSION), Development (a git checkout: no
-        integrity check, the files change all the time), or Unprotected (any other folder: not checkable against the protected install).
+        Where is this copy running? A folder directly below the install folder is always Installed, and its version is the name of the folder (whatever a
+        VERSION file or a .git inside says is checked against the manifest as a changed or extra file). Anything else is Unprotected (a copy elsewhere), or
+        Development (a git checkout) when the caller allows it: only the test mode with the fake machine does.
     #>
-    param([Parameter(Mandatory)][string]$AppRoot, [Parameter(Mandatory)][string]$InstallRoot)
+    param([Parameter(Mandatory)][string]$AppRoot, [Parameter(Mandatory)][string]$InstallRoot, [switch]$AllowDevelopment)
     $app = [IO.Path]::GetFullPath($AppRoot).TrimEnd('\')
-    $version = Get-AVDTuneToolVersion $app
     $parent = (Split-Path $app -Parent).TrimEnd('\')
     $installRoot = [IO.Path]::GetFullPath($InstallRoot).TrimEnd('\')
-    $mode = 'Unprotected'
-    if (Test-Path -LiteralPath (Join-Path $app '.git')) { $mode = 'Development' }
-    elseif ([string]::Equals($parent, $installRoot, [StringComparison]::OrdinalIgnoreCase) -and (Split-Path $app -Leaf) -ceq $version -and $version) { $mode = 'Installed' }
+    $leaf = Split-Path $app -Leaf
+    if ([string]::Equals($parent, $installRoot, [StringComparison]::OrdinalIgnoreCase)) {
+        $mode = 'Installed'; $version = $(if (Test-AVDTuneReleaseVersion $leaf) { $leaf } else { '' })
+    }
+    else {
+        $version = Get-AVDTuneToolVersion $app
+        $mode = $(if ($AllowDevelopment -and (Test-Path -LiteralPath (Join-Path $app '.git'))) { 'Development' } else { 'Unprotected' })
+    }
     [pscustomobject]@{ Mode = $mode; Version = $version; AppRoot = $app; InstallRoot = $installRoot }
+}
+
+function Set-AVDTuneReleaseAclReader([scriptblock]$Reader) { $script:AclReader = $Reader }
+
+function Test-AVDTuneRealInstallRoot([string]$InstallRoot) {
+    [string]::Equals([IO.Path]::GetFullPath($InstallRoot).TrimEnd('\'), (Get-AVDTuneInstallRoot).TrimEnd('\'), [StringComparison]::OrdinalIgnoreCase)
+}
+
+function Get-AVDTuneAclProblems {
+    # What a user without administrator rights could have prepared in a folder (owner, explicit allow rules for others, links; same rules as the state folder)
+    param([Parameter(Mandatory)][string]$Folder, [switch]$Enforce)
+    if (-not ($Enforce -or $script:AclReader)) { return @() }
+    $p = @{ Root = $Folder }
+    if ($script:AclReader) { $p.ReadAcl = $script:AclReader; $p.AdminSid = '' }
+    @(Get-AVDTuneStateSecurityProblems @p)
+}
+
+function New-AVDTuneInstallFolder([string]$Path, [string]$InstallRoot) {
+    # A new folder below the install folder: with the protected ACL (administrators and SYSTEM only) in one step in the real install folder
+    if (Test-AVDTuneRealInstallRoot $InstallRoot) { (New-Object IO.DirectoryInfo $Path).Create((New-AVDTuneStateSecurity -WithOwner)) }
+    else { New-Item -ItemType Directory -Path $Path -Force | Out-Null }
+}
+
+function Remove-AVDTuneLink([string]$Path) {
+    # A link is removed as a link (never what it points to)
+    $item = Get-Item -LiteralPath $Path -Force
+    if ($item.PSIsContainer) { [IO.Directory]::Delete($Path) } else { $item.Delete() }
+}
+
+function Assert-AVDTuneNoLinkInPath {
+    # Every component of Base\Rel that exists must not be a link
+    param([Parameter(Mandatory)][string]$Base, [Parameter(Mandatory)][string]$Rel)
+    $cur = $Base
+    foreach ($part in ($Rel -split '/')) {
+        $cur = Join-Path $cur $part
+        $attr = $null; try { $attr = [IO.File]::GetAttributes($cur) } catch { continue }
+        if ($attr -band [IO.FileAttributes]::ReparsePoint) { throw "A part of the path $Rel is a link: stopped." }
+    }
 }
 
 #endregion
@@ -280,9 +325,9 @@ function Get-AVDTuneInstallInfo {
 #region integrity
 
 function Get-AVDTuneTreeFiles {
-    # Every file below a folder (relative path with /), links are reported and not followed. Returns Files and Links.
+    # Every file and folder below a folder (relative path with /), links are reported and not followed. Returns Files, Dirs and Links.
     param([Parameter(Mandatory)][string]$Folder)
-    $files = New-Object System.Collections.ArrayList; $links = New-Object System.Collections.ArrayList
+    $files = New-Object System.Collections.ArrayList; $links = New-Object System.Collections.ArrayList; $dirs = New-Object System.Collections.ArrayList
     $base = [IO.Path]::GetFullPath($Folder).TrimEnd('\')
     $stack = New-Object System.Collections.Stack; $stack.Push($base)
     while ($stack.Count -gt 0) {
@@ -290,10 +335,10 @@ function Get-AVDTuneTreeFiles {
         foreach ($e in (New-Object IO.DirectoryInfo $dir).EnumerateFileSystemInfos()) {
             $rel = $e.FullName.Substring($base.Length + 1).Replace('\', '/')
             if ($e.Attributes -band [IO.FileAttributes]::ReparsePoint) { [void]$links.Add($rel); continue }
-            if ($e.Attributes -band [IO.FileAttributes]::Directory) { $stack.Push($e.FullName) } else { [void]$files.Add($rel) }
+            if ($e.Attributes -band [IO.FileAttributes]::Directory) { [void]$dirs.Add($rel); $stack.Push($e.FullName) } else { [void]$files.Add($rel) }
         }
     }
-    [pscustomobject]@{ Files = @($files); Links = @($links) }
+    [pscustomobject]@{ Files = @($files); Dirs = @($dirs); Links = @($links) }
 }
 
 function Test-AVDTuneIntegrity {
@@ -318,22 +363,37 @@ function Test-AVDTuneIntegrity {
 
 function Get-AVDTuneIntegrityStatus {
     <#
-        The check at every start. Status: ok (all files as released), bad (missing, changed or extra files: the caller keeps AVDTune read only),
-        dev (git checkout, not checked), unprotected (not in the install folder, not checked), unverified (no manifest from GitHub and none cached: the
-        files could not be compared; AVDTune stays usable and says so). Message is the sentence for the Overview. Does not change anything.
+        The check at every start. Status: ok (all files as released), bad (missing, changed or extra files, a changed launcher, or an install folder that others
+        could write to), unverified (Installed, but no manifest from GitHub and none cached), unprotected (a copy outside the install folder), dev (git checkout,
+        only with -AllowDevelopment), failed (set by the caller). Blocked is true when AVDTune must stay read only: bad, unverified, and an unprotected copy that
+        users without administrator rights can change. Does not change anything.
     #>
-    param([Parameter(Mandatory)][string]$AppRoot, [Parameter(Mandatory)][string]$InstallRoot, [Parameter(Mandatory)][string]$StateRoot, [Parameter(Mandatory)]$Http)
-    $info = Get-AVDTuneInstallInfo -AppRoot $AppRoot -InstallRoot $InstallRoot
-    $r = [ordered]@{ Status = ''; Mode = $info.Mode; Version = $info.Version; Commit = ''; Source = ''; Missing = @(); Changed = @(); Extra = @(); Warnings = @(); Message = '' }
-    if ($info.Mode -eq 'Development') { $r.Status = 'dev'; $r.Message = 'Development copy (git checkout): the files are not checked against a release.'; return [pscustomobject]$r }
+    param([Parameter(Mandatory)][string]$AppRoot, [Parameter(Mandatory)][string]$InstallRoot, [Parameter(Mandatory)][string]$StateRoot, [Parameter(Mandatory)]$Http, [switch]$AllowDevelopment)
+    $info = Get-AVDTuneInstallInfo -AppRoot $AppRoot -InstallRoot $InstallRoot -AllowDevelopment:$AllowDevelopment
+    $r = [ordered]@{ Status = ''; Mode = $info.Mode; Version = $info.Version; Commit = ''; Source = ''; Missing = @(); Changed = @(); Extra = @(); Acl = @(); Warnings = @(); Blocked = $false; Message = '' }
+    if ($info.Mode -eq 'Development') { $r.Status = 'dev'; $r.Message = 'Development copy (git checkout, test mode): the files are not checked against a release.'; return [pscustomobject]$r }
     if ($info.Mode -eq 'Unprotected') {
-        $r.Status = 'unprotected'
-        $r.Message = "AVDTune does not run from the protected install folder ($($info.InstallRoot)\<version>): the files are not checked against a release."
+        $problems = @(Get-AVDTuneAclProblems -Folder $info.AppRoot -Enforce)
+        $r.Status = 'unprotected'; $r.Acl = @($problems | ForEach-Object { "$($_.Path): $($_.Problem)" })
+        if ($problems.Count -gt 0) {
+            $r.Blocked = $true
+            $r.Message = "AVDTune runs from a copy outside the install folder ($($info.InstallRoot)\<version>) that users without administrator rights can change ($($r.Acl[0])). It stays read only: install the release into the protected folder."
+        }
+        else { $r.Message = "AVDTune does not run from the protected install folder ($($info.InstallRoot)\<version>): the files are not checked against a release. The folder is administrators only, so it may run; install the release to get the check." }
+        return [pscustomobject]$r
+    }
+    # Installed
+    $acl = @(Get-AVDTuneAclProblems -Folder $info.InstallRoot -Enforce:(Test-AVDTuneRealInstallRoot $info.InstallRoot) | ForEach-Object { "$($_.Path): $($_.Problem)" })
+    $r.Acl = $acl
+    if (-not $info.Version) {
+        $r.Status = 'bad'; $r.Blocked = $true; $r.Message = "The folder $(Split-Path $info.AppRoot -Leaf) is not named like a version: AVDTune cannot tell which release to compare with. It stays read only."
         return [pscustomobject]$r
     }
     $m = Get-AVDTuneReleaseManifest -Http $Http -Version $info.Version -StateRoot $StateRoot
     if (-not $m.Manifest) {
-        $r.Status = 'unverified'; $r.Message = "The files of version $($info.Version) could not be compared: no manifest from GitHub and none cached ($($m.Error))"
+        if ($acl.Count -gt 0) { $r.Status = 'bad'; $r.Blocked = $true; $r.Message = "The install folder is not protected ($($acl[0])). AVDTune stays read only."; return [pscustomobject]$r }
+        $r.Status = 'unverified'; $r.Blocked = $true
+        $r.Message = "The files of version $($info.Version) could not be compared: no manifest from GitHub and none cached ($($m.Error)) AVDTune is read only until the manifest can be loaded."
         return [pscustomobject]$r
     }
     $warn = New-Object System.Collections.ArrayList
@@ -350,19 +410,34 @@ function Get-AVDTuneIntegrityStatus {
     }
     $r.Commit = [string]$use.Commit
     $t = Test-AVDTuneIntegrity -AppRoot $info.AppRoot -Manifest $use
-    $r.Missing = @($t.Missing); $r.Changed = @($t.Changed); $r.Extra = @($t.Extra); $r.Warnings = @($warn)
-    if ($t.Ok) { $r.Status = 'ok'; $r.Message = "All $(@($use.Files).Count) files are as released in version $($info.Version) (commit $(([string]$use.Commit).Substring(0, 7)))." }
+    $changed = New-Object System.Collections.ArrayList; foreach ($c in $t.Changed) { [void]$changed.Add($c) }
+    # the launcher in the install folder is not part of a release: it is written by AVDTune and must be exactly what AVDTune writes
+    $launcher = Join-Path $info.InstallRoot 'Start-AVDTune.ps1'
+    if (Test-Path -LiteralPath $launcher -PathType Leaf) { if ([IO.File]::ReadAllText($launcher) -cne $script:LauncherText) { [void]$changed.Add('../Start-AVDTune.ps1 (launcher)') } }
+    elseif (Test-Path -LiteralPath $launcher) { [void]$changed.Add('../Start-AVDTune.ps1 (launcher)') }
+    $r.Missing = @($t.Missing); $r.Changed = @($changed); $r.Extra = @($t.Extra); $r.Warnings = @($warn)
+    if ($t.Ok -and $changed.Count -eq 0 -and $acl.Count -eq 0) { $r.Status = 'ok'; $r.Message = "All $(@($use.Files).Count) files are as released in version $($info.Version) (commit $(([string]$use.Commit).Substring(0, 7)))." }
     else {
-        $r.Status = 'bad'
-        $r.Message = "The files of AVDTune do not match release $($info.Version): $($t.Missing.Count) missing, $($t.Changed.Count) changed, $($t.Extra.Count) extra. AVDTune is read only until it is repaired."
+        $r.Status = 'bad'; $r.Blocked = $true
+        $r.Message = "The files of AVDTune do not match release $($info.Version): $($r.Missing.Count) missing, $($r.Changed.Count) changed, $($r.Extra.Count) extra" + $(if ($acl.Count -gt 0) { "; the install folder is not protected ($($acl[0]))" }) + '. AVDTune is read only until it is repaired.'
     }
     [pscustomobject]$r
 }
 
 function Set-AVDTuneIntegrityBlock {
-    # Applies a status to this process: bad keeps the write gate shut; anything else lifts the "check running" block of the start
+    # Applies a status to this process: a blocked or failed one keeps the write gate shut; anything else lifts the "check running" block of the start
     param([Parameter(Mandatory)]$Status)
-    if ($Status.Status -eq 'bad') { Set-AVDTuneWriteBlock "the files of AVDTune do not match the release ($($Status.Message))" } else { Clear-AVDTuneWriteBlock }
+    if ($Status.Status -in 'bad', 'failed' -or (Get-AVDTuneProp $Status 'Blocked')) { Set-AVDTuneWriteBlock ([string]$Status.Message) } else { Clear-AVDTuneWriteBlock }
+}
+
+function Confirm-AVDTuneUnverified {
+    # "Continue without the check": only with the typed name of this computer; written to the change log (when there is an image version), the caller writes the protocol
+    param([Parameter(Mandatory)][string]$StateRoot, [string]$Name, [Parameter(Mandatory)][string]$Expected, [string]$User)
+    if (-not $Name -or ([string]$Name).Trim() -cne $Expected) { throw "Type the name of this computer ($Expected) to continue without the check." }
+    $text = 'AVDTune continued without the integrity check of its files (no manifest from GitHub and none cached); confirmed by typing the computer name.'
+    $logged = Write-AVDTuneReleaseLog -StateRoot $StateRoot -Text $text -User $User -ChangeType Note
+    Clear-AVDTuneWriteBlock
+    [pscustomobject]@{ Text = $text; ChangeLog = $logged }
 }
 
 #endregion
@@ -416,12 +491,16 @@ function Assert-AVDTuneUpdateAllowed {
 }
 
 function Assert-AVDTuneInstallRootSafe([string]$InstallRoot) {
-    if (-not (Test-Path -LiteralPath $InstallRoot -PathType Container)) { New-Item -ItemType Directory -Path $InstallRoot -Force | Out-Null }
+    # The install folder is AVDTune's own: not a link, administrators only (owner, no write access for others, no links inside), created protected when missing
+    $real = Test-AVDTuneRealInstallRoot $InstallRoot
+    if ($real -and -not (Test-AVDTuneElevated)) { throw 'The install folder can only be changed as administrator.' }
+    if (-not (Test-Path -LiteralPath $InstallRoot -PathType Container)) {
+        if ($real) { (New-Object IO.DirectoryInfo $InstallRoot).Create((New-AVDTuneStateSecurity -WithOwner)) } else { New-Item -ItemType Directory -Path $InstallRoot -Force | Out-Null }
+    }
     $item = Get-Item -LiteralPath $InstallRoot -Force
     if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw "The install folder $InstallRoot is a link." }
-    if ([string]::Equals([IO.Path]::GetFullPath($InstallRoot).TrimEnd('\'), (Get-AVDTuneInstallRoot).TrimEnd('\'), [StringComparison]::OrdinalIgnoreCase) -and -not (Test-AVDTuneElevated)) {
-        throw 'The install folder can only be changed as administrator.'
-    }
+    $problems = @(Get-AVDTuneAclProblems -Folder $InstallRoot -Enforce:$real)
+    if ($problems.Count -gt 0) { throw "The install folder is not protected ($(@($problems | Select-Object -First 3 | ForEach-Object { "$($_.Path): $($_.Problem)" }) -join '; ')). Set the owner to Administrators, remove the access of others and links, then try again." }
 }
 
 function Expand-AVDTuneReleaseZip {
@@ -490,12 +569,12 @@ function Get-AVDTuneVerifiedZip {
 
 function Write-AVDTuneReleaseLog {
     # One change log entry (tool version is part of every entry) when there is an image version; the protocol text goes back to the caller
-    param([string]$StateRoot, [string]$Text, [string]$User)
+    param([string]$StateRoot, [string]$Text, [string]$User, [string]$ChangeType = 'Updated')
     $logged = $false
     try {
         $state = Get-AVDTuneState $StateRoot
         $iv = [string](Get-AVDTuneProp $state 'ImageVersion')
-        if ($iv) { [void](Add-AVDTuneChangeLogEntry -Root $StateRoot -Version $iv -Category 'Tool' -Component 'AVDTune' -ChangeType Updated -Text $Text -User $User -Source Step); $logged = $true }
+        if ($iv) { [void](Add-AVDTuneChangeLogEntry -Root $StateRoot -Version $iv -Category 'Tool' -Component 'AVDTune' -ChangeType $ChangeType -Text $Text -User $User -Source Step); $logged = $true }
     }
     catch { }
     $logged
@@ -516,7 +595,9 @@ function Install-AVDTuneRelease {
     $staging = Join-Path $InstallRoot ('.staging-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
     $createdTarget = $false; $switched = $false
     try {
-        New-Item -ItemType Directory -Path $staging | Out-Null
+        New-AVDTuneInstallFolder $staging $InstallRoot
+        $targetDir = New-Object IO.DirectoryInfo $target
+        if ($targetDir.Exists -and ($targetDir.Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw "The folder $target is a link." }
         if (Test-Path -LiteralPath $target) {
             $existing = Test-AVDTuneIntegrity -AppRoot $target -Manifest $manifest
             if (-not $existing.Ok) { throw "The folder $target exists and does not match the release. Repair it from the running version or remove it, then try again." }
@@ -536,12 +617,12 @@ function Install-AVDTuneRelease {
         $switched = $true
     }
     finally {
-        if (Test-Path -LiteralPath $staging) { Remove-Item -LiteralPath $staging -Recurse -Force -ErrorAction SilentlyContinue }
-        if ($createdTarget -and -not $switched -and (Test-Path -LiteralPath $target)) { Remove-Item -LiteralPath $target -Recurse -Force -ErrorAction SilentlyContinue }
+        try { Remove-AVDTuneFolderNoFollow $staging } catch { }
+        if ($createdTarget -and -not $switched) { try { Remove-AVDTuneFolderNoFollow $target } catch { } }
     }
     # keep the new and the previous version, remove older ones (only folders that are named like a version)
     foreach ($d in @(Get-ChildItem -LiteralPath $InstallRoot -Directory -Force | Where-Object { (Test-AVDTuneReleaseVersion $_.Name) -and $_.Name -ne $version -and $_.Name -ne $previous })) {
-        if (-not ($d.Attributes -band [IO.FileAttributes]::ReparsePoint)) { Remove-Item -LiteralPath $d.FullName -Recurse -Force -ErrorAction SilentlyContinue }
+        try { Remove-AVDTuneFolderNoFollow $d.FullName } catch { }   # a link is removed as a link, nothing is followed
     }
     $short = ([string]$manifest.Commit).Substring(0, 7)
     $text = "AVDTune $version installed side by side" + $(if ($previous) { " (previous version $previous kept)" }) + ", commit $short, ZIP and every file checked against the SHA256 of the release manifest. Takes effect at the next start of AVDTune."
@@ -569,15 +650,18 @@ function Undo-AVDTuneRelease {
 
 function Repair-AVDTuneInstall {
     <#
-        Loads the release of the version again, checks ZIP and files, then puts the files right in the running folder: wrong or missing files are replaced, extra
-        files (and links) removed. A file that is in use stays and is reported: restart AVDTune and repair again. The caller keeps AVDTune read only until it is
-        started again, because the code that runs now was loaded from the files that were wrong.
+        Loads the release of the version again, checks ZIP and files, then puts the files right in the running folder: links are removed first (as links), wrong
+        or missing files are replaced (no path component may be a link), extra files removed. A file that is in use stays and is reported: restart AVDTune and
+        repair again. The caller keeps AVDTune read only until it is started again, because the code that runs now was loaded from the files that were wrong.
     #>
     param([Parameter(Mandatory)]$Http, [Parameter(Mandatory)][string]$AppRoot, [Parameter(Mandatory)][string]$InstallRoot, [Parameter(Mandatory)][string]$StateRoot,
         [string]$User, [switch]$RunActive)
     Assert-AVDTuneUpdateAllowed -StateRoot $StateRoot -RunActive:$RunActive
     $info = Get-AVDTuneInstallInfo -AppRoot $AppRoot -InstallRoot $InstallRoot
-    if ($info.Mode -ne 'Installed') { throw 'Repair works on the installed copy only (this copy is not in the install folder).' }
+    if ($info.Mode -ne 'Installed' -or -not $info.Version) { throw 'Repair works on the installed copy only (this copy is not in the install folder).' }
+    Assert-AVDTuneInstallRootSafe $InstallRoot
+    $appDir = New-Object IO.DirectoryInfo $info.AppRoot
+    if (-not $appDir.Exists -or ($appDir.Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw "The program folder $($info.AppRoot) is missing or a link: it cannot be repaired in place." }
     $m = Get-AVDTuneReleaseManifest -Http $Http -Version $info.Version -StateRoot $StateRoot
     if (-not $m.Manifest) { throw "No manifest for version $($info.Version) ($($m.Error))." }
     $manifest = $m.Manifest
@@ -585,29 +669,37 @@ function Repair-AVDTuneInstall {
     $staging = Join-Path $InstallRoot ('.staging-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
     $failed = New-Object System.Collections.ArrayList; $fixed = 0
     try {
-        New-Item -ItemType Directory -Path $staging -Force | Out-Null
+        New-AVDTuneInstallFolder $staging $InstallRoot
         $tree = Get-AVDTuneVerifiedZip -Http $Http -Manifest $manifest -Staging $staging
+        # 1. links first (a link in the place of a folder hides what is below it)
+        foreach ($rel in @((Get-AVDTuneTreeFiles $info.AppRoot).Links)) {
+            try { Remove-AVDTuneLink (Join-Path $info.AppRoot $rel.Replace('/', '\')); $fixed++ } catch { [void]$failed.Add("$rel ($($_.Exception.Message))") }
+        }
         $before = Test-AVDTuneIntegrity -AppRoot $info.AppRoot -Manifest $manifest
+        # 2. wrong and missing files from the verified copy
         foreach ($rel in @($before.Missing) + @($before.Changed)) {
             $dest = Join-Path $info.AppRoot $rel.Replace('/', '\')
             try {
+                Assert-AVDTuneNoLinkInPath -Base $info.AppRoot -Rel $rel
                 $folder = Split-Path $dest -Parent; if (-not (Test-Path -LiteralPath $folder)) { New-Item -ItemType Directory -Path $folder -Force | Out-Null }
-                if (Test-Path -LiteralPath $dest) { $it = Get-Item -LiteralPath $dest -Force; if ($it.Attributes -band [IO.FileAttributes]::ReparsePoint) { $it.Delete() } }
                 [IO.File]::Copy((Join-Path $tree $rel.Replace('/', '\')), $dest, $true); $fixed++
             }
             catch { [void]$failed.Add("$rel ($($_.Exception.Message))") }
         }
+        # 3. extra files
         foreach ($rel in @($before.Extra)) {
             $path = Join-Path $info.AppRoot $rel.Replace('/', '\')
-            try { $it = Get-Item -LiteralPath $path -Force; if ($it.Attributes -band [IO.FileAttributes]::Directory) { [IO.Directory]::Delete($path) } else { $it.Delete() }; $fixed++ }
+            try { Assert-AVDTuneNoLinkInPath -Base $info.AppRoot -Rel $rel; if (Test-Path -LiteralPath $path -PathType Leaf) { (Get-Item -LiteralPath $path -Force).Delete(); $fixed++ } }
             catch { [void]$failed.Add("$rel ($($_.Exception.Message))") }
         }
-        # folders that are empty now
-        foreach ($d in @(Get-ChildItem -LiteralPath $info.AppRoot -Directory -Recurse -Force | Where-Object { -not ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) } | Sort-Object { $_.FullName.Length } -Descending)) {
-            if (@(Get-ChildItem -LiteralPath $d.FullName -Force).Count -eq 0) { Remove-Item -LiteralPath $d.FullName -Force -ErrorAction SilentlyContinue }
+        # 4. folders that are empty now (own walk: links are not followed)
+        foreach ($rel in @((Get-AVDTuneTreeFiles $info.AppRoot).Dirs | Sort-Object { $_.Length } -Descending)) {
+            $d = New-Object IO.DirectoryInfo (Join-Path $info.AppRoot $rel.Replace('/', '\'))
+            try { if ($d.Exists -and -not ($d.Attributes -band [IO.FileAttributes]::ReparsePoint) -and @($d.GetFileSystemInfos()).Count -eq 0) { $d.Delete() } } catch { }
         }
+        Write-AVDTuneLauncher $InstallRoot
     }
-    finally { if (Test-Path -LiteralPath $staging) { Remove-Item -LiteralPath $staging -Recurse -Force -ErrorAction SilentlyContinue } }
+    finally { try { Remove-AVDTuneFolderNoFollow $staging } catch { } }
     $after = Test-AVDTuneIntegrity -AppRoot $info.AppRoot -Manifest $manifest
     try { Save-AVDTuneManifestCache $StateRoot $manifest } catch { }
     $text = "AVDTune $($info.Version) repaired: $fixed file(s) put right from the release" + $(if (-not $after.Ok) { "; still wrong: $($after.Missing.Count + $after.Changed.Count + $after.Extra.Count) (restart AVDTune and repair again)" } else { ', all files match the release now' }) + '. Restart AVDTune.'
@@ -621,4 +713,4 @@ Export-ModuleMember -Function Test-AVDTuneReleaseVersion, Compare-AVDTuneRelease
     Test-AVDTuneSafeRelativePath, Get-AVDTuneFileSha256, Get-AVDTuneToolVersion, Assert-AVDTuneManifest, ConvertFrom-AVDTuneManifestText, Get-AVDTuneReleaseManifest,
     New-AVDTuneReleaseHttp, Get-AVDTuneInstallRoot, Get-AVDTuneInstallState, Get-AVDTuneInstallInfo, Test-AVDTuneIntegrity, Get-AVDTuneIntegrityStatus,
     Set-AVDTuneIntegrityBlock, Get-AVDTuneReleaseSettings, Set-AVDTuneReleaseSettings, Get-AVDTuneLatestRelease, Assert-AVDTuneUpdateAllowed,
-    Expand-AVDTuneReleaseZip, Install-AVDTuneRelease, Undo-AVDTuneRelease, Repair-AVDTuneInstall, Write-AVDTuneLauncher
+    Expand-AVDTuneReleaseZip, Install-AVDTuneRelease, Undo-AVDTuneRelease, Repair-AVDTuneInstall, Write-AVDTuneLauncher, Set-AVDTuneReleaseAclReader, Confirm-AVDTuneUnverified, Assert-AVDTuneNoLinkInPath

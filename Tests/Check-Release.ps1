@@ -52,7 +52,7 @@ try {
     Test-Check 'versions: order incl. early access (x.y.z-ea.N is before x.y.z and after the one before)' ((Compare-AVDTuneReleaseVersion '0.2.0' '0.1.9') -eq 1 -and (Compare-AVDTuneReleaseVersion '0.2.0-ea.3' '0.2.0') -eq -1 -and (Compare-AVDTuneReleaseVersion '0.2.0-ea.3' '0.1.9') -eq 1 -and (Compare-AVDTuneReleaseVersion '0.2.0-ea.10' '0.2.0-ea.9') -eq 1 -and (Compare-AVDTuneReleaseVersion '1.0.0' '1.0.0') -eq 0 -and (Compare-AVDTuneReleaseVersion '0.10.0' '0.9.0') -eq 1) $null
     Test-Check 'version text: only x.y.z and x.y.z-ea.N' ((Test-AVDTuneReleaseVersion '0.1.0') -and (Test-AVDTuneReleaseVersion '1.2.3-ea.4') -and -not (Test-AVDTuneReleaseVersion '1.2') -and -not (Test-AVDTuneReleaseVersion '..\1.0.0') -and -not (Test-AVDTuneReleaseVersion '1.0.0-beta')) $null
     $urls = @{ 'https://github.com/o/r/releases/download/v1.0.0/manifest.json' = $true; 'https://objects.githubusercontent.com/x?sig=1' = $true; 'http://github.com/o/r' = $false
-        'https://github.com.evil.example/o' = $false; 'https://evil.example/github.com' = $false; 'https://user@github.com/o' = $false; 'https://github.com:8443/o' = $false; 'ftp://github.com/o' = $false; 'github.com/o' = $false
+        'https://github.com.evil.example/o' = $false; 'https://evil.example/github.com' = $false; 'https://user@github.com/o' = $false; 'https://github.com:8443/o' = $false; 'ftp://github.com/o' = $false; 'github.com/o' = $false   # public-content-ok: URL with credentials as fixture
         'https://api.github.com/repos/o/r' = $false; 'file:///c:/x' = $false }
     $badUrl = @($urls.GetEnumerator() | Where-Object { (Test-AVDTuneReleaseUrl $_.Key) -ne $_.Value } | ForEach-Object Key)
     Test-Check 'URL rule: https, default port, no credentials, only github.com and its download hosts (exact host)' ($badUrl.Count -eq 0) ($badUrl -join ' ')
@@ -137,7 +137,8 @@ try {
     Test-Check 'rollback without a previous version is refused' ((Get-ThrownText { Undo-AVDTuneRelease -InstallRoot $inst -StateRoot $state }) -like '*no previous version*') $null
     [IO.File]::WriteAllText((Join-Path $inst 'current.json'), '{"Schema":1,"Version":"..\\..\\x","Previous":"0.1.0"}')
     Test-Check 'a current.json with a path in the version is not trusted (no install state)' ($null -eq (Get-AVDTuneInstallState $inst)) $null
-    Test-Check 'the launcher checks the version text before it builds a path' ((Get-Content (Join-Path $inst 'Start-AVDTune.ps1') -Raw) -match "notmatch '\^\\d\+\\\.\\d\+\\\.\\d\+") $null
+    Test-Check 'the launcher checks the version text before it builds a path (with \z, not $)' ((Get-Content (Join-Path $inst 'Start-AVDTune.ps1') -Raw) -match [regex]::Escape("-notmatch '^\d+\.\d+\.\d+(-ea\.\d+)?\z'")) $null
+    Test-Check 'a version text with a line feed at the end is not a version' (-not (Test-AVDTuneReleaseVersion "0.1.0`n") -and (Test-AVDTuneReleaseVersion '0.1.0')) $null
     Remove-Item -LiteralPath $inst -Recurse -Force
 
     # ---------------------------------------------------------------- install refusals: nothing is switched, nothing is left
@@ -195,7 +196,7 @@ try {
     Test-Check 'integrity offline: compared with the cached manifest, with a note' ($st.Status -eq 'ok' -and $st.Source -eq 'cache' -and @($st.Warnings).Count -eq 1) ($st | Out-String)
     $cachePath = Join-Path $state 'release\manifest-0.2.0.json'; $cacheText = [IO.File]::ReadAllText($cachePath); Remove-Item $cachePath
     $st = Get-AVDTuneIntegrityStatus -AppRoot $app -InstallRoot $inst -StateRoot $state -Http $http
-    Test-Check 'integrity offline without a cached manifest: unverified (usable, said so), not red' ($st.Status -eq 'unverified' -and $st.Message -like '*could not be compared*') ($st | Out-String)
+    Test-Check 'integrity offline without a cached manifest (Installed): unverified and blocked (read only)' ($st.Status -eq 'unverified' -and $st.Blocked -and $st.Message -like '*could not be compared*') ($st | Out-String)
     [IO.File]::WriteAllText($cachePath, $cacheText); $http.Store.Offline = $false
     [IO.File]::WriteAllText($cachePath, '{ not json');
     $st = Get-AVDTuneIntegrityStatus -AppRoot $app -InstallRoot $inst -StateRoot $state -Http $http
@@ -243,12 +244,99 @@ try {
     Test-Check 'repair: logged in the change log with the tool version' (@((Get-AVDTuneChangeLog -Root $state) | Where-Object { $_.Text -like '*repaired*' -and $_.ToolVersion }).Count -eq 1) $null
     Test-Check 'repair of a development copy is refused' ((Get-ThrownText { Repair-AVDTuneInstall -Http $http -AppRoot $repo -InstallRoot $inst -StateRoot $state }) -like '*installed copy only*') $null
 
-    # ---------------------------------------------------------------- modes without a protected install
-    $dev = Get-AVDTuneIntegrityStatus -AppRoot $repo -InstallRoot $inst -StateRoot $state -Http $http
-    $loose = Join-Path $tmp 'loose\0.2.0'; New-Item -ItemType Directory -Path $loose -Force | Out-Null; [IO.File]::WriteAllText((Join-Path $loose 'VERSION'), '0.2.0')
-    $unp = Get-AVDTuneIntegrityStatus -AppRoot $loose -InstallRoot $inst -StateRoot $state -Http $http
-    Test-Check 'a git checkout is "dev" and a copy outside the install folder is "unprotected": neither blocks, both say so' ($dev.Status -eq 'dev' -and $unp.Status -eq 'unprotected' -and $unp.Message -like '*not run from*' -or $unp.Message -like '*does not run from*') (($dev | Out-String) + ($unp | Out-String))
+    # ---------------------------------------------------------------- continue without the check (typed name, change log)
+    Remove-Item $cachePath; $http.Store.Offline = $true
+    $st = Get-AVDTuneIntegrityStatus -AppRoot $app -InstallRoot $inst -StateRoot $state -Http $http
+    Set-AVDTuneIntegrityBlock $st
+    Test-Check 'unverified: AVDTune stays read only (the gate cannot be opened)' ((Get-ThrownText { Open-AVDTuneWriteGate -SnapshotId 's1' -ConfirmedBy 'admin1' }) -like '*read only*') $null
+    Test-Check 'continue without the check: a wrong or empty name is refused and the block stays' ((Get-ThrownText { Confirm-AVDTuneUnverified -StateRoot $state -Name 'wrong' -Expected 'GM-TEST01' }) -like '*Type the name*' -and (Get-ThrownText { Confirm-AVDTuneUnverified -StateRoot $state -Name '' -Expected 'GM-TEST01' }) -like '*Type the name*' -and (Get-AVDTuneWriteBlock)) $null
+    $logBefore = @(Get-AVDTuneChangeLog -Root $state).Count
+    $c = Confirm-AVDTuneUnverified -StateRoot $state -Name 'GM-TEST01' -Expected 'GM-TEST01' -User 'admin1'
+    Test-Check 'continue without the check: the typed name lifts the block and writes a change log entry' ($c.ChangeLog -and -not (Get-AVDTuneWriteBlock) -and @(Get-AVDTuneChangeLog -Root $state).Count -eq $logBefore + 1 -and $c.Text -like '*without the integrity check*') $null
+    [IO.File]::WriteAllText($cachePath, $cacheText); $http.Store.Offline = $false
+
+    # ---------------------------------------------------------------- Installed is decided by the folder, not by what is inside
+    [IO.File]::WriteAllText((Join-Path $app 'VERSION'), "9.9.9`n")
+    New-Item -ItemType Directory -Path (Join-Path $app '.git') | Out-Null; [IO.File]::WriteAllText((Join-Path $app '.git\HEAD'), 'ref')
+    $st = Get-AVDTuneIntegrityStatus -AppRoot $app -InstallRoot $inst -StateRoot $state -Http $http -AllowDevelopment
+    Test-Check 'a folder in the install folder is Installed with the version of the folder name; another VERSION and a .git inside count as changed and extra (also with -AllowDevelopment)' ($st.Mode -eq 'Installed' -and $st.Version -eq '0.2.0' -and $st.Status -eq 'bad' -and $st.Blocked -and $st.Changed -contains 'VERSION' -and $st.Extra -contains '.git/HEAD') ($st | Out-String)
+    [void](Repair-AVDTuneInstall -Http $http -AppRoot $app -InstallRoot $inst -StateRoot $state -User 'admin1')
+    Test-Check 'repair removes the .git folder and restores VERSION' ((Get-AVDTuneIntegrityStatus -AppRoot $app -InstallRoot $inst -StateRoot $state -Http $http).Status -eq 'ok' -and -not (Test-Path (Join-Path $app '.git'))) $null
+    $oddDir = Join-Path $inst 'not-a-version'; New-Item -ItemType Directory -Path $oddDir | Out-Null
+    $st = Get-AVDTuneIntegrityStatus -AppRoot $oddDir -InstallRoot $inst -StateRoot $state -Http $http
+    Test-Check 'a folder in the install folder that is not named like a version: bad and blocked' ($st.Mode -eq 'Installed' -and $st.Status -eq 'bad' -and $st.Blocked) ($st | Out-String)
+    Remove-Item $oddDir
+
+    # ---------------------------------------------------------------- launcher and install folder protection
+    $launcherPath = Join-Path $inst 'Start-AVDTune.ps1'; $launcherText = [IO.File]::ReadAllText($launcherPath)
+    [IO.File]::WriteAllText($launcherPath, $launcherText + "`r`nWrite-Host evil")
+    $st = Get-AVDTuneIntegrityStatus -AppRoot $app -InstallRoot $inst -StateRoot $state -Http $http
+    Test-Check 'a launcher that is not what AVDTune writes counts as changed (bad)' ($st.Status -eq 'bad' -and ($st.Changed -join ',') -like '*launcher*') ($st | Out-String)
+    $rp = Repair-AVDTuneInstall -Http $http -AppRoot $app -InstallRoot $inst -StateRoot $state -User 'admin1'
+    Test-Check 'repair writes the launcher again' ([IO.File]::ReadAllText($launcherPath) -ceq $launcherText -and (Get-AVDTuneIntegrityStatus -AppRoot $app -InstallRoot $inst -StateRoot $state -Http $http).Status -eq 'ok') $null
+    $aclState = @{ Bad = @() }
+    Set-AVDTuneReleaseAclReader ({ param($Path, $IsDirectory)
+            $rules = @(); if (@($aclState.Bad | Where-Object { $Path -like "$_*" }).Count -gt 0) { $rules = @([pscustomobject]@{ Sid = 'S-1-5-32-545'; Inherited = $false }) }
+            [pscustomobject]@{ Owner = 'S-1-5-32-544'; Protected = $true; Rules = $rules } }.GetNewClosure())
+    try {
+        $st = Get-AVDTuneIntegrityStatus -AppRoot $app -InstallRoot $inst -StateRoot $state -Http $http
+        Test-Check 'install folder with administrator-only rights: ok' ($st.Status -eq 'ok' -and $st.Acl.Count -eq 0) ($st | Out-String)
+        $aclState.Bad = @($inst)
+        $st = Get-AVDTuneIntegrityStatus -AppRoot $app -InstallRoot $inst -StateRoot $state -Http $http
+        Test-Check 'install folder that users can write to: bad, blocked, listed' ($st.Status -eq 'bad' -and $st.Blocked -and $st.Acl.Count -ge 1 -and $st.Message -like '*not protected*') ($st | Out-String)
+        $before = Get-Content (Join-Path $inst 'current.json') -Raw
+        Test-Check 'install, repair and rollback refuse an install folder that users can write to, nothing is changed' ((Get-ThrownText { Install-AVDTuneRelease -Http $http -Manifest (ConvertFrom-AVDTuneManifestText $manifestSaved['0.3.0'] '0.3.0') -InstallRoot $inst -StateRoot $state }) -like '*not protected*' -and (Get-ThrownText { Repair-AVDTuneInstall -Http $http -AppRoot $app -InstallRoot $inst -StateRoot $state }) -like '*not protected*' -and (Get-Content (Join-Path $inst 'current.json') -Raw) -eq $before -and -not (Test-Path (Join-Path $inst '0.3.0'))) $null
+        $aclState.Bad = @()
+        # an unprotected copy: users can write -> blocked, install only; administrators only -> may run, with a note
+        $loose = Join-Path $tmp 'loose\0.2.0'; New-Item -ItemType Directory -Path $loose -Force | Out-Null; [IO.File]::WriteAllText((Join-Path $loose 'VERSION'), '0.2.0')
+        $aclState.Bad = @($loose)
+        $unp = Get-AVDTuneIntegrityStatus -AppRoot $loose -InstallRoot $inst -StateRoot $state -Http $http
+        Set-AVDTuneIntegrityBlock $unp
+        Test-Check 'unprotected copy that users can write to: blocked, the gate stays shut, the message names the install' ($unp.Status -eq 'unprotected' -and $unp.Blocked -and $unp.Message -like '*read only*install the release*' -and -not (Test-AVDTuneWriteAllowed) -and (Get-ThrownText { Open-AVDTuneWriteGate -SnapshotId 's1' -ConfirmedBy 'admin1' }) -like '*read only*') ($unp | Out-String)
+        $aclState.Bad = @()
+        $unp = Get-AVDTuneIntegrityStatus -AppRoot $loose -InstallRoot $inst -StateRoot $state -Http $http
+        Set-AVDTuneIntegrityBlock $unp
+        Test-Check 'unprotected copy with administrator-only rights: may run (not blocked), with a note' ($unp.Status -eq 'unprotected' -and -not $unp.Blocked -and $unp.Message -like '*administrators only*' -and -not (Get-AVDTuneWriteBlock)) ($unp | Out-String)
+    }
+    finally { Set-AVDTuneReleaseAclReader $null }
+    $dev = Get-AVDTuneIntegrityStatus -AppRoot $repo -InstallRoot $inst -StateRoot $state -Http $http -AllowDevelopment
+    $devNot = Get-AVDTuneIntegrityStatus -AppRoot $repo -InstallRoot $inst -StateRoot $state -Http $http
+    Test-Check 'a git checkout is "dev" only when the caller allows it (test mode); otherwise it is an unprotected copy' ($dev.Status -eq 'dev' -and -not $dev.Blocked -and $devNot.Status -eq 'unprotected') (($dev | Out-String) + ($devNot | Out-String))
     Test-Check 'the check did not use the real install or state folder' ($inst -ne (Get-AVDTuneInstallRoot) -and -not (Test-AVDTuneDefaultRoot $state)) $null
+
+    # ---------------------------------------------------------------- links: repair and clean-up never follow them
+    $ext = Join-Path $tmp 'external'; New-Item -ItemType Directory -Path $ext | Out-Null; [IO.File]::WriteAllText((Join-Path $ext 'keep.txt'), 'keep'); [IO.File]::WriteAllText((Join-Path $ext 'Fake.psm1'), 'external module')
+    Remove-Item (Join-Path $app 'Modules') -Recurse -Force
+    New-Item -ItemType Junction -Path (Join-Path $app 'Modules') -Target $ext | Out-Null
+    $st = Get-AVDTuneIntegrityStatus -AppRoot $app -InstallRoot $inst -StateRoot $state -Http $http
+    Test-Check 'a link in the place of a program folder: bad (missing files below it, the link as extra)' ($st.Status -eq 'bad' -and $st.Extra -contains 'Modules' -and $st.Missing -contains 'Modules/Fake.psm1') ($st | Out-String)
+    $rp = Repair-AVDTuneInstall -Http $http -AppRoot $app -InstallRoot $inst -StateRoot $state -User 'admin1'
+    Test-Check 'repair removes the link first and writes the real files; the target of the link is untouched' ($rp.Ok -and (Get-Content (Join-Path $app 'Modules\Fake.psm1') -Raw) -like '# module 0.2.0*' -and (Get-Content (Join-Path $ext 'Fake.psm1') -Raw) -eq 'external module' -and (Test-Path (Join-Path $ext 'keep.txt')) -and -not ((Get-Item (Join-Path $app 'Modules')).Attributes -band [IO.FileAttributes]::ReparsePoint)) ($rp | Out-String)
+    # clean-up of an old version that contains a link: the link is removed as a link
+    $inst3 = Join-Path $tmp 'Program Files 3\AVDTune'
+    [void](Install-AVDTuneRelease -Http $http -Manifest (ConvertFrom-AVDTuneManifestText $manifestSaved['0.1.0'] '0.1.0') -InstallRoot $inst3 -StateRoot $state)
+    New-Item -ItemType Junction -Path (Join-Path $inst3 '0.1.0\linkdir') -Target $ext | Out-Null
+    [void](Install-AVDTuneRelease -Http $http -Manifest (ConvertFrom-AVDTuneManifestText $manifestSaved['0.2.0'] '0.2.0') -InstallRoot $inst3 -StateRoot $state)
+    [void](Install-AVDTuneRelease -Http $http -Manifest (ConvertFrom-AVDTuneManifestText $manifestSaved['0.3.0'] '0.3.0') -InstallRoot $inst3 -StateRoot $state)
+    Test-Check 'clean-up of an old version with a link inside: the version folder is gone, the target of the link is untouched' (-not (Test-Path (Join-Path $inst3 '0.1.0')) -and (Test-Path (Join-Path $ext 'keep.txt')) -and (Test-Path (Join-Path $inst3 '0.2.0'))) $null
+    # the target folder of an install is a link
+    $inst4 = Join-Path $tmp 'Program Files 4\AVDTune'; New-Item -ItemType Directory -Path $inst4 -Force | Out-Null
+    New-Item -ItemType Junction -Path (Join-Path $inst4 '0.2.0') -Target $ext | Out-Null
+    Test-Check 'an install whose version folder is a link is refused' ((Get-ThrownText { Install-AVDTuneRelease -Http $http -Manifest (ConvertFrom-AVDTuneManifestText $manifestSaved['0.2.0'] '0.2.0') -InstallRoot $inst4 -StateRoot $state }) -like '*is a link*' -and (Test-Path (Join-Path $ext 'keep.txt'))) $null
+    # a path with a link in the middle is stopped
+    New-Item -ItemType Junction -Path (Join-Path $app 'viaLink') -Target $ext | Out-Null
+    Test-Check 'a path with a link component is refused' ((Get-ThrownText { Assert-AVDTuneNoLinkInPath -Base $app -Rel 'viaLink/x.txt' }) -like '*is a link*' -and ($null -eq (Get-ThrownText { Assert-AVDTuneNoLinkInPath -Base $app -Rel 'Modules/Fake.psm1' }))) $null
+    [IO.Directory]::Delete((Join-Path $app 'viaLink'))
+
+    # ---------------------------------------------------------------- the workflow
+    $wf = Get-Content (Join-Path $repo '.github\workflows\release.yml') -Raw
+    $wfLines = $wf -split "`r?`n"
+    $badExpr = @($wfLines | Where-Object { $_ -match '\$\{\{' -and $_ -notmatch '^\s*(TAG|GH_TOKEN|GH_REPO|group):' })
+    Test-Check 'workflow: ${{ }} only in env: and the concurrency group, never in a script text' ($badExpr.Count -eq 0) ($badExpr -join ' | ')
+    $uses = @($wfLines | Where-Object { $_ -match '^\s*-?\s*uses:' })
+    Test-Check 'workflow: every action is pinned to a commit' ($uses.Count -ge 3 -and @($uses | Where-Object { $_ -notmatch '@[0-9a-f]{40}\s*$' }).Count -eq 0) ($uses -join ' | ')
+    Test-Check 'workflow: the build job reads only, the publish job writes, the top level has no permissions, the tag is checked first with \z' (($wf -match '(?m)^permissions: \{\}') -and ([regex]::Matches($wf, 'contents: write')).Count -eq 1 -and ([regex]::Matches($wf, 'contents: read')).Count -eq 1 -and $wf.IndexOf('contents: write') -gt $wf.IndexOf('publish:') -and ([regex]::Matches($wf, [regex]::Escape('^v\d+\.\d+\.\d+(-ea\.\d+)?\z'))).Count -ge 2 -and $wf.IndexOf('The tag has the form') -lt $wf.IndexOf('actions/checkout')) $null
+    Test-Check 'workflow: no secrets other than the built-in token' (@($wfLines | Where-Object { $_ -match 'secrets\.' }).Count -eq 0) $null
 
     # ---------------------------------------------------------------- window parts exist
     [xml]$xaml = Get-Content (Join-Path $repo 'UI\AVDTune.xaml') -Raw -Encoding UTF8
@@ -258,14 +346,18 @@ try {
 
     # ---------------------------------------------------------------- Check-PublicContent scanner
     $pc = Join-Path $tmp 'pc'; New-Item -ItemType Directory -Path (Join-Path $pc 'Tests') -Force | Out-Null
-    $g1 = '3f2b8c1e-5a4d-4e6f-9b7a-1c2d3e4f5a6b'
-    [IO.File]::WriteAllLines((Join-Path $pc 'a.ps1'), @("x = '$g1'", "ok = '7971F918-A847-4430-9279-4A52D1EFE18D'", 'h = contoso1.file.core.windows.net', 'h2 = realshare01.file.core.windows.net', 'h3 = privatelink.file.core.windows.net', 'ip = 192.0.2.10 and 203.0.113.7 and 10.1.2.3 and 168.63.129.16', 'v = 10.0.22631.1 and 2.9.8884.27471', "y = '$g1' # public-content-ok", 'n = Fabrikam Internal Name'))
-    [IO.File]::WriteAllLines((Join-Path $pc 'Tests\t.ps1'), @("fake = '$g1'", 'dc = 10.0.0.10', 'real = 8.8.8.8'))   # public-content-ok (fixture)
+    $g1 = '3f2b8c1e-5a4d-4e6f-9b7a-1c2d3e4f5a6b'   # public-content-ok: random GUID as scanner fixture
+    [IO.File]::WriteAllLines((Join-Path $pc 'a.ps1'), @("x = '$g1'", "ok = '7971F918-A847-4430-9279-4A52D1EFE18D'", 'h = contoso1.file.core.windows.net', 'h2 = realshare01.file.core.windows.net', 'h3 = privatelink.file.core.windows.net', 'ip = 192.0.2.10 and 203.0.113.7 and 10.1.2.3 and 168.63.129.16', 'v = 10.0.22631.1 and 2.9.8884.27471', "y = '$g1' # public-content-ok: test", 'n = Fabrikam Internal Name'))
+    [IO.File]::WriteAllLines((Join-Path $pc 'Tests\t.ps1'), @("fake = '$g1'", 'dc = 10.0.0.10', 'real = 8.8.8.8'))   # public-content-ok: fixture of the scanner check
+    [IO.File]::WriteAllLines((Join-Path $pc 'b.ps1'), @('u = admin@corp.com', 'u2 = svc@contoso.com and x@example.org and a@host.test', 't = acme.onmicrosoft.com', 't2 = contoso.onmicrosoft.com', 's = acme.sharepoint.com', 'b = realblob.blob.core.windows.net', 'k = realvault.vault.azure.net', 'v6 = 2a01:4f8:abcd::1 and 2001:db8::5 and ::1', 'ts = 12:30:45 and 14:48:14', 'f = 11111111-2222-3333-4444-555555555555 and aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee', 'm = nothing # public-content-ok', "m2 = $g1 # public-content-ok: documented reason"))   # public-content-ok: fixture of the scanner check
     $found = @(Find-PublicContentFindings -Folder $pc -Deny @('fabrikam internal', 'secretname'))
     $by = { param($rule) , @($found | Where-Object Rule -eq $rule) }
-    Test-Check 'public content: an unknown GUID outside Tests fails, an allowlisted one, one in Tests and a marked line do not' ((& $by 'guid').Count -eq 1 -and (& $by 'guid')[0].Detail -eq $g1 -and (& $by 'guid')[0].File -eq 'a.ps1' -and (& $by 'guid')[0].Line -eq 1) ($found | Out-String)
-    Test-Check 'public content: a storage host with a real name fails, placeholders and privatelink do not' ((& $by 'storage-host').Count -eq 1 -and (& $by 'storage-host')[0].Detail -eq 'realshare01.file.core.windows.net') ($found | Out-String)   # public-content-ok (fixture)
-    Test-Check 'public content: an IP outside the documentation ranges fails (10.x outside Tests, 8.8.8.8 in Tests), documentation and Azure fixed addresses and version numbers do not' (((& $by 'ip') | ForEach-Object Detail | Sort-Object) -join ',' -eq '10.1.2.3,8.8.8.8') ($found | Out-String)   # public-content-ok (fixture)
+    Test-Check 'public content: an unknown GUID fails (also in Tests), an allowlisted one, obvious fakes (11111111-2222-..., aaaaaaaa-bbbb-...) and a line marked with a reason do not' ((& $by 'guid').Count -eq 2 -and (& $by 'guid')[0].Detail -eq $g1 -and (& $by 'guid')[0].File -eq 'a.ps1' -and (& $by 'guid')[0].Line -eq 1 -and (& $by 'guid')[1].File -eq 'Tests/t.ps1' -and (& $by 'guid')[1].Line -eq 1) ($found | Out-String)
+    Test-Check 'public content: hosts of storage, blob, vault, onmicrosoft and sharepoint with a real name fail, placeholders and privatelink do not' ((@((& $by 'storage-host') | ForEach-Object Detail | Sort-Object) -join ',') -eq 'acme.onmicrosoft.com,acme.sharepoint.com,realblob.blob.core.windows.net,realshare01.file.core.windows.net,realvault.vault.azure.net') ($found | Out-String)   # public-content-ok: fixture of the scanner check
+    Test-Check 'public content: an IP outside the documentation ranges fails (10.x outside Tests, 8.8.8.8 in Tests), documentation and Azure fixed addresses and version numbers do not' (((& $by 'ip') | ForEach-Object Detail | Sort-Object) -join ',' -eq '10.1.2.3,8.8.8.8') ($found | Out-String)   # public-content-ok: fixture of the scanner check
+    Test-Check 'public content: an e-mail address fails, placeholder domains (contoso, example.*, .test) do not' ((& $by 'mail').Count -eq 1 -and (& $by 'mail')[0].Detail -eq 'admin@corp.com') ($found | Out-String)   # public-content-ok: fixture value of the scanner check
+    Test-Check 'public content: an IPv6 address fails, the documentation range, ::1 and times do not' ((& $by 'ipv6').Count -eq 1 -and (& $by 'ipv6')[0].Detail -eq '2a01:4f8:abcd::1') ($found | Out-String)   # public-content-ok: fixture value of the scanner check
+    Test-Check 'public content: the marker without a reason is a finding, with a reason it is not' ((& $by 'marker').Count -eq 1 -and (& $by 'marker')[0].File -eq 'b.ps1' -and (& $by 'marker')[0].Line -eq 11) ($found | Out-String)
     Test-Check 'public content: a deny-list name is found (case does not matter) and the finding does not print the name' ((& $by 'deny-list').Count -eq 1 -and (& $by 'deny-list')[0].Detail -notlike '*fabrikam*' -and (& $by 'deny-list')[0].Detail -like '*entry 1*') ($found | Out-String)
     $none = Join-Path $tmp 'deny-missing.txt'
     $out = & $powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'Check-PublicContent.ps1') -Root $pc -DenyListPath $none 2>&1 | Out-String
