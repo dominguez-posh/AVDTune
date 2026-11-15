@@ -383,10 +383,11 @@ function Start-FslJob([string]$Kind, [hashtable]$Arg = @{}) {
     }
     if ($script:TestMode) {
         $c = $common.Clone(); $c.Machine = $script:Machine; $c.F = $script:FslFake.F; $c.Progress = $null
-        if ($Kind -eq 'Storage') { $c.Arm = $script:FslFake.Arm; $c.Files = $script:FslFake.Files; $c.Ldap = $script:FslFake.Ldap; $c.FakeLdap = $true; $c.ArmToken = 'fake-arm-token'; $c.StorageToken = 'fake-storage-token' }
+        if ($Kind -eq 'Storage') { $c.Arm = $script:FslFake.Arm; $c.Files = $script:FslFake.Files; $c.Ldap = $script:FslFake.Ldap; $c.FakeLdap = $true; $c.ArmToken = 'fake-arm-token' }   # the storage token comes from the fake session through Get-FslStorageToken (in $common), like in real use
         $res = $null; $err = ''
         try { $res = & ([scriptblock]::Create($script:FslWorkerText)) $Kind $c } catch { $err = $_.Exception.Message }
-        $script:FslJob = @{ Inline = $true; Result = $res; Err = $err; Kind = $Kind; Write = [bool]$Arg.Write; Task = (New-FslTask $Kind ([bool]$Arg.Write)) }
+        $c.StorageToken = $null; $c.ArmToken = $null; $c.TestPassword = $null
+        $script:FslJob = @{ Inline = $true; Result = $res; Err = $err; Kind = $Kind; Write = [bool]$Arg.Write; Task = (New-FslTask $Kind ([bool]$Arg.Write)); Common = $common }
     }
     else {
         $sync = [hashtable]::Synchronized(@{ Text = '' })
@@ -401,7 +402,7 @@ function Start-FslJob([string]$Kind, [hashtable]$Arg = @{}) {
                 if ($Gate) { Open-AVDTuneWriteGate -SnapshotId $Gate.SnapshotId -ConfirmedBy $Gate.ConfirmedBy }
                 & ([scriptblock]::Create($WorkerText)) $Kind $c
             }).AddArgument($script:AppRoot).AddArgument($Kind).AddArgument($common).AddArgument($gate).AddArgument($sync).AddArgument($script:FslWorkerText)
-        $script:FslJob = @{ PS = $ps; Handle = $ps.BeginInvoke(); Kind = $Kind; Sync = $sync; Write = [bool]$Arg.Write; Task = (New-FslTask $Kind ([bool]$Arg.Write)) }
+        $script:FslJob = @{ PS = $ps; Handle = $ps.BeginInvoke(); Kind = $Kind; Sync = $sync; Write = [bool]$Arg.Write; Task = (New-FslTask $Kind ([bool]$Arg.Write)); Common = $common }
     }
     Set-ShutdownBlock $true
     Set-FslBusy $true
@@ -423,6 +424,8 @@ function Complete-FslJob {
         catch { $err = $_.Exception.Message }
         finally { $job.PS.Dispose() }
     }
+    # No token or password stays referenced after the run (the hashtable of the job, the copy of the worker was local to it)
+    if ($job.Common) { foreach ($k in 'StorageToken', 'ArmToken', 'TestPassword') { if ($job.Common.ContainsKey($k)) { $job.Common[$k] = $null } }; $job.Common = $null }
     Set-FslBusy $false
     if ($job.Kind -eq 'Storage') { $ui.PwdFslPassword.Clear(); $ui.ChkFslKey.IsChecked = $false }   # the password and the key confirmation are for one run, also after an error
     if ($err -or -not $result) { Complete-AVDTuneUiTask $job.Task -Failed -Summary "The $($job.Kind.ToLower()) failed: $err"; $ui.TxtFslState.Text = "The $($job.Kind.ToLower()) failed: $err"; Show-Error $ui.TxtFslState.Text; Update-FslView; return }
@@ -487,7 +490,7 @@ Add-Click $ui.BtnFslAclSet {
     if (-not $share.Account -or -not $share.Share) { throw 'The diff does not name the share: run the storage check again.' }
     $files = if ($script:TestMode) { $script:FslFake.Files } else { New-AVDTuneFilesAdapter }
     $token = if ($script:TestMode) { 'fake-storage-token' } else { '' }
-    if (-not $token) { throw 'No token for Azure Storage: the sign-in of AVDTune does not request that audience yet (issue 11).' }
+    if (-not $token) { throw 'Setting the NTFS ACL is not built yet: it comes in its own issue (write gate, confirmed hash of the diff, intent backup on the PUT). Until then the check only reads.' }
     $res = Invoke-FslChange -Kind 'fslogix-acl' -Title 'Setting the NTFS ACL of the share root' -Step 'Reading the ACL again and setting the recommended one' -Block { Set-AVDTuneStorageRootAcl -Files $files -Account $share.Account -Share $share.Share -Token $token -UsersSid $sids.Users[0] -AdminsSid $sids.Admins[0] -ConfirmedHash $d.Hash -Root $script:StateRoot -User (Get-FslUser) -SnapshotId (Get-FslGateSnapshot) }
     $ui.TxtFslState.Text = "NTFS ACL: $($res.Status). $($res.Message)"; Show-Toast $ui.TxtFslState.Text
     [void](Add-AVDTuneProtocolNote -Protocol $script:Protocol -Group 'fslogix' -Subject 'NTFS ACL of the share root' -Note "$($res.Status). $($res.Message)"); Save-Protocol

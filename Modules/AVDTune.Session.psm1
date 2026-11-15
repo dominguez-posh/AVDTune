@@ -61,7 +61,8 @@ function Get-AVDTuneSetupConsentNote { $script:SetupConsentNote }
 $script:Audiences = [ordered]@{
     Graph = @{ Scopes = @('Group.Read.All', 'DeviceManagementApps.Read.All'); Resource = $script:GraphResource; Purpose = 'Microsoft Graph (read: groups, Intune app notes)' }
     Sites = @{ Scopes = @('Sites.Selected'); Resource = $script:GraphResource; Purpose = 'SharePoint site of the environment (Sites.Selected)' }
-    Arm   = @{ Scopes = @('user_impersonation'); Resource = $script:ArmResource; Purpose = 'Azure Resource Manager (snapshot, VM size, region)' }
+    # Alt: other exact forms of the audience. The ARM scope is asked for on management.azure.com; Microsoft's v1 style tokens of Azure Service Management name management.core.windows.net (not verified on a real tenant, so both exact forms, with and without a trailing slash, are accepted and nothing else)
+    Arm   = @{ Scopes = @('user_impersonation'); Resource = $script:ArmResource; Alt = @('https://management.core.windows.net'); Purpose = 'Azure Resource Manager (snapshot, VM size, region)' }
     Storage = @{ Scopes = @('user_impersonation'); Resource = $script:StorageResource; Purpose = 'Azure Storage (NTFS rights of the FSLogix share; optional)'; Optional = $true }
 }
 
@@ -141,10 +142,16 @@ function New-AVDTuneSession {
     [pscustomobject]@{ Auth = $Auth; TempRoot = $TempRoot; TenantId = ''; ClientId = ''; Account = ''; Name = ''; Tokens = @{}; Refresh = $null; Connected = $false; Warnings = @(); Unavailable = @{} }
 }
 
-function Set-AVDTuneSessionToken($Session, [string]$Audience, $Response) {
+function Test-AVDTuneConsentError([string]$Message) { [string]$Message -match 'AADSTS(65001|70011|90094|650056)' }
+
+function Set-AVDTuneSessionToken {
+    # Checks first, keeps afterwards: the claims (audience, scope, tenant) are verified BEFORE the access token and the rotated refresh token are stored; a failing check throws and changes nothing.
+    # Returns the scopes beyond what AVDTune asks for on this resource.
+    param($Session, [string]$Audience, $Response, [string]$TenantId)
     $access = [string](Get-AVDTuneProp $Response 'access_token')
     if (-not $access) { throw "The sign-in returned no access token for $Audience." }
     $claims = Get-AVDTuneTokenClaims $access
+    $extra = @(Assert-AVDTuneTokenClaims -Claims $claims -Audience $Audience -TenantId $TenantId)
     $expires = (Get-Date).AddSeconds([int](Get-AVDTuneProp $Response 'expires_in')).ToUniversalTime()
     $scopes = @(([string](Get-AVDTuneProp $claims 'scp')) -split ' ' | Where-Object { $_ })
     $old = $Session.Tokens[$Audience]
@@ -154,7 +161,7 @@ function Set-AVDTuneSessionToken($Session, [string]$Audience, $Response) {
     }
     $refresh = [string](Get-AVDTuneProp $Response 'refresh_token')
     if ($refresh) { if ($Session.Refresh) { $Session.Refresh.Dispose() }; $Session.Refresh = ConvertTo-AVDTuneSecure $refresh }
-    $claims
+    $extra
 }
 
 function Assert-AVDTuneTokenClaims {
@@ -164,7 +171,7 @@ function Assert-AVDTuneTokenClaims {
     $a = $script:Audiences[$Audience]
     $aud = [string](Get-AVDTuneProp $Claims 'aud')
     # Exact audience (no prefix match: a look-alike host must not pass)
-    $okAud = if ($a.Resource -eq $script:GraphResource) { $aud -in @($script:GraphResource, '00000003-0000-0000-c000-000000000000') } else { $aud -in @($a.Resource, "$($a.Resource)/") }
+    $okAud = if ($a.Resource -eq $script:GraphResource) { $aud -in @($script:GraphResource, '00000003-0000-0000-c000-000000000000') } else { $aud -in @(@($a.Resource) + @($(if ($a.ContainsKey('Alt')) { $a.Alt })) | ForEach-Object { $_; "$_/" }) }
     if (-not $okAud) { throw "The token for $Audience is for another resource ($aud)." }
     $have = @(([string](Get-AVDTuneProp $Claims 'scp')) -split ' ' | Where-Object { $_ })
     foreach ($need in $a.Scopes) { if ($need -notin $have) { throw "The token for $Audience lacks the permission $need (granted: $($have -join ', '))." } }
@@ -247,24 +254,23 @@ function Connect-AVDTuneSession {
             $urls = @(Get-AVDTuneAudienceScopeUrls $audience)
             if ($script:Audiences[$audience].ContainsKey('Optional')) {
                 # An optional audience (Storage): a registration without its consent still signs in; the reason is kept, nothing is changed
-                try {
-                    $response = & $Session.Auth.Refresh $tid $ClientId (ConvertFrom-AVDTuneSecure $Session.Refresh) $urls
-                    $c = Set-AVDTuneSessionToken $Session $audience $response
-                    $extra = @(Assert-AVDTuneTokenClaims -Claims $c -Audience $audience -TenantId $tid)
-                    if ($extra.Count -gt 0) { [void]$warnings.Add((Get-AVDTuneScopeWarning $audience $extra)) }
-                }
+                # Only the expected failure is caught here: Microsoft refuses the token because there is no consent (AADSTS65001, 70011, 90094, 650056).
+                # Everything else (wrong audience, missing scope, other tenant, network) ends the whole sign-in like for the other audiences.
+                $response = $null
+                try { $response = & $Session.Auth.Refresh $tid $ClientId (ConvertFrom-AVDTuneSecure $Session.Refresh) $urls }
                 catch {
-                    $old = $Session.Tokens[$audience]; if ($old -and $old.Access) { $old.Access.Dispose() }
-                    $Session.Tokens.Remove($audience)
+                    if (-not (Test-AVDTuneConsentError $_.Exception.Message)) { throw }
                     $why = ConvertTo-AVDTuneAuthError -Message $_.Exception.Message -Audience $audience
                     $Session.Unavailable[$audience] = "No $audience token: $why $(Get-AVDTuneOptionalAudienceHint $audience)"
                     [void]$warnings.Add($Session.Unavailable[$audience])
+                    continue
                 }
+                $extra = @(Set-AVDTuneSessionToken $Session $audience $response $tid)
+                if ($extra.Count -gt 0) { [void]$warnings.Add((Get-AVDTuneScopeWarning $audience $extra)) }
                 continue
             }
             $response = & $Session.Auth.Refresh $tid $ClientId (ConvertFrom-AVDTuneSecure $Session.Refresh) $urls
-            $c = Set-AVDTuneSessionToken $Session $audience $response
-            $extra = @(Assert-AVDTuneTokenClaims -Claims $c -Audience $audience -TenantId $tid)
+            $extra = @(Set-AVDTuneSessionToken $Session $audience $response $tid)
             if ($extra.Count -gt 0) { [void]$warnings.Add((Get-AVDTuneScopeWarning $audience $extra)) }
         }
         $Session.Warnings = @($warnings)
@@ -290,11 +296,14 @@ function Get-AVDTuneAccessToken {
         try {
             $urls = @(Get-AVDTuneAudienceScopeUrls $Audience)
             $response = & $Session.Auth.Refresh $Session.TenantId $Session.ClientId (ConvertFrom-AVDTuneSecure $Session.Refresh) $urls
-            $c = Set-AVDTuneSessionToken $Session $Audience $response
-            $extra = @(Assert-AVDTuneTokenClaims -Claims $c -Audience $Audience -TenantId $Session.TenantId)
+            $extra = @(Set-AVDTuneSessionToken $Session $Audience $response $Session.TenantId)
             if ($extra.Count -gt 0) { $Session.Warnings = @(@($Session.Warnings) + (Get-AVDTuneScopeWarning $Audience $extra) | Select-Object -Unique) }
         }
-        catch { throw (ConvertTo-AVDTuneAuthError -Message $_.Exception.Message -Audience $Audience) }
+        catch {
+            $text = ConvertTo-AVDTuneAuthError -Message $_.Exception.Message -Audience $Audience
+            if ($script:Audiences[$Audience].ContainsKey('Optional') -and (Test-AVDTuneConsentError $_.Exception.Message)) { $text = "$text $(Get-AVDTuneOptionalAudienceHint $Audience)" }
+            throw $text
+        }
         $t = $Session.Tokens[$Audience]
     }
     ConvertFrom-AVDTuneSecure $t.Access

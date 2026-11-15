@@ -19,6 +19,8 @@ AVDTune runs elevated on a machine that becomes the image of every user. These a
 - [ ] Fixed hosts (allowlist), HTTPS, no automatic redirects (follow by hand and check every hop), no credentials in URLs. Tokens only to their own host.
 - [ ] Path segments built from data (IMDS, ARM, user input) are validated (`[A-Za-z0-9._()-]+`), `?` at most once, `#` never. OData filters only with validated GUIDs; the real Graph refuses combined filters on some collections (`oauth2PermissionGrants`), so filter by one property and check the rest locally.
 - [ ] `[Net.ServicePointManager]::SecurityProtocol` is extended with `-bor`, never overwritten.
+- [ ] A token (and a rotated refresh token) is checked first (aud, tid, scp) and stored only afterwards; a failing check changes nothing, also on the second call.
+- [ ] Optional paths catch only the expected error class (e.g. missing consent); everything else ends the operation like for the required paths.
 - [ ] Secrets (tokens, passwords, storage keys) live only in memory (SecureString where possible), are cleared in `finally`, never reach the protocol, change log, run records, error texts or files. Keys only after a confirmation for this run.
 
 ## Changes to the master
@@ -35,3 +37,5 @@ AVDTune runs elevated on a machine that becomes the image of every user. These a
 ## Tests
 - [ ] Every point above that the change touches has a counter-test that fails without the fix.
 - [ ] Fakes behave like the real service where we learned the difference (e.g. Graph filters).
+- [ ] Every switch of a fake has a check that uses it.
+- [ ] Expectations of the GUI smoke (counts, texts) are adjusted with the change, even if the smoke runs later.
