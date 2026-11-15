@@ -53,10 +53,21 @@ jobs:
           $PSVersionTable.PSVersion
           .\Tests\Check-All.ps1
 
-      - name: Build ZIP and manifest.json
+      # actions/setup-dotnet v4.3.1 (the measure program is built with the .NET 10 SDK, Bench\AVDTune.Bench.csproj)
+      - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9
+        with:
+          global-json-file: Bench/global.json   # exact SDK version, no roll forward
+
+      - name: Build the measure program AVDTune.Bench.exe (unit tests first; the exe is never committed, issue #19)
         shell: powershell
         run: |
-          .\Tools\New-AVDTuneRelease.ps1 -OutDir dist -ExpectTag $env:TAG
+          .\Bench\build.ps1 -Output Bench\out
+          if (-not (Test-Path -LiteralPath Bench\out\AVDTune.Bench.exe)) { throw 'AVDTune.Bench.exe was not built.' }
+
+      - name: Build ZIP and manifest.json (the exe goes into the ZIP and its SHA256 into the manifest: Files and Bench; without it no release)
+        shell: powershell
+        run: |
+          .\Tools\New-AVDTuneRelease.ps1 -OutDir dist -ExpectTag $env:TAG -BenchExe Bench\out\AVDTune.Bench.exe -RequireBench
           Get-ChildItem dist | Format-Table Name, Length
 
       # actions/upload-artifact v4.6.2

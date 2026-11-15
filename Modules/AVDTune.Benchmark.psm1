@@ -16,6 +16,7 @@
 
 Set-StrictMode -Version 2.0
 Import-Module (Join-Path $PSScriptRoot 'AVDTune.psm1')
+Import-Module (Join-Path $PSScriptRoot 'AVDTune.Release.psm1')   # Open-AVDTuneVerifiedBenchExe: the measure program is only started after the check against the release manifest (issue #19)
 
 $script:DataDefault = Join-Path (Split-Path $PSScriptRoot -Parent) 'Bench\data'
 $script:RestoreTaskName = 'AVDTune-BenchmarkRestore'
@@ -183,19 +184,140 @@ function ConvertFrom-AVDTuneDiskspdXml {
 
 #endregion
 
+#region child processes (issue #19)
+
+$script:Limits = @{ BenchMs = 600000; DiskspdMs = 900000 }      # timeouts; the checks lower them in module scope
+$script:Hooks = @{ AclReader = $null }   # test hook: a fake ACL reader for the TEMP folder check
+
+function Initialize-AVDTuneBenchJob {
+    if ('AVDTuneBenchNative.Job' -as [type]) { return }
+    Add-Type -TypeDefinition @"
+using System; using System.ComponentModel; using System.Runtime.InteropServices;
+namespace AVDTuneBenchNative {
+  public static class Job {
+    [StructLayout(LayoutKind.Sequential)] struct BasicLimit { public long PerProcessUserTimeLimit, PerJobUserTimeLimit; public uint LimitFlags; public UIntPtr MinWs, MaxWs; public uint ActiveProcessLimit; public UIntPtr Affinity; public uint PriorityClass, SchedulingClass; }
+    [StructLayout(LayoutKind.Sequential)] struct IoCounters { public ulong a, b, c, d, e, f; }
+    [StructLayout(LayoutKind.Sequential)] struct ExtendedLimit { public BasicLimit Basic; public IoCounters Io; public UIntPtr ProcessMemory, JobMemory, PeakProcess, PeakJob; }
+    [DllImport("kernel32.dll", SetLastError = true)] static extern IntPtr CreateJobObject(IntPtr attributes, string name);
+    [DllImport("kernel32.dll", SetLastError = true)] static extern bool SetInformationJobObject(IntPtr job, int infoClass, ref ExtendedLimit info, int length);
+    [DllImport("kernel32.dll", SetLastError = true)] static extern bool AssignProcessToJobObject(IntPtr job, IntPtr process);
+    [DllImport("kernel32.dll", SetLastError = true)] static extern bool TerminateJobObject(IntPtr job, uint exitCode);
+    [DllImport("kernel32.dll", SetLastError = true)] static extern bool CloseHandle(IntPtr handle);
+    // a job whose processes are all ended when the last handle is closed (also when AVDTune itself dies)
+    public static IntPtr Create() {
+      IntPtr j = CreateJobObject(IntPtr.Zero, null); if (j == IntPtr.Zero) throw new Win32Exception();
+      ExtendedLimit l = new ExtendedLimit(); l.Basic.LimitFlags = 0x2000;   // JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+      if (!SetInformationJobObject(j, 9, ref l, Marshal.SizeOf(typeof(ExtendedLimit)))) { int e = Marshal.GetLastWin32Error(); CloseHandle(j); throw new Win32Exception(e); }
+      return j;
+    }
+    public static void Assign(IntPtr job, IntPtr process) { if (!AssignProcessToJobObject(job, process)) throw new Win32Exception(); }
+    public static void Terminate(IntPtr job) { TerminateJobObject(job, 0xFFFFFFFF); }
+    public static void Close(IntPtr job) { CloseHandle(job); }
+  }
+}
+"@
+}
+
+function Initialize-AVDTuneBenchTemp {
+    <#
+        TEMP of the measure program: <state>\temp\bench, administrators only. An existing folder is trusted only when it is no link (the folder and the ones above it) and has no
+        owner or rule of someone else (Get-AVDTuneStateSecurityProblems); otherwise it is set aside (renamed to bench.untrusted-<stamp>, never repaired or deleted in place) and a new
+        one is created in one step with the protected ACL.
+    #>
+    param([Parameter(Mandatory)][string]$StateRoot)
+    $parent = Join-Path $StateRoot 'temp'
+    $dir = Join-Path $parent 'bench'
+    Assert-AVDTuneNoLinkInPath -Base $StateRoot -Rel 'temp'
+    if (-not (Test-Path -LiteralPath $parent)) { [void][IO.Directory]::CreateDirectory($parent) }
+    $info = New-Object IO.DirectoryInfo $dir
+    $file = New-Object IO.FileInfo $dir
+    if ($info.Exists -or $file.Exists) {
+        $bad = $file.Exists -or (($info.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)
+        if (-not $bad) {
+            $p = @{ Root = $dir }
+            if ($script:Hooks.AclReader) { $p.ReadAcl = $script:Hooks.AclReader; $p.AdminSid = '' }
+            $bad = @(Get-AVDTuneStateSecurityProblems @p).Count -gt 0
+        }
+        if (-not $bad) { return $dir }
+        $stamp = (Get-Date).ToString('yyyyMMdd-HHmmss', [Globalization.CultureInfo]::InvariantCulture)
+        $aside = Join-Path $parent "bench.untrusted-$stamp"
+        for ($n = 2; (Test-Path -LiteralPath $aside); $n++) { $aside = Join-Path $parent "bench.untrusted-$stamp-$n" }
+        if ($file.Exists) { [IO.File]::Move($dir, $aside) } else { [IO.Directory]::Move($dir, $aside) }   # a rename: nothing inside is opened or followed
+    }
+    $elevated = Test-AVDTuneElevated
+    $security = New-AVDTuneStateSecurity -WithOwner:$elevated
+    # AVDTune runs the benchmark elevated only; a non-elevated process (the checks) must not lock itself out of its own folder
+    if (-not $elevated) { $security.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule([Security.Principal.WindowsIdentity]::GetCurrent().User, 'FullControl', 'ContainerInherit, ObjectInherit', 'None', 'Allow'))) }
+    (New-Object IO.DirectoryInfo $dir).Create($security)
+    $dir
+}
+
+function Get-AVDTuneChildEnvironment {
+    # Allowlist of the environment of a child: only what Windows programs need to find the system, plus fixed PATH, TEMP and TMP. Everything else (DOTNET_*, COR*, __COMPAT_LAYER,
+    # variables from the profile of the user) is not passed on.
+    param([Parameter(Mandatory)][string]$TempDir)
+    $names = @('SystemRoot', 'windir', 'ProgramData', 'ProgramFiles', 'ProgramFiles(x86)', 'CommonProgramFiles', 'NUMBER_OF_PROCESSORS', 'OS', 'COMSPEC')
+    $env = [ordered]@{}
+    foreach ($k in @([Environment]::GetEnvironmentVariables().Keys | ForEach-Object { [string]$_ })) {
+        if ($k -in $names -or $k -like 'PROCESSOR_*') { $env[$k] = [Environment]::GetEnvironmentVariable($k) }
+    }
+    $env['PATH'] = [Environment]::GetFolderPath('System'); $env['TEMP'] = $TempDir; $env['TMP'] = $TempDir
+    $env
+}
+
+function Invoke-AVDTuneChildProcess {
+    <#
+        Starts a program and waits for it: no window, output read asynchronously (stdout and stderr, so neither pipe can fill up and block it), a timeout, and the process in a
+        job object (kill on close): on a timeout, or when this function ends, the whole tree is ended. -CleanEnvironment passes only the allowlist of Get-AVDTuneChildEnvironment
+        and TEMP/TMP in -TempDir (Initialize-AVDTuneBenchTemp). If the process cannot be put into the job it is ended. Returns ExitCode, Output, Error, TimedOut.
+    #>
+    param([Parameter(Mandatory)][string]$FileName, [string]$Arguments = '', [int]$TimeoutMs = 600000, [switch]$CleanEnvironment, [string]$TempDir)
+    Initialize-AVDTuneBenchJob
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = $FileName; $psi.Arguments = $Arguments
+    $psi.UseShellExecute = $false; $psi.RedirectStandardOutput = $true; $psi.RedirectStandardError = $true; $psi.CreateNoWindow = $true
+    if ($CleanEnvironment) {
+        if (-not $TempDir) { throw 'A clean environment needs a TEMP folder.' }
+        $psi.EnvironmentVariables.Clear()
+        $clean = Get-AVDTuneChildEnvironment -TempDir $TempDir
+        foreach ($k in $clean.Keys) { $psi.EnvironmentVariables[$k] = [string]$clean[$k] }
+    }
+    $job = [AVDTuneBenchNative.Job]::Create()
+    $p = $null
+    try {
+        $p = [System.Diagnostics.Process]::Start($psi)
+        try { [AVDTuneBenchNative.Job]::Assign($job, $p.Handle) } catch { try { $p.Kill() } catch { }; throw }
+        $outTask = $p.StandardOutput.ReadToEndAsync(); $errTask = $p.StandardError.ReadToEndAsync()
+        $timedOut = -not $p.WaitForExit($TimeoutMs)
+        if ($timedOut) { [AVDTuneBenchNative.Job]::Terminate($job); [void]$p.WaitForExit(10000) }
+        else { [void]$p.WaitForExit() }
+        [void]$outTask.Wait(10000); [void]$errTask.Wait(10000)
+        [pscustomobject]@{ ExitCode = $(if ($timedOut) { -1 } else { $p.ExitCode }); Output = $(if ($outTask.IsCompleted) { $outTask.Result } else { '' }); Error = $(if ($errTask.IsCompleted) { $errTask.Result } else { '' }); TimedOut = $timedOut }
+    }
+    finally {
+        [AVDTuneBenchNative.Job]::Terminate($job); [AVDTuneBenchNative.Job]::Close($job)   # nothing of the tree outlives the call
+        if ($p) { $p.Dispose() }
+    }
+}
+#endregion
 #region adapter (real)
 
 function New-AVDTuneBenchAdapter {
     <#
         The real benchmark adapter. Reading members change nothing. Writing members: Download (a file under the tool folder), Expand, RestoreTaskRegister /
         RestoreTaskRemove (one scheduled task), Lock (a named mutex), DiskspdRun and RunBench (load on this computer). Tests use New-AVDTuneFakeBench.
+        The measure program (issue #19) is never searched for: it is the file of the release this copy of AVDTune runs from (<install folder>\<version>\Bench\bin),
+        and before every start Open-AVDTuneVerifiedBenchExe checks it against the release manifest of that version and holds it open while the process starts.
+        A development checkout or a copy outside the install folder cannot run it. -InstallRoot, -StateRoot and -Manifest exist for the checks and only work
+        together with AVDTUNE_FAKE (the test mode).
     #>
-    param([string]$ExePath)
-    $app = Split-Path $PSScriptRoot -Parent
-    if (-not $ExePath) {
-        foreach ($c in (Join-Path $app 'Bench\out\AVDTune.Bench.exe'), (Join-Path $app 'tools\AVDTune.Bench.exe')) { if (Test-Path -LiteralPath $c) { $ExePath = $c; break } }
-    }
-    $exe = $ExePath
+    param([string]$AppRoot, [string]$InstallRoot, [string]$StateRoot, $Manifest)
+    if (-not $AppRoot) { $AppRoot = Split-Path $PSScriptRoot -Parent }
+    if (-not $InstallRoot) { $InstallRoot = Get-AVDTuneInstallRoot }
+    if (-not $StateRoot) { $StateRoot = Get-AVDTuneRoot }
+    if (($PSBoundParameters.ContainsKey('AppRoot') -or $PSBoundParameters.ContainsKey('Manifest') -or $PSBoundParameters.ContainsKey('StateRoot') -or $PSBoundParameters.ContainsKey('InstallRoot')) -and -not $env:AVDTUNE_FAKE) { throw 'The measure program is always the one of the release this copy runs from (the parameters are for the checks).' }
+    $engineState = @{ Problem = '' }
+    $limits = $script:Limits
     $b = [ordered]@{ Kind = 'Real' }
     $b.Elevated = { Test-AVDTuneElevated }
     $b.OtherSessions = {
@@ -246,27 +368,31 @@ function New-AVDTuneBenchAdapter {
     }
     $b.Unlock = { param($Handle) if ($Handle) { try { $Handle.ReleaseMutex() } catch { }; $Handle.Dispose() } }
     $b.EngineInfo = {
-        if (-not $exe -or -not (Test-Path -LiteralPath $exe)) { return $null }
-        # the SHA256 goes into the result; checking it against the release manifest is plan 9a (not part of this round)
-        [pscustomobject]@{ Path = $exe; Version = (Get-Item -LiteralPath $exe).VersionInfo.FileVersion; Sha256 = (Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash.ToLowerInvariant() }
+        # $null when the measure program cannot be started (EngineProblem says why); otherwise its SHA256 is the one the release manifest names (checked just now)
+        $v = $null
+        try {
+            $v = Open-AVDTuneVerifiedBenchExe -AppRoot $AppRoot -InstallRoot $InstallRoot -StateRoot $StateRoot -Manifest $Manifest
+            $engineState.Problem = ''
+            [pscustomobject]@{ Path = $v.Path; Version = $v.Version; Sha256 = $v.Sha256; Verified = $true }
+        }
+        catch { $engineState.Problem = $_.Exception.Message; $null }
+        finally { if ($v) { $v.Stream.Dispose() } }
     }.GetNewClosure()
+    $b.EngineProblem = { [string]$engineState.Problem }.GetNewClosure()
     $b.RunBench = {
         # Runs the measure program and parses its JSON. Arguments are fixed words and numbers made by this module, never user text
         param([string]$Command, [string[]]$Arguments)
         if ($Command -notmatch '^[a-z]+$') { throw "Invalid command '$Command'." }
-        if (-not $exe -or -not (Test-Path -LiteralPath $exe)) { throw 'AVDTune.Bench.exe was not found.' }
-        $psi = New-Object System.Diagnostics.ProcessStartInfo
-        $psi.FileName = $exe
-        $psi.Arguments = (@($Command) + @($Arguments) | ForEach-Object { ConvertTo-AVDTuneArgument ([string]$_) }) -join ' '
-        $psi.UseShellExecute = $false; $psi.RedirectStandardOutput = $true; $psi.RedirectStandardError = $true; $psi.CreateNoWindow = $true
-        $p = [System.Diagnostics.Process]::Start($psi)
-        try {
-            $out = $p.StandardOutput.ReadToEnd(); $err = $p.StandardError.ReadToEnd()
-            [void]$p.WaitForExit(600000)
-            if ($p.ExitCode -ne 0) { throw "AVDTune.Bench $Command failed (exit $($p.ExitCode)): $($err.Trim())" }
-        }
-        finally { $p.Dispose() }
-        $out | ConvertFrom-Json
+        # checked against the release manifest right before this start, and held open (no write, delete or rename) until the process has started
+        $verified = Open-AVDTuneVerifiedBenchExe -AppRoot $AppRoot -InstallRoot $InstallRoot -StateRoot $StateRoot -Manifest $Manifest
+        $cmdLine = (@($Command) + @($Arguments) | ForEach-Object { ConvertTo-AVDTuneArgument ([string]$_) }) -join ' '
+        # environment allowlist, TEMP in an administrators-only folder, timeout with the whole tree ended, kill on close
+        # the verified file stays held (no write, delete, rename) until the process has ended
+        try { $r = Invoke-AVDTuneChildProcess -FileName $verified.Path -Arguments $cmdLine -TimeoutMs $limits.BenchMs -CleanEnvironment -TempDir (Initialize-AVDTuneBenchTemp -StateRoot $StateRoot) }
+        finally { $verified.Stream.Dispose() }
+        if ($r.TimedOut) { throw "AVDTune.Bench $Command did not finish in time and was ended with everything it had started." }
+        if ($r.ExitCode -ne 0) { throw "AVDTune.Bench $Command failed (exit $($r.ExitCode)): $($r.Error.Trim())" }
+        $r.Output | ConvertFrom-Json
     }.GetNewClosure()
     $b.Download = {
         param([string]$Url, [string]$Path)
@@ -289,17 +415,9 @@ function New-AVDTuneBenchAdapter {
     }
     $b.DiskspdRun = {
         param([string]$Exe, [string[]]$Arguments)
-        $psi = New-Object System.Diagnostics.ProcessStartInfo
-        $psi.FileName = $Exe
-        $psi.Arguments = ($Arguments | ForEach-Object { ConvertTo-AVDTuneArgument ([string]$_) }) -join ' '
-        $psi.UseShellExecute = $false; $psi.RedirectStandardOutput = $true; $psi.RedirectStandardError = $true; $psi.CreateNoWindow = $true
-        $p = [System.Diagnostics.Process]::Start($psi)
-        try {
-            $out = $p.StandardOutput.ReadToEnd(); $err = $p.StandardError.ReadToEnd()
-            [void]$p.WaitForExit(900000)
-            [pscustomobject]@{ ExitCode = $p.ExitCode; Output = $out; Error = $err }
-        }
-        finally { $p.Dispose() }
+        $r = Invoke-AVDTuneChildProcess -FileName $Exe -Arguments (($Arguments | ForEach-Object { ConvertTo-AVDTuneArgument ([string]$_) }) -join ' ') -TimeoutMs $limits.DiskspdMs -CleanEnvironment -TempDir (Initialize-AVDTuneBenchTemp -StateRoot $StateRoot)
+        if ($r.TimedOut) { throw 'diskspd did not finish in time and was ended with everything it had started.' }
+        [pscustomobject]@{ ExitCode = $r.ExitCode; Output = $r.Output; Error = $r.Error }
     }
     $b.RestoreTaskRegister = {
         # A SYSTEM task at start-up that runs the restore script from the protected state folder (never a script of the application folder)
@@ -463,7 +581,8 @@ function Test-AVDTuneBenchmarkPreconditions {
     $items = New-Object System.Collections.ArrayList
     $add = { param($Id, $Level, $Ok, $Text) [void]$items.Add([pscustomobject]@{ Id = $Id; Level = $Level; Ok = [bool]$Ok; Text = $Text }) }
     $engine = & $Bench.EngineInfo
-    & $add 'engine' 'Blocker' ($null -ne $engine) $(if ($engine) { 'The measure program is there.' } else { 'AVDTune.Bench.exe was not found (build it with Bench\build.ps1 or use a release).' })
+    $engineWhy = $(if ($Bench.PSObject.Properties['EngineProblem']) { [string](& $Bench.PSObject.Properties['EngineProblem'].Value) } else { '' })
+    & $add 'engine' 'Blocker' ($null -ne $engine) $(if ($engine) { 'The measure program is there and matches the release manifest.' } elseif ($engineWhy) { $engineWhy } else { 'AVDTune.Bench.exe was not found or is not checked (install a release of AVDTune that carries it).' })
     $elev = & $Bench.Elevated
     & $add 'elevated' 'Blocker' $elev $(if ($elev) { 'Running as administrator.' } else { 'The benchmark needs an administrator session.' })
     $sessions = & $Bench.OtherSessions
@@ -1085,7 +1204,7 @@ function Get-AVDTuneBenchmarkSummaryText {
 
 #endregion
 
-Export-ModuleMember -Function Get-AVDTuneBenchRound, Get-AVDTuneBenchmarkConfig, Get-AVDTuneBenchmarkReference, Get-AVDTuneBenchCategoryKey, Get-AVDTuneBenchMedian, Get-AVDTuneBenchCv, Get-AVDTuneBenchIndex,
+Export-ModuleMember -Function Get-AVDTuneBenchRound, Get-AVDTuneBenchmarkConfig, Invoke-AVDTuneChildProcess, Initialize-AVDTuneBenchTemp, Get-AVDTuneChildEnvironment, Get-AVDTuneBenchmarkReference, Get-AVDTuneBenchCategoryKey, Get-AVDTuneBenchMedian, Get-AVDTuneBenchCv, Get-AVDTuneBenchIndex,
     Get-AVDTuneBenchGeometricMean, Get-AVDTuneBenchWeightedGeometricMean, Get-AVDTuneBenchPercentile, Get-AVDTuneBenchmarkScores, ConvertFrom-AVDTuneDiskspdXml, New-AVDTuneBenchAdapter,
     Get-AVDTuneDiskspd, Test-AVDTuneBenchmarkPreconditions, Wait-AVDTuneUpdateIdle, Get-AVDTuneBenchmarkJournalPath, Get-AVDTuneBenchmarkRestoreScriptPath, New-AVDTuneBenchmarkRestoreScript,
     Start-AVDTuneBenchmarkQuiet, Stop-AVDTuneBenchmarkQuiet, Get-AVDTuneBenchmarkCrash, Repair-AVDTuneBenchmarkCrash, Test-AVDTuneBenchmarkClean, Get-AVDTuneBenchRestoreAction, Remove-AVDTuneDiskspdCache, Invoke-AVDTuneBenchDisk, Invoke-AVDTuneBenchNetwork,

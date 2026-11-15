@@ -38,6 +38,7 @@ $script:AclReader = $null   # test hook (Set-AVDTuneReleaseAclReader): replaces 
 $script:MaxManifestBytes = 4MB
 $script:MaxZipBytes = 200MB
 $script:MaxFiles = 2000
+$script:BenchExePath = 'Bench/bin/AVDTune.Bench.exe'   # the measure program inside a release (Tools\New-AVDTuneRelease.ps1 -BenchExe puts it there)
 
 #region versions, URLs, paths (pure)
 
@@ -112,24 +113,34 @@ function Assert-AVDTuneManifest {
     $zip = Get-AVDTuneProp $Manifest 'Zip'
     Need ($null -ne $zip) 'no ZIP entry.'
     Need (([string](Get-AVDTuneProp $zip 'Name')) -ceq "AVDTune-$v.zip") 'bad ZIP name.'
-    Need (([string](Get-AVDTuneProp $zip 'Sha256')) -match '^[0-9a-f]{64}$') 'bad ZIP hash.'
+    Need (([string](Get-AVDTuneProp $zip 'Sha256')) -cmatch '^[0-9a-f]{64}\z') 'bad ZIP hash.'
     $zs = [int64](Get-AVDTuneProp $zip 'Size')
     Need ($zs -gt 0 -and $zs -le $script:MaxZipBytes) 'bad ZIP size.'
     $files = @(Get-AVDTuneProp $Manifest 'Files')
     Need ($files.Count -gt 0 -and $files.Count -le $script:MaxFiles) 'bad file count.'
-    $seen = @{}; $total = [int64]0
+    $seen = @{}; $byPath = @{}; $total = [int64]0
     foreach ($f in $files) {
         $p = [string](Get-AVDTuneProp $f 'Path')
         Need (Test-AVDTuneSafeRelativePath $p) "unsafe path '$p'."
         Need (-not $seen.ContainsKey($p.ToLowerInvariant())) "path '$p' twice."
-        $seen[$p.ToLowerInvariant()] = $true
+        $seen[$p.ToLowerInvariant()] = $true; $byPath[$p.ToLowerInvariant()] = $f
         $sz = [int64](Get-AVDTuneProp $f 'Size')
         Need ($sz -ge 0 -and $sz -le $script:MaxZipBytes) "bad size of '$p'."
         $total += $sz
-        Need (([string](Get-AVDTuneProp $f 'Sha256')) -match '^[0-9a-f]{64}$') "bad hash of '$p'."
+        Need (([string](Get-AVDTuneProp $f 'Sha256')) -cmatch '^[0-9a-f]{64}\z') "bad hash of '$p'."
     }
     Need ($total -le 400MB) 'the files are too large together.'
     Need ($seen.ContainsKey('start-avdtune.ps1') -and $seen.ContainsKey('version')) 'Start-AVDTune.ps1 or VERSION is missing in the list.'
+    # The measure program (issue #19): optional (releases before it have none), but when there it is one of the listed files and says the same about it
+    $bench = Get-AVDTuneProp $Manifest 'Bench'
+    if ($null -ne $bench) {
+        $bp = [string](Get-AVDTuneProp $bench 'Path')
+        Need ($bp -ceq $script:BenchExePath) 'bad path of the measure program.'
+        Need ($byPath.ContainsKey($bp.ToLowerInvariant())) 'the measure program is not in the file list.'
+        $bf = $byPath[$bp.ToLowerInvariant()]
+        Need (([string](Get-AVDTuneProp $bench 'Sha256')) -cmatch '^[0-9a-f]{64}\z') 'bad hash of the measure program.'
+        Need (([string](Get-AVDTuneProp $bench 'Sha256')) -ceq ([string](Get-AVDTuneProp $bf 'Sha256')) -and [int64](Get-AVDTuneProp $bench 'Size') -eq [int64](Get-AVDTuneProp $bf 'Size')) 'the measure program entry differs from its entry in the file list.'
+    }
     $Manifest
 }
 
@@ -442,6 +453,92 @@ function Confirm-AVDTuneUnverified {
 
 #endregion
 
+#region measure program (issue #19)
+
+function Get-AVDTuneChainAclProblems {
+    # The file and every folder above it up to the install folder: not a link, owner Administrators or SYSTEM (below the install folder also the elevated administrator
+    # running AVDTune), no explicit allow rule for anyone else. Same standard as the install folder check (Get-AVDTuneAclProblems). Empty = fine.
+    param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][string]$InstallRoot)
+    $reader = $script:AclReader
+    if (-not $reader) { $reader = { param($P, $IsDirectory) Read-AVDTuneAclInfo -Path $P -IsDirectory $IsDirectory } }
+    $trusted = @('S-1-5-32-544', 'S-1-5-18')
+    $adminSid = ''
+    if (-not $script:AclReader -and (Test-AVDTuneElevated)) { $adminSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value }
+    $root = [IO.Path]::GetFullPath($InstallRoot).TrimEnd('\')
+    $cur = [IO.Path]::GetFullPath($Path).TrimEnd('\')
+    $problems = New-Object System.Collections.ArrayList
+    $isDir = $false
+    while ($true) {
+        $attr = $null; try { $attr = [IO.File]::GetAttributes($cur) } catch { [void]$problems.Add("$cur cannot be read: $($_.Exception.Message)") }
+        if ($null -ne $attr -and ($attr -band [IO.FileAttributes]::ReparsePoint)) { [void]$problems.Add("$cur is a link") }
+        $acl = $null
+        try { $acl = & $reader $cur $isDir } catch { [void]$problems.Add("ACL of $cur cannot be read: $($_.Exception.Message)") }
+        if ($acl) {
+            $owners = @($trusted); if ($adminSid -and $cur -ine $root) { $owners += $adminSid }
+            if ([string]$acl.Owner -notin $owners) { [void]$problems.Add("owner of $cur is $($acl.Owner)") }
+            $foreign = @($acl.Rules | Where-Object { $_.Sid -notin $trusted -and -not $_.Inherited } | ForEach-Object { $_.Sid } | Sort-Object -Unique)
+            if ($foreign.Count -gt 0) { [void]$problems.Add("access for $($foreign -join ', ') on $cur") }
+        }
+        if ($cur -ieq $root) { break }
+        $parent = [IO.Path]::GetDirectoryName($cur)
+        if (-not $parent -or $parent -ieq $cur) { [void]$problems.Add("$Path is not below the install folder"); break }
+        $cur = $parent; $isDir = $true
+    }
+    @($problems)
+}
+
+function Open-AVDTuneVerifiedBenchExe {
+    <#
+        The only way to get at AVDTune.Bench.exe (issue #19, plan 9a). Returns Path, Version, Size, Sha256 and Stream: the file held open for reading with
+        FileShare.Read (nobody can write to it, delete it or rename it, nor the folders above it, while it is held). The caller starts the process while the
+        stream is open and disposes it afterwards; Windows still loads the program (read and execute are shared). Everything is checked on the held file:
+          * the copy of AVDTune runs from <install folder>\<version> (not a development checkout, not an unprotected copy);
+          * the manifest of this version (saved at install time, or -Manifest) has a Bench entry; no entry = no start;
+          * the file and every folder up to the install folder are administrators only, no links;
+          * size and SHA256 of the held file equal the manifest entry. No match = no start.
+        Throws with a plain reason; there is no fallback to a program found elsewhere. The checks use a temporary install folder only together with AVDTUNE_FAKE
+        (the test mode) and a fake ACL reader (Set-AVDTuneReleaseAclReader).
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$AppRoot, [Parameter(Mandatory)][string]$InstallRoot, [Parameter(Mandatory)][string]$StateRoot, $Manifest)
+    $real = Test-AVDTuneRealInstallRoot $InstallRoot
+    if (-not $real -and -not $env:AVDTUNE_FAKE) { throw 'AVDTune.Bench.exe only starts from the install folder of AVDTune.' }
+    $info = Get-AVDTuneInstallInfo -AppRoot $AppRoot -InstallRoot $InstallRoot
+    if ($info.Mode -ne 'Installed' -or -not $info.Version) {
+        throw "AVDTune.Bench.exe only starts from the protected install folder ($($info.InstallRoot)\<version>), and this copy of AVDTune runs from $($info.AppRoot). Install a release; a development checkout or a copy elsewhere cannot run the measure program."
+    }
+    if (-not $Manifest) { $Manifest = (Get-AVDTuneReleaseManifest -Version $info.Version -StateRoot $StateRoot -CacheOnly).Manifest }
+    if (-not $Manifest) { throw "No release manifest of version $($info.Version) is saved on this computer, so AVDTune.Bench.exe cannot be checked and is not started. Start AVDTune once with access to GitHub (or repair the install)." }
+    $Manifest = Assert-AVDTuneManifest -Manifest $Manifest -Version $info.Version
+    $entry = Get-AVDTuneProp $Manifest 'Bench'
+    if ($null -eq $entry) { throw "The release manifest of version $($info.Version) has no entry for AVDTune.Bench.exe: this release does not carry a checked measure program, so the benchmark does not start. Update AVDTune to a release that has one." }
+    $rel = [string]$entry.Path
+    Assert-AVDTuneNoLinkInPath -Base $info.AppRoot -Rel $rel
+    $full = Join-Path $info.AppRoot $rel.Replace('/', '\')
+    $stream = $null
+    try {
+        try { $stream = [IO.File]::Open($full, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read) }
+        catch { throw "AVDTune.Bench.exe cannot be opened ($full): $($_.Exception.Message)" }
+        if ($real -or $script:AclReader) {
+            $problems = @(Get-AVDTuneChainAclProblems -Path $full -InstallRoot $info.InstallRoot)
+            if ($problems.Count -gt 0) { throw "AVDTune.Bench.exe is not in a protected folder ($($problems[0])). It is not started." }
+        }
+        # nothing but the exe next to it (no DLL to side-load); checked while the exe is held, so the folder cannot be refilled between check and start
+        $binDir = New-Object IO.DirectoryInfo (Split-Path $full -Parent)
+        $others = @($binDir.GetFileSystemInfos() | Where-Object { $_.Name -ine (Split-Path $full -Leaf) } | ForEach-Object Name)
+        if ($others.Count -gt 0) { throw "The folder of AVDTune.Bench.exe holds more than the exe ($($others -join ', ')). It is not started." }
+        if ($stream.Length -ne [int64]$entry.Size) { throw "AVDTune.Bench.exe does not have the size in the release manifest of version $($info.Version) ($($stream.Length) instead of $($entry.Size) bytes). It is not started." }
+        $sha = [Security.Cryptography.SHA256]::Create()
+        try { $hash = ([BitConverter]::ToString($sha.ComputeHash($stream)) -replace '-', '').ToLowerInvariant() } finally { $sha.Dispose() }
+        if ($hash -cne [string]$entry.Sha256) { throw "AVDTune.Bench.exe does not match the SHA256 in the release manifest of version $($info.Version) (expected $(([string]$entry.Sha256).Substring(0, 12)) ..., found $($hash.Substring(0, 12)) ...). It is not started." }
+        $stream.Position = 0
+        [pscustomobject]@{ Path = $full; Version = $info.Version; Size = $stream.Length; Sha256 = $hash; Stream = $stream }
+    }
+    catch { if ($stream) { $stream.Dispose() }; throw }
+}
+
+#endregion
+
 #region settings and update check
 
 function Get-AVDTuneReleaseSettings([string]$StateRoot) {
@@ -713,4 +810,4 @@ Export-ModuleMember -Function Test-AVDTuneReleaseVersion, Compare-AVDTuneRelease
     Test-AVDTuneSafeRelativePath, Get-AVDTuneFileSha256, Get-AVDTuneToolVersion, Assert-AVDTuneManifest, ConvertFrom-AVDTuneManifestText, Get-AVDTuneReleaseManifest,
     New-AVDTuneReleaseHttp, Get-AVDTuneInstallRoot, Get-AVDTuneInstallState, Get-AVDTuneInstallInfo, Test-AVDTuneIntegrity, Get-AVDTuneIntegrityStatus,
     Set-AVDTuneIntegrityBlock, Get-AVDTuneReleaseSettings, Set-AVDTuneReleaseSettings, Get-AVDTuneLatestRelease, Assert-AVDTuneUpdateAllowed,
-    Expand-AVDTuneReleaseZip, Install-AVDTuneRelease, Undo-AVDTuneRelease, Repair-AVDTuneInstall, Write-AVDTuneLauncher, Set-AVDTuneReleaseAclReader, Confirm-AVDTuneUnverified, Assert-AVDTuneNoLinkInPath
+    Expand-AVDTuneReleaseZip, Install-AVDTuneRelease, Undo-AVDTuneRelease, Repair-AVDTuneInstall, Write-AVDTuneLauncher, Set-AVDTuneReleaseAclReader, Confirm-AVDTuneUnverified, Assert-AVDTuneNoLinkInPath, Open-AVDTuneVerifiedBenchExe

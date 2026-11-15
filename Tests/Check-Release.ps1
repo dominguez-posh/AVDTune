@@ -78,6 +78,25 @@ try {
         Test-Check 'release: notes come from the commit subjects; the manifest passes the tool validation' ($m1.Notes -like '*first release content*' -and (Assert-AVDTuneManifest $m1 '0.1.0')) $m1.Notes
         $r1b = & (Join-Path $repo 'Tools\New-AVDTuneRelease.ps1') -Root $g -OutDir (Join-Path $tmp 'rel1b')
         Test-Check 'release: building the same commit again gives the same ZIP (reproducible)' ((Get-AVDTuneFileSha256 $r1.Zip) -eq (Get-AVDTuneFileSha256 $r1b.Zip)) $null
+        # the measure program (issue #19): in the ZIP, in Files and as Bench {Path, Size, Sha256}; a release without it is refused when it is required
+        $benchFile = Join-Path $tmp 'built-AVDTune.Bench.exe'; [IO.File]::WriteAllBytes($benchFile, [byte[]](1..200))
+        $r1c = & (Join-Path $repo 'Tools\New-AVDTuneRelease.ps1') -Root $g -OutDir (Join-Path $tmp 'rel1c') -BenchExe $benchFile -RequireBench -ExpectTag 'v0.1.0'
+        $m1c = Get-Content -LiteralPath $r1c.Manifest -Raw | ConvertFrom-Json
+        $benchHash = Get-AVDTuneFileSha256 $benchFile
+        $benchInFiles = @($m1c.Files | Where-Object { $_.Path -ceq 'Bench/bin/AVDTune.Bench.exe' })
+        Test-Check 'release with -BenchExe: Bench entry has path, size and the SHA256 of the file, and the same entry is in Files' ($m1c.Bench.Path -ceq 'Bench/bin/AVDTune.Bench.exe' -and $m1c.Bench.Size -eq 200 -and $m1c.Bench.Sha256 -ceq $benchHash -and $benchInFiles.Count -eq 1 -and $benchInFiles[0].Sha256 -ceq $benchHash -and $benchInFiles[0].Size -eq 200) ($m1c | ConvertTo-Json -Depth 4 -Compress)
+        Add-Type -AssemblyName System.IO.Compression, System.IO.Compression.FileSystem
+        $zc = [IO.Compression.ZipFile]::OpenRead($r1c.Zip); try { $zipNames = @($zc.Entries | ForEach-Object FullName) } finally { $zc.Dispose() }
+        Test-Check 'release with -BenchExe: the exe is in the ZIP and the manifest passes the tool validation' ($zipNames -contains 'Bench/bin/AVDTune.Bench.exe' -and (Assert-AVDTuneManifest $m1c '0.1.0')) ($zipNames -join ',')
+        Test-Check 'release without -BenchExe has no Bench entry (older releases stay valid)' ($null -eq $m1.PSObject.Properties['Bench']) $null
+        Test-Check 'release: -RequireBench without -BenchExe is refused (no release without the measure program)' ((Get-ThrownText { & (Join-Path $repo 'Tools\New-AVDTuneRelease.ps1') -Root $g -OutDir (Join-Path $tmp 'rel1d') -RequireBench }) -like '*required*') $null
+        Test-Check 'release: a missing, empty or linked -BenchExe is refused' ((Get-ThrownText { & (Join-Path $repo 'Tools\New-AVDTuneRelease.ps1') -Root $g -OutDir (Join-Path $tmp 'rel1e') -BenchExe (Join-Path $tmp 'nope.exe') }) -and (& { $e = Join-Path $tmp 'empty.exe'; [IO.File]::WriteAllBytes($e, [byte[]]@()); Get-ThrownText { & (Join-Path $repo 'Tools\New-AVDTuneRelease.ps1') -Root $g -OutDir (Join-Path $tmp 'rel1f') -BenchExe $e } }) -like '*implausible*') $null
+        $mb = Get-Content -LiteralPath $r1c.Manifest -Raw | ConvertFrom-Json; $mb.Bench.Sha256 = ('0' * 64)
+        Test-Check 'manifest validation: a Bench entry that differs from its entry in Files is refused' ((Get-ThrownText { Assert-AVDTuneManifest $mb '0.1.0' }) -like '*differs*') $null
+        $mb = Get-Content -LiteralPath $r1c.Manifest -Raw | ConvertFrom-Json; $mb.Bench.Path = 'Modules/A.psm1'
+        Test-Check 'manifest validation: a Bench entry for another path is refused' ((Get-ThrownText { Assert-AVDTuneManifest $mb '0.1.0' }) -like '*bad path of the measure program*') $null
+        $mb = Get-Content -LiteralPath $r1c.Manifest -Raw | ConvertFrom-Json; $mb.Files = @($mb.Files | Where-Object { $_.Path -cne 'Bench/bin/AVDTune.Bench.exe' })
+        Test-Check 'manifest validation: a Bench entry that is not in Files is refused' ((Get-ThrownText { Assert-AVDTuneManifest $mb '0.1.0' }) -like '*not in the file list*') $null
         [IO.File]::AppendAllText((Join-Path $g 'README.md'), 'dirty')
         Test-Check 'release: a checkout with changes is refused' ((Get-ThrownText { & (Join-Path $repo 'Tools\New-AVDTuneRelease.ps1') -Root $g -OutDir (Join-Path $tmp 'rel2') }) -like '*not clean*') $null
         Invoke-Git @('checkout', '-q', '--', 'README.md') $g

@@ -25,6 +25,9 @@
     <PublishReadyToRun>true</PublishReadyToRun>
     <DebugType>none</DebugType>
     <NoWarn>CA1416</NoWarn>
+    <!-- no startup hooks (DOTNET_STARTUP_HOOKS cannot load code into this elevated process) and a lock file for the restore (build.ps1 restores in locked mode) -->
+    <StartupHookSupport>false</StartupHookSupport>
+    <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="src/**/*.cs" />

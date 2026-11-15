@@ -261,6 +261,214 @@ try {
     Test-Check 'Overview: an open restore journal shows a red Benchmark row, none without a journal' ($row0.Count -eq 0 -and $row1.Count -eq 1 -and $row1[0].Status -eq 'bad' -and $row1[0].Detail -like '*Benchmark page*') $null
     Remove-Item (Get-AVDTuneBenchmarkJournalPath $tmp) -Force
 
+    # ---------------------------------------------------------------- the measure program: manifest entry, protected folder, hash before every start, no gap (issue #19)
+    # A copy of a small system program stands in for AVDTune.Bench.exe (it really starts); the install folder is a temporary one (only together with AVDTUNE_FAKE).
+    Import-Module (Join-Path $repo 'Modules\AVDTune.Release.psm1') -Force
+    $oldFake = $env:AVDTUNE_FAKE; $env:AVDTUNE_FAKE = 'bench-check'
+    try {
+        $inst = Join-Path $tmp 'install'; $app = Join-Path $inst '0.5.0'; $exeDir = Join-Path $app 'Bench\bin'; $exe = Join-Path $exeDir 'AVDTune.Bench.exe'
+        $stand = Join-Path $tmp 'stand-in.exe'   # a tiny console program that prints JSON like the measure program does
+        $standSrc = @"
+using System; using System.Threading;
+public static class StandIn { public static int Main(string[] a) {
+  if (a.Length > 1 && a[0] == "env") { Console.Out.Write("{\"v\":\"" + (Environment.GetEnvironmentVariable(a[1]) ?? "<none>").Replace("\\", "\\\\") + "\"}"); return 0; }
+  if (a.Length > 0 && a[0] == "hang") { var c = System.Diagnostics.Process.Start(System.Reflection.Assembly.GetExecutingAssembly().Location, "sleep"); Console.Out.Write("child:" + c.Id + "\n"); Console.Out.Flush(); Thread.Sleep(600000); return 0; }
+  if (a.Length > 0 && a[0] == "sleep") { Thread.Sleep(600000); return 0; }
+  if (a.Length > 0 && a[0] == "noisy") { for (int i = 0; i < 20000; i++) Console.Error.WriteLine("0123456789012345678901234567890123456789"); Console.Out.Write("{\"ok\":2}"); return 0; }
+  Console.Out.Write("{\"ok\":1}"); return 0; } }
+"@
+        Add-Type -TypeDefinition $standSrc -OutputType ConsoleApplication -OutputAssembly $stand
+        New-Item -ItemType Directory -Path $exeDir -Force | Out-Null
+        Copy-Item -LiteralPath $stand -Destination $exe
+        [IO.File]::WriteAllText((Join-Path $app 'VERSION'), '0.5.0'); [IO.File]::WriteAllText((Join-Path $app 'Start-AVDTune.ps1'), '# stand-in')
+        $goodHash = Get-AVDTuneFileSha256 $exe; $goodSize = (Get-Item -LiteralPath $exe).Length
+        function New-BenchManifest([string]$Hash, [bool]$WithBench = $true, [string]$Version = '0.5.0') {
+            $files = @([ordered]@{ Path = 'Bench/bin/AVDTune.Bench.exe'; Size = $goodSize; Sha256 = $goodHash }, [ordered]@{ Path = 'Start-AVDTune.ps1'; Size = 10; Sha256 = ('c' * 64) }, [ordered]@{ Path = 'VERSION'; Size = 5; Sha256 = ('d' * 64) })
+            $m = [ordered]@{ Schema = 1; Product = 'AVDTune'; Version = $Version; Commit = ('a' * 40); Date = '2026-11-20T10:00:00Z'; Prerelease = $false; Notes = ''; Zip = [ordered]@{ Name = "AVDTune-$Version.zip"; Size = 1000; Sha256 = ('b' * 64) }; Files = $files }
+            if ($WithBench) { $m.Files[0].Sha256 = $Hash; $m.Bench = [ordered]@{ Path = 'Bench/bin/AVDTune.Bench.exe'; Size = $goodSize; Sha256 = $Hash } }
+            ($m | ConvertTo-Json -Depth 6 | ConvertFrom-Json)
+        }
+        function Get-EnginePre($Adapter) { @(Test-AVDTuneBenchmarkPreconditions -Bench $Adapter -Root $tmp -Config $config -SkipIdleCheck | Where-Object { $_.Id -eq 'engine' })[0] }
+        $okManifest = New-BenchManifest $goodHash
+        $realAdapter = New-AVDTuneBenchAdapter -AppRoot $app -InstallRoot $inst -StateRoot $tmp -Manifest $okManifest
+        # the checks run unelevated: a fake ACL reader stands in for the owner check of the bench TEMP folder (the real one wants Administrators as owner)
+        $mod2 = Get-Module AVDTune.Benchmark
+        $trustAll = { param($Path, $IsDirectory) [pscustomobject]@{ Owner = 'S-1-5-32-544'; Protected = $true; Rules = @([pscustomobject]@{ Sid = 'S-1-5-32-544'; Inherited = $false }) } }
+        & $mod2 { $script:Hooks.AclReader = $args[0] } $trustAll
+        $info = & $realAdapter.EngineInfo
+        Test-Check 'measure program: in the install folder with the hash of the manifest it is accepted, the result carries the checked hash' ($info -and $info.Sha256 -ceq $goodHash -and $info.Verified -and $info.Path -ceq $exe -and (& $realAdapter.EngineProblem) -eq '') ($info | Out-String)
+        $run = & $realAdapter.RunBench 'cpu' @('--quick')
+        Test-Check 'measure program: RunBench starts the checked program and reads its JSON' ($run.ok -eq 1 -and (& { [IO.File]::AppendAllText($exe, ''); $true }) -eq $true) ($run | Out-String)
+        $pre = Get-EnginePre $realAdapter
+        Test-Check 'measure program: the precondition says it matches the release manifest' ($pre.Ok -and $pre.Text -like '*matches the release manifest*') $pre.Text
+
+        # no gap between check and start: while the verified file is held it cannot be written, deleted, renamed or replaced, and it still starts
+        $v = Open-AVDTuneVerifiedBenchExe -AppRoot $app -InstallRoot $inst -StateRoot $tmp -Manifest $okManifest
+        try {
+            $w = Get-ThrownText { $s = [IO.File]::Open($exe, 'Open', 'Write', 'ReadWrite'); $s.Dispose() }
+            $d = Get-ThrownText { [IO.File]::Delete($exe) }
+            $mv = Get-ThrownText { [IO.File]::Move($exe, "$exe.old") }
+            $mvDir = Get-ThrownText { [IO.Directory]::Move($exeDir, "$exeDir-old") }
+            $ov = Get-ThrownText { [IO.File]::Copy((Join-Path $env:SystemRoot 'System32\whoami.exe'), $exe, $true) }
+            Test-Check 'measure program: held open, it cannot be written, deleted, renamed or overwritten, nor its folder renamed (no gap after the check)' ($w -and $d -and $mv -and $mvDir -and $ov) "$w | $d | $mv | $mvDir | $ov"
+            $psi = New-Object System.Diagnostics.ProcessStartInfo; $psi.FileName = $v.Path; $psi.UseShellExecute = $false; $psi.CreateNoWindow = $true; $psi.RedirectStandardOutput = $true
+            $pr = [System.Diagnostics.Process]::Start($psi); $null = $pr.StandardOutput.ReadToEnd(); [void]$pr.WaitForExit(20000); $code = $pr.ExitCode; $pr.Dispose()
+            Test-Check 'measure program: the held file starts (read and execute stay shared)' ($code -eq 0) $code
+        }
+        finally { $v.Stream.Dispose() }
+        Test-Check 'measure program: after the start the hold is released again' ((& { [IO.File]::AppendAllText($exe, 'x'); $true }) -eq $true) $null
+        [IO.File]::WriteAllBytes($exe, [IO.File]::ReadAllBytes($stand))   # the original bytes again
+
+        # wrong hash: nothing starts, the message names the manifest
+        $badHash = New-BenchManifest ('9' * 64)
+        $msg = Get-ThrownText { Open-AVDTuneVerifiedBenchExe -AppRoot $app -InstallRoot $inst -StateRoot $tmp -Manifest $badHash }
+        Test-Check 'measure program: a hash that is not the one of the manifest is refused with a clear message' ($msg -like '*does not match the SHA256 in the release manifest*not started*') $msg
+        $adBad = New-AVDTuneBenchAdapter -AppRoot $app -InstallRoot $inst -StateRoot $tmp -Manifest $badHash
+        $runMsg = Get-ThrownText { & $adBad.RunBench 'cpu' @('--quick') }
+        $preBad = Get-EnginePre $adBad
+        Test-Check 'measure program: RunBench with a wrong hash starts nothing; the engine precondition is a blocker with the reason' ($runMsg -like '*does not match the SHA256*' -and $null -eq (& $adBad.EngineInfo) -and -not $preBad.Ok -and $preBad.Level -eq 'Blocker' -and $preBad.Text -like '*does not match*') $runMsg
+        # the file is changed after the manifest was made: same size (hash differs) and a different size
+        $orig = [IO.File]::ReadAllBytes($exe); $flip = $orig.Clone(); $flip[$flip.Length - 1] = [byte](($flip[$flip.Length - 1] + 1) % 256); [IO.File]::WriteAllBytes($exe, $flip)
+        $m1 = Get-ThrownText { Open-AVDTuneVerifiedBenchExe -AppRoot $app -InstallRoot $inst -StateRoot $tmp -Manifest $okManifest }
+        [IO.File]::WriteAllBytes($exe, $orig + [byte[]](1, 2, 3))
+        $m2 = Get-ThrownText { Open-AVDTuneVerifiedBenchExe -AppRoot $app -InstallRoot $inst -StateRoot $tmp -Manifest $okManifest }
+        [IO.File]::WriteAllBytes($exe, $orig)
+        Test-Check 'measure program: a changed file (same size, other size) is refused, and nothing stays open afterwards' ($m1 -like '*does not match the SHA256*' -and $m2 -like '*size*not started*' -and (& { [IO.File]::AppendAllText($exe, ''); $true }) -eq $true) "$m1 | $m2"
+
+        # child process of the measure program (issue #19): clean environment, TEMP in an administrators-only folder, async pipes, timeout ends the tree, extra files stop the start
+        $env:DOTNET_AVDTUNE_TEST = 'evil'; $env:COMPlus_AVDTUNE_TEST = 'evil'; $env:AVDTUNE_KEEP_ME = 'kept'
+        try {
+            $e1 = & $realAdapter.RunBench 'env' @('DOTNET_AVDTUNE_TEST'); $e2 = & $realAdapter.RunBench 'env' @('COMPlus_AVDTUNE_TEST'); $e3 = & $realAdapter.RunBench 'env' @('AVDTUNE_KEEP_ME')
+            Test-Check 'child process: DOTNET_ and COMPlus_ variables are not in the environment of the measure program (and no other variable of the caller is either)' ($e1.v -eq '<none>' -and $e2.v -eq '<none>' -and $e3.v -eq '<none>') "$($e1.v) $($e2.v) $($e3.v)"
+        }
+        finally { Remove-Item Env:\DOTNET_AVDTUNE_TEST, Env:\COMPlus_AVDTUNE_TEST, Env:\AVDTUNE_KEEP_ME -ErrorAction SilentlyContinue }
+        $pv = (& $realAdapter.RunBench 'env' @('PATH')).v; $tv = (& $realAdapter.RunBench 'env' @('TEMP')).v; $tm = (& $realAdapter.RunBench 'env' @('TMP')).v
+        Test-Check 'child process: PATH is System32 only, TEMP and TMP are the folder below the state folder' ($pv -ieq (Join-Path $env:SystemRoot 'System32') -and $tv -ieq (Join-Path $tmp 'temp\bench') -and $tm -ieq $tv -and (Test-Path -LiteralPath $tv)) "$pv | $tv | $tm"
+        $evil = @('DOTNET_AVDTUNE_T', 'COREHOST_AVDTUNE_T', 'CORECLR_AVDTUNE_T', 'COMPlus_AVDTUNE_T', 'COR_AVDTUNE_T', '__COMPAT_LAYER', 'AVDTUNE_HKCU_LIKE', 'USERPROFILE_FAKE_AVDTUNE')
+        foreach ($k in $evil) { [Environment]::SetEnvironmentVariable($k, 'evil') }
+        try {
+            $seen = @($evil | ForEach-Object { "$_=$((& $realAdapter.RunBench 'env' @($_)).v)" })
+            Test-Check 'child process: environment allowlist: all five prefixes, __COMPAT_LAYER and any other variable are gone' (@($seen | Where-Object { $_ -notlike '*=<none>' }).Count -eq 0) ($seen -join ' ')
+            $sr = (& $realAdapter.RunBench 'env' @('SystemRoot')).v; $np = (& $realAdapter.RunBench 'env' @('NUMBER_OF_PROCESSORS')).v; $pa = (& $realAdapter.RunBench 'env' @('PROCESSOR_ARCHITECTURE')).v
+            Test-Check 'child process: the allowlisted variables (SystemRoot, NUMBER_OF_PROCESSORS, PROCESSOR_*) are passed on' ($sr -ieq $env:SystemRoot -and $np -eq $env:NUMBER_OF_PROCESSORS -and $pa -eq $env:PROCESSOR_ARCHITECTURE) "$sr $np $pa"
+        }
+        finally { foreach ($k in $evil) { [Environment]::SetEnvironmentVariable($k, $null) } }
+        # TEMP folder (checklist: no links, no foreign rules, set aside, created in one step with its ACL)
+        $benchTemp = Join-Path $tmp 'temp\bench'
+        $first = & $mod2 { Initialize-AVDTuneBenchTemp -StateRoot $args[0] } $tmp
+        Test-Check 'bench TEMP: created below the state folder; a second call reuses it' ($first -ieq $benchTemp -and (Test-Path -LiteralPath $benchTemp) -and (& $mod2 { Initialize-AVDTuneBenchTemp -StateRoot $args[0] } $tmp) -ieq $benchTemp -and @(Get-ChildItem (Join-Path $tmp 'temp') -Filter 'bench.untrusted-*').Count -eq 0) $first
+        $acl = (New-Object IO.DirectoryInfo $benchTemp).GetAccessControl()
+        $allowedSids = @('S-1-5-32-544', 'S-1-5-18') + $(if (-not (Test-AVDTuneElevated)) { [Security.Principal.WindowsIdentity]::GetCurrent().User.Value })
+        Test-Check 'bench TEMP: created with a protected ACL (no inheritance; Administrators and SYSTEM only, plus the current user only when the check itself is not elevated)' ($acl.AreAccessRulesProtected -and @($acl.GetAccessRules($true, $false, [Security.Principal.SecurityIdentifier]) | Where-Object { $_.IdentityReference.Value -notin $allowedSids }).Count -eq 0) $null
+        $tempMark = Join-Path $benchTemp 'mark.txt'; [IO.File]::WriteAllText($tempMark, 'x')
+        $tgt = Join-Path $tmp 'temp-link-target'; New-Item -ItemType Directory -Path $tgt | Out-Null; [IO.File]::WriteAllText((Join-Path $tgt 'keep.txt'), 'keep')
+        Remove-Item -LiteralPath $benchTemp -Recurse -Force
+        [void](New-Item -ItemType Junction -Path $benchTemp -Target $tgt)
+        $viaJ = & $mod2 { Initialize-AVDTuneBenchTemp -StateRoot $args[0] } $tmp
+        $aside = @(Get-ChildItem (Join-Path $tmp 'temp') -Filter 'bench.untrusted-*' -Force)
+        Test-Check 'bench TEMP: a junction in its place is set aside as a link, the target is untouched, a new real folder is made' ($aside.Count -eq 1 -and (Test-Path (Join-Path $tgt 'keep.txt')) -and -not ((Get-Item -LiteralPath $viaJ -Force).Attributes -band [IO.FileAttributes]::ReparsePoint)) ($aside.Name -join ',')
+        [IO.Directory]::Delete($aside[0].FullName)
+        $mod2hooks = { $script:Hooks.AclReader = $args[0] }
+        & $mod2 $mod2hooks ({ param($Path, $IsDirectory) $r = @([pscustomobject]@{ Sid = 'S-1-5-32-544'; Inherited = $false }); if ($Path -like '*\bench') { $r += [pscustomobject]@{ Sid = 'S-1-5-32-545'; Inherited = $false } }; [pscustomobject]@{ Owner = 'S-1-5-32-544'; Protected = $true; Rules = $r } })
+        try {
+            [IO.File]::WriteAllText((Join-Path $benchTemp 'prepared.txt'), 'x')
+            $viaP = & $mod2 { Initialize-AVDTuneBenchTemp -StateRoot $args[0] } $tmp
+            $aside = @(Get-ChildItem (Join-Path $tmp 'temp') -Filter 'bench.untrusted-*' -Force)
+            Test-Check 'bench TEMP: a prepared folder (rule for users) is set aside with its content, not repaired' ($aside.Count -eq 1 -and (Test-Path (Join-Path $aside[0].FullName 'prepared.txt')) -and -not (Test-Path (Join-Path $viaP 'prepared.txt'))) ($aside.Name -join ',')
+        }
+        finally { & $mod2 $mod2hooks $trustAll }
+        $srcBuild = Get-Content -LiteralPath (Join-Path $repo 'Bench\build.ps1') -Raw; $gj = Get-Content -LiteralPath (Join-Path $repo 'Bench\global.json') -Raw | ConvertFrom-Json
+        Test-Check 'Bench build: runs from the Bench folder (Push-Location, Pop in finally) and stops when dotnet is not the SDK of global.json' ($srcBuild -match 'Push-Location \$PSScriptRoot' -and $srcBuild -match 'finally \{ Pop-Location \}' -and $srcBuild -match '\$sdk -ne \$want' -and $gj.sdk.version -match '^\d+\.\d+\.\d+$' -and $gj.sdk.rollForward -eq 'disable') $null
+        $nc = Get-Content -LiteralPath (Join-Path $repo 'Bench\nuget.config') -Raw
+        Test-Check 'Bench build: nuget.config has nuget.org as the only source with a package source mapping' ($nc -match '<clear />' -and $nc -match 'packageSourceMapping' -and ([regex]::Matches($nc, '<add key=')).Count -eq 1 -and $nc -match 'https://api.nuget.org/') $null
+        $noisy = & $realAdapter.RunBench 'noisy' @()
+        Test-Check 'child process: a program that writes a lot to stderr does not block (stderr is read at the same time)' ($noisy.ok -eq 2) $null
+        $mod = Get-Module AVDTune.Benchmark; $mod2 = $mod
+        & $mod { $script:Limits.BenchMs = 3000 }
+        try {
+            $sw = [Diagnostics.Stopwatch]::StartNew()
+            $hm = Get-ThrownText { & $realAdapter.RunBench 'hang' @() }
+            $sw.Stop()
+        }
+        finally { & $mod { $script:Limits.BenchMs = 600000 } }
+        Test-Check 'child process: a program that hangs is ended after the timeout with a clear message' ($hm -like '*did not finish in time*' -and $sw.Elapsed.TotalSeconds -lt 30) "$hm $($sw.Elapsed.TotalSeconds)"
+        $hr = & $mod { Invoke-AVDTuneChildProcess -FileName $args[0] -Arguments 'hang' -TimeoutMs 2000 } $exe
+        $childId = [int](([regex]::Match($hr.Output, 'child:(\d+)')).Groups[1].Value)
+        Start-Sleep -Milliseconds 500
+        Test-Check 'child process: on a timeout the whole tree is ended, also the process it started' ($hr.TimedOut -and $childId -gt 0 -and $null -eq (Get-Process -Id $childId -ErrorAction SilentlyContinue)) ($hr | Out-String)
+        $extra = Join-Path $exeDir 'evil.dll'; [IO.File]::WriteAllBytes($extra, [byte[]](1, 2, 3))
+        $msg = Get-ThrownText { Open-AVDTuneVerifiedBenchExe -AppRoot $app -InstallRoot $inst -StateRoot $tmp -Manifest $okManifest }
+        Remove-Item -LiteralPath $extra -Force
+        Test-Check 'measure program: an extra DLL next to the exe stops the start' ($msg -like '*holds more than the exe*evil.dll*not started*') $msg
+        $okAgain = Open-AVDTuneVerifiedBenchExe -AppRoot $app -InstallRoot $inst -StateRoot $tmp -Manifest $okManifest; $okAgain.Stream.Dispose()
+        $bad64 = New-BenchManifest ($goodHash.ToUpperInvariant())
+        Test-Check 'manifest validation: an upper-case or longer hash is not a hash' ((Get-ThrownText { Assert-AVDTuneManifest $bad64 '0.5.0' }) -like '*bad hash*' -and (Get-ThrownText { Assert-AVDTuneManifest (New-BenchManifest ($goodHash + "`n")) '0.5.0' }) -like '*bad hash*') $null
+        # no manifest entry
+        $noEntry = New-BenchManifest $goodHash $false
+        $msg = Get-ThrownText { Open-AVDTuneVerifiedBenchExe -AppRoot $app -InstallRoot $inst -StateRoot $tmp -Manifest $noEntry }
+        $adNo = New-AVDTuneBenchAdapter -AppRoot $app -InstallRoot $inst -StateRoot $tmp -Manifest $noEntry
+        $preNo = Get-EnginePre $adNo
+        Test-Check 'measure program: a manifest without a Bench entry means no start, with a clear message and a blocking precondition' ($msg -like '*no entry for AVDTune.Bench.exe*does not start*' -and $null -eq (& $adNo.EngineInfo) -and (Get-ThrownText { & $adNo.RunBench 'mem' @() }) -like '*no entry*' -and -not $preNo.Ok -and $preNo.Text -like '*no entry*') $msg
+        # manifest of another version
+        $msg = Get-ThrownText { Open-AVDTuneVerifiedBenchExe -AppRoot $app -InstallRoot $inst -StateRoot $tmp -Manifest (New-BenchManifest $goodHash $true '0.6.0') }
+        Test-Check 'measure program: the manifest of another version is not used' ($msg -like '*not valid*0.6.0*') $msg
+        # no manifest anywhere: none saved
+        $msg = Get-ThrownText { Open-AVDTuneVerifiedBenchExe -AppRoot $app -InstallRoot $inst -StateRoot (Join-Path $tmp 'empty-state') }
+        Test-Check 'measure program: without a saved manifest it is not started' ($msg -like '*No release manifest of version 0.5.0*not started*') $msg
+        # the saved manifest (written at install time) is what a normal start uses
+        New-Item -ItemType Directory -Path (Join-Path $tmp 'release') -Force | Out-Null
+        [IO.File]::WriteAllText((Join-Path $tmp 'release\manifest-0.5.0.json'), ($okManifest | ConvertTo-Json -Depth 6))
+        $viaCache = Open-AVDTuneVerifiedBenchExe -AppRoot $app -InstallRoot $inst -StateRoot $tmp
+        $viaCache.Stream.Dispose()
+        Test-Check 'measure program: with the manifest saved at install time it is accepted without -Manifest' ($viaCache.Sha256 -ceq $goodHash) $null
+
+        # outside the install folder: a development checkout with Bench\out and tools\, a version-named folder somewhere else
+        $dev = Join-Path $tmp 'checkout'; $devOut = Join-Path $dev 'Bench\out'; New-Item -ItemType Directory -Path $devOut -Force | Out-Null
+        Copy-Item -LiteralPath $exe -Destination (Join-Path $devOut 'AVDTune.Bench.exe'); New-Item -ItemType Directory -Path (Join-Path $dev 'tools') -Force | Out-Null; Copy-Item -LiteralPath $exe -Destination (Join-Path $dev 'tools\AVDTune.Bench.exe')
+        [IO.File]::WriteAllText((Join-Path $dev 'VERSION'), '0.5.0')
+        $msg = Get-ThrownText { Open-AVDTuneVerifiedBenchExe -AppRoot $dev -InstallRoot $inst -StateRoot $tmp -Manifest $okManifest }
+        $adDev = New-AVDTuneBenchAdapter -AppRoot $dev -InstallRoot $inst -StateRoot $tmp -Manifest $okManifest
+        Test-Check 'measure program: from a checkout (Bench\out, tools\) it is not started, even with the right hash' ($msg -like '*only starts from the protected install folder*' -and $null -eq (& $adDev.EngineInfo) -and (Get-ThrownText { & $adDev.RunBench 'cpu' @() }) -like '*protected install folder*') $msg
+        $srcAdapter = Get-Content -LiteralPath (Join-Path $repo 'Modules\AVDTune.Benchmark.psm1') -Raw
+        Test-Check 'measure program: the adapter no longer looks in Bench\out or tools\ and has no ExePath parameter' ($srcAdapter -notmatch 'Bench\\out' -and $srcAdapter -notmatch '\$ExePath' -and -not (Get-Command New-AVDTuneBenchAdapter).Parameters.ContainsKey('ExePath')) $null
+        $other = Join-Path $tmp 'elsewhere\0.5.0'; New-Item -ItemType Directory -Path (Join-Path $other 'Bench\bin') -Force | Out-Null; Copy-Item -LiteralPath $exe -Destination (Join-Path $other 'Bench\bin\AVDTune.Bench.exe')
+        Test-Check 'measure program: a version-named folder outside the install folder is not an install' ((Get-ThrownText { Open-AVDTuneVerifiedBenchExe -AppRoot $other -InstallRoot $inst -StateRoot $tmp -Manifest $okManifest }) -like '*only starts from the protected install folder*') $null
+        # the test parameters of the adapter only work in the test mode; the real install folder is the only one otherwise
+        $env:AVDTUNE_FAKE = ''
+        Test-Check 'measure program: another install folder or manifest is refused outside the test mode' ((Get-ThrownText { New-AVDTuneBenchAdapter -InstallRoot $inst }) -like '*always the one of the release*' -and (Get-ThrownText { Open-AVDTuneVerifiedBenchExe -AppRoot $app -InstallRoot $inst -StateRoot $tmp -Manifest $okManifest }) -like '*only starts from the install folder*') $null
+        $env:AVDTUNE_FAKE = 'bench-check'
+
+        # the folder is not admin-only: a rule for users, a foreign owner, a link above the file
+        $aclCase = @{ Mode = 'ok' }
+        Set-AVDTuneReleaseAclReader ({ param($Path, $IsDirectory)
+                $owner = 'S-1-5-32-544'; $rules = @([pscustomobject]@{ Sid = 'S-1-5-32-544'; Inherited = $false })
+                if ($aclCase.Mode -eq 'users-folder' -and $Path -like '*Bench\bin') { $rules += [pscustomobject]@{ Sid = 'S-1-5-32-545'; Inherited = $false } }
+                if ($aclCase.Mode -eq 'foreign-owner' -and $Path -like '*0.5.0') { $owner = 'S-1-5-21-1-2-3-1001' }
+                if ($aclCase.Mode -eq 'users-file' -and $Path -like '*AVDTune.Bench.exe') { $rules += [pscustomobject]@{ Sid = 'S-1-1-0'; Inherited = $false } }
+                [pscustomobject]@{ Owner = $owner; Protected = $true; Rules = $rules } }.GetNewClosure())
+        try {
+            $okChain = Open-AVDTuneVerifiedBenchExe -AppRoot $app -InstallRoot $inst -StateRoot $tmp -Manifest $okManifest; $okChain.Stream.Dispose()
+            Test-Check 'measure program: with administrator-only folders the ACL check passes' ($okChain.Sha256 -ceq $goodHash) $null
+            foreach ($mode in 'users-folder', 'foreign-owner', 'users-file') {
+                $aclCase.Mode = $mode
+                $msg = Get-ThrownText { Open-AVDTuneVerifiedBenchExe -AppRoot $app -InstallRoot $inst -StateRoot $tmp -Manifest $okManifest }
+                Test-Check "measure program: folder not administrator-only ($mode) is refused" ($msg -like '*not in a protected folder*not started*') $msg
+            }
+            $aclCase.Mode = 'ok'
+            # a junction as Bench in the version folder: refused, and the target is never opened
+            $target = Join-Path $tmp 'junction-target'; New-Item -ItemType Directory -Path (Join-Path $target 'bin') -Force | Out-Null; Copy-Item -LiteralPath $exe -Destination (Join-Path $target 'bin\AVDTune.Bench.exe')
+            $app2 = Join-Path $inst '0.5.1'; New-Item -ItemType Directory -Path $app2 | Out-Null; [IO.File]::WriteAllText((Join-Path $app2 'VERSION'), '0.5.1')
+            [void](New-Item -ItemType Junction -Path (Join-Path $app2 'Bench') -Target $target)
+            $msg = Get-ThrownText { Open-AVDTuneVerifiedBenchExe -AppRoot $app2 -InstallRoot $inst -StateRoot $tmp -Manifest (New-BenchManifest $goodHash $true '0.5.1') }
+            Test-Check 'measure program: a link in the path (junction as Bench) is refused' ($msg -like '*link*') $msg
+            [IO.Directory]::Delete((Join-Path $app2 'Bench'))
+        }
+        finally { Set-AVDTuneReleaseAclReader $null }
+        & $mod2 { $script:Hooks.AclReader = $null }
+        Test-Check 'measure program: the checks used a temporary install folder, not Program Files' ($inst -ne (Get-AVDTuneInstallRoot) -and $env:AVDTUNE_FAKE -eq 'bench-check') $null
+    }
+    finally { $env:AVDTUNE_FAKE = $oldFake; if ($null -eq $oldFake) { Remove-Item Env:\AVDTUNE_FAKE -ErrorAction SilentlyContinue } }
+
     Test-Check 'no file of the check run touched the real state folder' ($tmp -ne (Join-Path ([Environment]::GetFolderPath('CommonApplicationData')) 'AVDTune')) $tmp
 }
 finally {
