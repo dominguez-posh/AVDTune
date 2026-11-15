@@ -318,6 +318,8 @@ function Build-DomainForm {
     $e = Get-AVDTuneEnvironment $script:StateRoot
     $dc = Get-AVDTuneProp $e 'Dc'
     $f.Server = New-Object System.Windows.Controls.TextBox; $f.Server.Width = 320; $f.Server.Text = [string](Get-AVDTuneProp $dc 'Server'); $f.Server.Name = 'TxtDcServer'
+    # A pending confirmation (LDAP 389, pin) belongs to the server it was shown for: a changed name drops it
+    $f.Server.Add_TextChanged({ try { Clear-DomainPending } catch { } })
     $f.User = New-Object System.Windows.Controls.TextBox; $f.User.Width = 320; $f.User.Text = [string](Get-AVDTuneProp $dc 'User'); $f.User.Name = 'TxtDcUser'
     $f.PasswordBox = New-Object System.Windows.Controls.PasswordBox; $f.PasswordBox.Width = 320; $f.PasswordBox.Name = 'PwdDc'; $f.PasswordBox.MaxLength = 256
     [void]$ui.PanelStageBody.Children.Add((New-FormRow 'Domain controller (IP or name)' $f.Server))
@@ -347,8 +349,16 @@ function Show-DirectorySummary($Info, [string]$Security) {
     $f.Summary.Text = $lines -join "`r`n"; $f.Summary.Visibility = 'Visible'
 }
 function Format-Thumbprint([string]$Hex) { (($Hex -split '(?<=\G.{2})' | Where-Object { $_ }) -join ':') }
+function Clear-DomainPending {
+    $f = $script:Form
+    if (-not $f.PendingServer -and -not $f.PendingCert) { return }
+    $f.PendingServer = $null; $f.PendingCert = $null
+    $script:StageAction2 = $null
+    $ui.BtnStageAction2.Visibility = 'Collapsed'
+}
 function Invoke-DomainConnect {
-    param([switch]$ConfirmWithoutLdaps)
+    # -ConfirmedServer: the server whose LDAP 389 warning was accepted; it must still be the one in the form, otherwise nothing is confirmed
+    param([string]$ConfirmedServer)
     $f = $script:Form
     if ($f.PasswordBox.SecurePassword.Length -eq 0) { Set-StageMessage 'Enter the password of the domain account.' 'error'; return }
     $e = Get-AVDTuneEnvironment $script:StateRoot
@@ -356,7 +366,7 @@ function Invoke-DomainConnect {
     $f.Secure = $f.PasswordBox.SecurePassword
     $ldap = Get-StartLdap
     $pins = Get-AVDTuneDcPins $e
-    $r = Invoke-Busy "Connecting to $server ..." { Connect-AVDTuneDirectory -Ldap $ldap -Server $server -User $user -Password $f.Secure -Pins $pins -ConfirmWithoutLdaps:$ConfirmWithoutLdaps }
+    $r = Invoke-Busy "Connecting to $server ..." { Connect-AVDTuneDirectory -Ldap $ldap -Server $server -User $user -Password $f.Secure -Pins $pins -ConfirmedServer $(if ($ConfirmedServer -and $ConfirmedServer -ieq $server) { $ConfirmedServer } else { '' }) }
     switch ($r.Status) {
         'NeedsConfirmation' {
             # LDAPS does not answer: no bind until the administrator accepts the named risk; the acceptance goes into the protocol
@@ -366,10 +376,11 @@ function Invoke-DomainConnect {
             $ui.BtnStageAction2.Content = 'I accept the risk: connect over LDAP 389'; $ui.BtnStageAction2.Visibility = 'Visible'
             $script:StageAction2 = {
                 $srv = $script:Form.PendingServer
+                if (-not $srv -or $srv -ine $script:Form.Server.Text.Trim()) { Clear-DomainPending; Set-StageMessage 'The server name changed after the warning. Connect again to see the warning for this server.' 'error'; return }
                 if (-not (Confirm-Action ((Get-AVDTuneLdapRiskText -Server $srv) + "`n`nConnect to $srv over LDAP 389 anyway?") 'Connect without LDAPS')) { return }
                 Add-StartProtocol "Domain controller without LDAPS confirmed ($srv)" ("Confirmed by $env:USERDOMAIN\$env:USERNAME" + $(if ($script:StartContext.Session -and $script:StartContext.Session.Account) { " (signed in as $($script:StartContext.Session.Account))" }) + ': ' + $(if (Test-AVDTuneIpAddress $srv) { 'NTLM over 389, server not authenticated' } else { 'Kerberos over 389, no certificate pin' }))
                 $ui.BtnStageAction2.Visibility = 'Collapsed'
-                Invoke-DomainConnect -ConfirmWithoutLdaps
+                Invoke-DomainConnect -ConfirmedServer $srv
             }
         }
         'NeedsPin' {

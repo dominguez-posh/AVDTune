@@ -89,7 +89,7 @@ function Connect-AVDTuneDirectory {
         Status of the result
           NeedsPin            first contact over LDAPS: Certificate is shown (with chain status and name match as extra facts), nothing was sent.
                               Pin it (Set-AVDTuneDcPin in AVDTune.Start.psm1), connect again.
-          NeedsConfirmation   636 does not answer: Warning names the risk, nothing was sent. Connect again with -ConfirmWithoutLdaps after the
+          NeedsConfirmation   636 does not answer: Warning names the risk, nothing was sent. Connect again with -ConfirmedServer <that server> after the
                               administrator confirmed it (the window logs the confirmation).
           CertificateChanged  the certificate differs from the pin: no bind, no fallback (Expected, Certificate).
           Connected           Connection (adapter handle), Security (text for the protocol), Port.
@@ -98,8 +98,8 @@ function Connect-AVDTuneDirectory {
     #>
     [CmdletBinding()]
     param([Parameter(Mandatory)]$Ldap, [Parameter(Mandatory)][string]$Server, [Parameter(Mandatory)][string]$User, [Parameter(Mandatory)][System.Security.SecureString]$Password, [hashtable]$Pins = @{},
-        # The administrator read the warning of NeedsConfirmation and accepts LDAP 389 for this connection
-        [switch]$ConfirmWithoutLdaps)
+        # The server for which the administrator read the warning of NeedsConfirmation and accepted LDAP 389; only valid for exactly that server
+        [string]$ConfirmedServer)
     $Server = $Server.Trim().ToLowerInvariant()
     if (-not (Test-AVDTuneDcServer $Server)) { return [pscustomobject]@{ Status = 'Failed'; Message = 'The domain controller must be an IP address or a DNS name.' } }
     if (-not (Test-AVDTuneDomainUser $User)) { return [pscustomobject]@{ Status = 'Failed'; Message = 'The domain account must look like DOMAIN\user or user@domain.example.' } }
@@ -119,7 +119,8 @@ function Connect-AVDTuneDirectory {
     }
     # No LDAPS at all (and never seen with it): LDAP 389 only after the confirmation; Kerberos for a DNS name, Negotiate (NTLM) for an IP address
     $ip = Test-AVDTuneIpAddress $Server
-    if (-not $ConfirmWithoutLdaps) {
+    $confirmed = $ConfirmedServer -and ($ConfirmedServer.Trim().ToLowerInvariant() -eq $Server)
+    if (-not $confirmed) {
         return [pscustomobject]@{ Status = 'NeedsConfirmation'; Server = $Server; IsIp = $ip; Reason = [string]$probe.Error; Warning = (Get-AVDTuneLdapRiskText -Server $Server); Message = "LDAPS (636) on $Server does not answer ($($probe.Error)). Nothing was sent." }
     }
     $security = if ($ip) { 'LDAP 389 with Negotiate (NTLM) signing and sealing, no LDAPS, server not authenticated: confirmed by the administrator' } else { 'LDAP 389 with Kerberos signing and sealing (NTLM refused), no LDAPS: confirmed by the administrator' }
