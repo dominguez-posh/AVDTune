@@ -79,7 +79,7 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         foreach ($page in $script:PageTable) {
             Show-Page $page.Key
             $window.UpdateLayout()
-            $placeholder = $page.Key -notin 'Overview', 'Protocol', 'Updates', 'UpdateBlock', 'UserExperience'
+            $placeholder = $page.Key -notin 'Overview', 'Protocol', 'Updates', 'UpdateBlock', 'UserExperience', 'Benchmark'
             $ok = ($script:CurrentPage -eq $page.Key -and $ui["Nav$($page.Key)"].IsChecked -and $ui.PagePlaceholder.Visibility -eq (ConvertTo-Vis $placeholder))
             if ($placeholder) { $ok = $ok -and $ui.TxtPhTitle.Text -eq $page.Title -and $ui.TxtPhPhase.Text -eq "Planned for phase $($page.Phase)" -and $ui.TxtPhText.Text.Length -gt 40 }
             Test-Smoke "page $($page.Key) shows" $ok $null
@@ -324,7 +324,7 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
             $script:CloseWhenDone = $false   # the smoke goes on
             $sessionEnd = [pscustomobject]@{ Cancel = $false }
             Invoke-SessionEnding $sessionEnd
-            Test-Smoke 'log off or shut down during an update operation is held back, Windows shows the reason' ($sessionEnd.Cancel -and (Get-ShutdownBlockReason) -like 'AVDTune is running an update operation*') (Get-ShutdownBlockReason)
+            Test-Smoke 'log off or shut down during an update operation is held back, Windows shows the reason' ($sessionEnd.Cancel -and (Get-ShutdownBlockReason) -like 'AVDTune runs an operation*') (Get-ShutdownBlockReason)
             return $false
         }
         if ($script:UpdJob) { return $false }
@@ -357,6 +357,31 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         Test-Smoke 'a failed update with a repairable cause offers DISM and sfc' ($ui.BoxUpdRepair.Visibility -eq 'Visible') $null
         Save-SmokeShot '32-updates-repair-offer'
         $script:UpdLastRun = $null; Update-UpdatesView
+        $true } }
+    @{ Name = 'benchmark page'; Do = {
+        if ($script:OverviewJob -or $script:ReadyJob) { return $false }
+        if (-not $script:BenchStep) {
+            $script:BenchStep = 1
+            Show-Page 'Benchmark'; $window.UpdateLayout()
+            Test-Smoke 'Benchmark page: no result yet, both start buttons there, no placeholder' ($ui.PageBenchmark.Visibility -eq 'Visible' -and $ui.PagePlaceholder.Visibility -eq 'Collapsed' -and $ui.TxtBenchScore.Text -like 'No benchmark yet*' -and $ui.BtnBenchFull.IsEnabled -and $ui.BtnBenchQuick.IsEnabled) $ui.TxtBenchScore.Text
+            $ui.BtnBenchQuick.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
+            Test-Smoke 'quick run: asks first, runs in the background, buttons locked meanwhile' ($script:ConfirmAsked -like '*quick benchmark*' -and $script:BenchJob -and -not $ui.BtnBenchFull.IsEnabled) $script:ConfirmAsked
+            $window.Close()
+            Test-Smoke 'closing during a benchmark is refused with a hint' ($window.IsVisible -and $script:BenchJob -and $script:CloseWhenDone -and $script:LastToast -like '*benchmark is still running*') $script:LastToast
+            $script:CloseWhenDone = $false
+            $sessionEnd = [pscustomobject]@{ Cancel = $false }
+            Invoke-SessionEnding $sessionEnd
+            Test-Smoke 'log off or shut down during a benchmark is held back, Windows shows the general reason' ($sessionEnd.Cancel -and (Get-ShutdownBlockReason) -like 'AVDTune runs an operation*') (Get-ShutdownBlockReason)
+            $blocked = $null; try { Start-UpdJob 'Scan' $null } catch { $blocked = $_.Exception.Message }
+            Test-Smoke 'an update operation cannot start while the benchmark runs' ($blocked -like '*benchmark is running*') $blocked
+            return $false
+        }
+        if ($script:BenchJob) { return $false }
+        $window.UpdateLayout()
+        $r = @(Get-AVDTuneBenchmarkResult -Root $script:StateRoot)
+        Test-Smoke 'quick run done: result stored, score and five categories shown, provisional note, history row' ($r.Count -eq 1 -and $r[0].mode -eq 'quick' -and $ui.TxtBenchScore.Text -match '^\d+$' -and $ui.PanelBenchCats.Children.Count -eq 5 -and $ui.BoxBenchProvisional.Visibility -eq 'Visible' -and $ui.PanelBenchHistory.Children.Count -eq 1 -and $ui.BtnBenchFull.IsEnabled) "$($r.Count) $($ui.TxtBenchScore.Text) | $($ui.TxtBenchState.Text)"
+        Test-Smoke 'the run is in the protocol and the change log, services are back' (@($script:Protocol.Actions | Where-Object { $_.Category -eq 'benchmark' }).Count -ge 1 -and @(Get-AVDTuneChangeLog -Root $script:StateRoot | Where-Object { $_.Category -eq 'Benchmark' }).Count -ge 1) $null
+        Save-SmokeShot '35-benchmark'
         $true } }
     @{ Name = 'update block page'; Do = {
         if ($script:OverviewJob -or $script:ReadyJob) { return $false }   # the fake machine is not thread safe: never change it while the overview job reads it

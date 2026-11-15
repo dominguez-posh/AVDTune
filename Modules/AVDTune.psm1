@@ -615,7 +615,7 @@ function Get-AVDTuneLastChange {
     <#
         When AVDTune last changed the master (Apply or Undo that changed something), as a local [datetime], or $null when it never did.
         The newest of: state.json LastChange, the end of every run record with a Changed/Reverted result, every automatic change log
-        entry (Source Step) except the snapshot confirmations and the readiness analyses and confirmations (analysis is no change; a fix has the category "Readiness fix").
+        entry (Source Step) except the snapshot confirmations, the readiness analyses and confirmations and the benchmarks (a measurement is no change) (analysis is no change; a fix has the category "Readiness fix").
     #>
     param([string]$Root = (Get-AVDTuneRoot))
     $times = New-Object System.Collections.ArrayList
@@ -626,7 +626,7 @@ function Get-AVDTuneLastChange {
         if (-not $run -or (Get-AVDTuneProp $run 'WhatIf')) { continue }
         if (@(@(Get-AVDTuneProp $run 'Results') | Where-Object { $_ -and $_.Status -in 'Changed', 'Reverted' }).Count -gt 0) { & $parse (Get-AVDTuneProp $run 'Ended') }
     }
-    foreach ($e in @(Get-AVDTuneChangeLog -Root $Root)) { if ($e.Source -eq 'Step' -and $e.Category -notin 'Snapshot', 'Readiness') { & $parse $e.At } }
+    foreach ($e in @(Get-AVDTuneChangeLog -Root $Root)) { if ($e.Source -eq 'Step' -and $e.Category -notin 'Snapshot', 'Readiness', 'Benchmark') { & $parse $e.At } }
     if ($times.Count -eq 0) { return $null }
     (@($times | Sort-Object)[-1]).ToLocalTime()
 }
@@ -1079,6 +1079,12 @@ function Get-AVDTuneHealth {
     @($rows)
 }
 
+function Get-AVDTuneBenchmarkHealthRow([string]$Root) {
+    # An open restore journal at the start: a benchmark was interrupted and Windows Update or the indexer may still be paused
+    if (-not (Test-Path -LiteralPath (Join-Path $Root 'benchmark\restore.json'))) { return @() }
+    [pscustomobject]@{ Id = 'benchmark'; Title = 'Benchmark'; Status = 'bad'; Detail = 'A benchmark did not end properly: Windows Update or the indexer may still be paused. Restore them on the Benchmark page.' }
+}
+
 function Get-AVDTuneOverview {
     # Everything the Overview page shows, from the machine adapter and the state
     param([Parameter(Mandatory)]$Machine, [string]$Root = (Get-AVDTuneRoot), $UpdateBlock)
@@ -1092,7 +1098,7 @@ function Get-AVDTuneOverview {
         Office = Get-AVDTuneOfficeInfo $Machine
         LastUpdate = $(if ($state.LastUpdate) { [string]$state.LastUpdate } else { '' })
         LastBenchmark = $(if ($state.LastBenchmark) { [string]$state.LastBenchmark } else { '' })
-        Health = @(Get-AVDTuneHealth $Machine $state $UpdateBlock)
+        Health = @(@(Get-AVDTuneHealth $Machine $state $UpdateBlock) + @(Get-AVDTuneBenchmarkHealthRow $Root))
         UpdateBlock = $(if ($UpdateBlock) { [string]$UpdateBlock.State } else { [string]$state.UpdateBlock })
         Sealed = [bool]$state.Sealed
     }
