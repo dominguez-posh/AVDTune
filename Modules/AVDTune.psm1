@@ -136,8 +136,8 @@ function New-AVDTuneFileSecurity {
 function Write-AVDTuneAccessFile {
     <#
         The real FileWrite of the machine adapter. The file never keeps an ACL that was there before (File.Replace would): it is created new
-        (CreateNew, temp name) with the explicit protected ACL of New-AVDTuneFileSecurity, an existing file is deleted and the new one moved
-        into place, and the result is checked again with Get-AVDTuneAclProblems (a file that fails is removed again and the call throws).
+        (CreateNew, temp name) with the explicit protected ACL of New-AVDTuneFileSecurity, an existing file is replaced atomically
+        (MoveFileEx) by the new one, and the result is checked again with Get-AVDTuneAclProblems (a file that fails is removed again and the call throws).
           Admin      folder created with the ACL it inherits (Program Files); its parent folder, the folder and an existing target must pass the check first
           UsersRead  folder created in one step with New-AVDTuneUsersReadSecurity; an existing folder and target must pass the check first
           AdminNew   only a file that is not there yet (restore of the old launcher in ProgramData: the folder is shared, so only the new file is checked)
@@ -160,7 +160,7 @@ function Write-AVDTuneAccessFile {
         $stream = New-Object IO.FileStream($temp, [IO.FileMode]::CreateNew, [Security.AccessControl.FileSystemRights]'Write, ReadPermissions', [IO.FileShare]::None, 4096, [IO.FileOptions]::None, (New-AVDTuneFileSecurity))
         try { $stream.Write($bytes, 0, $bytes.Length) } finally { $stream.Dispose() }
         if ($Access -eq 'AdminNew') { [IO.File]::Move($temp, $Path) }
-        else { if (Test-Path -LiteralPath $Path) { [IO.File]::Delete($Path) }; [IO.File]::Move($temp, $Path) }
+        else { Move-AVDTuneFileReplace $temp $Path }
     }
     finally { if (Test-Path -LiteralPath $temp) { Remove-Item -LiteralPath $temp -Force -ErrorAction SilentlyContinue } }
     $after = @(Get-AVDTuneAclProblems (Read-AVDTuneAclReport $Path) -ExtraTrusted $ExtraTrusted)
@@ -376,8 +376,20 @@ function New-AVDTuneStateSecurity {
     $security
 }
 
+function Move-AVDTuneFileReplace {
+    # Atomic replace: MoveFileEx(REPLACE_EXISTING | WRITE_THROUGH) on the same volume. The target exists at every moment (old or new file) and the new file
+    # keeps the ACL of the temp file; the old ACL is gone. Throws when the move fails (the target is then unchanged).
+    param([Parameter(Mandatory)][string]$Temp, [Parameter(Mandatory)][string]$Target)
+    if (-not ('AVDTune.NativeMove' -as [type])) {
+        Add-Type -Namespace AVDTune -Name NativeMove -MemberDefinition '[System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true, CharSet = System.Runtime.InteropServices.CharSet.Unicode)] public static extern bool MoveFileEx(string existing, string target, int flags);'
+    }
+    if (-not [AVDTune.NativeMove]::MoveFileEx($Temp, $Target, 0x1 -bor 0x8)) {
+        throw (New-Object ComponentModel.Win32Exception([Runtime.InteropServices.Marshal]::GetLastWin32Error()))
+    }
+}
+
 function Write-AVDTuneFile {
-    # Written next to the target with an explicit protected admin-only ACL (CreateNew), then moved over it: a crash leaves the old or the new file,
+    # Written next to the target with an explicit protected admin-only ACL (CreateNew), then moved over it atomically: a crash leaves the old or the new file,
     # never half of one, and the file never keeps an ACL that was there before (File.Replace would keep it)
     param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][string]$Text)
     $folder = Split-Path $Path -Parent
@@ -387,8 +399,7 @@ function Write-AVDTuneFile {
     try {
         $stream = New-Object IO.FileStream($temp, [IO.FileMode]::CreateNew, [Security.AccessControl.FileSystemRights]'Write, ReadPermissions', [IO.FileShare]::None, 4096, [IO.FileOptions]::None, (New-AVDTuneFileSecurity -AdminOnly))
         try { $stream.Write($bytes, 0, $bytes.Length) } finally { $stream.Dispose() }
-        if (Test-Path -LiteralPath $Path) { [IO.File]::Delete($Path) }
-        [IO.File]::Move($temp, $Path)
+        Move-AVDTuneFileReplace $temp $Path
     }
     finally { if (Test-Path -LiteralPath $temp) { Remove-Item -LiteralPath $temp -Force -ErrorAction SilentlyContinue } }
 }
