@@ -1,0 +1,32 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- AVDTune measure program (docs/benchmark-design.md, part 0): .NET 10, self-contained single file, x64, no third-party libraries. -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <Platforms>x64</Platforms>
+    <PlatformTarget>x64</PlatformTarget>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>AVDTune.Bench</AssemblyName>
+    <RootNamespace>AVDTune.Bench</RootNamespace>
+    <Version>1.0.0</Version>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <TieredPGO>false</TieredPGO>
+    <ConcurrentGarbageCollection>true</ConcurrentGarbageCollection>
+    <ServerGarbageCollector>false</ServerGarbageCollector>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <!-- single file, self-contained; ReadyToRun so the JIT state is the same on every machine (design 1.1) -->
+    <SelfContained>true</SelfContained>
+    <PublishSingleFile>true</PublishSingleFile>
+    <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
+    <PublishReadyToRun>true</PublishReadyToRun>
+    <DebugType>none</DebugType>
+    <NoWarn>CA1416</NoWarn>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="src/**/*.cs" />
+  </ItemGroup>
+</Project>
