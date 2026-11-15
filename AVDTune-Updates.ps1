@@ -27,6 +27,12 @@ function Get-UpdateAdapter {
     New-AVDTuneUpdateAdapter
 }
 
+function Get-UpdTaskTitle([string]$Kind) {
+    switch ($Kind) {
+        'Scan' { 'Searching for updates' } 'Run' { 'Running updates' } 'Repair-Dism' { 'Repairing the Windows image (DISM)' } 'Repair-Sfc' { 'Checking the system files (sfc)' }
+        'Block-On' { 'Update block: switching on' } 'Block-Off' { 'Update block: switching off (maintenance)' } 'Block-Repair' { 'Repairing the update block' } default { "Update operation $Kind" }
+    }
+}
 function Start-UpdJob([string]$Kind, $Argument) {
     # Kind: Scan | Run | Repair-Dism | Repair-Sfc
     if ($script:UpdJob) { throw 'Another update operation is still running.' }
@@ -62,7 +68,9 @@ function Start-UpdJob([string]$Kind, $Argument) {
             }
             finally { $Sync.Done = $true }
         }).AddArgument($script:AppRoot).AddArgument($(if ($script:TestMode) { $env:AVDTUNE_FAKE } else { '' })).AddArgument($script:UpdFakeScript).AddArgument($script:StateRoot).AddArgument($Kind).AddArgument($Argument).AddArgument($gate).AddArgument($sync).AddArgument([string]$env:USERNAME).AddArgument($script:UpdFakeSeed).AddArgument($script:UpdFakeWua).AddArgument($script:UpdFakeNative).AddArgument($(if ($script:TestMode) { $script:Machine } else { $null }))
-    $script:UpdJob = @{ PS = $ps; Handle = $ps.BeginInvoke(); Kind = $Kind; Sync = $sync }
+    # only the search is read only and can be started again from the list; everything else changes the master and is started on the page (with its confirmation)
+    $task = Start-AVDTuneUiTask -Kind "update-$($Kind.ToLower())" -Title (Get-UpdTaskTitle $Kind) -Step 'Starting' -Retry $(if ($Kind -eq 'Scan') { @{ Command = 'Start-UpdJob'; Arguments = @('Scan', $null) } })
+    $script:UpdJob = @{ PS = $ps; Handle = $ps.BeginInvoke(); Kind = $Kind; Sync = $sync; Task = $task }
     Set-ShutdownBlock $true   # Windows shows why log off or shut down should wait (Start-AVDTune.ps1)
     Set-UpdateBusy $true
 }
@@ -73,7 +81,13 @@ function Set-UpdateBusy([bool]$Busy) {
 function Complete-UpdJob {
     $job = $script:UpdJob
     if (-not $job) { return }
-    if (-not $job.Handle.IsCompleted) { if ($job.Sync.Text -and $script:CurrentPage -eq 'Updates') { $ui.TxtUpdState.Text = $job.Sync.Text }; return }
+    if (-not $job.Handle.IsCompleted) {
+        # the progress of the runspace goes into the task; the page shows the same state
+        $text = [string]$job.Sync.Text
+        if ($text) { Update-AVDTuneUiTask $job.Task -Step $text }
+        if ($job.Task.Step -and $script:CurrentPage -eq 'Updates') { $ui.TxtUpdState.Text = [string]$job.Task.Step }
+        return
+    }
     $script:UpdJob = $null
     Set-ShutdownBlock $false
     $result = $null; $err = ''
@@ -85,6 +99,7 @@ function Complete-UpdJob {
     catch { $err = $_.Exception.Message }
     finally { $job.PS.Dispose() }
     Set-UpdateBusy $false
+    try {
     switch -Wildcard ($job.Kind) {
         'Scan' {
             if ($err) { $ui.TxtUpdState.Text = "The search failed: $err" } else {
@@ -92,6 +107,7 @@ function Complete-UpdJob {
                 $ui.TxtUpdState.Text = "Searched at $((Get-Date).ToString('HH:mm:ss')): $(@($script:UpdItems | Where-Object Selectable).Count) item(s) can be updated."
             }
             Update-UpdatesView
+            Complete-AVDTuneUiTask $job.Task -Failed:([bool]$err) -Summary $(if ($err) { "The search failed: $err" } else { [string]$ui.TxtUpdState.Text })
         }
         'Run' {
             if ($err) { $ui.TxtUpdState.Text = "The run stopped: $err"; Show-Error $err }
@@ -103,12 +119,14 @@ function Complete-UpdJob {
                 Show-Toast $ui.TxtUpdState.Text
             }
             Update-UpdatesView; Start-OverviewRefresh; Update-UpdateBlockView
+            Complete-AVDTuneUiTask $job.Task -Failed:([bool]($err -or ($result -and @($result.Results | Where-Object { $_.Status -eq 'Failed' }).Count))) -Summary $(if ($err -and -not $result) { "The run stopped: $err" } else { [string]$ui.TxtUpdState.Text })
             # the list is stale after a run: search again
             if (-not $script:UpdJob -and -not $script:CloseWhenDone) { Start-UpdJob 'Scan' $null }
         }
         'Repair-*' {
             if ($err) { Show-Error $err } elseif ($result) { Register-StepResult $result; Show-Toast "$($result.Title): $($result.Status). $($result.Message)"; $ui.TxtUpdState.Text = "$($result.Title): $($result.Status). $($result.Message)" }
             Update-UpdatesView; Start-OverviewRefresh
+            Complete-AVDTuneUiTask $job.Task -Failed:([bool]($err -or ($result -and $result.Status -eq 'Failed'))) -Summary $(if ($err) { $err } else { [string]$script:LastToast })
         }
         'Block-*' {
             if ($err) { Show-Error $err }
@@ -119,8 +137,12 @@ function Complete-UpdJob {
                 Save-Protocol
             }
             Update-UpdateBlockView; Start-OverviewRefresh
+            Complete-AVDTuneUiTask $job.Task -Failed:([bool]$err) -Summary $(if ($err) { $err } else { [string]$script:LastToast })
         }
     }
+    }
+    catch { Complete-AVDTuneUiTask $job.Task -Failed -Summary $_.Exception.Message; throw }   # a task never stays "running" because its result could not be shown
+    Complete-AVDTuneUiTask $job.Task -Failed:([bool]$err) -Summary $(if ($err) { $err } else { 'Finished' })   # no-op when the branch above ended it
     # the window was closed during the operation (Add_Closing in Start-AVDTune.ps1): close it now, unless it failed and the message has to be read
     if ($script:CloseWhenDone -and -not $script:UpdJob -and -not $script:BenchJob) {
         if ($err) { $script:CloseWhenDone = $false; Show-Error "Not closed because the operation failed: $err" } else { $window.Close() }

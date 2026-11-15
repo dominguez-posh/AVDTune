@@ -59,6 +59,12 @@ function Set-RelBusy([bool]$Busy) {
     foreach ($b in $ui.BtnRelCheck, $ui.BtnRelRepair, $ui.BtnRelInstall, $ui.BtnRelBack, $ui.ChkRelEarly) { $b.IsEnabled = -not $Busy }
 }
 
+function Get-RelTaskTitle([string]$Kind, [string]$Argument) {
+    switch ($Kind) {
+        'Start' { 'Integrity check and update check of AVDTune' } 'Check' { 'Checking for a new AVDTune version' } 'Install' { "Updating AVDTune to version $Argument" }
+        'Back' { 'Going back to the previous AVDTune version' } 'Repair' { 'Repairing the AVDTune files' } default { "AVDTune $Kind" }
+    }
+}
 function Start-RelJob([string]$Kind, [string]$Argument = '') {
     if ($script:Rel.Job) { throw 'Another check of the tool is still running.' }
     $ctx = @{
@@ -67,16 +73,18 @@ function Start-RelJob([string]$Kind, [string]$Argument = '') {
         RunActive = (Test-RelRunActive); Http = (Get-RelHttp); Import = (-not $script:TestMode); AllowDev = [bool]$script:TestMode
     }
     Set-RelBusy $true
+    # the checks are read only and can be started again from the list; install, back and repair change the tool and are started on the card
+    $task = Start-AVDTuneUiTask -Kind "release-$($Kind.ToLower())" -Title (Get-RelTaskTitle $Kind $Argument) -Step $(if ($Kind -in 'Start', 'Check') { 'Comparing the files and asking GitHub for the latest release' } else { 'Downloading and checking against the SHA256 of the manifest' }) -Retry $(if ($Kind -in 'Start', 'Check') { @{ Command = 'Start-RelJob'; Arguments = @($Kind) } })
     if ($script:TestMode) {
         # inline: the fakes are closures of this runspace (same reason as the readiness check)
         $res = $null; $err = ''
         try { $res = & $script:RelWork $ctx } catch { $err = $_.Exception.Message }
-        $script:Rel.Job = @{ Inline = $true; Result = $res; Err = $err; Kind = $Kind }
+        $script:Rel.Job = @{ Inline = $true; Result = $res; Err = $err; Kind = $Kind; Task = $task }
         return
     }
     $ps = [powershell]::Create()
     [void]$ps.AddScript($script:RelWork.ToString()).AddArgument($ctx)
-    $script:Rel.Job = @{ PS = $ps; Handle = $ps.BeginInvoke(); Kind = $Kind }
+    $script:Rel.Job = @{ PS = $ps; Handle = $ps.BeginInvoke(); Kind = $Kind; Task = $task }
 }
 
 function Add-RelProtocol([string]$Subject, [string]$Note, [string]$Result = 'ok') {
@@ -138,6 +146,7 @@ function Complete-RelResult($Job, $Res, [string]$Err) {
     Set-RelBusy $false
     $kind = $Job.Kind
     if ($Err) {
+        Complete-AVDTuneUiTask $Job.Task -Failed -Summary $Err
         if ($kind -eq 'Start') { Set-AVDTuneWriteBlock "the integrity check could not run ($Err)."; $script:Rel.Status = [pscustomobject]@{ Status = 'failed'; Message = "The integrity check could not run: $Err"; Warnings = @(); Changed = @(); Missing = @(); Extra = @() } }
         else { Show-Error $Err; Add-RelProtocol "AVDTune $kind" $Err 'failed' }
         Update-ReleaseView
@@ -164,6 +173,8 @@ function Complete-RelResult($Job, $Res, [string]$Err) {
         if ($kind -eq 'Repair' -and $r.Ok) { $script:Rel.Status = [pscustomobject]@{ Status = 'bad'; Message = 'Repaired. AVDTune stays read only in this session: restart it (the code that is running was loaded from the files that were wrong).'; Warnings = @(); Changed = @(); Missing = @(); Extra = @() } }
         if ($kind -eq 'Repair' -and -not $r.Ok) { $script:Rel.Status = [pscustomobject]@{ Status = 'bad'; Message = "Not everything could be repaired: $(@($r.Failed) -join '; ')"; Warnings = @(); Changed = @($r.Remaining.Changed); Missing = @($r.Remaining.Missing); Extra = @($r.Remaining.Extra) } ; $script:Rel.Restart = '' }
     }
+    $summary = if ($kind -in 'Install', 'Back', 'Repair') { [string]$Res.Result.Text } elseif ($kind -eq 'Start' -and $Res.Error) { "The integrity check could not run: $($Res.Error)" } elseif ($Res.CheckError) { "Update check: $($Res.CheckError)" } elseif ($kind -eq 'Start') { [string]$script:Rel.Status.Message } elseif ($script:Rel.Latest.Newer) { "Version $($script:Rel.Latest.Version) is available" } else { 'AVDTune is up to date' }
+    Complete-AVDTuneUiTask $Job.Task -Failed:([bool]($Res.Error -or $Res.CheckError -or ($kind -eq 'Start' -and $script:Rel.Status.Status -in 'bad', 'failed') -or ($kind -eq 'Repair' -and -not $Res.Result.Ok))) -Summary $summary
     Update-ReleaseView
     if ($script:CurrentPage -eq 'Protocol') { Update-ProtocolView }
 }
