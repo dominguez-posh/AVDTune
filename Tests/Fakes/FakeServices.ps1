@@ -141,6 +141,8 @@ function New-AVDTuneFakeAuth {
             return $none
         }
         if ($p -eq '/v1.0/oauth2PermissionGrants') {
+            # Like the real Graph (seen on a real tenant): oauth2PermissionGrants refuses a $filter that combines conditions with 'and'
+            if ($Method -eq 'GET' -and $Path -match '\$filter=([^&]*)' -and [Uri]::UnescapeDataString($Matches[1]) -match '\sand\s') { return [pscustomobject]@{ Status = 400; Body = (ConvertTo-FakeJson @{ error = @{ code = 'Request_UnsupportedQuery'; message = 'Query filter is not supported.' } }); Error = '' } }
             if ($Method -eq 'GET') { return (& $ok @{ value = @($store.Grants | Where-Object { & $match $_ }) }) }
             if ($store.GrantForbidden) { return $deny }
             $g = @{ id = "grant-$(& $newId)"; clientId = $Body.clientId; consentType = $Body.consentType; principalId = $Body.principalId; resourceId = $Body.resourceId; scope = $Body.scope }

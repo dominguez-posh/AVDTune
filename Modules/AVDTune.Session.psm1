@@ -495,11 +495,11 @@ function Install-AVDTuneAppRegistration {
         # Consent for the signed-in admin only (consentType Principal), per resource
         foreach ($resApp in $script:AppPermissions.Keys) {
             $scopeText = ($script:AppPermissions[$resApp] -join ' ')
-            $grant = @(& $list (Get-AVDTuneGraphFilterPath 'oauth2PermissionGrants' "clientId eq '$($sp.id)' and consentType eq 'Principal' and principalId eq '$me' and resourceId eq '$($resourceSp[$resApp])'" '') 'read the consent') | Select-Object -First 1
+            $grant = @(& $list (Get-AVDTuneGraphFilterPath 'oauth2PermissionGrants' "clientId eq '$($sp.id)'" '') 'read the consent') | Where-Object { [string]$_.consentType -eq 'Principal' -and [string]$_.principalId -eq $me -and [string]$_.resourceId -eq [string]$resourceSp[$resApp] } | Select-Object -First 1
             if ($grant) { [void](& $g PATCH "/v1.0/oauth2PermissionGrants/$($grant.id)" @{ scope = $scopeText } 'grant the consent') }
             else { [void](& $g POST '/v1.0/oauth2PermissionGrants' @{ clientId = [string]$sp.id; consentType = 'Principal'; principalId = $me; resourceId = $resourceSp[$resApp]; scope = $scopeText } 'grant the consent') }
         }
-        $orgWide = @(& $list (Get-AVDTuneGraphFilterPath 'oauth2PermissionGrants' "clientId eq '$($sp.id)' and consentType eq 'AllPrincipals'" '') 'read the consent')
+        $orgWide = @(& $list (Get-AVDTuneGraphFilterPath 'oauth2PermissionGrants' "clientId eq '$($sp.id)'" '') 'read the consent' | Where-Object { [string]$_.consentType -eq 'AllPrincipals' })
         if ($orgWide.Count -gt 0) { [void]$notes.Add("Note: the enterprise app 'AVDTune' also has a consent for the whole organization (from an earlier version). Only assigned accounts can sign in; remove that consent when it is not needed: Entra admin center > Enterprise applications > AVDTune > Permissions.") }
         [void]$notes.Add("Consent granted for $account only (" + (@($script:AppPermissions.Keys | ForEach-Object { $script:AppPermissions[$_] -join ', ' }) -join '; ') + '); the enterprise app requires an assignment, your account is assigned.')
         [pscustomobject]@{ TenantId = $tid; ClientId = $clientId.ToLowerInvariant(); Account = $account; Created = $created; Notes = $notes }   # the list itself: the finally block below adds to it
@@ -510,7 +510,7 @@ function Install-AVDTuneAppRegistration {
             try {
                 $cli = @(& $list (Get-AVDTuneGraphFilterPath 'servicePrincipals' "appId eq '$script:SetupClientId'" 'id') 'read Microsoft Graph Command Line Tools') | Select-Object -First 1
                 if ($cli) {
-                    $own = @(& $list (Get-AVDTuneGraphFilterPath 'oauth2PermissionGrants' "clientId eq '$($cli.id)' and consentType eq 'Principal' and principalId eq '$me' and resourceId eq '$graphSpId'" '') 'read your consent for Microsoft Graph Command Line Tools') | Select-Object -First 1
+                    $own = @(& $list (Get-AVDTuneGraphFilterPath 'oauth2PermissionGrants' "clientId eq '$($cli.id)'" '') 'read your consent for Microsoft Graph Command Line Tools') | Where-Object { [string]$_.consentType -eq 'Principal' -and [string]$_.principalId -eq $me -and [string]$_.resourceId -eq [string]$graphSpId } | Select-Object -First 1
                     if ($own) {
                         $scopes = @(([string]$own.scope) -split ' ' | Where-Object { $_ })
                         $keep = @($scopes | Where-Object { $_ -notin 'Application.ReadWrite.All', 'DelegatedPermissionGrant.ReadWrite.All' })
@@ -520,7 +520,7 @@ function Install-AVDTuneAppRegistration {
                             [void]$notes.Add("Application.ReadWrite.All and DelegatedPermissionGrant.ReadWrite.All were taken out of your own consent for 'Microsoft Graph Command Line Tools' again; the rest of it stays ($($keep -join ' ')).")
                         }
                     }
-                    $cliOrg = @(& $list (Get-AVDTuneGraphFilterPath 'oauth2PermissionGrants' "clientId eq '$($cli.id)' and consentType eq 'AllPrincipals' and resourceId eq '$graphSpId'" '') 'read the consent of Microsoft Graph Command Line Tools for the organization') |
+                    $cliOrg = @(& $list (Get-AVDTuneGraphFilterPath 'oauth2PermissionGrants' "clientId eq '$($cli.id)'" '') 'read the consent of Microsoft Graph Command Line Tools for the organization') | Where-Object { [string]$_.consentType -eq 'AllPrincipals' -and [string]$_.resourceId -eq [string]$graphSpId } |
                         Where-Object { @(([string]$_.scope) -split ' ') -contains 'Application.ReadWrite.All' -or @(([string]$_.scope) -split ' ') -contains 'DelegatedPermissionGrant.ReadWrite.All' }
                     if (@($cliOrg).Count -gt 0) { [void]$notes.Add("Note: 'Microsoft Graph Command Line Tools' has Application.ReadWrite.All or DelegatedPermissionGrant.ReadWrite.All for the whole organization. AVDTune does not change that consent (it may be older); see the note on the setup consent.") }
                 }
