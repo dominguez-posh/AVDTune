@@ -24,10 +24,10 @@ $sub = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'
 $tok = 'tok-env-SECRET-9'
 $g1 = '11111111-1111-1111-1111-111111111111'; $g2 = '22222222-2222-2222-2222-222222222222'
 $subnet = "/subscriptions/$sub/resourceGroups/rg-network/providers/Microsoft.Network/virtualNetworks/vnet-avd/subnets/snet-avd"
-$acc = '/subscriptions/{0}/resourceGroups/rg-example/providers/Microsoft.Storage/storageAccounts/stprofilesexample' -f $sub
+$acc = '/subscriptions/{0}/resourceGroups/rg-example/providers/Microsoft.Storage/storageAccounts/contosoprofiles' -f $sub
 function New-Spec([hashtable]$O = @{}) {
-    $h = [ordered]@{ SubscriptionId = $sub; ResourceGroup = 'rg-example'; Location = 'westeurope'; AccountName = 'stprofilesexample'; Sku = 'Premium_LRS'; ShareName = 'profiles'; Users = 200; GiBPerUser = 30
-        Endpoint = 'Private'; SubnetId = $subnet; PrivateEndpointName = 'pe-stprofilesexample'; DnsZone = 'Azure'; DnsZoneResourceGroup = 'rg-network'; UsersGroupId = $g1; AdminsGroupId = $g2; DomainName = ''; DomainGuid = ''; AllowedIps = @() }
+    $h = [ordered]@{ SubscriptionId = $sub; ResourceGroup = 'rg-example'; Location = 'westeurope'; AccountName = 'contosoprofiles'; Sku = 'Premium_LRS'; ShareName = 'profiles'; Users = 200; GiBPerUser = 30
+        Endpoint = 'Private'; SubnetId = $subnet; PrivateEndpointName = 'pe-contosoprofiles'; DnsZone = 'Azure'; DnsZoneResourceGroup = 'rg-network'; UsersGroupId = $g1; AdminsGroupId = $g2; DomainName = ''; DomainGuid = ''; AllowedIps = @() }
     foreach ($k in $O.Keys) { $h[$k] = $O[$k] }
     [pscustomobject]$h
 }
@@ -67,7 +67,7 @@ try {
     Test-Check 'public endpoint: an IP list is checked, a name is refused' ((Test-AVDTuneEnvSpec (New-Spec @{ Endpoint = 'Public'; AllowedIps = @('203.0.113.0/24') })).Count -eq 0 -and (Test-AVDTuneEnvSpec (New-Spec @{ Endpoint = 'Public'; AllowedIps = @('*.example.test') })).Count -eq 1) $null
     $q = Get-AVDTuneEnvQuota -Users 200 -GiBPerUser 30; $q2 = Get-AVDTuneEnvQuota -Users 2 -GiBPerUser 5
     Test-Check 'quota: users x GiB, Premium minimum 100, IOPS and throughput shown' ($q.GiB -eq 6000 -and $q.Iops -eq 9000 -and $q.MiBPerSecond -eq 700 -and $q2.GiB -eq 100) ($q | ConvertTo-Json -Compress)
-    Test-Check 'Entra SID from an object ID (four little endian numbers)' ((ConvertTo-AVDTuneEntraSid '00000001-0000-0000-0000-000000000000') -eq 'S-1-12-1-1-0-0-0' -and (ConvertTo-AVDTuneEntraSid '11111111-1111-1111-1111-111111111111') -eq 'S-1-12-1-286331153-286331153-286331153-286331153' -and (Test-Throws { ConvertTo-AVDTuneEntraSid 'nope' })) (ConvertTo-AVDTuneEntraSid '11111111-1111-1111-1111-111111111111')
+    Test-Check 'Entra SID from an object ID (four little endian numbers)' ((ConvertTo-AVDTuneEntraSid '00000000-0000-0000-0000-000000000000') -eq 'S-1-12-1-0-0-0-0' -and (ConvertTo-AVDTuneEntraSid '11111111-1111-1111-1111-111111111111') -eq 'S-1-12-1-286331153-286331153-286331153-286331153' -and (Test-Throws { ConvertTo-AVDTuneEntraSid 'nope' })) (ConvertTo-AVDTuneEntraSid '11111111-1111-1111-1111-111111111111')
     $c1 = ConvertTo-AVDTuneEnvCanonical @{ b = 1; a = @{ y = 'x'; x = $true } }; $c2 = ConvertTo-AVDTuneEnvCanonical ([ordered]@{ a = [ordered]@{ x = $true; y = 'x' }; b = 1 })
     Test-Check 'canonical form does not depend on the key order (the plan hash is stable)' ($c1 -eq $c2) "$c1 / $c2"
     Test-Check 'role assignment names are fixed per scope, principal and role' ((Get-AVDTuneEnvRoleName 's' 'p' 'r') -eq (Get-AVDTuneEnvRoleName 'S' 'P' 'R') -and (Get-AVDTuneEnvRoleName 's' 'p' 'r') -ne (Get-AVDTuneEnvRoleName 's' 'p2' 'r') -and (Test-AVDTuneEnvGuid (Get-AVDTuneEnvRoleName 's' 'p' 'r'))) $null
@@ -139,14 +139,14 @@ try {
 
     # existing resources
     $accKey = $acc.ToLowerInvariant()
-    $std = New-AVDTuneFakeEnvArm -Seed @{ Resources = @{ $accKey = @{ name = 'stprofilesexample'; kind = 'StorageV2'; sku = @{ name = 'Standard_LRS' }; location = 'westeurope'; properties = @{ supportsHttpsTrafficOnly = $true; minimumTlsVersion = 'TLS1_2'; allowBlobPublicAccess = $false; publicNetworkAccess = 'Disabled' } } } }
+    $std = New-AVDTuneFakeEnvArm -Seed @{ Resources = @{ $accKey = @{ name = 'contosoprofiles'; kind = 'StorageV2'; sku = @{ name = 'Standard_LRS' }; location = 'westeurope'; properties = @{ supportsHttpsTrafficOnly = $true; minimumTlsVersion = 'TLS1_2'; allowBlobPublicAccess = $false; publicNetworkAccess = 'Disabled' } } } }
     $sp = Get-AVDTuneEnvPlan -Arm $std -Token $tok -Spec $good -User 'u'
     Test-Check 'existing Standard account: not recommended warning, never created again, no change to kind or SKU' ((Get-Step $sp 'env.account').Action -eq 'None' -and ($sp.Warnings -join ' ') -like '*not recommended*' -and $sp.AccountExists) ($sp.Warnings -join '|')
-    $loose = New-AVDTuneFakeEnvArm -Seed @{ Resources = @{ $accKey = @{ name = 'stprofilesexample'; kind = 'FileStorage'; sku = @{ name = 'Premium_LRS' }; location = 'westeurope'; properties = @{ supportsHttpsTrafficOnly = $true; minimumTlsVersion = 'TLS1_0'; allowBlobPublicAccess = $false; publicNetworkAccess = 'Enabled' } } } }
+    $loose = New-AVDTuneFakeEnvArm -Seed @{ Resources = @{ $accKey = @{ name = 'contosoprofiles'; kind = 'FileStorage'; sku = @{ name = 'Premium_LRS' }; location = 'westeurope'; properties = @{ supportsHttpsTrafficOnly = $true; minimumTlsVersion = 'TLS1_0'; allowBlobPublicAccess = $false; publicNetworkAccess = 'Enabled' } } } }
     $lp = Get-AVDTuneEnvPlan -Arm $loose -Token $tok -Spec $good -User 'u'
     $la = Get-Step $lp 'env.account'
     Test-Check 'existing account that deviates: an update of only the deviating values, the old values kept for undo' ($la.Action -eq 'Update' -and $la.Method -eq 'PATCH' -and $la.Body.properties.minimumTlsVersion -eq 'TLS1_2' -and $la.Body.properties.publicNetworkAccess -eq 'Disabled' -and $la.Before.minimumTlsVersion -eq 'TLS1_0' -and -not $la.Body.properties.Contains('supportsHttpsTrafficOnly')) ($la.Changes -join '|')
-    $adx = New-AVDTuneFakeEnvArm -Seed @{ Resources = @{ $accKey = @{ name = 'stprofilesexample'; kind = 'FileStorage'; sku = @{ name = 'Premium_LRS' }; location = 'westeurope'; properties = @{ supportsHttpsTrafficOnly = $true; minimumTlsVersion = 'TLS1_2'; allowBlobPublicAccess = $false; publicNetworkAccess = 'Disabled'; azureFilesIdentityBasedAuthentication = @{ directoryServiceOptions = 'AD' } } } } }
+    $adx = New-AVDTuneFakeEnvArm -Seed @{ Resources = @{ $accKey = @{ name = 'contosoprofiles'; kind = 'FileStorage'; sku = @{ name = 'Premium_LRS' }; location = 'westeurope'; properties = @{ supportsHttpsTrafficOnly = $true; minimumTlsVersion = 'TLS1_2'; allowBlobPublicAccess = $false; publicNetworkAccess = 'Disabled'; azureFilesIdentityBasedAuthentication = @{ directoryServiceOptions = 'AD' } } } } }
     $xp = Get-AVDTuneEnvPlan -Arm $adx -Token $tok -Spec $good -User 'u'
     Test-Check 'account already uses another identity source: blocked (only one source is possible)' ((Get-Step $xp 'env.identity').Action -eq 'Blocked' -and $xp.Blocked.Count -ge 1 -and ($xp.Blocked -join ' ') -like '*only one*') ($xp.Blocked -join '|')
     $nosn = Get-AVDTuneEnvPlan -Arm (New-AVDTuneFakeEnvArm) -Token $tok -Spec (New-Spec @{ SubnetId = "/subscriptions/$sub/resourceGroups/rg-network/providers/Microsoft.Network/virtualNetworks/vnet-avd/subnets/missing" }) -User 'u'
@@ -188,7 +188,7 @@ try {
     $res = Invoke-Full $arm $good $root
     Test-Check 'full apply: Changed, every step Changed' ($res.Status -eq 'Changed' -and @($res.Results | Where-Object Status -ne 'Changed').Count -eq 0 -and $res.Results.Count -eq 10) (($res.Results | ForEach-Object { "$($_.Id)=$($_.Status) $($_.Message)" }) -join '|')
     $wr = (Get-Writes $arm) -replace "^(\w+) .*/(storageaccounts|privatednszones|privateendpoints)/.*$", '$1 $2'
-    Test-Check 'writes in the planned order, each only once' ((Get-Writes $arm).Count -eq 10 -and (Get-Writes $arm)[0] -like 'PUT *storageAccounts/stprofilesexample' -and (Get-Writes $arm)[1] -like '*fileServices/default' -and (Get-Writes $arm)[2] -like '*shares/profiles' -and (Get-Writes $arm)[3] -like '*privateDnsZones/privatelink.file.core.windows.net' -and (Get-Writes $arm)[5] -like '*privateEndpoints/pe-*' -and (Get-Writes $arm)[7] -like 'PATCH *storageAccounts/stprofilesexample') ((Get-Writes $arm) -join "`n")
+    Test-Check 'writes in the planned order, each only once' ((Get-Writes $arm).Count -eq 10 -and (Get-Writes $arm)[0] -like 'PUT *storageAccounts/contosoprofiles' -and (Get-Writes $arm)[1] -like '*fileServices/default' -and (Get-Writes $arm)[2] -like '*shares/profiles' -and (Get-Writes $arm)[3] -like '*privateDnsZones/privatelink.file.core.windows.net' -and (Get-Writes $arm)[5] -like '*privateEndpoints/pe-*' -and (Get-Writes $arm)[7] -like 'PATCH *storageAccounts/contosoprofiles') ((Get-Writes $arm) -join "`n")
     $ops = @($arm.Log | Where-Object { $_ -match '/(asyncoperations|operations)/op\d+' })
     Test-Check 'asynchronous operations: Location (account) and Azure-AsyncOperation (zone, link, endpoint, zone group) were polled until they finished' ($ops.Count -ge 5 * 2 -and @($ops | Where-Object { $_ -like '*Storage/locations*' }).Count -ge 3 -and @($ops | Where-Object { $_ -like '*Network/locations*' }).Count -ge 12) "$($ops.Count)"
     $stored = $arm.Store.Resources[$accKey]
@@ -206,7 +206,7 @@ try {
     $cases = @(
         @{ N = '403 on the endpoint names the role'; Seed = @{ ForbidWrite = @('endpoint') }; At = 'env.endpoint'; Like = '*403*Network Contributor*' }
         @{ N = '403 on the role assignment names the role administrator'; Seed = @{ ForbidWrite = @('role') }; At = 'env.role-users'; Like = '*403*Role Based Access Control Administrator*' }
-        @{ N = '409 name taken'; Seed = @{ TakenNames = @('stprofilesexample') }; At = 'env.account'; Like = '*already taken*Choose another name*' }
+        @{ N = '409 name taken'; Seed = @{ TakenNames = @('contosoprofiles') }; At = 'env.account'; Like = '*already taken*Choose another name*' }
         @{ N = '409 another operation in progress'; Seed = @{ Busy = @('share') }; At = 'env.share'; Like = '*busy with another operation*' }
         @{ N = '400 invalid request'; Seed = @{ Invalid = @('smb') }; At = 'env.smb'; Like = '*invalid (400)*InvalidRequestContent*' }
         @{ N = 'asynchronous operation ends Failed (Azure-AsyncOperation)'; Seed = @{ FailAsync = @('endpoint') }; At = 'env.endpoint'; Like = '*failed in Azure*InternalServerError*' }
@@ -287,7 +287,7 @@ try {
     $nc = Invoke-AVDTuneEnvUndo -Arm $arm -Token $tok -Root $root -ConfirmedHash 'bad' -PollSeconds 0
     Test-Check 'undo: another hash is refused, nothing changed' ($nc.Status -eq 'Refused' -and (Get-Writes $arm).Count -eq 0) $null
     $ur = Invoke-AVDTuneEnvUndo -Arm $arm -Token $tok -Root $root -ConfirmedHash $up.Hash -User 'Test User' -SnapshotId 'snap2' -PollSeconds 0 -MaxPolls 20
-    Test-Check 'undo: reverted, the endpoint (asynchronous delete), the roles, the DNS group, link and zone are gone, the account and the share stay' ($ur.Status -eq 'Reverted' -and -not $arm.Store.Resources.ContainsKey($accKey.Replace('storageaccounts/stprofilesexample', 'storageaccounts/stprofilesexample') + '/x') -and $arm.Store.Roles.Count -eq 0 -and $arm.Store.Resources.ContainsKey($accKey) -and @($arm.Store.Resources.Keys | Where-Object { $_ -like '*privateendpoints*' -or $_ -like '*privatednszones*' }).Count -eq 0) (($ur.Results | ForEach-Object { "$($_.Id)=$($_.Status) $($_.Message)" }) -join '|')
+    Test-Check 'undo: reverted, the endpoint (asynchronous delete), the roles, the DNS group, link and zone are gone, the account and the share stay' ($ur.Status -eq 'Reverted' -and -not $arm.Store.Resources.ContainsKey($accKey.Replace('storageaccounts/contosoprofiles', 'storageaccounts/contosoprofiles') + '/x') -and $arm.Store.Roles.Count -eq 0 -and $arm.Store.Resources.ContainsKey($accKey) -and @($arm.Store.Resources.Keys | Where-Object { $_ -like '*privateendpoints*' -or $_ -like '*privatednszones*' }).Count -eq 0) (($ur.Results | ForEach-Object { "$($_.Id)=$($_.Status) $($_.Message)" }) -join '|')
     Test-Check 'undo: the identity is back to None, a change log entry per step, journal entries marked, a second undo has nothing left to do (except the kept ones)' ($arm.Store.Resources[$accKey].properties.azureFilesIdentityBasedAuthentication.directoryServiceOptions -eq 'None' -and @(Get-AVDTuneChangeLog -Root $root | Where-Object { $_.Text -like 'Undo:*' }).Count -ge 7 -and @((Get-AVDTuneEnvUndoPlan -Arm $arm -Token $tok -Root $root).Steps | Where-Object { $_.Action -in 'Delete', 'Restore' }).Count -eq 0) $null
     # with a storage token and an empty share the account goes
     $root = New-Root; $roots += $root
@@ -308,7 +308,7 @@ try {
     Test-Check 'a share that holds profile folders is kept, with the account' ($byId['env.share'].Action -eq 'Keep' -and $byId['env.share'].Reason -like '*holds data*' -and $byId['env.account'].Action -eq 'Keep') $null
     # a resource that lost its tag is not AVDTune's
     $arm.Store.Resources["/subscriptions/$sub/resourcegroups/rg-network/providers/microsoft.network/privateendpoints".ToLowerInvariant() + '/x'] = @{}
-    $peKey = "/subscriptions/$sub/resourcegroups/rg-example/providers/microsoft.network/privateendpoints/pe-stprofilesexample"
+    $peKey = "/subscriptions/$sub/resourcegroups/rg-example/providers/microsoft.network/privateendpoints/pe-contosoprofiles"
     $arm.Store.Resources[$peKey].tags = [pscustomobject]@{ Owner = 'someone' }
     $up = Get-AVDTuneEnvUndoPlan -Arm $arm -Token $tok -Root $root -Files $full -StorageToken 'x'
     Test-Check 'a resource without the tag CreatedWith=AVDTune is not deleted (it may have been replaced)' (@($up.Steps | Where-Object Id -eq 'env.endpoint')[0].Action -eq 'Keep' -and @($up.Steps | Where-Object Id -eq 'env.endpoint')[0].Reason -like '*tag*') $null
@@ -320,14 +320,14 @@ try {
     Test-Check 'a private DNS zone that other accounts use (more records) is kept' (@($up.Steps | Where-Object Id -eq 'env.dnszone')[0].Action -eq 'Keep' -and @($up.Steps | Where-Object Id -eq 'env.dnszone')[0].Reason -like '*record sets*') (($up.Steps | ForEach-Object { "$($_.Id)=$($_.Action)" }) -join ',')
     # what AVDTune did not create is not touched: the account existed, only the share was new
     $root = New-Root; $roots += $root
-    $pre = @{ $accKey = @{ name = 'stprofilesexample'; kind = 'FileStorage'; sku = @{ name = 'Premium_LRS' }; location = 'westeurope'; tags = @{ Owner = 'team' }; properties = @{ supportsHttpsTrafficOnly = $true; minimumTlsVersion = 'TLS1_2'; allowBlobPublicAccess = $false; publicNetworkAccess = 'Disabled' } } }
+    $pre = @{ $accKey = @{ name = 'contosoprofiles'; kind = 'FileStorage'; sku = @{ name = 'Premium_LRS' }; location = 'westeurope'; tags = @{ Owner = 'team' }; properties = @{ supportsHttpsTrafficOnly = $true; minimumTlsVersion = 'TLS1_2'; allowBlobPublicAccess = $false; publicNetworkAccess = 'Disabled' } } }
     $arm = New-AVDTuneFakeEnvArm -Seed @{ Resources = $pre }
     $res = Invoke-Full $arm $good $root
     $up = Get-AVDTuneEnvUndoPlan -Arm $arm -Token $tok -Root $root -Files $files -StorageToken 'x'
     Test-Check 'an account that existed before is never in the undo plan as a delete' (@($up.Steps | Where-Object { $_.Type -eq 'account' -and $_.Action -eq 'Delete' }).Count -eq 0) (($up.Steps | ForEach-Object { "$($_.Id)=$($_.Action)" }) -join ',')
     # aligned settings of an existing account are restored
     $root = New-Root; $roots += $root
-    $arm = New-AVDTuneFakeEnvArm -Seed @{ Resources = @{ $accKey = @{ name = 'stprofilesexample'; kind = 'FileStorage'; sku = @{ name = 'Premium_LRS' }; location = 'westeurope'; properties = @{ supportsHttpsTrafficOnly = $true; minimumTlsVersion = 'TLS1_0'; allowBlobPublicAccess = $false; publicNetworkAccess = 'Enabled' } } } }
+    $arm = New-AVDTuneFakeEnvArm -Seed @{ Resources = @{ $accKey = @{ name = 'contosoprofiles'; kind = 'FileStorage'; sku = @{ name = 'Premium_LRS' }; location = 'westeurope'; properties = @{ supportsHttpsTrafficOnly = $true; minimumTlsVersion = 'TLS1_0'; allowBlobPublicAccess = $false; publicNetworkAccess = 'Enabled' } } } }
     $res = Invoke-Full $arm $good $root
     $tlsNow = $arm.Store.Resources[$accKey].properties.minimumTlsVersion
     $up = Get-AVDTuneEnvUndoPlan -Arm $arm -Token $tok -Root $root
@@ -353,7 +353,7 @@ try {
     $w = Set-AVDTuneEnvMaster -Machine $m -Spec $good -Identity EntraKerberos -Root $root -User 'u' -SnapshotId 'snap3' -WhatIf
     Test-Check 'FSLogix on the master: WhatIf changes nothing' (@($m.Log | Where-Object { $_ -like 'RegSet*' }).Count -eq 0) $null
     [void](Set-AVDTuneEnvMaster -Machine $m -Spec $good -Identity EntraKerberos -Root $root -User 'u' -SnapshotId 'snap3')
-    Test-Check 'FSLogix on the master: Enabled, VHDLocations with the new share and the cloud Kerberos ticket value' (($m.Log -join "`n") -like '*FSLogix\Profiles|VHDLocations*stprofilesexample.file.core.windows.net\profiles*' -and ($m.Log -join "`n") -like '*Enabled=1*' -and ($m.Log -join "`n") -like '*CloudKerberosTicketRetrievalEnabled=1*') ($m.Log -join '|')
+    Test-Check 'FSLogix on the master: Enabled, VHDLocations with the new share and the cloud Kerberos ticket value' (($m.Log -join "`n") -like '*FSLogix\Profiles|VHDLocations*contosoprofiles.file.core.windows.net\profiles*' -and ($m.Log -join "`n") -like '*Enabled=1*' -and ($m.Log -join "`n") -like '*CloudKerberosTicketRetrievalEnabled=1*') ($m.Log -join '|')
     $e2 = New-AVDTuneFakeMachine
     [void](Set-AVDTuneEnvMaster -Machine $e2 -Spec $good -Identity EntraDs -Root $root -User 'u' -SnapshotId 'snap3')
     Test-Check 'the Kerberos client value is only set for Entra Kerberos' (($e2.Log -join "`n") -notlike '*CloudKerberosTicketRetrievalEnabled*') $null
@@ -365,7 +365,7 @@ try {
     $verifyArm = $e3
     [void](Invoke-Full $e3 $good (New-Root))
     $vr = Invoke-AVDTuneEnvVerify -Machine (New-AVDTuneFakeMachine) -F (New-AVDTuneFakeFSLogix) -Spec $good -Arm $e3 -ArmToken $tok
-    Test-Check 'verify: the storage check runs for the new share and finds the account that was created' ((@($vr.Rows | Where-Object Id -eq 'st.account').Count -eq 1 -and $vr.Account -eq 'stprofilesexample') -and ($vr | ConvertTo-Json -Depth 6) -notmatch 'SECRET') ((@($vr.Rows | Select-Object -First 3 | ForEach-Object { "$($_.Id)=$($_.Status) $($_.Reason)" })) -join '|')
+    Test-Check 'verify: the storage check runs for the new share and finds the account that was created' ((@($vr.Rows | Where-Object Id -eq 'st.account').Count -eq 1 -and $vr.Account -eq 'contosoprofiles') -and ($vr | ConvertTo-Json -Depth 6) -notmatch 'SECRET') ((@($vr.Rows | Select-Object -First 3 | ForEach-Object { "$($_.Id)=$($_.Status) $($_.Reason)" })) -join '|')
 
     # ---------------------------------------------------------------- the page and its hooks (no window is opened here: the GUI smoke test is the Smoke-Tester's)
     foreach ($f in 'AVDTune-Environment.ps1', 'Start-AVDTune.ps1', 'Modules\AVDTune.Environment.psm1') {

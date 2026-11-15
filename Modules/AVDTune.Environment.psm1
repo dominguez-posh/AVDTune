@@ -490,7 +490,7 @@ function Get-AVDTuneEnvPlan {
             if ($g.Exists) { [void]$steps.Add((New-AVDTuneEnvStep (++$n) 'env.dnsgroup' 'dnsgroup' 'DNS zone group of the endpoint' 'None' '' '' $null $null @() 'Exists.')) }
             else { [void]$steps.Add((New-AVDTuneEnvStep (++$n) 'env.dnsgroup' 'dnsgroup' 'Register the endpoint in the private DNS zone' 'Create' 'PUT' "${gPath}?api-version=$script:NetworkApi" ([ordered]@{ properties = @{ privateDnsZoneConfigs = @(@{ name = 'privatelink-file-core-windows-net'; properties = @{ privateDnsZoneId = $zonePath } }) } }) $null @('A record for the account name') 'Creates the A record that points the account name to the private IP.' "$script:LearnFiles/storage-files-networking-dns" $true '' $false -Role 'Network Contributor')) }
         }
-        else { [void]$steps.Add((New-AVDTuneEnvStep (++$n) 'env.dnsrecord' 'manual' 'DNS record on your own DNS servers' 'Manual' '' '' $null $null @("$acct.file.core.windows.net -> private IP of the endpoint (shown after the endpoint exists)") 'You chose your own DNS servers: the record (or a conditional forwarder for privatelink.file.core.windows.net) is yours to create; the storage check tests the resolution afterwards.' "$script:LearnFiles/storage-files-networking-dns")) }
+        else { [void]$steps.Add((New-AVDTuneEnvStep (++$n) 'env.dnsrecord' 'manual' 'DNS record on your own DNS servers' 'Manual' '' '' $null $null @("<account>.file.core.windows.net -> private IP of the endpoint (shown after the endpoint exists)") 'You chose your own DNS servers: the record (or a conditional forwarder for privatelink.file.core.windows.net) is yours to create; the storage check tests the resolution afterwards.' "$script:LearnFiles/storage-files-networking-dns")) }
     }
 
     # 8 identity
