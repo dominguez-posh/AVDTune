@@ -74,14 +74,14 @@ try {
     Test-Check 'xml reader: a DTD is refused' (-not (Test-AVDTuneOfficeXml $dtd).Ok) $null
 
     # ---------------------------------------------------------------- ODT link
-    $good = 'https://download.microsoft.com/download/6c1eeb25-cf8b-41d9-8d0d-cc1dbc032140/officedeploymenttool_20430-20146.exe'
+    $good = 'https://download.microsoft.com/download/11111111-1111-1111-1111-111111111111/officedeploymenttool_20430-20146.exe'
     $l = Get-AVDTuneOdtLink -PageText "<a href=`"$good`">x</a> and again $good"
     Test-Check 'link: one package link (repeated is one), name and host' ($l.Ok -and $l.Url -eq $good -and $l.FileName -eq 'officedeploymenttool_20430-20146.exe') $l.Error
     $bad = @{
-        'another host' = 'https://download.microsoft.com.evil.example/download/6c1eeb25-cf8b-41d9-8d0d-cc1dbc032140/officedeploymenttool_20430-20146.exe'
-        'http' = 'http://download.microsoft.com/download/6c1eeb25-cf8b-41d9-8d0d-cc1dbc032140/officedeploymenttool_20430-20146.exe'
-        'user info' = 'https://x@download.microsoft.com/download/6c1eeb25-cf8b-41d9-8d0d-cc1dbc032140/officedeploymenttool_20430-20146.exe'
-        'other file' = 'https://download.microsoft.com/download/6c1eeb25-cf8b-41d9-8d0d-cc1dbc032140/evil.exe'
+        'another host' = 'https://download.microsoft.com.evil.example/download/11111111-1111-1111-1111-111111111111/officedeploymenttool_20430-20146.exe'
+        'http' = 'http://download.microsoft.com/download/11111111-1111-1111-1111-111111111111/officedeploymenttool_20430-20146.exe'
+        'user info' = ('https://user:pw' + [char]64 + 'download.microsoft.com/download/11111111-1111-1111-1111-111111111111/officedeploymenttool_20430-20146.exe')
+        'other file' = 'https://download.microsoft.com/download/11111111-1111-1111-1111-111111111111/evil.exe'
         'nothing' = '<html>no link</html>'
         'two links' = "$good https://download.microsoft.com/download/00000000-0000-0000-0000-000000000000/officedeploymenttool_10000-10000.exe"
         'empty' = ''
@@ -224,6 +224,8 @@ try {
     # ---------------------------------------------------------------- source of the real adapter (not run here)
     $src = Get-Content -LiteralPath (Join-Path $repo 'Modules\AVDTune.Office.psm1') -Raw
     Test-Check 'real adapter: no redirects, https only, fixed hosts, no PATH lookup, no shell start, no Invoke-WebRequest' (([regex]::Matches($src, 'AllowAutoRedirect = \$false')).Count -ge 2 -and $src -match 'download\.microsoft\.com' -and $src -match 'www\.microsoft\.com' -and $src -notmatch 'Get-Command|Invoke-WebRequest|Invoke-Expression|Start-Process|cmd\.exe|UseShellExecute = \$true') $null
+    Test-Check 'real adapter: Run goes through Invoke-AVDTuneChildProcess with the clean allowlist environment' ($src -match 'Invoke-AVDTuneChildProcess -FileName \$File[^
+]*-CleanEnvironment -TempDir') $null
     Test-Check 'real adapter: constructs and has every member the flow uses' ((@('OdtPage', 'NewTempFolder', 'IsProtectedFolder', 'Download', 'VerifySignature', 'Run', 'FindSetup', 'WriteText', 'RemoveFolder') | Where-Object { $null -eq (New-AVDTuneOfficeAdapter).$_ }).Count -eq 0) $null
     Test-Check 'the fake has every member of the real adapter (the fake stays in step)' ((@((New-AVDTuneOfficeAdapter).PSObject.Properties.Name | Where-Object { $_ -ne 'Kind' }) | Where-Object { $null -eq (New-AVDTuneFakeOffice -Machine (New-Master)).$_ }).Count -eq 0) $null
 }

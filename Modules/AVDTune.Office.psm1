@@ -16,6 +16,7 @@ Set-StrictMode -Version 2.0
 Import-Module (Join-Path $PSScriptRoot 'AVDTune.psm1')
 Import-Module (Join-Path $PSScriptRoot 'AVDTune.Updates.psm1')
 Import-Module (Join-Path $PSScriptRoot 'AVDTune.Trust.psm1')
+Import-Module (Join-Path $PSScriptRoot 'AVDTune.Benchmark.psm1')   # Invoke-AVDTuneChildProcess (issue 19): allowlist environment, job object
 
 $script:Learn = 'https://learn.microsoft.com'
 $script:OdtPageUrl = 'https://www.microsoft.com/en-us/download/details.aspx?id=49117'
@@ -466,7 +467,7 @@ function New-AVDTuneOfficeAdapter {
         documentation and have to be tried on a throw-away VM (docs\office.md, "not verified"). Hosts: www.microsoft.com (page) and download.microsoft.com (file),
         https only, no redirect followed.
     #>
-    $u = New-AVDTuneUpdateAdapter   # the run with the job object (the timeout covers the whole process tree)
+    $u = New-AVDTuneUpdateAdapter   # its VerifySignature
     $a = [ordered]@{ Kind = 'Real' }
     $a.OdtPage = {
         try {
@@ -508,7 +509,12 @@ function New-AVDTuneOfficeAdapter {
         catch { @{ Ok = $false; Error = $_.Exception.Message } }
     }
     $a.VerifySignature = $u.VerifySignature
-    $a.Run = $u.Run
+    $a.Run = {
+        # No shell, no window, a clean allowlist environment (TEMP = the protected work folder of the file), the whole process tree in a job object, timeout ends the tree
+        param($File, [string[]]$Arguments, [int]$TimeoutSeconds = 600)
+        $r = Invoke-AVDTuneChildProcess -FileName $File -Arguments (($Arguments | ForEach-Object { ConvertTo-AVDTuneArgument ([string]$_) }) -join ' ') -TimeoutMs ($TimeoutSeconds * 1000) -CleanEnvironment -TempDir (Split-Path $File -Parent)
+        [pscustomobject]@{ ExitCode = $r.ExitCode; Output = ([string]$r.Output + [string]$r.Error) }
+    }
     $a.FindSetup = {
         param($Dir)
         $p = Join-Path $Dir 'setup.exe'
