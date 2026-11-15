@@ -106,6 +106,21 @@ try {
     Test-Check 'attack: a junction that reappears during the quarantine never gets an owner or ACL change through it; the start is refused' ($e -like '*does not start*' -and (Get-Content -LiteralPath (Join-Path $qTarget 'system-file.txt') -Raw).Trim() -eq 'must stay as it is' -and @(Get-ChildItem -LiteralPath $qTarget -Force).Count -eq 1 -and (Get-Acl -LiteralPath $qTarget).Sddl -eq $targetAcl) $e
     Remove-AVDTuneTestTree $qRoot
     Get-ChildItem -LiteralPath $qParent -Force | ForEach-Object { Remove-AVDTuneTestTree $_.FullName }
+    # the SID of the administrator himself counts as owner below the root only (an unelevated process of his could have made the root)
+    $adminSid = 'S-1-5-21-1000000000-2000000000-3000000000-500'
+    $aRoot = Join-Path $tmp 'admin-root'; New-Item -ItemType Directory -Path (Join-Path $aRoot 'runs') -Force | Out-Null
+    $readAdmin = { param($Path, $IsDirectory) [pscustomobject]@{ Owner = $adminSid; Protected = $true; Rules = @([pscustomobject]@{ Sid = 'S-1-5-32-544'; Inherited = $false }) } }.GetNewClosure()
+    $pa = @(Get-AVDTuneStateSecurityProblems -Root $aRoot -Final -ReadAcl $readAdmin -AdminSid $adminSid)
+    Test-Check 'root owned by the administrator''s own SID is a problem; the same owner below the root is fine' ($pa.Count -eq 1 -and $pa[0].Path -eq $aRoot -and $pa[0].Problem -eq "owner $adminSid") (($pa | ForEach-Object { "$($_.Path)=$($_.Problem)" }) -join '; ')
+    Remove-AVDTuneTestTree $aRoot
+    # a FILE named like the state folder: a problem, set aside like a foreign folder, then the folder is created
+    $fParent = Join-Path $tmp 'file-parent'; New-Item -ItemType Directory -Path $fParent -Force | Out-Null
+    $fRoot = Join-Path $fParent 'AVDTune'; [IO.File]::WriteAllText($fRoot, 'planted file')
+    Test-Check 'a file in place of the state folder is a problem' (@(Get-AVDTuneStateSecurityProblems -Root $fRoot -Final -ReadAcl $readQ | Where-Object { $_.Problem -eq 'a file, not a folder' }).Count -eq 1) $null
+    $e = $null; try { [void](Initialize-AVDTuneState -Root $fRoot -Protect -ReadAcl $readQ -CreateRoot $createPlain) } catch { $e = $_.Exception.Message }
+    $asideF = @(Get-ChildItem -LiteralPath $fParent -File | Where-Object { $_.Name -like 'AVDTune.untrusted-*' })
+    Test-Check 'attack: a file named AVDTune is set aside (renamed) and the state folder is created; no unclear abort' (-not $e -and $asideF.Count -eq 1 -and (Test-Path -LiteralPath $fRoot -PathType Container) -and (Test-Path (Join-Path $fRoot 'state.json')) -and @((Get-AVDTuneStateSecurityReport).Quarantined).Count -eq 1) $e
+    Remove-AVDTuneTestTree $fParent
     $modCode = [IO.File]::ReadAllText((Join-Path $repo 'Modules\AVDTune.psm1'))
     Test-Check 'N1: no recursive icacls (/T, /reset) anywhere in the engine; the folder is created in one step with its ACL' ($modCode -notmatch "'/T'" -and $modCode -notmatch "'/reset'" -and $modCode -match '\.Create\(\(New-AVDTuneStateSecurity -WithOwner\)\)') $null
     $sd = New-AVDTuneStateSecurity -WithOwner

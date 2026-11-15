@@ -201,13 +201,20 @@ function Get-AVDTuneStateSecurityProblems {
         an owner other than Administrators/SYSTEM, explicit allow rules for anyone else, links (junctions, symlinks), an ACL that cannot be read.
         -Final also requires the root to be protected (no inheritance from ProgramData) with allow rules for Administrators/SYSTEM only.
     #>
-    param([Parameter(Mandatory)][string]$Root, [switch]$Final, [scriptblock]$ReadAcl = { param($Path, $IsDirectory) Read-AVDTuneAclInfo -Path $Path -IsDirectory $IsDirectory })
+    param([Parameter(Mandatory)][string]$Root, [switch]$Final, [scriptblock]$ReadAcl = { param($Path, $IsDirectory) Read-AVDTuneAclInfo -Path $Path -IsDirectory $IsDirectory },
+        # SID of the elevated administrator running AVDTune (files he creates below the root may carry it); '' when not elevated
+        [string]$AdminSid = $(if (Test-AVDTuneElevated) { [Security.Principal.WindowsIdentity]::GetCurrent().User.Value } else { '' }))
     $problems = New-Object System.Collections.ArrayList
-    # Owners that are fine: Administrators, SYSTEM, and the elevated administrator running AVDTune (files he creates may carry his own SID)
+    # Owners that are fine: the root only Administrators or SYSTEM (the admin's own SID could also come from an unelevated process of him);
+    # below the root also the elevated administrator running AVDTune
     $owners = @($script:TrustedOwnerSids)
-    if (Test-AVDTuneElevated) { $owners += [Security.Principal.WindowsIdentity]::GetCurrent().User.Value }
+    if ($AdminSid) { $owners += $AdminSid }
     $rootInfo = New-Object IO.DirectoryInfo $Root
-    if (-not $rootInfo.Exists) { return @() }
+    if (-not $rootInfo.Exists) {
+        $f = New-Object IO.FileInfo $Root
+        if ($f.Exists) { return @([pscustomobject]@{ Path = $Root; Problem = 'a file, not a folder' }) }
+        return @()
+    }
     $queue = New-Object System.Collections.Queue
     $queue.Enqueue($rootInfo)
     $count = 0
@@ -221,7 +228,7 @@ function Get-AVDTuneStateSecurityProblems {
         try { $acl = & $ReadAcl $item.FullName $isDir }
         catch { [void]$problems.Add([pscustomobject]@{ Path = $item.FullName; Problem = "ACL cannot be read: $($_.Exception.Message)" }); $acl = $null }
         if ($acl) {
-            if ($acl.Owner -notin $owners) { [void]$problems.Add([pscustomobject]@{ Path = $item.FullName; Problem = "owner $($acl.Owner)" }) }
+            if ($acl.Owner -notin $(if ($isRoot) { $script:TrustedOwnerSids } else { $owners })) { [void]$problems.Add([pscustomobject]@{ Path = $item.FullName; Problem = "owner $($acl.Owner)" }) }
             # Explicit rules anywhere; on the root in the final check also the inherited ones (the root must not inherit from ProgramData)
             $foreign = @($acl.Rules | Where-Object { $_.Sid -notin $script:TrustedOwnerSids -and (-not $_.Inherited -or ($Final -and $isRoot)) } | ForEach-Object { $_.Sid } | Sort-Object -Unique)
             if ($foreign.Count -gt 0) { [void]$problems.Add([pscustomobject]@{ Path = $item.FullName; Problem = "access for $($foreign -join ', ')" }) }
@@ -244,8 +251,10 @@ function Move-AVDTuneStateToQuarantine {
     #>
     param([Parameter(Mandatory)][string]$Root, $Problems)
     $dir = New-Object IO.DirectoryInfo $Root
-    if (-not $dir.Exists) { return '' }
-    if (($dir.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { $dir.Delete(); return '' }   # removes the link, not its target
+    $file = New-Object IO.FileInfo $Root
+    if (-not $dir.Exists -and -not $file.Exists) { return '' }
+    if ($dir.Exists -and ($dir.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { $dir.Delete(); return '' }   # removes the link, not its target
+    if ($file.Exists -and ($file.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { $file.Delete(); return '' }
     $icacls = Join-Path ([Environment]::SystemDirectory) 'icacls.exe'
     $ErrorActionPreference = 'Continue'   # icacls writes its refusal to stderr; that must not stop the quarantine
     try { [void](& $icacls $Root '/setowner' '*S-1-5-32-544' '/C' '/L' '/Q' 2>&1) } catch { }   # root only; a failure is fine, the rename below decides
@@ -253,7 +262,8 @@ function Move-AVDTuneStateToQuarantine {
     $stamp = (Get-Date).ToString('yyyyMMdd-HHmmss', [Globalization.CultureInfo]::InvariantCulture)
     $target = Join-Path $parent "$(Split-Path $Root -Leaf).untrusted-$stamp"
     for ($n = 2; Test-Path -LiteralPath $target; $n++) { $target = Join-Path $parent "$(Split-Path $Root -Leaf).untrusted-$stamp-$n" }
-    [IO.Directory]::Move($Root, $target)   # a rename on the same volume: nothing inside is opened or followed
+    if ($file.Exists) { [IO.File]::Move($Root, $target) }   # a file named like the folder is set aside the same way
+    else { [IO.Directory]::Move($Root, $target) }   # a rename on the same volume: nothing inside is opened or followed
     $target
 }
 
