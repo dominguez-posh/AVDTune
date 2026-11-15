@@ -331,6 +331,13 @@ Kerberos RC4 to AES (same Learn page): the April 2026 Windows Server update chan
 
 Still to research for the list (feature developer, with sources, before the Optimization page is built): new Teams VDI and multimedia redirection details, FSLogix profile settings beyond 5a, Edge/OneDrive per machine, SMB client and network settings, Storage Sense, power, time zone redirection, RDP Shortpath, GPU policies, Start and search, logon speed (Run keys, Active Setup, AppX on first logon).
 
+
+Built (#33, branch feature/33-optimization): `data\optimization.json` (the list as data, strictly type-checked at load, fail closed), `Modules\AVDTune.Optimization.psm1` (steps `optimization.*`, status, Apply/Undo), page Optimization (`AVDTune-Optimization.ps1`, built in code), `NOTICE`, checks `Tests\Check-Optimization.ps1` with `Tests\Fakes\FakeOptimization.ps1`.
+- Licence of WDOT checked 2026-11-15: repository MIT (copyright 2025 The Virtual Desktop Team) plus the Microsoft sample code EULA in the same repository. Only facts (names) are taken over as our own data lines with a source per entry; MIT text, copyright and the EULA note are in `NOTICE`. The EULA indemnity clause concerns embedded sample code: open for the user's decision (issue #33).
+- Kinds: Registry (HKLM, DWord/String), ServiceStartup, TaskDisabled, AppxRemove, DefenderPref (fixed list of Set-MpPreference names); autologgers are registry entries that only apply when the logger exists. Entry fields: Id, Category, Kind, Title, Why, Source (https, allowed hosts), Origin (a listed source), Risk, Default, Reboot, Irreversible, plus the kind's own fields. Presets: recommended (the defaults), conservative (default, risk Low, no AppX), everything.
+- Undo: the value found before Apply is saved in `config\optimization-backup.json` (only when none exists for the entry, never overwritten); Undo restores it and removes the backup; without a backup there is no undo (nothing AVDTune did not set is turned back). AppX removal has no undo, is marked on every row and needs a second confirmation (`-ConfirmIrreversible`).
+- Not in this step (open in #33): HKCU/default profile settings (visual effects, Start layout), `SharedSignaturesPath` with a readable-share check, the Defender settings without a verified cmdlet name (hide exclusions from local admins, suppress notifications, scan after update, quick scan time). Real AppX, Defender, service and task calls are checked against the fake only, not on a live host.
+
 ## 6. Benchmark (complete rework, own design step)
 
 The user wants a full rework, GPU included. Before building, the feature developer writes a short benchmark design (measures, method, score, report) for the user to approve. Fixed points so far:

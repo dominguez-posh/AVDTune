@@ -1,0 +1,50 @@
+AVDTune third-party notices
+
+Optimization list (data/optimization.json)
+-------------------------------------------
+Parts of the optimization list are based on the configuration data of the
+Windows Desktop Optimization Tool (WDOT):
+
+  Repository : https://github.com/The-Virtual-Desktop-Team/Windows-Desktop-Optimization-Tool
+  Licence    : MIT License
+  Copyright  : Copyright (c) 2025 The Virtual Desktop Team
+
+Only facts are taken over (names of Windows services, scheduled tasks, AppX
+packages, autologgers and registry values). The selection, the explanations,
+the risk notes and the undo logic are AVDTune's own. No WDOT script code is
+copied and WDOT is neither downloaded nor run by AVDTune.
+
+MIT License
+
+Copyright (c) 2025 The Virtual Desktop Team
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+The WDOT repository also ships an EULA.txt (Microsoft sample code terms:
+illustration only, not intended for production, copyright notice required,
+no use of Microsoft's name or logos to market a product, indemnification
+clause). AVDTune embeds no WDOT sample code; the notice is kept here so the
+terms stay visible next to the data that came from the repository.
+
+Defender for VDI preset
+-----------------------
+The Defender settings follow Microsoft Learn, "Configure Microsoft Defender
+Antivirus on a remote desktop or virtual desktop infrastructure environment"
+(https://learn.microsoft.com/en-us/defender-endpoint/deployment-vdi-microsoft-defender-antivirus).
+Settings only; no text is copied.
