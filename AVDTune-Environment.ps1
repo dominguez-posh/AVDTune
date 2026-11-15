@@ -5,7 +5,7 @@
 # Test mode: the fake ARM (Tests\Fakes\FakeEnvArm.ps1) and no token of a real sign-in; nothing leaves this computer.
 
 $script:EnvFake = $null
-if ($script:TestMode) { . (Join-Path (Split-Path $env:AVDTUNE_FAKE -Parent) 'FakeEnvArm.ps1'); $script:EnvFake = New-AVDTuneFakeEnvArm }
+if ($script:TestMode) { . (Get-TestScript 'FakeEnvArm.ps1'); $script:EnvFake = New-AVDTuneFakeEnvArm }
 $script:EnvFields = @{}
 $script:EnvPlan = $null
 $script:EnvUndoPlan = $null

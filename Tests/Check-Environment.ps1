@@ -193,7 +193,7 @@ try {
     Test-Check 'asynchronous operations: Location (account) and Azure-AsyncOperation (zone, link, endpoint, zone group) were polled until they finished' ($ops.Count -ge 5 * 2 -and @($ops | Where-Object { $_ -like '*Storage/locations*' }).Count -ge 3 -and @($ops | Where-Object { $_ -like '*Network/locations*' }).Count -ge 12) "$($ops.Count)"
     $stored = $arm.Store.Resources[$accKey]
     Test-Check 'the fake holds the resources AVDTune asked for, tagged' ($stored.kind -eq 'FileStorage' -and $stored.tags.CreatedWith -eq 'AVDTune' -and $stored.properties.azureFilesIdentityBasedAuthentication.directoryServiceOptions -eq 'AADKERB' -and $arm.Store.Roles.Count -eq 2) $null
-    Test-Check 'LastChange is set, a run record and a change log entry per step exist' ($null -ne (Get-AVDTuneLastChange -Root $root) -and @(Get-AVDTuneRun -Root $root | Where-Object Kind -eq 'Environment-Azure').Count -eq 1 -and @(Get-AVDTuneChangeLog -Root $root | Where-Object { $_.Component -like 'Azure:*' }).Count -eq 10) (@(Get-AVDTuneChangeLog -Root $root).Count)
+    Test-Check 'Azure steps do not set LastChange; a run record and a change log entry per step exist' ($null -eq (Get-AVDTuneLastChange -Root $root) -and @(Get-AVDTuneRun -Root $root | Where-Object Kind -eq 'Environment-Azure').Count -eq 1 -and @(Get-AVDTuneChangeLog -Root $root | Where-Object { $_.Component -like 'Azure:*' -and $_.Category -eq 'Azure' }).Count -eq 10) (@(Get-AVDTuneChangeLog -Root $root).Count)
     $j = Get-AVDTuneEnvJournal -Root $root
     Test-Check 'the journal lists every step as Done, with the path and whether it can carry a tag' (@($j.Runs[0].Steps).Count -eq 10 -and @($j.Runs[0].Steps | Where-Object Status -ne 'Done').Count -eq 0 -and $j.Runs[0].Status -eq 'Done') $null
     $all = Get-AllText $root
@@ -220,9 +220,9 @@ try {
             $r = Invoke-Full $arm $good $root
             $failedStep = @($r.Results | Where-Object Status -eq 'Failed')
             $skipped = @($r.Results | Where-Object Status -eq 'Skipped')
-            $ok = $r.Status -eq 'Failed' -and $failedStep.Count -eq 1 -and $failedStep[0].Id -eq $c.At -and $failedStep[0].Message -like $c.Like -and (Test-Path -LiteralPath (Join-Path $root 'config\azure-setup.json')) -and $null -ne (Get-AVDTuneLastChange -Root $root)
+            $ok = $r.Status -eq 'Failed' -and $failedStep.Count -eq 1 -and $failedStep[0].Id -eq $c.At -and $failedStep[0].Message -like $c.Like -and (Test-Path -LiteralPath (Join-Path $root 'config\azure-setup.json')) -and $null -eq (Get-AVDTuneLastChange -Root $root)
             if ($c.At -ne 'env.role-admins') { $ok = $ok -and ($failedStep[0].Id -eq 'env.role-users' -or $skipped.Count -ge 1) }
-            Test-Check "error: $($c.N); the rest is skipped, the journal and LastChange are written" $ok (($r.Results | ForEach-Object { "$($_.Id)=$($_.Status) $($_.Message)" }) -join '|')
+            Test-Check "error: $($c.N); the rest is skipped, the journal is written, LastChange stays empty" $ok (($r.Results | ForEach-Object { "$($_.Id)=$($_.Status) $($_.Message)" }) -join '|')
             Test-Check "error: $($c.N); the token is not in the messages" (($r | ConvertTo-Json -Depth 8) -notmatch 'SECRET') $null
         }
         else {
@@ -354,6 +354,23 @@ try {
     Test-Check 'FSLogix on the master: WhatIf changes nothing' (@($m.Log | Where-Object { $_ -like 'RegSet*' }).Count -eq 0) $null
     [void](Set-AVDTuneEnvMaster -Machine $m -Spec $good -Identity EntraKerberos -Root $root -User 'u' -SnapshotId 'snap3')
     Test-Check 'FSLogix on the master: Enabled, VHDLocations with the new share and the cloud Kerberos ticket value' (($m.Log -join "`n") -like '*FSLogix\Profiles|VHDLocations*contosoprofiles.file.core.windows.net\profiles*' -and ($m.Log -join "`n") -like '*Enabled=1*' -and ($m.Log -join "`n") -like '*CloudKerberosTicketRetrievalEnabled=1*') ($m.Log -join '|')
+    $lcRoot = New-Root; $roots += $lcRoot
+    Open-AVDTuneWriteGate -SnapshotId 'snap4' -ConfirmedBy 'Test User'
+    $before = Get-AVDTuneLastChange -Root $lcRoot
+    [void](Set-AVDTuneEnvMaster -Machine (New-AVDTuneFakeMachine) -Spec $good -Identity EntraKerberos -Root $lcRoot -User 'u' -SnapshotId 'snap4' -WhatIf)
+    Test-Check 'the master part: WhatIf does not set LastChange' ($null -eq $before -and $null -eq (Get-AVDTuneLastChange -Root $lcRoot)) $null
+    [void](Set-AVDTuneEnvMaster -Machine (New-AVDTuneFakeMachine) -Spec $good -Identity EntraKerberos -Root $lcRoot -User 'u' -SnapshotId 'snap4')
+    Test-Check 'the master part sets LastChange (registry of the master)' ($null -ne (Get-AVDTuneLastChange -Root $lcRoot)) $null
+    $lcRoot2 = New-Root; $roots += $lcRoot2
+    $fm = New-AVDTuneFakeMachine -Seed @{ }; $fm.Store.FailWrites = @('VHDLocations')
+    [void](Set-AVDTuneEnvMaster -Machine $fm -Spec $good -Identity EntraKerberos -Root $lcRoot2 -User 'u' -SnapshotId 'snap4' -ErrorAction SilentlyContinue)
+    Test-Check 'the master part sets LastChange also when a registry write fails' ($null -ne (Get-AVDTuneLastChange -Root $lcRoot2)) $null
+    $azRoot = New-Root; $roots += $azRoot
+    $azArm = New-AVDTuneFakeEnvArm
+    [void](Invoke-Full $azArm $good $azRoot)
+    $az2 = New-Root; $roots += $az2
+    Test-Check 'Azure steps still need the open gate and the plan hash (no LastChange does not mean no gate)' ($null -eq (Get-AVDTuneLastChange -Root $azRoot) -and (Get-Thrown { Close-AVDTuneWriteGate; Invoke-Full (New-AVDTuneFakeEnvArm) $good $az2 }) -like '*snapshot gate*') $null
+    Open-AVDTuneWriteGate -SnapshotId 'snap4' -ConfirmedBy 'Test User'
     $e2 = New-AVDTuneFakeMachine
     [void](Set-AVDTuneEnvMaster -Machine $e2 -Spec $good -Identity EntraDs -Root $root -User 'u' -SnapshotId 'snap3')
     Test-Check 'the Kerberos client value is only set for Entra Kerberos' (($e2.Log -join "`n") -notlike '*CloudKerberosTicketRetrievalEnabled*') $null

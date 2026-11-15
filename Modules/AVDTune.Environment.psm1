@@ -7,7 +7,7 @@
 
       * Plan first: Get-AVDTuneEnvPlan only reads (GET). Every step says Create, Update, None, Manual or Blocked, with the exact request body, and the plan has a hash.
       * Write only through Invoke-AVDTuneEnvApply: snapshot gate open (Test-AVDTuneWriteAllowed), the plan is read AGAIN and must have the confirmed hash (any difference:
-        nothing is written), resource by resource, asynchronous operations awaited, stop at the first failure, LastChange set (also for a failed attempt).
+        nothing is written), resource by resource, asynchronous operations awaited, stop at the first failure. No LastChange: that is for changes of the master (docs\security-checklist.md); only Set-AVDTuneEnvMaster sets it.
       * Journal config\azure-setup.json (before and after every write, no secret, no token) is what Undo works from: only what AVDTune created (tag CreatedWith=AVDTune), in
         reverse order, the share and the account only when the share is verified empty over the data plane.
       * Azure Resource Manager only through the ARM adapter of AVDTune.Snapshot.psm1 (host fixed, no redirects). This module adds an allowlist of the resource types and methods
@@ -561,7 +561,7 @@ function Save-AVDTuneEnvJournal([string]$Root, $Journal) { Write-AVDTuneFile (Ge
 function Invoke-AVDTuneEnvApply {
     <#
         Creates what the plan says, after the confirmation. -ConfirmedHash is the hash of the plan the administrator saw: the plan is built again now and a different hash writes nothing.
-        Refuses without the snapshot gate. -WhatIf returns the plan and writes nothing. Stops at the first failure (the rest is Skipped). Every attempt sets LastChange.
+        Refuses without the snapshot gate. -WhatIf returns the plan and writes nothing. Stops at the first failure (the rest is Skipped). Azure resources do not set LastChange (the OS disk snapshot does not contain them; their way back is the journal undo).
         Returns @{ Status Changed | Unchanged | Failed | Refused | WhatIf; Message; Results; Plan }.
     #>
     [CmdletBinding()]
@@ -581,7 +581,6 @@ function Invoke-AVDTuneEnvApply {
     $entries = New-Object System.Collections.ArrayList
     $run = [pscustomobject][ordered]@{ RunId = $runId; Started = $started.ToString('o'); Ended = $null; User = $User; SnapshotId = $SnapshotId; Account = [string]$Spec.AccountName; ResourceGroup = [string]$Spec.ResourceGroup; Status = 'Running'; Steps = $entries }
     $journal.Runs = @(@($journal.Runs) | Where-Object { $_ }) + $run
-    [void](Set-AVDTuneState -Root $Root -Values @{ LastChange = $started.ToString('o') })   # also a failed attempt may have changed something
     $results = New-Object System.Collections.ArrayList
     $stopped = $false
     foreach ($s in $todo) {
@@ -601,7 +600,7 @@ function Invoke-AVDTuneEnvApply {
         }
         Save-AVDTuneEnvJournal $Root $journal
         if ($state.ImageVersion -and $w.Ok -and -not $w.Benign) {
-            [void](Add-AVDTuneChangeLogEntry -Root $Root -Version $state.ImageVersion -Category 'FSLogix' -Component "Azure: $($s.Type)" -ChangeType $(if ($s.Action -eq 'Create') { 'Added' } else { 'Changed' }) -Text "$($s.Title) (storage account $($Spec.AccountName), resource group $($Spec.ResourceGroup)); $(@($s.Changes) -join '; ')" -User $User -SnapshotId $SnapshotId -RunId $runId -Source Step)
+            [void](Add-AVDTuneChangeLogEntry -Root $Root -Version $state.ImageVersion -Category 'Azure' -Component "Azure: $($s.Type)" -ChangeType $(if ($s.Action -eq 'Create') { 'Added' } else { 'Changed' }) -Text "$($s.Title) (storage account $($Spec.AccountName), resource group $($Spec.ResourceGroup)); $(@($s.Changes) -join '; ')" -User $User -SnapshotId $SnapshotId -RunId $runId -Source Step)
         }
     }
     $failed = @($results | Where-Object Status -eq 'Failed').Count -gt 0
@@ -685,7 +684,7 @@ function Get-AVDTuneEnvUndoPlan {
 }
 
 function Invoke-AVDTuneEnvUndo {
-    <# Takes back what the undo plan lists, after the confirmation of its hash; same gate, LastChange and change log rules as the apply. Returns @{ Status; Message; Results }. #>
+    <# Takes back what the undo plan lists, after the confirmation of its hash; same gate and change log rules as the apply, no LastChange. Returns @{ Status; Message; Results }. #>
     [CmdletBinding()]
     param([Parameter(Mandatory)]$Arm, [Parameter(Mandatory)][string]$Token, [string]$ConfirmedHash, [string]$Root = (Get-AVDTuneRoot), $Files, [string]$StorageToken, [string]$User, [string]$SnapshotId, [int]$PollSeconds = 5, [int]$TimeoutSeconds = 900, [int]$MaxPolls = 400)
     if (-not (Test-AVDTuneWriteAllowed)) { throw 'The snapshot gate is not confirmed: AVDTune is read only until a snapshot newer than its last change is confirmed on the Overview.' }
@@ -693,7 +692,6 @@ function Invoke-AVDTuneEnvUndo {
     if (-not $ConfirmedHash -or $plan.Hash -ne $ConfirmedHash) { return [pscustomobject]@{ Status = 'Refused'; Message = 'The undo plan differs from the one that was confirmed (or nothing was confirmed). Nothing was changed.'; Results = @(); Plan = $plan } }
     $todo = @($plan.Steps | Where-Object { $_.Action -in 'Delete', 'Restore' })
     if ($todo.Count -eq 0) { return [pscustomobject]@{ Status = 'Unchanged'; Message = 'There is nothing AVDTune may take back.'; Results = @(); Plan = $plan } }
-    [void](Set-AVDTuneState -Root $Root -Values @{ LastChange = (Get-Date).ToString('o') })
     $journal = Get-AVDTuneEnvJournal -Root $Root
     $state = Get-AVDTuneState $Root
     $results = New-Object System.Collections.ArrayList; $stopped = $false
@@ -708,7 +706,7 @@ function Invoke-AVDTuneEnvUndo {
         if ($w.Ok) {
             foreach ($run in @($journal.Runs)) { foreach ($e in @($run.Steps)) { if ($e -and $e.Id -eq $s.Id -and ([string]$e.Path -eq ($s.Path -split '\?')[0])) { $e.Undone = $true } } }
             [void]$results.Add([pscustomobject]@{ Id = $s.Id; Title = $s.Title; Status = 'Reverted'; Message = '' })
-            if ($state.ImageVersion) { [void](Add-AVDTuneChangeLogEntry -Root $Root -Version $state.ImageVersion -Category 'FSLogix' -Component "Azure: $($s.Type)" -ChangeType $(if ($s.Action -eq 'Delete') { 'Removed' } else { 'Changed' }) -Text "Undo: $($s.Title)" -User $User -SnapshotId $SnapshotId -Source Step) }
+            if ($state.ImageVersion) { [void](Add-AVDTuneChangeLogEntry -Root $Root -Version $state.ImageVersion -Category 'Azure' -Component "Azure: $($s.Type)" -ChangeType $(if ($s.Action -eq 'Delete') { 'Removed' } else { 'Changed' }) -Text "Undo: $($s.Title)" -User $User -SnapshotId $SnapshotId -Source Step) }
         }
         else { $stopped = $true; [void]$results.Add([pscustomobject]@{ Id = $s.Id; Title = $s.Title; Status = 'Failed'; Message = $w.Message }) }
         Save-AVDTuneEnvJournal $Root $journal
@@ -737,6 +735,7 @@ function Set-AVDTuneEnvMaster {
     [CmdletBinding()]
     param([Parameter(Mandatory)]$Machine, [Parameter(Mandatory)]$Spec, [Parameter(Mandatory)][string]$Identity, [string]$Root = (Get-AVDTuneRoot), [string]$User, [string]$SnapshotId, [switch]$WhatIf)
     $v = Get-AVDTuneEnvMasterValues -Spec $Spec -Identity $Identity
+    if (-not $WhatIf -and (Test-AVDTuneWriteAllowed)) { [void](Set-AVDTuneState -Root $Root -Values @{ LastChange = (Get-Date).ToString('o') }) }   # the master changes: also a failed attempt may have written part of it
     $runs = @(Set-AVDTuneFSLogixSettings -Machine $Machine -Root $Root -Values $v.Values -User $User -SnapshotId $SnapshotId -WhatIf:$WhatIf)
     foreach ($r in $v.Registry) {
         $step = New-AVDTuneFSLogixRegStep -Id 'fslogix.kerberos.cloudticket' -Path $r.Path -Name $r.Name -Value $r.Value -Type $r.Type -Title 'Allow the cloud Kerberos ticket (Entra Kerberos)' -SourceUrl $r.Source -Why 'The client asks Microsoft Entra ID for the Kerberos ticket of the share.'

@@ -25,7 +25,7 @@ Issue 32, plan section 1b (phase 3). Code: `Modules\AVDTune.Environment.psm1`, p
 | ARM only through the adapter, allowlist | Every request goes through `New-AVDTuneArmAdapter` (host fixed, no redirects). This module allows PUT, PATCH, DELETE only for eight resource types with their api version; POST (listKeys, regenerateKey) never |
 | Tokens only to their host, no redirects followed | Polling links are absolute URLs: only `https://management.azure.com/subscriptions/...` is followed (`ConvertTo-AVDTuneArmPath`), anything else fails the step |
 | Secrets | The module has no key call, no HTTP client; the token is a parameter, never in the plan, journal, change log, run record or a message (checked by scanning the files) |
-| Write gate and LastChange | Apply and undo throw without the gate; `LastChange` is set before the first write and also for a failed run |
+| Write gate and LastChange | Apply and undo throw without the gate and need the confirmed plan hash. Azure resources do not set `LastChange` (not in the OS disk snapshot; their way back is the journal undo, user decision, issue 32); the master part (`Set-AVDTuneEnvMaster`: Enabled, VHDLocations, CloudKerberosTicketRetrievalEnabled) sets it before writing, also when a write fails. Change log entries of Azure steps have the category Azure, which `Get-AVDTuneLastChange` ignores |
 | Change log and undo | One entry per step (also for undo); undo works only on what the journal says AVDTune created, and never deletes data |
 | Crash safety | The journal is written before and after every write (`Started`, `Done`, `Failed`) |
 | Data is data | A journal entry that names another resource type produces no step and no request |

@@ -25,6 +25,7 @@ AVDTune runs elevated on a machine that becomes the image of every user. These a
 
 ## Changes to the master
 - [ ] Every write goes through the write gate (`Invoke-AVDTuneStep` or an explicit gate check) and sets `LastChange` (also undo, repair, maintenance mode, failed attempts). Pure analysis does not set it.
+  - Clarification (user go, issue 32): `LastChange` applies to changes of the master. Azure resources that AVDTune creates (storage account, share, DNS, private endpoint, roles of the environment wizard) are not in the OS disk snapshot and have their own journal undo (`config\azure-setup.json`); they do not set `LastChange`, but still need the open write gate, the confirmed plan hash, a change log entry (category Azure) and a journal entry. The master part (FSLogix registry values) sets `LastChange`, also when it fails.
 - [ ] Every change has a change log entry and, where it can be undone, an undo that does not overwrite older backups.
 - [ ] Anything that lifts a protection (update block, Defender, services) is restored in `finally`, survives a crash (journal + repair at the next start) and blocks closing the window and signing out while it runs.
 - [ ] Defender exclusions: only what Microsoft documents, processes with full path, never folders users can write to without a visible risk note.
