@@ -12,6 +12,14 @@ AVDTune runs locally and elevated on the Golden Master VM and takes over its who
 
 Not in scope: customer specific software and shortcuts (they come as packages from the library), host pool management in Azure, Citrix/Horizon.
 
+## 1a. Start: sign-in, domain, snapshot gate (added 2026-11-15)
+
+Nothing changes the master before these three steps are done; the Overview shows them as a short start sequence.
+
+1. **Microsoft 365 / Azure sign-in.** One sign-in with three token audiences: Microsoft Graph (SharePoint site of the environment, read of Intune app notes for the package trust anchor), Azure Resource Manager (snapshot of the OS disk, VM size and region for the benchmark), and the PackTune package store (Sites.Selected). The app registration needs `user_impersonation` on Azure Service Management in addition to PackTune's permissions; the setup assistant adds it. Tokens live in memory only and are removed and checked before seal.
+2. **Domain.** The master is not domain joined (it must not be, because of sysprep), so the user enters the IP (or name) of a domain controller and a domain account with the rights to create groups in an OU. AVDTune reads everything else itself from the DC: RootDSE (domain DNS name, NetBIOS name, naming contexts, functional level), the OU tree, existing groups and their SIDs, the site, optionally the DNS servers. Connection: LDAPS 636 first; fallback LDAP 389 only with Negotiate signing and sealing; never a simple bind in clear text. The certificate of the DC is shown on first contact (thumbprint) and pinned per environment. The password stays in a SecureString in memory, never on disk, never in the protocol.
+3. **Snapshot gate.** AVDTune finds its own VM through the Azure Instance Metadata Service (subscription, resource group, VM, OS disk) and offers "Create snapshot now" (incremental snapshot of the OS disk, name `<vm>-avdtune-<image version>-<yyyyMMdd-HHmm>`, tags with image version and user). It then checks that a snapshot of the OS disk from today exists, and the user confirms by typing their full name: "Ich bestaetige, dass vor diesem Lauf ein Snapshot des Golden Masters erstellt wurde und ein Rollback moeglich ist." Name, time, snapshot resource ID and whether AVDTune made it go into the protocol and the change log. Without the confirmation every page is read only. Rollback hint on the Overview: how to create a disk from the snapshot and swap the OS disk.
+
 ## 2. Shape
 
 - Own entry point `Start-AVDTune.ps1` + `UI/AVDTune.xaml`, same `UI/Theme.xaml`, same shell (own title bar, left navigation, light/dark), same redesign target.
@@ -30,11 +38,13 @@ Not in scope: customer specific software and shortcuts (they come as packages fr
 | Software | packages of the PackTune library (SharePoint) plus winget/Chocolatey catalog: install, update, remove; detection of what is on the master |
 | Office | ODT configuration form (channel, 64 bit, languages, excluded apps, `SharedComputerLicensing=1`, `Updates Enabled=FALSE`), preview of `configuration.xml`, install/update/remove, build info. ODT downloaded from Microsoft, Authenticode checked |
 | Optimization | VDOT data re-implemented with attribution (AppX, services, tasks, autologgers), visual effects and transparency off for all users, power plan, widgets/news/consumer features/Copilot off, Edge/Chrome (no hardware acceleration, sleeping tabs, no background run), Storage Sense off, telemetry Required, hibernation off, scheduled defrag off, Xbox/gaming removed |
-| VDI components | FSLogix install/update + profile settings + `redirections.xml` editor with the cache template (Windows, Edge, Chrome, Teams, Office caches), Defender exclusions for FSLogix, Defender onboarding for non-persistent VDI (package from the library), new Teams for VDI (`teamsbootstrapper -p`, `IsWVDEnvironment`, SlimCore plugin / WebRTC redirector per Microsoft Learn), MMR, RDP Shortpath, time zone redirection, OneDrive per machine |
+| FSLogix | setup, settings, `redirections.xml`, function test (section 5a) |
+| App Masking | FSLogix hiding rules for icons and apps, groups in the domain (section 5b) |
+| VDI components | Defender onboarding for non-persistent VDI (package from the library), new Teams for VDI (`teamsbootstrapper -p`, `IsWVDEnvironment`, SlimCore plugin / WebRTC redirector per Microsoft Learn), MMR, RDP Shortpath, time zone redirection, OneDrive per machine |
 | User experience | wallpaper (replace `img0.jpg` with ownership handling), watermark (section 5), Start/taskbar layout and default apps for new profiles, public desktop shortcuts and web apps (PWA) with FSLogix App Masking rules per group |
 | Update block for users | everything that offers or runs updates is hidden and off for users (section 4) |
 | Benchmark | section 6 |
-| Cleanup & seal | DISM component cleanup, temp/logs/caches, default profile check, AppX-per-user check (sysprep blocker), BitLocker off, tokens and sign-in caches of AVDTune removed, snapshot reminder, sysprep `/generalize /oobe /shutdown /mode:vm` as the interactive admin (never SYSTEM), typed confirmation |
+| Cleanup & seal | the last button of a version: a checklist that must be green (no pending reboot, update block on, FSLogix test passed, no AVD agent, no join, no tokens), then DISM component cleanup, temp/logs/caches, default profile check, AppX-per-user check (sysprep blocker), BitLocker off, tokens and sign-in caches of AVDTune removed, snapshot reminder, sysprep `/generalize /oobe /shutdown /mode:vm` as the interactive admin (never SYSTEM), typed confirmation |
 | Protocol & change log | session protocol like PackTune (ticket text), change log per image version (Version, date, category, component, change type, text) with automatic entries from every step and free notes, export HTML/Markdown, copy to the library folder `AVDTune/<image>` |
 
 ## 4. Updates hidden for users, maintenance mode
@@ -57,7 +67,45 @@ New:
 - Migration: AVDTune detects the old task "PilotOverlay" and the VBS file and offers to replace them.
 - Optional the Microsoft watermark (QR code with connection ID, policy `fEnableWatermarking`) for forensic needs, and screen capture protection as a hint (host pool setting, not image).
 
-## 6. Benchmark (rework of AVD-Benchmark)
+## 5a. FSLogix setup and function test
+
+Setup:
+- Install or update FSLogix (download from Microsoft, Authenticode check), version shown on the Updates page.
+- Profile container settings as a form with Microsoft's recommended values and an explanation per value: `Enabled`, `VHDLocations` (or Cloud Cache `CCDLocations`), `VolumeType=VHDX`, `IsDynamic=1`, `SizeInMBs`, `DeleteLocalProfileWhenVHDShouldApply`, `FlipFlopProfileDirectoryName`, `LockedRetryCount`/`LockedRetryInterval`, `ReAttachRetryCount`/`ReAttachIntervalSeconds`, `PreventLoginWithFailure`/`PreventLoginWithTempProfile`, `ProfileType`; optional Office container (ODFC). Include/exclude groups (`FSLogix Profile Include List`/`Exclude List`) with groups from the domain (section 1a).
+- `redirections.xml` editor with the cache template from the change log (Windows, Edge, Chrome, Teams, Office caches; no exclusion of WAM/TokenBroker, which broke SSO in the change log), written to the profile share's `redirections.xml` path setting (`RedirXMLSourceFolder`) or locally.
+- Defender exclusions for FSLogix (VHD/VHDX, `%ProgramFiles%\FSLogix\Apps\frxdrv.sys` etc., Microsoft's list) and the local administrators exclusion (built-in Administrators must be excluded from the profile).
+- Azure Files: the authentication type of the share (AD DS or Entra Kerberos) is read from the storage account with the Azure sign-in, shown and checked (share and NTFS permissions as Microsoft recommends: Users modify on the share root only "this folder", Creator Owner on subfolders).
+
+Function test ("FSLogix-Test", also part of the seal checklist):
+1. Installed version, services `frxsvc` and `frxccds` running, filter driver loaded (`fltmc`).
+2. Registry valid (required values present, no typos in paths, no conflicting Cloud Cache plus VHDLocations).
+3. Each `VHDLocations` path: DNS resolution, TCP 445 reachable, SMB session, Kerberos ticket for `cifs/<host>` when AD auth is used.
+4. Permissions: create a test folder, write/read/delete a file, check the effective NTFS rights on the root against the recommendation.
+5. VHDX test: `frx create-vhd` of a small dynamic VHDX in the share, mount it, write, dismount, delete (proves VHDX creation, locking and the driver without a real user).
+6. `redirections.xml` parses and matches the editor; Defender exclusions present; local Administrators in the exclude list.
+7. Optional with a test user from the domain: sign-in of a test user is not possible on the master itself without join, so the real logon test runs on a session host after rollout; AVDTune reads the FSLogix logs and `frx list-redirects` there through the Benchmark/Status script in the stand-alone package.
+Result: green/yellow/red per step with a fix hint, stored in the change log.
+
+## 5b. App Masking (FSLogix hiding rules) with the domain
+
+- Page lists every rule set in `C:\Program Files\FSLogix\Apps\Rules` (`.fxr` + `.fxa`) with what it hides (public desktop shortcuts, Start entries, folders, registry) and the group it is assigned to.
+- New rule set from: a shortcut on the public desktop, a Start menu entry, an installed app (uninstall key) or a web app (PWA) shortcut. AVDTune writes the rule file (hide rules for the `.lnk`, optional folders and registry) and the assignment file.
+- Groups: for each rule set the user chooses an OU once (OU tree from the DC); AVDTune creates the group `<prefix>-App-<name>` there if missing (naming pattern in the settings, description "AVDTune App Masking: <name>"), reads its SID and writes the assignment by SID: everyone hidden, members of the group shown. Existing groups can be chosen instead.
+- Membership is not managed in AVDTune (that stays in AD), but the page shows the member count and links the group.
+- Changes are applied with `frxcontext`/the FSLogix Apps service reload and verified (rule compiled, assignment readable). Each change goes into the change log (rule, group, OU, SID).
+- Migration: the rules made today with the FSLogix Rule Editor are read and shown; unknown parts of a rule are kept as they are.
+
+## 6. Benchmark (complete rework, own design step)
+
+The user wants a full rework, GPU included. Before building, the feature developer writes a short benchmark design (measures, method, score, report) for the user to approve. Fixed points so far:
+
+GPU (for NV/NC VMs, skipped with a note on VMs without GPU):
+- Detect: adapter, driver version, VRAM, vGPU partition (`Get-CimInstance Win32_VideoController`, `nvidia-smi`/AMD tools when present), whether the RDS policies use the hardware adapter, H.264/AVC444 and hardware encoding.
+- Render: a fixed off-screen Direct3D scene (WPF/D3D11 through a small included .NET program) with frames per second at a fixed resolution, and the same scene through the software renderer as a reference.
+- Encode/decode: Media Foundation hardware H.264/HEVC encode of a fixed clip (frames per second), hardware decode of a fixed video.
+- Compute: optional OpenCL/DirectCompute kernel time.
+
+Findings in the current script:
 
 Findings in the current script:
 - The internet test downloads the start page of windows.net (a few KB) and computes as if it were 1 GB; on error it reports a fixed 150 Mbps. The value is not real.
@@ -80,6 +128,7 @@ New benchmark in AVDTune:
 - On the master: `C:\ProgramData\AVDTune\` (ACL Administrators/SYSTEM): `state.json` (current), `runs\` (one record per run, append only), `changelog.json`, `benchmark\`, `config\` (Office XML, redirections.xml, watermark), `logs\`. No secrets, no tokens.
 - Image version `YYYY.MM.NNN` (as in the hand-written log), raised by "start new version"; capture records the gallery version as free text.
 - Protocol per session as in PackTune (DE/EN, ready for a ticket), saved locally and to the library.
+- Optional SharePoint list (user decision: own site per customer/environment): the site URL is a setting of the environment; the setup assistant creates the site if wanted and a list "AVDTune Change Log" with the columns Version, Date, Category, Component, Change type, Text, User, Snapshot ID, Run ID; the app registration gets `Sites.Selected` on that site (one-time grant as in PackTune). Every change log entry is written to the list too; when SharePoint is not reachable entries wait in a local queue and are sent later. The list is the shared view; the local `changelog.json` stays the source.
 
 ## 8. Library (SharePoint) on the master
 
@@ -98,9 +147,12 @@ Elevated tool on a machine that becomes the image of all users: runs from a prot
 
 | Phase | Content |
 |---|---|
-| 1 | Shell in PackTune look, elevation, engine, state, protocol and change log, Overview |
+| 1 | Shell in PackTune look, elevation, engine, state, protocol and change log, Overview; start sequence: M365/Azure sign-in, DC connection and discovery, snapshot gate with name confirmation |
 | 2 | Updates page (Windows, Office, Edge/Teams/OneDrive/FSLogix/Defender, software) and update block with maintenance mode |
-| 3 | Software from the library and catalog |
-| 4 | Benchmark (new engine, comparison per version), AVD-Benchmark repo stand-alone |
-| 5 | Setup: Office, language, VDI components, optimizations, user experience, watermark |
-| 6 | Cleanup & seal, export, docs and demo |
+| 3 | FSLogix setup and function test; App Masking with groups in the domain; SharePoint change log list |
+| 4 | Software from the library and catalog |
+| 5 | Benchmark: design for approval, then new engine incl. GPU, comparison per version, AVD-Benchmark repo stand-alone |
+| 6 | Setup: Office, language, VDI components, optimizations, user experience, watermark |
+| 7 | Cleanup & seal (last button, checklist), export, docs and demo |
+
+Security reviews: phase 1 (sign-in, domain credentials, LDAP, snapshot rights), 2 (update block), 3 (group creation in AD, share permissions), 7 (seal, token removal).
