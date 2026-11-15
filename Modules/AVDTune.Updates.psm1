@@ -651,6 +651,32 @@ function Test-AVDTuneAdminOnlyPath {
     $true
 }
 
+function Initialize-AVDTuneProcessTree {
+    # A job object around a started tool, so a timeout ends the whole tree (installers started by winget or choco), not only the tool
+    if ('AVDTune.ProcessTree' -as [type]) { return }
+    Add-Type -TypeDefinition @"
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+namespace AVDTune {
+    public static class ProcessTree {
+        [StructLayout(LayoutKind.Sequential)]
+        struct BasicAccounting { public long TotalUserTime, TotalKernelTime, PeriodUserTime, PeriodKernelTime; public uint PageFaults, TotalProcesses, ActiveProcesses, TerminatedProcesses; }
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] static extern IntPtr CreateJobObject(IntPtr attributes, string name);
+        [DllImport("kernel32.dll", SetLastError = true)] static extern bool AssignProcessToJobObject(IntPtr job, IntPtr process);
+        [DllImport("kernel32.dll", SetLastError = true)] static extern bool TerminateJobObject(IntPtr job, uint exitCode);
+        [DllImport("kernel32.dll", SetLastError = true)] static extern bool QueryInformationJobObject(IntPtr job, int infoClass, out BasicAccounting info, int length, IntPtr returned);
+        [DllImport("kernel32.dll", SetLastError = true)] static extern bool CloseHandle(IntPtr handle);
+        public static IntPtr Create() { IntPtr j = CreateJobObject(IntPtr.Zero, null); if (j == IntPtr.Zero) throw new Win32Exception(); return j; }
+        public static void Assign(IntPtr job, IntPtr process) { if (!AssignProcessToJobObject(job, process)) throw new Win32Exception(); }
+        public static int Active(IntPtr job) { BasicAccounting i; if (!QueryInformationJobObject(job, 1, out i, Marshal.SizeOf(typeof(BasicAccounting)), IntPtr.Zero)) throw new Win32Exception(); return (int)i.ActiveProcesses; }
+        public static void Terminate(IntPtr job) { TerminateJobObject(job, 0xFFFFFFFF); }
+        public static void Close(IntPtr job) { CloseHandle(job); }
+    }
+}
+"@
+}
+
 function New-AVDTuneUpdateAdapter {
     <#
         The real update adapter. Reads work everywhere; WuaRegisterMicrosoftUpdate, WuaInstall, Run, DefenderUpdate change the system and are only used by a run
@@ -737,15 +763,40 @@ function New-AVDTuneUpdateAdapter {
         if ((Split-Path $dir -Leaf) -match '^[0-9a-f]{32}$' -and (Split-Path (Split-Path $dir -Parent) -Leaf) -eq 'temp') { Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue }
     }
     $u.Run = {
+        <#
+            Starts the tool in a job object: the timeout covers the whole process tree (installers started by winget or choco), and Run returns
+            only when every process of the tree has ended, so the caller's lock (Global\PackTune) is held until then. On a timeout the tree is ended.
+        #>
         param($File, [string[]]$Arguments, [int]$TimeoutSeconds = 600)
         $psi = New-Object System.Diagnostics.ProcessStartInfo
         $psi.FileName = $File
         $psi.Arguments = (@($Arguments | ForEach-Object { ConvertTo-AVDTuneArgument ([string]$_) }) -join ' ')
         $psi.UseShellExecute = $false; $psi.CreateNoWindow = $true; $psi.RedirectStandardOutput = $true; $psi.RedirectStandardError = $true
-        try { $p = [System.Diagnostics.Process]::Start($psi) } catch { return [pscustomobject]@{ ExitCode = -1; Output = $_.Exception.Message } }
-        $out = $p.StandardOutput.ReadToEndAsync(); $err = $p.StandardError.ReadToEndAsync()
-        if (-not $p.WaitForExit($TimeoutSeconds * 1000)) { try { $p.Kill() } catch { }; return [pscustomobject]@{ ExitCode = -1; Output = 'timeout' } }
-        [pscustomobject]@{ ExitCode = $p.ExitCode; Output = ($out.Result + $err.Result) }
+        $job = [IntPtr]::Zero
+        try { Initialize-AVDTuneProcessTree; $job = [AVDTune.ProcessTree]::Create() } catch { $job = [IntPtr]::Zero }
+        try {
+            try { $p = [System.Diagnostics.Process]::Start($psi) } catch { return [pscustomobject]@{ ExitCode = -1; Output = $_.Exception.Message } }
+            $inJob = $false
+            if ($job -ne [IntPtr]::Zero) { try { [AVDTune.ProcessTree]::Assign($job, $p.Handle); $inJob = $true } catch { } }
+            $out = $p.StandardOutput.ReadToEndAsync(); $err = $p.StandardError.ReadToEndAsync()
+            $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+            $exited = $p.WaitForExit($TimeoutSeconds * 1000)
+            if ($exited -and $inJob) { while ([AVDTune.ProcessTree]::Active($job) -gt 0 -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 250 } }
+            $treeDone = $exited -and (-not $inJob -or [AVDTune.ProcessTree]::Active($job) -eq 0)
+            if (-not $treeDone) {
+                if ($inJob) {
+                    [AVDTune.ProcessTree]::Terminate($job)
+                    $until = (Get-Date).AddSeconds(30)
+                    while ([AVDTune.ProcessTree]::Active($job) -gt 0 -and (Get-Date) -lt $until) { Start-Sleep -Milliseconds 100 }
+                }
+                else { try { $p.Kill() } catch { } }
+                return [pscustomobject]@{ ExitCode = -1; Output = 'timeout' }
+            }
+            [void]$out.Wait(5000); [void]$err.Wait(5000)
+            $text = ''; if ($out.IsCompleted) { $text += $out.Result }; if ($err.IsCompleted) { $text += $err.Result }
+            [pscustomobject]@{ ExitCode = $p.ExitCode; Output = $text }
+        }
+        finally { if ($job -ne [IntPtr]::Zero) { [AVDTune.ProcessTree]::Close($job) } }
     }
     $u.WuaMicrosoftUpdateRegistered = {
         try {

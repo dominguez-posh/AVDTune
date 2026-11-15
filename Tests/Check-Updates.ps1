@@ -245,6 +245,29 @@ try {
     & $real.Unstage $staged
     Test-Check 'real adapter: the staged copy lies in a protected folder under <root>\temp (no inherited or other entries) and is removed afterwards' ($stagedThere -and $staged -like "$tmp\temp\*\README.md" -and $sacl.AreAccessRulesProtected -and $others.Count -eq 0 -and -not (Test-Path -LiteralPath (Split-Path $staged -Parent))) $staged
 
+    # the real Run with harmless processes this check starts itself (powershell.exe and ping.exe on 127.0.0.1); their PIDs are tracked and only they are stopped
+    $ps = Join-Path ([Environment]::GetFolderPath('System')) 'WindowsPowerShell\v1.0\powershell.exe'
+    $pidFile = Join-Path $tmp 'child.pid'
+    $enc = { param($Text) [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($Text)) }
+    $startChild = "`$c = [Diagnostics.Process]::Start((Join-Path ([Environment]::GetFolderPath('System')) 'PING.EXE'), '-n {0} 127.0.0.1'); Set-Content -LiteralPath '$pidFile' -Value `$c.Id; Start-Sleep -Seconds {1}"
+    $childPids = @()
+    try {
+        $t0 = Get-Date
+        $rt = & $real.Run $ps @('-NoProfile', '-NonInteractive', '-EncodedCommand', (& $enc ($startChild -f 60, 60))) 4
+        $kid = [int](Get-Content -LiteralPath $pidFile); $childPids += $kid
+        Start-Sleep -Milliseconds 500
+        $alive = [bool](Get-Process -Id $kid -ErrorAction SilentlyContinue | Where-Object { $_.ProcessName -eq 'PING' })
+        Test-Check 'real Run: a timeout ends the whole tree (the child of the tool too), so the lock is not freed while an installer still runs' ($rt.Output -eq 'timeout' -and -not $alive -and ((Get-Date) - $t0).TotalSeconds -lt 40) "alive=$alive"
+        Remove-Item -LiteralPath $pidFile -ErrorAction SilentlyContinue
+        $t1 = Get-Date
+        $rn = & $real.Run $ps @('-NoProfile', '-NonInteractive', '-EncodedCommand', (& $enc ($startChild -f 4, 0))) 60
+        $took = ((Get-Date) - $t1).TotalSeconds
+        $kid2 = [int](Get-Content -LiteralPath $pidFile); $childPids += $kid2
+        $alive2 = [bool](Get-Process -Id $kid2 -ErrorAction SilentlyContinue | Where-Object { $_.ProcessName -eq 'PING' })
+        Test-Check 'real Run: returns only when the child the tool left behind has ended (the lock is held until then)' ($rn.ExitCode -eq 0 -and -not $alive2 -and $took -ge 2.5) "took $took s, alive=$alive2"
+    }
+    finally { foreach ($k in $childPids) { Get-Process -Id $k -ErrorAction SilentlyContinue | Where-Object { $_.ProcessName -eq 'PING' } | Stop-Process -Force -ErrorAction SilentlyContinue } }
+
     # ---------------------------------------------------------------- history
     $h = @(Get-AVDTuneUpdateHistory -Root $tmp)
     Test-Check 'history: runs and repairs, newest first, with code and text' ($h.Count -ge 15 -and @($h | Where-Object { $_.Code -eq '0x80073712' }).Count -ge 1 -and @($h | Where-Object { $_.Group -eq 'Windows' }).Count -ge 5) $h.Count
