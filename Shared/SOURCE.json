@@ -1,8 +1,8 @@
 {
     "Source":  "dominguez-posh/PackTune",
-    "Commit":  "59a79bec2163158471dd23d044364b271da937a4",
+    "Commit":  "ce1de0f974248a3637b7a20139f8171fa739a381",
     "Dirty":  false,
-    "SyncedAt":  "2026-11-15T11:59:16Z",
+    "SyncedAt":  "2026-11-15T13:24:01Z",
     "Files":  [
                   {
                       "Path":  "UI/Theme.xaml",
@@ -10,7 +10,7 @@
                   },
                   {
                       "Path":  "Modules/PackTune.SignIn.psm1",
-                      "Sha256":  "537b340bba7fcb7d57aacbb9e9a11c38ce33755d9e3cb07cd5e4074e18501407"
+                      "Sha256":  "5777c6611ef97dc1e503c9fa7106ed8c4031a7cda222d8d84e67e5ee51638498"
                   },
                   {
                       "Path":  "PackTune-Store.ps1",
