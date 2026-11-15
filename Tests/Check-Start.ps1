@@ -303,6 +303,11 @@ try {
     # client ID: a strict GUID (review #11, point 4)
     $looseOk = @('------------------------------------', 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', '66666666-7777-8888-9999-00000000000-', '6666666677778888-9999-000000000000--' | Where-Object { $x = Get-AVDTuneEnvironmentDefaults; $x.ClientId = $_; (Test-AVDTuneEnvironmentAnswers $x).Errors -notcontains 'The client ID must be a GUID.' })
     Test-Check 'the client ID of the questions must be a real GUID (36 hyphens or hex without the 8-4-4-4-12 form are refused)' ($looseOk.Count -eq 0) ($looseOk -join ', ')
+    $ag = New-AVDTuneFakeAuth
+    $e = Get-ThrownText { Install-AVDTuneAppRegistration -Auth $ag -ExistingClientId "x' or appId ne '0" -TempRoot $signTemp -RetryDelaySeconds 0 }
+    Test-Check 'a saved client ID that is not a GUID stops the setup before any sign-in or Graph call (it would go into an OData filter)' ($e -like '*saved client ID is not a GUID*' -and $ag.Log.Count -eq 0) "$e | $($ag.Log -join ' | ')"
+    $e = ConvertTo-AVDTuneAuthError -Message "Sign-in failed: AADSTS50105: Your administrator has configured the application AVDTune to block users unless they are specifically granted ('assigned') access."
+    Test-Check 'not assigned (AADSTS50105): readable text with the way to get assigned (Set up again, or an administrator assigns)' ($e -like "Your account is not assigned to AVDTune's app registration*'Set up again (authorize this administrator)'*Users and groups*") $e
     # Graph only through the adapter, only graph.microsoft.com
     $sessSrc = [IO.File]::ReadAllText((Join-Path $repo 'Modules\AVDTune.Session.psm1'))
     $hosts = @([regex]::Matches($sessSrc, 'https?://(?>([A-Za-z0-9.-]+))(?!\\)') | ForEach-Object { $_.Groups[1].Value.TrimEnd('.') } | Sort-Object -Unique)
