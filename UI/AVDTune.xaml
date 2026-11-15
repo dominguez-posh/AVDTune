@@ -32,7 +32,7 @@
 
     <Grid x:Name="RootGrid" Background="{DynamicResource WindowBackground}">
         <Grid>
-            <Grid.RowDefinitions><RowDefinition Height="52"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+            <Grid.RowDefinitions><RowDefinition Height="52"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
 
             <!-- Title row -->
             <Grid Grid.Row="0">
@@ -501,6 +501,52 @@
                     </Grid>
                 </Border>
             </Grid>
+
+            <!-- Task bar (like the busy bar of PackTune): what runs now, with the step and the progress; a click opens the list of the tasks of this session -->
+            <Border x:Name="BoxTaskBar" Grid.Row="2" Background="{DynamicResource AccentFaint}" BorderBrush="{DynamicResource SurfaceBorder}" BorderThickness="0,1,0,0" Cursor="Hand" Focusable="True" ToolTip="Show the tasks of this session"
+                    AutomationProperties.Name="Tasks: what AVDTune is doing now">
+                <StackPanel>
+                    <ProgressBar x:Name="PbTask" Height="3" BorderThickness="0" Background="Transparent" Foreground="{DynamicResource Primary}" Minimum="0" Maximum="100" Visibility="Hidden"/>
+                    <Grid Margin="20,4,16,5" MinHeight="22">
+                        <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                        <Ellipse x:Name="DotTask" Width="9" Height="9" Margin="0,0,10,0" VerticalAlignment="Center" Fill="{DynamicResource MutedText}"/>
+                        <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+                            <TextBlock x:Name="TxtTaskTitle" FontSize="12" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" MaxWidth="460"/>
+                            <TextBlock x:Name="TxtTaskStep" FontSize="12" Foreground="{DynamicResource MutedText}" TextTrimming="CharacterEllipsis" Margin="8,0,0,0" MaxWidth="560"/>
+                        </StackPanel>
+                        <Border x:Name="PillTaskCount" Grid.Column="2" Style="{DynamicResource Pill}" Background="{DynamicResource AccentSubtle}" Padding="8,0" Margin="10,0,0,0" VerticalAlignment="Center" Visibility="Collapsed">
+                            <TextBlock x:Name="TxtTaskCount" FontSize="12" FontWeight="SemiBold" Foreground="{DynamicResource PrimaryDark}"/>
+                        </Border>
+                        <Border x:Name="PillTaskResult" Grid.Column="3" Style="{DynamicResource Pill}" Padding="10,0" Margin="10,0,0,0" VerticalAlignment="Center" Visibility="Collapsed">
+                            <TextBlock x:Name="TxtTaskResult" FontSize="12" FontWeight="SemiBold"/>
+                        </Border>
+                        <TextBlock x:Name="TxtTaskChevron" Grid.Column="4" Text="&#xE70E;" FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" FontSize="11" Foreground="{DynamicResource MutedText}" Margin="12,0,0,0" VerticalAlignment="Center"/>
+                    </Grid>
+                </StackPanel>
+            </Border>
+
+            <!-- List of the tasks of this session, opened from the bar (rows are made in code, AVDTune-TaskBar.ps1) -->
+            <Border x:Name="BoxTaskList" Grid.Row="1" Grid.RowSpan="2" Panel.ZIndex="70" Visibility="Collapsed" VerticalAlignment="Bottom" HorizontalAlignment="Right" Margin="0,0,16,36" Width="780" MaxHeight="460"
+                    Background="{DynamicResource Card}" BorderBrush="{DynamicResource CardBorder}" BorderThickness="1" CornerRadius="8" AutomationProperties.Name="Tasks of this session">
+                <Border.Effect><DropShadowEffect BlurRadius="24" ShadowDepth="4" Opacity="0.25" Direction="270"/></Border.Effect>
+                <DockPanel>
+                    <Grid DockPanel.Dock="Top" Margin="18,12,10,8">
+                        <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                        <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                            <TextBlock Text="Tasks of this session" FontWeight="SemiBold" FontSize="15"/>
+                            <TextBlock x:Name="TxtTaskSummary" Style="{DynamicResource Hint}" Margin="12,2,0,0" VerticalAlignment="Center"/>
+                        </StackPanel>
+                        <Button x:Name="BtnTaskClose" Grid.Column="1" Style="{DynamicResource IconButton}" Content="&#xE711;" AutomationProperties.Name="Close the list of tasks" ToolTip="Close"/>
+                    </Grid>
+                    <Border DockPanel.Dock="Top" BorderBrush="{DynamicResource Divider}" BorderThickness="0,1,0,0"/>
+                    <ScrollViewer Style="{DynamicResource PageScroll}" MaxHeight="400">
+                        <StackPanel>
+                            <TextBlock x:Name="TxtTaskEmpty" Style="{DynamicResource Hint}" Margin="18,14,18,16" Text="Nothing has run in this session yet."/>
+                            <StackPanel x:Name="PanelTaskList"/>
+                        </StackPanel>
+                    </ScrollViewer>
+                </DockPanel>
+            </Border>
         </Grid>
     </Grid>
 </Window>

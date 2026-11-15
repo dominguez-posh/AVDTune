@@ -69,6 +69,12 @@ function Set-ReadyBusy([bool]$Busy) {
     $ui.BtnReadyRun.IsEnabled = -not $Busy
     $window.Cursor = $(if ($Busy -and $script:CurrentPage -eq 'Overview') { [System.Windows.Input.Cursors]::AppStarting } else { $null })
 }
+function New-ReadyTask([string]$Kind, [string]$FixId) {
+    # the analysis is read only and can be started again from the list; a fix changes the master and is started on the card (with its confirmation)
+    $title = switch ($Kind) { 'Fix' { "Readiness fix $FixId" } 'Healthcheck' { 'Healthcheck of the master' } 'Erstanalyse' { 'Initial analysis of the master' } 'Start' { 'Readiness analysis at start' } default { 'Readiness analysis' } }
+    $retry = if ($Kind -ne 'Fix') { @{ Command = 'Start-ReadyJob'; Arguments = @($Kind, '') } }
+    Start-AVDTuneUiTask -Kind "readiness-$($Kind.ToLower())" -Title $title -Step $(if ($Kind -eq 'Fix') { 'Applying the fix' } else { 'Checking the master against the readiness list' }) -Retry $retry
+}
 function Start-ReadyJob([string]$Kind, [string]$FixId) {
     # Kind: Start | Erstanalyse | Healthcheck | Manual (analysis) or Fix. A request while one runs is queued (the newest one wins).
     # Test mode: the inline run waits while the Overview refresh uses the same fake machine on its own thread (the timer starts it afterwards)
@@ -85,7 +91,7 @@ function Start-ReadyJob([string]$Kind, [string]$FixId) {
             else { Invoke-AVDTuneReadiness -Machine $script:Machine -Arm $script:ReadyFakeArm -Token $tok.Token -NoTokenReason $tok.Reason -GalleryImageId $gallery }
         }
         catch { $err = $_.Exception.Message }
-        $script:ReadyJob = @{ Inline = $true; Result = $res; Err = $err; Kind = $Kind; FixId = $FixId }
+        $script:ReadyJob = @{ Inline = $true; Result = $res; Err = $err; Kind = $Kind; FixId = $FixId; Task = (New-ReadyTask $Kind $FixId) }
         Set-ReadyBusy $true
         Update-ReadyView
         return
@@ -103,7 +109,7 @@ function Start-ReadyJob([string]$Kind, [string]$FixId) {
             }
             else { Invoke-AVDTuneReadiness -Machine $m -Arm (New-AVDTuneArmAdapter) -Token $Token -NoTokenReason $Reason -GalleryImageId $Gallery }
         }).AddArgument($script:AppRoot).AddArgument($script:StateRoot).AddArgument($Kind).AddArgument($FixId).AddArgument($tok.Token).AddArgument($tok.Reason).AddArgument($gallery).AddArgument($gate).AddArgument([string]$env:USERNAME)
-    $script:ReadyJob = @{ PS = $ps; Handle = $ps.BeginInvoke(); Kind = $Kind; FixId = $FixId }
+    $script:ReadyJob = @{ PS = $ps; Handle = $ps.BeginInvoke(); Kind = $Kind; FixId = $FixId; Task = (New-ReadyTask $Kind $FixId) }
     Set-ReadyBusy $true
     Update-ReadyView
 }
@@ -127,6 +133,9 @@ function Complete-ReadyJob {
         finally { $job.PS.Dispose() }
     }
     Set-ReadyBusy $false
+    if ($err -or -not $result) { Complete-AVDTuneUiTask $job.Task -Failed -Summary $(if ($job.Kind -eq 'Fix') { "The fix failed: $err" } else { "The analysis failed: $err" }) }
+    elseif ($job.Kind -eq 'Fix') { Complete-AVDTuneUiTask $job.Task -Failed:([bool]($result.Status -eq 'Failed')) -Summary "$($result.FixId): $($result.Status). $($result.Message)" }
+    else { Complete-AVDTuneUiTask $job.Task -Summary "$($result.Overall): $($result.Counts.Red) red, $($result.Counts.Yellow) yellow, $($result.Counts.Unknown) not checkable, $($result.Counts.Green) green" }
     if ($job.Kind -eq 'Fix') {
         if ($err -or -not $result) { Show-Error "The fix failed: $err" }
         else {

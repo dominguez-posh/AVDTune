@@ -38,7 +38,8 @@ function Start-BenchJob([string]$Mode, [string]$Kind) {
             $progress = { param($t, $p) $Sync.Text = $t; if ($null -ne $p) { $Sync.Percent = [int]$p } }
             Invoke-AVDTuneBenchmark -Machine $m -Bench $b -Root $Root -Mode $Mode -Kind $Kind -User $User -Progress $progress -SkipIdleCheck:$skipIdle
         }).AddArgument($script:AppRoot).AddArgument($(if ($script:TestMode) { $env:AVDTUNE_FAKE } else { '' })).AddArgument($script:BenchFakeScript).AddArgument($script:StateRoot).AddArgument($Mode).AddArgument($Kind).AddArgument($sync).AddArgument([string]$env:USERNAME).AddArgument($script:BenchFakeSeed).AddArgument($(if ($script:TestMode) { $script:Machine } else { $null }))
-    $script:BenchJob = @{ PS = $ps; Handle = $ps.BeginInvoke(); Mode = $Mode; Sync = $sync }
+    $task = Start-AVDTuneUiTask -Kind 'benchmark' -Title "Benchmark ($($Mode.ToLower()) run)" -Step 'Starting' -Percent 0   # no Retry: a run pauses Windows Update and the indexer and is started on the page after its confirmation
+    $script:BenchJob = @{ PS = $ps; Handle = $ps.BeginInvoke(); Mode = $Mode; Sync = $sync; Task = $task }
     Set-ShutdownBlock $true
     Set-BenchBusy $true
 }
@@ -47,7 +48,10 @@ function Complete-BenchJob {
     $job = $script:BenchJob
     if (-not $job) { return }
     if (-not $job.Handle.IsCompleted) {
-        if ($script:CurrentPage -eq 'Benchmark') { $ui.TxtBenchState.Text = [string]$job.Sync.Text; $ui.BarBench.Value = [double]$job.Sync.Percent }
+        # the progress of the runspace goes into the task; the page shows the same state
+        $text = [string]$job.Sync.Text
+        Update-AVDTuneUiTask $job.Task -Step $text -Percent ([int]$job.Sync.Percent)
+        if ($script:CurrentPage -eq 'Benchmark') { $ui.TxtBenchState.Text = [string]$job.Task.Step; $ui.BarBench.Value = [double]$job.Task.Percent }
         return
     }
     $script:BenchJob = $null
@@ -61,14 +65,16 @@ function Complete-BenchJob {
     catch { $err = $_.Exception.Message }
     finally { $job.PS.Dispose() }
     Set-BenchBusy $false
-    if ($err -and -not $result) { $ui.TxtBenchState.Text = "The benchmark stopped: $err"; Show-Error $err }
+    if ($err -and -not $result) { $ui.TxtBenchState.Text = "The benchmark stopped: $err"; Show-Error $err; Complete-AVDTuneUiTask $job.Task -Failed -Summary "The benchmark stopped: $err" }
     elseif ($result) {
         $script:BenchLast = $result.Result
         $ui.TxtBenchState.Text = "Finished: $($result.Summary)"
         Show-Toast "Benchmark finished: $($result.Summary)"
+        Complete-AVDTuneUiTask $job.Task -Summary "Benchmark finished: $($result.Summary)"
         [void](Add-AVDTuneProtocolNote -Protocol $script:Protocol -Group 'benchmark' -Subject $result.Summary)
         Save-Protocol
     }
+    Complete-AVDTuneUiTask $job.Task -Failed:([bool]$err) -Summary $(if ($err) { $err } else { 'Finished' })   # no-op when the branch above ended it
     Update-BenchmarkView; Start-OverviewRefresh
     if ($script:CloseWhenDone -and -not $script:BenchJob -and -not $script:UpdJob) { if ($err) { $script:CloseWhenDone = $false } else { $window.Close() } }
 }
@@ -151,9 +157,11 @@ function Start-BenchRun([string]$Mode) {
 Add-Click $ui.BtnBenchFull { Start-BenchRun 'Full' }
 Add-Click $ui.BtnBenchQuick { Start-BenchRun 'Quick' }
 Add-Click $ui.BtnBenchRepair {
-    $m = $script:Machine
-    $b = $(if ($script:TestMode) { . $script:BenchFakeScript; New-AVDTuneFakeBench -Reference (Get-AVDTuneBenchmarkReference) -Config (Get-AVDTuneBenchmarkConfig) } else { New-AVDTuneBenchAdapter })
-    $r = Repair-AVDTuneBenchmarkCrash -Machine $m -Bench $b -Root $script:StateRoot -User ([string]$env:USERNAME)
+    $r = Invoke-UiTaskInline -Kind 'benchmark-repair' -Title 'Restoring Windows Update and the indexer' -Step 'Putting back what the benchmark paused' -Block {
+        $m = $script:Machine
+        $b = $(if ($script:TestMode) { . $script:BenchFakeScript; New-AVDTuneFakeBench -Reference (Get-AVDTuneBenchmarkReference) -Config (Get-AVDTuneBenchmarkConfig) } else { New-AVDTuneBenchAdapter })
+        Repair-AVDTuneBenchmarkCrash -Machine $m -Bench $b -Root $script:StateRoot -User ([string]$env:USERNAME)
+    }
     Show-Toast $r.Message
     Update-BenchmarkView
 }

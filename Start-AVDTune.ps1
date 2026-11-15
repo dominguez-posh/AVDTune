@@ -68,6 +68,7 @@ try { [void](Initialize-AVDTuneState -Root $script:StateRoot) } catch { Stop-Wit
 try { [void](Clear-AVDTuneStageFolder -Root $script:StateRoot) } catch { }
 $script:WorkRoot = $script:StateRoot
 . (Join-Path $PSScriptRoot 'AVDTune-Protocol.ps1')
+. (Join-Path $PSScriptRoot 'AVDTune-Tasks.ps1')   # the tasks of this session (state; the bar is AVDTune-TaskBar.ps1)
 
 # ---------------------------------------------------------------- console window
 if (-not ('AVDTune.NativeWindow' -as [type])) {
@@ -286,7 +287,8 @@ function Start-OverviewRefresh {
             if ($FakeScript) { . $FakeScript; $m = $SharedMachine; if (-not $m) { $m = New-AVDTuneFakeMachine } } else { $m = New-AVDTuneMachine }
             Get-AVDTuneOverview -Machine $m -Root $Root -UpdateBlock (Get-AVDTuneUpdateBlockStatus $m)
         }).AddArgument((Join-Path $script:AppRoot 'Modules\AVDTune.psm1')).AddArgument($(if ($script:TestMode) { $env:AVDTUNE_FAKE } else { '' })).AddArgument($script:StateRoot).AddArgument($(if ($script:TestMode) { $script:Machine } else { $null }))
-    $script:OverviewJob = @{ PS = $ps; Handle = $ps.BeginInvoke() }
+    $task = Start-AVDTuneUiTask -Kind 'overview' -Title 'Reading the machine' -Step 'Reading Windows, Office, source image and health checks' -Retry @{ Command = 'Start-OverviewRefresh'; Arguments = @() }
+    $script:OverviewJob = @{ PS = $ps; Handle = $ps.BeginInvoke(); Task = $task }
 }
 function Complete-OverviewRefresh {
     $job = $script:OverviewJob
@@ -296,8 +298,9 @@ function Complete-OverviewRefresh {
         $result = @($job.PS.EndInvoke($job.Handle))
         if ($job.PS.HadErrors -and $job.PS.Streams.Error.Count -gt 0) { throw $job.PS.Streams.Error[0].Exception.Message }
         $script:Overview = $result | Select-Object -Last 1
+        Complete-AVDTuneUiTask $job.Task -Summary 'Machine read'
     }
-    catch { Show-Error "The machine could not be read: $($_.Exception.Message)" }
+    catch { Complete-AVDTuneUiTask $job.Task -Failed -Summary "The machine could not be read: $($_.Exception.Message)"; Show-Error "The machine could not be read: $($_.Exception.Message)" }
     finally { $job.PS.Dispose() }
     if ($script:CurrentPage -eq 'Overview') { Update-OverviewView } else { Update-Chip }
 }
@@ -418,6 +421,7 @@ Add-Click $ui.BtnProtocolCopy {
     Show-Toast 'Copied.'
 }
 
+. (Join-Path $PSScriptRoot 'AVDTune-TaskBar.ps1')   # the bar at the bottom and the list of tasks; the pages below start and finish their tasks through AVDTune-Tasks.ps1
 . (Join-Path $PSScriptRoot 'AVDTune-Start.ps1')
 . (Join-Path $PSScriptRoot 'AVDTune-Updates.ps1')
 $script:ReadyFakeArm = $(if ($script:TestMode) { $script:Services.Arm } else { $null })

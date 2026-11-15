@@ -40,6 +40,59 @@ function Find-Text($Parent, [string]$Text) {
     $false
 }
 
+# ---- task bar (issue #22): one scene per theme with the states running, several, failed result and the opened list
+$script:SmokeRetryCalls = 0
+function Start-SmokeRetry { $script:SmokeRetryCalls++ }
+function Reset-TaskScene {
+    $script:UiTasks.Clear()
+    foreach ($r in @($script:TaskRows.Values)) { $ui.PanelTaskList.Children.Remove($r.Border) }
+    $script:TaskRows.Clear()
+    Show-TaskList $false
+    Update-TaskBar
+}
+function Get-ThemeBrushColor([string]$Key) { ([System.Windows.Application]::Current.Resources.MergedDictionaries[0][$Key]).Color.ToString() }
+function Invoke-TaskScene([string]$Suffix) {
+    Reset-TaskScene
+    $window.UpdateLayout()
+    Test-Smoke "task bar $Suffix`: idle with no task: says so, no bar, no pills" ($ui.TxtTaskTitle.Text -eq 'No task running' -and $ui.PbTask.Visibility -eq 'Hidden' -and $ui.PillTaskCount.Visibility -eq 'Collapsed' -and $ui.PillTaskResult.Visibility -eq 'Collapsed') $ui.TxtTaskTitle.Text
+    Test-Smoke "task bar $Suffix`: the bar follows the theme (background token of the theme)" ($ui.BoxTaskBar.Background.Color.ToString() -eq (Get-ThemeBrushColor 'AccentFaint')) "$($ui.BoxTaskBar.Background.Color) / $(Get-ThemeBrushColor 'AccentFaint')"
+    $a = Start-AVDTuneUiTask -Kind 'benchmark' -Title 'Benchmark (full run)' -Step 'Disk: sequential read' -Percent 45
+    $a.Started = (Get-Date).AddSeconds(-95)
+    Update-TaskBar; $window.UpdateLayout()
+    Test-Smoke "task bar $Suffix`: one running task: title, step, determinate bar at 45 percent, no counter" ($ui.TxtTaskTitle.Text -eq 'Benchmark (full run)' -and $ui.TxtTaskStep.Text -eq 'Disk: sequential read' -and $ui.PbTask.Visibility -eq 'Visible' -and -not $ui.PbTask.IsIndeterminate -and $ui.PbTask.Value -eq 45 -and $ui.PillTaskCount.Visibility -eq 'Collapsed') "$($ui.TxtTaskTitle.Text) / $($ui.PbTask.Value)"
+    Save-SmokeShot "task-1-running-$Suffix"
+    $b = Start-AVDTuneUiTask -Kind 'update-scan' -Title 'Searching for updates' -Step 'Asking Windows Update' -Retry @{ Command = 'Start-SmokeRetry'; Arguments = @() }
+    $c = Start-AVDTuneUiTask -Kind 'release-check' -Title 'Checking for a new AVDTune version' -Step 'Asking GitHub'
+    $b.Started = (Get-Date).AddSeconds(-20); $c.Started = (Get-Date).AddSeconds(-12)
+    Add-AVDTuneUiTaskLog $b 'Windows Update: 3 results'
+    Add-AVDTuneUiTaskLog $b 'winget upgrade: could not start, token=abc123secret' 'Warning'
+    Update-TaskBar; $window.UpdateLayout()
+    Test-Smoke "task bar $Suffix`: several running: the oldest is shown and the counter says +2 more" ($ui.TxtTaskTitle.Text -eq 'Benchmark (full run)' -and $ui.PillTaskCount.Visibility -eq 'Visible' -and $ui.TxtTaskCount.Text -eq '+2 more') $ui.TxtTaskCount.Text
+    Save-SmokeShot "task-2-several-$Suffix"
+    Complete-AVDTuneUiTask $a -Summary 'Benchmark finished: host score 1020'
+    Update-TaskBar
+    Test-Smoke "task bar $Suffix`: when the first one ends, the next one is shown, without a percent the bar runs indeterminate" ($ui.TxtTaskTitle.Text -eq 'Searching for updates' -and $ui.PbTask.IsIndeterminate -and $ui.TxtTaskCount.Text -eq '+1 more') "$($ui.TxtTaskTitle.Text) / $($ui.PbTask.IsIndeterminate)"
+    Save-SmokeShot "task-2b-indeterminate-$Suffix"
+    Complete-AVDTuneUiTask $c -Summary 'AVDTune is up to date'
+    Complete-AVDTuneUiTask $b -Failed -Summary 'The search failed: Windows Update could not be reached.'
+    Update-TaskBar; $window.UpdateLayout()
+    Test-Smoke "task bar $Suffix`: right after the end the result is shown: failed pill, the cause, red dot, no bar" ($ui.PillTaskResult.Visibility -eq 'Visible' -and $ui.TxtTaskResult.Text -eq 'Failed' -and $ui.TxtTaskStep.Text -like 'The search failed*' -and $ui.PbTask.Visibility -eq 'Hidden' -and $ui.DotTask.Fill -eq [System.Windows.Application]::Current.Resources.MergedDictionaries[0]['Danger']) "$($ui.TxtTaskResult.Text) / $($ui.TxtTaskStep.Text)"
+    Save-SmokeShot "task-3-failed-$Suffix"
+    $d = Start-AVDTuneUiTask -Kind 'readiness-manual' -Title 'Readiness analysis' -Step 'Checking the master against the readiness list' -Percent 70
+    $d.Started = (Get-Date).AddSeconds(-8)
+    Show-TaskList $true
+    Update-TaskBar; $window.UpdateLayout()
+    Test-Smoke "task bar $Suffix`: a click opens the list: one row per task, the newest on top" ($ui.BoxTaskList.Visibility -eq 'Visible' -and $ui.PanelTaskList.Children.Count -eq 4 -and $script:TaskRows[[int]$d.Id].Border -eq $ui.PanelTaskList.Children[0] -and $script:TaskRows[[int]$a.Id].Border -eq $ui.PanelTaskList.Children[3]) $ui.PanelTaskList.Children.Count
+    $rowB = $script:TaskRows[[int]$b.Id]; $rowA = $script:TaskRows[[int]$a.Id]; $rowD = $script:TaskRows[[int]$d.Id]
+    Test-Smoke "task bar $Suffix`: rows show status pills (Running, Done, Failed), duration and the summary or step" ($rowD.PillText.Text -eq 'Running' -and $rowA.PillText.Text -eq 'Done' -and $rowB.PillText.Text -eq 'Failed' -and $rowA.Sub.Text -like 'Benchmark finished: host score 1020*1 min 35 s*' -and $rowB.Sub.Text -like 'The search failed*' -and $rowD.Sub.Text -like 'Checking the master*s') "$($rowA.Sub.Text) | $($rowB.Sub.Text) | $($rowD.Sub.Text)"
+    Test-Smoke "task bar $Suffix`: only the failed row with a retry command has Retry, a running row has its progress bar, an ended row has none" ($rowB.RetryBtn.Visibility -eq 'Visible' -and $rowA.RetryBtn.Visibility -eq 'Collapsed' -and $rowD.RetryBtn.Visibility -eq 'Collapsed' -and $rowD.Bar.Visibility -eq 'Visible' -and $rowD.Bar.Value -eq 70 -and $rowA.Bar.Visibility -eq 'Collapsed') $null
+    $rowB.LogBtn.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
+    $window.UpdateLayout()
+    Test-Smoke "task bar $Suffix`: Show log unfolds the log of the row, the secret is not in it, the button says Hide log" ($rowB.LogBorder.Visibility -eq 'Visible' -and $rowB.LogBox.Text -like '*Windows Update: 3 results*' -and $rowB.LogBox.Text -like '*could not start*' -and $rowB.LogBox.Text -notlike '*abc123secret*' -and [string]$rowB.LogBtn.Content -eq 'Hide log') $rowB.LogBox.Text
+    Save-SmokeShot "task-4-list-$Suffix"
+    return @{ A = $a; B = $b; C = $c; D = $d }
+}
+
 $script:SmokeSteps = [System.Collections.ArrayList]@(
     @{ Name = 'overview'; Do = {
         if (-not $script:Overview) { return $false }   # read in the background
@@ -664,6 +717,55 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         Test-Smoke 'the card says Azure was not read and why' ($ui.TxtReadySummary.Text -like '*Azure was not read: Not signed in*') $ui.TxtReadySummary.Text
         $ui.BoxReady.BringIntoView(); $window.UpdateLayout()
         Save-SmokeShot '44-readiness-signed-out-light'
+        $true } }
+    @{ Name = 'task bar'; Do = {
+        # the flows of the earlier steps went through the one mechanism; wait (at most 30 s) until nothing runs any more
+        if (-not $script:TaskStepStart) { $script:TaskStepStart = Get-Date }
+        $tasks = @(Get-AVDTuneUiTasks)
+        if (@($tasks | Where-Object { $_.Status -eq 'running' }).Count -gt 0 -and ((Get-Date) - $script:TaskStepStart).TotalSeconds -lt 30) { return $false }
+        $kinds = @($tasks | ForEach-Object { $_.Kind } | Select-Object -Unique)
+        $need = 'overview', 'release-start', 'readiness-start', 'stage', 'snapshot', 'update-scan', 'update-run', 'benchmark', 'watermark'
+        Test-Smoke 'the flows of the earlier steps are tasks: machine read, integrity check, readiness analysis, sign-in and other calls of the start sequence, snapshot, update search and run, benchmark, watermark' (@($need | Where-Object { $_ -notin $kinds }).Count -eq 0) ("missing: " + (($need | Where-Object { $_ -notin $kinds }) -join ', ') + " / have: " + ($kinds -join ', '))
+        Test-Smoke 'no task is stuck on running after the flows ended' (@($tasks | Where-Object { $_.Status -eq 'running' }).Count -eq 0) ((@($tasks | Where-Object { $_.Status -eq 'running' } | ForEach-Object { $_.Title })) -join '; ')
+        $signIn = @($tasks | Where-Object { $_.Title -eq 'Signing in to Microsoft 365 and Azure' })
+        Test-Smoke 'the sign-in is a task and succeeded' ($signIn.Count -ge 1 -and $signIn[0].Status -eq 'succeeded' -and $signIn[0].Summary -eq 'Signed in') (($signIn | ForEach-Object { $_.Status }) -join ',')
+        $snap = @($tasks | Where-Object { $_.Kind -eq 'snapshot' })
+        Test-Smoke 'the snapshot is a task that ran until Azure had it ready' ($snap.Count -ge 1 -and $snap[0].Status -eq 'succeeded' -and $snap[0].Summary -like '*is ready') (($snap | ForEach-Object { "$($_.Status) $($_.Summary)" }) -join ',')
+        $run = @($tasks | Where-Object { $_.Kind -eq 'update-run' })
+        Test-Smoke 'the update run is a task with the steps of the run in its log and its result as summary' ($run.Count -ge 1 -and $run[0].Summary -like 'Run finished*' -and $run[0].Log.Count -ge 2) (($run | ForEach-Object { "$($_.Status) $($_.Summary) $($_.Log.Count)" }) -join ',')
+        $scan = @($tasks | Where-Object { $_.Kind -eq 'update-scan' })
+        Test-Smoke 'the update search is a task and offers Retry' ($scan.Count -ge 1 -and $scan[0].Retry.Command -eq 'Start-UpdJob') $null
+        $bench = @($tasks | Where-Object { $_.Kind -eq 'benchmark' })
+        Test-Smoke 'the benchmark is a task (a run is never offered as Retry: it asks first)' ($bench.Count -ge 1 -and $bench[0].Summary -like 'Benchmark finished*' -and -not $bench[0].Retry) (($bench | ForEach-Object { "$($_.Status) $($_.Summary)" }) -join ',')
+        $writes = @($tasks | Where-Object { $_.Kind -in 'update-run', 'update-block-on', 'update-block-off', 'update-repair-sfc', 'update-repair-dism', 'watermark', 'benchmark' -and $_.Retry })
+        Test-Smoke 'no task that changes the master offers Retry (it would skip the confirmation)' ($writes.Count -eq 0) (($writes | ForEach-Object { $_.Kind }) -join ',')
+        $secrets = (@($tasks | ForEach-Object { $_.Title; $_.Summary; $_.Step; @($_.Log | ForEach-Object { $_.Text }) }) -join ' ')
+        Test-Smoke 'no token, password or sign-in secret in any task of the session' ($secrets -notmatch 'eyJ[A-Za-z0-9_-]{10,}' -and $secrets -notmatch 'Not-A-Real-Password' -and $secrets -notmatch 'fake-refresh') $null
+
+        # the scenes, light then dark (the theme is put back at the end)
+        $first = $script:Settings.Theme
+        $light = Invoke-TaskScene $(if ($first -eq 'Dark') { 'dark' } else { 'light' })
+        $window.UpdateLayout()
+        # Retry: runs the start function once, the failed row loses its button
+        $row = $script:TaskRows[[int]$light.B.Id]
+        $row.RetryBtn.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
+        Test-Smoke 'Retry runs the named start function once and the failed row loses the button' ($script:SmokeRetryCalls -eq 1 -and $row.RetryBtn.Visibility -eq 'Collapsed' -and -not $light.B.Retry) $script:SmokeRetryCalls
+        # the result goes away after its time: the bar is idle again but remembers the failed one
+        Complete-AVDTuneUiTask $light.D -Summary 'Done'
+        foreach ($t in @($light.A, $light.B, $light.C, $light.D)) { $t.Finished = (Get-Date).AddSeconds(-60) }
+        Update-TaskBar
+        Test-Smoke 'after the result time the bar is idle: no task running, 4 tasks in this session, one failed' ($ui.TxtTaskTitle.Text -eq 'No task running' -and $ui.TxtTaskStep.Text -eq '4 tasks in this session' -and $ui.TxtTaskResult.Text -eq '1 failed' -and $ui.PillTaskResult.Visibility -eq 'Visible') "$($ui.TxtTaskStep.Text) / $($ui.TxtTaskResult.Text)"
+        # a click on the bar closes the list again
+        $click = New-Object System.Windows.Input.MouseButtonEventArgs([System.Windows.Input.Mouse]::PrimaryDevice, 0, [System.Windows.Input.MouseButton]::Left)
+        $click.RoutedEvent = [System.Windows.UIElement]::MouseLeftButtonUpEvent
+        $ui.BoxTaskBar.RaiseEvent($click)
+        Test-Smoke 'a click on the bar closes the list' (-not $script:TaskListOpen -and $ui.BoxTaskList.Visibility -eq 'Collapsed') $null
+        Switch-Theme
+        [void](Invoke-TaskScene $(if ($first -eq 'Dark') { 'light' } else { 'dark' }))
+        Reset-TaskScene
+        Switch-Theme
+        Test-Smoke 'the theme is back as it was' ($script:Settings.Theme -eq $first) $script:Settings.Theme
+        $script:TaskStepStart = $null
         $true } }
     @{ Name = 'close after the operation'; Do = {
         # last step: closing during a search is held back and the window closes by itself when the search is done (the Closed handler below records it)

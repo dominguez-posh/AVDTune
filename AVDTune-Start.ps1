@@ -34,13 +34,14 @@ function Set-StageMessage([string]$Text, [string]$Kind = 'info') {
     $key = switch ($Kind) { 'ok' { 'Success' } 'error' { 'Danger' } 'warn' { 'Warning' } default { 'MutedText' } }
     Set-Brush $ui.TxtStageMessage ([System.Windows.Controls.TextBlock]::ForegroundProperty) $key
 }
-function Invoke-Busy([string]$Text, [scriptblock]$Block) {
-    # A call to a service from the window thread: the message shows first, the wait cursor while it runs (every call has its own timeout)
+function Invoke-Busy([string]$Text, [scriptblock]$Block, [string]$TaskTitle = '', [string]$Done = '') {
+    # A call to a service from the window thread: the message shows first, the wait cursor while it runs (every call has its own timeout).
+    # With -TaskTitle it is also a task of the task bar (running, then done or failed with the cause).
     Set-StageMessage $Text 'info'
     $window.Cursor = [System.Windows.Input.Cursors]::Wait
     try {
         $window.Dispatcher.Invoke([Action]{}, [System.Windows.Threading.DispatcherPriority]::Render)
-        & $Block
+        if ($TaskTitle) { Invoke-UiTaskInline -Kind 'stage' -Title $TaskTitle -Step $Text -Done $Done -Block $Block } else { & $Block }
     }
     finally { $window.Cursor = $null }
 }
@@ -320,7 +321,7 @@ function Invoke-SignIn([switch]$Setup) {
     $session = New-AVDTuneSession -Auth (Get-StartAuth) -TempRoot (Get-StartTempRoot)
     try {
         $result = Invoke-Busy $(if ($setup) { 'The setup sign-in window is open: sign in with an administrator account ...' } else { 'The sign-in window is open: sign in with the account that manages this master ...' }) {
-            Invoke-AVDTuneStartSignIn -Root $script:StateRoot -Session $session -Account $account -User ([string]$env:USERNAME) -RetryDelaySeconds $(if ($script:TestMode) { 0 } else { 5 }) -Setup:$setup }
+            Invoke-AVDTuneStartSignIn -Root $script:StateRoot -Session $session -Account $account -User ([string]$env:USERNAME) -RetryDelaySeconds $(if ($script:TestMode) { 0 } else { 5 }) -Setup:$setup } -TaskTitle 'Signing in to Microsoft 365 and Azure' -Done 'Signed in'
         $info = $result.Info
         foreach ($n in @($result.Notes)) { Add-StartProtocol $(if ($n -like 'Warning:*' -or $n -like 'Note:*') { 'Warning: app registration' } else { 'Sign-in: tenant and app registration' }) $n }
         # The full text was in the confirmation; the protocol keeps the short form (notes are cut at 200 characters)
@@ -408,7 +409,7 @@ function Invoke-DomainConnect {
     $f.Secure = $f.PasswordBox.SecurePassword
     $ldap = Get-StartLdap
     $pins = Get-AVDTuneDcPins $e
-    $r = Invoke-Busy "Connecting to $server ..." { Connect-AVDTuneDirectory -Ldap $ldap -Server $server -User $user -Password $f.Secure -Pins $pins -ConfirmedServer $(if ($ConfirmedServer -and $ConfirmedServer -ieq $server) { $ConfirmedServer } else { '' }) }
+    $r = Invoke-Busy "Connecting to $server ..." { Connect-AVDTuneDirectory -Ldap $ldap -Server $server -User $user -Password $f.Secure -Pins $pins -ConfirmedServer $(if ($ConfirmedServer -and $ConfirmedServer -ieq $server) { $ConfirmedServer } else { '' }) } -TaskTitle 'Connecting to the domain controller' -Done 'Connected'
     switch ($r.Status) {
         'NeedsConfirmation' {
             # LDAPS does not answer: no bind until the administrator accepts the named risk; the acceptance goes into the protocol
@@ -458,7 +459,7 @@ function Invoke-DomainConnect {
         }
         'Connected' {
             try {
-                $info = Invoke-Busy 'Reading the domain, OUs and groups ...' { Get-AVDTuneDirectoryInfo -Ldap $ldap -Connection $r.Connection }
+                $info = Invoke-Busy 'Reading the domain, OUs and groups ...' { Get-AVDTuneDirectoryInfo -Ldap $ldap -Connection $r.Connection } -TaskTitle 'Reading the domain, OUs and groups' -Done 'Read'
             }
             catch {
                 Disconnect-AVDTuneDirectory -Ldap $ldap -Connection $r.Connection
@@ -529,7 +530,7 @@ function Update-SnapshotForm {
         [void]$f.Info.Children.Add((New-InfoRow $row[0] ([string]$row[1])))
     }
     try {
-        $list = Invoke-Busy 'Looking for snapshots of the OS disk ...' { @(Get-AVDTuneOsDiskSnapshots -Arm (Get-StartArm) -Token (Get-ArmToken) -Vm $vm -LastChange $f.LastChange) }
+        $list = Invoke-Busy 'Looking for snapshots of the OS disk ...' { @(Get-AVDTuneOsDiskSnapshots -Arm (Get-StartArm) -Token (Get-ArmToken) -Vm $vm -LastChange $f.LastChange) } -TaskTitle 'Looking for snapshots of the OS disk' -Done 'Looked'
     }
     catch {
         $script:StartContext.Failures['Snapshot'] = $_.Exception.Message
@@ -564,7 +565,7 @@ function Invoke-SnapshotCreate {
     if ($script:PendingSnapshot) { return }
     $vm = $f.Vm
     try {
-        $started = Invoke-Busy 'Asking Azure to create the incremental snapshot ...' { Start-AVDTuneSnapshot -Arm (Get-StartArm) -Token (Get-ArmToken) -Vm $vm -ImageVersion $f.ImageVersion -User ([string]$script:StartContext.Session.Account) -At (& $script:Machine.Now) -NamePattern $f.NamePattern -ExistingNames @(@($f.Snapshots) | Where-Object { $_ } | ForEach-Object { $_.Name }) }
+        $started = Invoke-Busy 'Asking Azure to create the incremental snapshot ...' { Start-AVDTuneSnapshot -Arm (Get-StartArm) -Token (Get-ArmToken) -Vm $vm -ImageVersion $f.ImageVersion -User ([string]$script:StartContext.Session.Account) -At (& $script:Machine.Now) -NamePattern $f.NamePattern -ExistingNames @(@($f.Snapshots) | Where-Object { $_ } | ForEach-Object { $_.Name }) } -TaskTitle 'Asking Azure to create the snapshot' -Done 'Request accepted'
     }
     catch {
         $script:StartContext.Failures['Snapshot'] = $_.Exception.Message
@@ -574,6 +575,7 @@ function Invoke-SnapshotCreate {
         return
     }
     $script:PendingSnapshot = $started
+    $script:SnapTask = Start-AVDTuneUiTask -Kind 'snapshot' -Title "Snapshot $($started.Name)" -Step 'Being created in Azure'   # runs until the timer below sees it ready or failed
     $ui.BtnStageAction2.IsEnabled = $false; $ui.BtnStageAction.IsEnabled = $false
     Set-StageMessage "Snapshot $($started.Name) is being created in Azure. This can take a few minutes; the window stays usable." 'info'
     $script:SnapTimer.Start()
@@ -586,6 +588,7 @@ $script:SnapTimer.Add_Tick({
             if ($s.State -eq 'Succeeded') {
                 $script:SnapTimer.Stop(); $script:PendingSnapshot = $null
                 Add-StartProtocol 'Snapshot of the OS disk created' "$($p.Name) (incremental)"
+                Complete-AVDTuneUiTask $script:SnapTask -Summary "Snapshot $($p.Name) is ready"
                 if ($script:OpenStage -eq 'Snapshot') { Update-SnapshotForm }
                 Show-Toast "Snapshot $($p.Name) is ready."
             }
@@ -593,14 +596,16 @@ $script:SnapTimer.Add_Tick({
                 $script:SnapTimer.Stop(); $script:PendingSnapshot = $null
                 $script:StartContext.Failures['Snapshot'] = "The snapshot $($p.Name) failed in Azure."
                 Add-StartProtocol 'Snapshot of the OS disk' "$($p.Name) failed in Azure" 'failed'
+                Complete-AVDTuneUiTask $script:SnapTask -Failed -Summary "The snapshot $($p.Name) failed in Azure."
                 Set-StageMessage $script:StartContext.Failures['Snapshot'] 'error'
                 $ui.BtnStageAction2.IsEnabled = $true
                 Update-StartView
             }
-            elseif ($s.Percent -ne $null) { Set-StageMessage "Snapshot $($p.Name): $([int]$s.Percent) percent ..." 'info' }
+            elseif ($s.Percent -ne $null) { Set-StageMessage "Snapshot $($p.Name): $([int]$s.Percent) percent ..." 'info'; Update-AVDTuneUiTask $script:SnapTask -Step "Being created in Azure: $([int]$s.Percent) percent" -Percent ([int]$s.Percent) }
         }
         catch {
             $script:SnapTimer.Stop(); $script:PendingSnapshot = $null
+            Complete-AVDTuneUiTask $script:SnapTask -Failed -Summary $_.Exception.Message
             Set-StageMessage $_.Exception.Message 'error'
             $ui.BtnStageAction2.IsEnabled = $true
         }
