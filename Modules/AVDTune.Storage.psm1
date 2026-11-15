@@ -11,8 +11,8 @@
       * The data plane (the share's ACL) is the Files adapter ($Files): Invoke = { param($Method, $Url, $Token, $Headers, $Body) } returns
         @{ Status; Headers; Body; Error }. New-AVDTuneFilesAdapter is the real one (only https://<account>.file.core.windows.net, no redirects), the fake is
         Tests\Fakes\FakeStorage.ps1. OAuth (the user's token, x-ms-file-request-intent: backup), never a key.
-      * The tokens are parameters of the caller and never stored. The storage audience (https://storage.azure.com/) is not one of the three audiences of
-        AVDTune.Session.psm1 yet (that file belongs to issue 11): without a storage token the ACL rows say so.
+      * The tokens are parameters of the caller and never stored. The storage token is the optional Storage audience of AVDTune.Session.psm1 (issue 18):
+        without it the ACL rows say so. It goes only to https://<account>.file.core.windows.net of the checked account (names validated here, the adapter allows only that host, no redirects).
       * The account key lives in memory for one call: it goes to the Files/SMB mapping adapter members and is removed at the end. It is never written to a file,
         the protocol or the change log, and no result contains it (the checks scan for it).
       * Every row has a source and a Verified flag. What Learn does not state is Verified=false with the reason.
@@ -431,7 +431,7 @@ function Invoke-AVDTuneStorageCheck {
     $aclNote = 'Get Permission with an OAuth token: the intent header and the roles are on the Learn pages; the authorization section of the Get Permission page still names only the account owner and SAS. To be proven on the test VM.'
     $sddl = $null; $aclFail = $null
     if (-not $Files -or -not $StorageToken) {
-        $why = if ($NoStorageReason) { $NoStorageReason } else { 'no token for Azure Storage (https://storage.azure.com/). The sign-in of AVDTune does not request that audience yet.' }
+        $why = if ($NoStorageReason) { $NoStorageReason } else { 'no token for Azure Storage (https://storage.azure.com/): the sign-in has no Storage token.' }
         Add (New-AVDTuneStRow 'st.acl.root' 5 'NTFS rights of the share root' 'unknown' "Not checkable: $why" 'Sign in with the storage audience, or confirm the key fallback for this run.' -Source $aclSource -Verified $false -Note $aclNote)
     }
     else {

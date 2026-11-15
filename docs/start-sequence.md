@@ -21,6 +21,7 @@ AVDTune has its own app registration `AVDTune` (not PackTune's), created at the 
 | Graph | Microsoft Graph | `Group.Read.All`, `DeviceManagementApps.Read.All` |
 | Sites | Microsoft Graph | `Sites.Selected` (plus the one-time site grant as in PackTune) |
 | Arm | Azure Service Management (`797f4846-ba00-4fd7-ba43-dac1f8f63013`) | `user_impersonation` |
+| Storage | Azure Storage (`e406a681-f3d4-42a8-90b6-c2b029497af1`), optional | `user_impersonation` (issue 18; NTFS rows of the FSLogix check, see `docs\fslogix.md`; a registration without it signs in without this token) |
 
 `offline_access` is needed for the refresh token. `Group.ReadWrite.All` (Entra groups) comes in phase 3 and only for that action. In Azure the signed-in account needs, on the resource group of the VM, a role with `Microsoft.Compute/snapshots/read` and `write` and `Microsoft.Compute/disks/read` (for example Disk Snapshot Contributor on the resource group, plus Reader on the disk). A missing role or consent is named in the message.
 

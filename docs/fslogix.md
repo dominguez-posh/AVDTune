@@ -32,8 +32,21 @@ Issue 10, plan sections 5a and 5d. Code: `Modules\AVDTune.FSLogix.psm1`, `Module
 - Get Permission with an OAuth token: the intent header and the Privileged roles are documented, but the authorization section of the Get Permission page still names only the account owner and SAS. To be proven on the VM.
 - `msDS-SupportedEncryptionTypes` bits (AES128 8, AES256 16) are from the Active Directory documentation, not from the FSLogix page. SMB 3.1.1, AES-256-GCM, premium storage, private endpoint, `pwdLastSet` thresholds (14 days) are the plan's recommendations.
 - Logon as a domain user (LogonUser with new credentials, impersonation) and the key fallback mapping (WNetAddConnection2) are written from the API documentation. The VHDX test as that user is not done (frx runs as the administrator).
-- The storage audience (`https://storage.azure.com/`) is not one of the three audiences of the sign-in (`AVDTune.Session.psm1`, issue 11): without a storage token the ACL rows say "not checkable".
+- The Storage audience (issue 18) is built but not tried on a real tenant: scope `https://storage.azure.com/user_impersonation`, token audience `https://storage.azure.com`. Whether Get Permission accepts that user token (see the line above) is still to be proven on the VM. Without the token the ACL rows say "not checkable" with the reason.
 - Not built: reading Entra applications (admin consent, Conditional Access exclusion) and Entra groups: shown as a by-hand hint. Subscriptions: the one of this VM plus ids you enter (the ARM adapter allows only paths below a subscription id).
+
+## Storage token for the NTFS rows (issue 18)
+
+The ACL rows of the storage check read the NTFS rights over the Azure Files REST API with the signed-in user's token (OAuth, header `x-ms-file-request-intent: backup`, never a key). That is the fourth audience of the sign-in (`AVDTune.Session.psm1`):
+
+| | |
+|---|---|
+| Resource | Azure Storage (`e406a681-f3d4-42a8-90b6-c2b029497af1`), token audience `https://storage.azure.com` |
+| Scope | `https://storage.azure.com/user_impersonation`, delegated, consent for the signed-in administrator only (`consentType` `Principal`) |
+| Token | fetched from the refresh token like the others, claims checked (exact `aud`, `tid` of the sign-in, `scp` contains `user_impersonation`), in memory only (SecureString), removed by sign out and Finish |
+| Sent to | only `https://<account>.file.core.windows.net` of the checked storage account (account and share names validated, https, default port, no userinfo, no redirects); never to ARM, Graph or any other host. The ARM token never goes to the share |
+
+The Storage token is optional. An app registration made before issue 18 has no consent for it: the sign-in still works with the other three tokens, the protocol and the FSLogix page say "No Storage token ..." with the reason, and the ACL rows stay "not checkable" (or the key fallback that you confirm for a run). Nothing is changed silently. To retrofit: Overview, sign-in step, "Set up again (authorize this administrator)": the setup (after its confirmation) adds Azure Storage `user_impersonation` to the registration, adds the Azure Storage service principal to the tenant if it is missing, and grants your consent for it (the same path as for Azure Service Management). Other administrators do the same with their own account. Without the roles for that (Application Administrator, Privileged Role Administrator) an administrator does it in the Entra admin center: API permissions > Azure Storage > `user_impersonation`, then grant consent.
 
 ## Real test on the throwaway VM (after docs\test-vm.md steps 1 to 4)
 
@@ -45,4 +58,5 @@ Issue 10, plan sections 5a and 5d. Code: `Modules\AVDTune.FSLogix.psm1`, `Module
 | F4 | redirections.xml: generate, save | File on the share; the `RedirXMLSourceFolder` value set; a hand-written TokenBroker exclusion is refused. |
 | F5 | Defender: add the missing exclusions, Undo | `Get-MpPreference` shows them; Undo removes only those AVDTune added. |
 | F6 | Run test; run test with write tests (needs a share) | Rows as in the screenshots; write test folder gone from the share; no VHDX left; if the master has no access (not joined): yellow, not red. |
-| F7 | Storage check with a domain account | Identity, SMB, DNS, roles; ACL rows need the storage audience; with a confirmed key fallback the key use is named in the change log. |
+| F7 | Storage check with a domain account | Identity, SMB, DNS, roles; ACL rows need the storage token (sign-in with the Storage audience); with a confirmed key fallback the key use is named in the change log. |
+| F8 | Sign in with a registration made before issue 18, then "Set up again" | First: sign-in works, warning "No Storage token", ACL rows not checkable with the hint. After the setup: Storage token present, ACL rows are read. |

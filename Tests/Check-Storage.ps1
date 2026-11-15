@@ -71,6 +71,26 @@ try {
     $bad3 = & $real.Invoke 'DELETE' 'https://storageaccount.file.core.windows.net/p?restype=directory' 't' @{} $null
     Test-Check 'the real data plane adapter refuses other hosts, look-alike hosts and other methods without a request' ($bad1.Status -eq 0 -and $bad2.Status -eq 0 -and $bad3.Status -eq 0 -and $bad1.Error -like 'Refused*') "$($bad1.Error) $($bad2.Error) $($bad3.Error)"
 
+    # the storage token (issue 18, Storage audience of the sign-in): only to <account>.file.core.windows.net, no redirects, never in errors
+    $stSecretUrl = 'tok-storage-SECRET-2'
+    $badUrls = @('https://storageaccount.file.core.windows.net:444/p?restype=directory', ('https://user' + [char]64 + 'storageaccount.file.core.windows.net/p?restype=directory'), 'http://storageaccount.file.core.windows.net/p?restype=directory', 'https://storageaccount.blob.core.windows.net/p?restype=directory', 'https://storageaccount.file.core.windows.net/../x?restype=directory', 'https://storageaccount.file.core.windows.net@evil.example/p?restype=directory', 'https://management.azure.com/p?restype=directory')
+    $badRes = @($badUrls | ForEach-Object { & $real.Invoke 'GET' $_ $stSecretUrl @{} $null })
+    Test-Check 'the real data plane adapter never sends the storage token to a port, userinfo, http, another storage service, a path with .. or another host; no token in the answer' (@($badRes | Where-Object { $_.Status -ne 0 -or $_.Error -notlike 'Refused*' -or $_.Error -match 'SECRET' }).Count -eq 0) (($badRes | ForEach-Object { "$($_.Status) $($_.Error)" }) -join ' | ')
+    $srcStorage = Get-Content -LiteralPath (Join-Path $repo 'Modules\AVDTune.Storage.psm1') -Raw
+    Test-Check 'the real data plane adapter does not follow redirects and speaks TLS 1.2 (extended with -bor, not overwritten)' ($srcStorage -match 'AllowAutoRedirect = \$false' -and $srcStorage -match 'SecurityProtocol -bor') $null
+    $spyEnv = New-Env
+    $spy = New-Object System.Collections.ArrayList
+    $realFiles = $spyEnv.Files; $realArm = $spyEnv.Arm
+    $spyFiles = [pscustomobject]@{ Invoke = { param($Method, $Url, $Token, $Headers, $Body) [void]$spy.Add("FILES|$Token|$Url|$($Headers['x-ms-file-request-intent'])"); & $realFiles.Invoke $Method $Url $Token $Headers $Body }.GetNewClosure() }
+    $spyArm = [pscustomobject]@{ Invoke = { param($Method, $Path, $Token, $Body) [void]$spy.Add("ARM|$Token|$Path"); & $realArm.Invoke $Method $Path $Token $Body }.GetNewClosure() }
+    $spyEnv.Files = $spyFiles; $spyEnv.Arm = $spyArm
+    $spyRes = Invoke-Check $spyEnv
+    $fileCalls = @($spy | Where-Object { $_ -like 'FILES|*' }); $armCalls = @($spy | Where-Object { $_ -like 'ARM|*' })
+    Test-Check 'the storage token goes only to https://storageaccount.file.core.windows.net (with the intent header backup), the ARM token only to ARM; neither to the other' ($spyRes.Overall -eq 'green' -and $fileCalls.Count -ge 3 -and @($fileCalls | Where-Object { $_ -notlike "FILES|$stTok|https://storageaccount.file.core.windows.net/*|backup" }).Count -eq 0 -and $armCalls.Count -ge 3 -and @($armCalls | Where-Object { $_ -notlike "ARM|$armTok|/subscriptions/*" }).Count -eq 0) (($fileCalls | Select-Object -First 2) -join ' ; ')
+    $noTok = New-Env
+    $noTokRes = Invoke-Check $noTok @{ StorageToken = $null; NoStorageReason = 'no token for Azure Storage (https://storage.azure.com/): No Storage token: ... Set up again (authorize this administrator)' }
+    Test-Check 'without a storage token (old app registration): the ACL rows say why and how to fix it, no request goes to the share, nothing green' ((Get-Row $noTokRes 'st.acl.root').Status -eq 'unknown' -and (Get-Row $noTokRes 'st.acl.root').Reason -like '*Set up again*' -and $noTok.Files.Log.Count -eq 0 -and @($noTokRes.Rows | Where-Object Status -eq 'green').Count -lt @((Invoke-Check (New-Env)).Rows | Where-Object Status -eq 'green').Count) (Not-Green $noTokRes)
+
     # ---------------------------------------------------------------- finding the account
     $e = New-Env
     $f1 = Find-AVDTuneStorageAccount -Arm $e.Arm -Token $armTok -AccountName 'storageaccount' -SubscriptionIds @($sub)

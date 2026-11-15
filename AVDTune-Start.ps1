@@ -272,7 +272,7 @@ function Save-EnvironmentForm {
 # ---------------------------------------------------------------- 2. sign-in
 function Build-SignInForm {
     $ui.TxtStageTitle.Text = '2. Microsoft 365 and Azure sign-in'
-    $ui.TxtStageIntro.Text = 'One normal Microsoft sign-in in an embedded window: you sign in yourself. AVDTune gets three tokens from it, one for Microsoft Graph, one for the SharePoint site and one for Azure Resource Manager. Microsoft puts every consented permission of a resource into its token, so both Graph tokens carry all Graph permissions listed here; extra permissions are reported as a warning. The tokens live in memory only and are removed on closing, on sign out and by Finish.'
+    $ui.TxtStageIntro.Text = 'One normal Microsoft sign-in in an embedded window: you sign in yourself. AVDTune gets four tokens from it, one for Microsoft Graph, one for the SharePoint site, one for Azure Resource Manager and one for Azure Storage (the NTFS rows of the FSLogix check; optional, an older app registration without it signs in without that token and says so). Microsoft puts every consented permission of a resource into its token, so both Graph tokens carry all Graph permissions listed here; extra permissions are reported as a warning. The tokens live in memory only and are removed on closing, on sign out and by Finish.'
     $session = $script:StartContext.Session
     foreach ($key in (Get-AVDTuneAudience).Keys) {
         $a = (Get-AVDTuneAudience)[$key]
@@ -291,7 +291,7 @@ function Build-SignInForm {
         "First sign-in: you sign in with an administrator account through Microsoft's app 'Microsoft Graph Command Line Tools' (Application.ReadWrite.All, DelegatedPermissionGrant.ReadWrite.All). AVDTune creates its own app registration 'AVDTune' (or reuses the one it created and saved before, after checking it) (public client, http://localhost, no secret), grants the admin consent for the permissions above and then signs you in with it. Needs Application Administrator or Cloud Application Administrator, and Privileged Role Administrator (or Global Administrator) for the consent."
     }
     elseif (-not $tenant) { 'With the account AVDTune finds the tenant of its domain; without it the sign-in goes through organizations (only for a multi-tenant app registration). The tenant of the sign-in is saved.' }
-    else { 'The app registration needs these permissions with admin consent, Azure Service Management user_impersonation included: see docs\start-sequence.md.' }
+    else { 'The app registration needs these permissions with admin consent, Azure Service Management and Azure Storage user_impersonation included: see docs\start-sequence.md.' }
     $ui.PanelStageBody.Children.Add((New-Text $hint 'Hint' '0,8,0,0')) | Out-Null
     if ($session -and $session.Connected) {
         $info = Get-AVDTuneSessionInfo $session
@@ -338,7 +338,8 @@ function Invoke-SignIn([switch]$Setup) {
     $script:StartContext.Session = $session
     $script:StartContext.Failures.Remove('SignIn')
     Add-StartProtocol 'Microsoft 365 and Azure sign-in' ("Signed in as $($info.Account): " + (($info.Audiences | ForEach-Object { "$($_.Audience) ($($_.Scopes -join ', '))" }) -join '; '))
-    foreach ($w in @($info.Warnings)) { Add-StartProtocol 'Warning: sign-in token with extra permissions' $w }
+    $missing = @($info.Unavailable | ForEach-Object { $_.Reason })
+    foreach ($w in @($info.Warnings)) { Add-StartProtocol $(if ($w -in $missing) { 'Warning: sign-in without the Storage token' } else { 'Warning: sign-in token with extra permissions' }) $w }
     Show-Toast "Signed in as $($info.Account)."
     Close-Stage
     Update-StartView
