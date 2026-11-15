@@ -1,0 +1,5 @@
+[
+  { "Id": "optimization.test-registry", "Section": "Optimization", "Title": "Test value is 1", "Why": "Check fixture", "Kind": "Registry", "Path": "HKLM:\\SOFTWARE\\AVDTuneTest", "Name": "Flag", "Value": 1, "Type": "DWord", "Reboot": true, "SourceUrl": "https://learn.microsoft.com/windows/" },
+  { "Id": "optimization.test-service", "Section": "Optimization", "Title": "Test service is disabled", "Kind": "ServiceStartup", "Name": "AvdTuneTestSvc", "Startup": "Disabled", "Previous": "Automatic" },
+  { "Id": "optimization.test-task", "Section": "Optimization", "Title": "Test task is disabled", "Kind": "TaskDisabled", "TaskPath": "\\AVDTuneTest\\", "TaskName": "Nightly" }
+]
