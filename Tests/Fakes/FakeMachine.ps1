@@ -98,7 +98,7 @@ function New-AVDTuneFakeMachine {
         @($names.Keys)
     }.GetNewClosure()
     $m.RegNames = { param($Path) $prefix = ([string]$Path).ToLowerInvariant() + '|'; $orig = @{}; foreach ($k in $store.Registry.Keys) { if ($k.StartsWith($prefix)) { $orig[$k.Substring($prefix.Length)] = $true } }; @($orig.Keys) }.GetNewClosure()    $m.PathExists = { param($Path) $k = ([string]$Path).ToLowerInvariant(); (@($store.Paths) | Where-Object { $_ -eq $Path }).Count -gt 0 -or $store.Files.ContainsKey($k) -or $store.Folders.ContainsKey($k.TrimEnd([char]92)) }.GetNewClosure()
-
+    $m.PathExists = { param($Path) $k = ([string]$Path).ToLowerInvariant(); (@($store.Paths) | Where-Object { $_ -eq $Path }).Count -gt 0 -or $store.Files.ContainsKey($k) -or $store.Folders.ContainsKey($k.TrimEnd([char]92)) }.GetNewClosure()
     $m.DirList = { param($Path, $Filter = '*') @(@($store.Dirs[$Path]) | Where-Object { $_ -and $_ -like $Filter }) }.GetNewClosure()
     $m.Hotfixes = { $store.Hotfixes }.GetNewClosure()
     $m.NetAdapters = { $store.NetAdapters }.GetNewClosure()

@@ -132,7 +132,7 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         foreach ($page in $script:PageTable) {
             Show-Page $page.Key
             $window.UpdateLayout()
-            $placeholder = $page.Key -notin 'Overview', 'Protocol', 'Updates', 'UpdateBlock', 'UserExperience', 'Benchmark'
+            $placeholder = $page.Key -notin 'Overview', 'Protocol', 'Updates', 'UpdateBlock', 'UserExperience', 'Benchmark', 'FSLogix'
             $ok = ($script:CurrentPage -eq $page.Key -and $ui["Nav$($page.Key)"].IsChecked -and $ui.PagePlaceholder.Visibility -eq (ConvertTo-Vis $placeholder))
             if ($placeholder) { $ok = $ok -and $ui.TxtPhTitle.Text -eq $page.Title -and $ui.TxtPhPhase.Text -eq "Planned for phase $($page.Phase)" -and $ui.TxtPhText.Text.Length -gt 40 }
             Test-Smoke "page $($page.Key) shows" $ok $null
@@ -142,7 +142,7 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         $keepWidth = $window.Width
         foreach ($width in 1280, 960) {
             $window.Width = $width
-            foreach ($head in @(@('Overview', 'TxtOverviewSubtitle', 'PanelOverviewHead'), @('Updates', 'TxtUpdSubtitle', 'PanelUpdHead'), @('UpdateBlock', 'TxtBlockSubtitle', 'PanelBlockHead'), @('UserExperience', 'TxtUxSubtitle', 'PanelUxHead'), @('Protocol', 'TxtProtocolSubtitle', 'PanelProtocolHead'))) {
+            foreach ($head in @(@('Overview', 'TxtOverviewSubtitle', 'PanelOverviewHead'), @('Updates', 'TxtUpdSubtitle', 'PanelUpdHead'), @('UpdateBlock', 'TxtBlockSubtitle', 'PanelBlockHead'), @('UserExperience', 'FSLogix', 'TxtUxSubtitle', 'PanelUxHead'), @('Protocol', 'TxtProtocolSubtitle', 'PanelProtocolHead'), @('FSLogix', 'TxtFslSubtitle', 'PanelFslHead'))) {
                 Show-Page $head[0]; $window.UpdateLayout()
                 Test-Smoke "page $($head[0]) at $width px: the intro text does not run under the buttons" (Test-HeadClear $ui[$head[1]] $ui[$head[2]]) "$(Get-SmokeBounds $ui[$head[1]]) / $(Get-SmokeBounds $ui[$head[2]])"
             }
@@ -686,6 +686,130 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         $ui.BoxReady.BringIntoView(); $window.UpdateLayout(); $ui.TxtReadyGalleryState.BringIntoView(); $window.UpdateLayout()
         $ui.BoxToast.Visibility = 'Collapsed'; Save-SmokeShot '46-readiness-gallery-chosen-light'
         $true } }
+    @{ Name = 'fslogix: page, settings, groups, redirections, Defender'; Do = {
+        if ($script:OverviewJob -or $script:ReadyJob -or $script:ReadyQueued) { return $false }
+        $reg = $script:Machine.Store.Registry
+        $pk = 'hklm:\software\fslogix\profiles|'
+        $reg['hklm:\software\fslogix\apps|installversion'] = '2.9.8884.27471'
+        $reg[$pk + 'enabled'] = 1; $reg[$pk + 'vhdlocations'] = @('\\stfake01.file.core.windows.net\profiles'); $reg[$pk + 'volumetype'] = 'vhd'; $reg[$pk + 'lockedretrycount'] = 12; $reg[$pk + 'sizeinmbs'] = 30000
+        $reg[$pk + 'lockedretyinterval'] = 5   # a typo, to be found by the test
+        $script:Machine.Store.Services['frxsvc'] = [pscustomobject]@{ Name = 'frxsvc'; Status = 'Running'; StartType = 'Automatic' }
+        $script:Machine.Store.Native[(Join-Path (Get-AVDTuneSystemFolder System) 'fltmc.exe') + ' filters'] = @{ ExitCode = 0; Output = "Filter Name  Num Instances  Altitude  Frame`r`nfrxdrv  3  135000  0`r`nfrxdrvvt  3  135100  0`r`n" }
+        $script:Machine.Store.Native['*frx.exe create-vhd *'] = @{ ExitCode = 0; Output = 'created' }; $script:Machine.Store.Native['*frx.exe begin-edit-profile *'] = @{ ExitCode = 0; Output = 'cookie: 4876' }; $script:Machine.Store.Native['*frx.exe end-edit-profile *'] = @{ ExitCode = 0; Output = 'ok' }
+        $script:FslFake.F.Store.Defender = @{ Paths = @('C:\Program Files\FSLogix\Apps\', 'C:\ProgramData\FSLogix\'); Processes = @('frxsvc.exe') }
+        Show-Page 'FSLogix'; $window.UpdateLayout()
+        Test-Smoke 'FSLogix page: own page (no placeholder), the nav item is checked' ($ui.PageFSLogix.Visibility -eq 'Visible' -and $ui.PagePlaceholder.Visibility -eq 'Collapsed' -and $ui.NavFSLogix.IsChecked) $null
+        Test-Smoke 'installation card: installed version, service and drivers' ($ui.TxtFslVersion.Text -like '*2.9.8884.27471*frxsvc Running*frxdrv*' -and $ui.TxtFslInstallPill.Text -eq 'Installed') $ui.TxtFslVersion.Text
+        Test-Smoke 'settings: every setting of the plan as a row with its recommendation and reason, differing values marked' ($script:FslInputs.Count -ge 19 -and (Find-Text $ui.PanelFslSettings 'LockedRetryCount') -and (Find-Text $ui.PanelFslSettings 'Differs') -and (Find-Text $ui.PanelFslSettings 'Office container (ODFC), optional')) $script:FslInputs.Count
+        Save-SmokeShot '50-fslogix-top-light'
+        # fill in the recommendation, dry run first, then write behind the gate
+        $ui.BtnFslFill.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
+        $ui.BtnFslSettingsTest.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
+        Test-Smoke 'Test: shows what would change and writes nothing' ($ui.TxtFslSettingsState.Text -like 'Test (nothing written)*lockedretrycount*' -and (& $script:Machine.RegGet 'HKLM:\SOFTWARE\FSLogix\Profiles' 'LockedRetryCount') -eq 12 -and @(Get-AVDTuneRun -Root $script:StateRoot | Where-Object Plan -like 'FSLogix*').Count -eq 0) $ui.TxtFslSettingsState.Text
+        $ui.BtnFslSettingsApply.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
+        Test-Smoke 'Apply: the confirmation names the count, the registry has the recommended values, LastChange shown, change log written' ($script:ConfirmAsked -like 'Write * FSLogix setting*' -and (& $script:Machine.RegGet 'HKLM:\SOFTWARE\FSLogix\Profiles' 'LockedRetryCount') -eq 3 -and (& $script:Machine.RegGet 'HKLM:\SOFTWARE\FSLogix\Profiles' 'VolumeType') -eq 'vhdx' -and $ui.TxtFslSettingsState.Text -like 'LastChange:*' -and @(Get-AVDTuneChangeLog -Root $script:StateRoot | Where-Object Category -eq 'FSLogix').Count -ge 3) "$($script:ConfirmAsked) / $($ui.TxtFslSettingsState.Text)"
+        Test-Smoke 'the change is in the protocol (category FSLogix)' (@($script:Protocol.Actions | Where-Object { $_.Category -eq 'fslogix' }).Count -ge 1) $null
+        $ui.BtnFslSettingsUndo.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
+        Test-Smoke 'Undo: the previous values are back' ((& $script:Machine.RegGet 'HKLM:\SOFTWARE\FSLogix\Profiles' 'LockedRetryCount') -eq 12 -and (& $script:Machine.RegGet 'HKLM:\SOFTWARE\FSLogix\Profiles' 'VolumeType') -eq 'vhd') $null
+        $ui.BtnFslFill.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
+        $ui.BtnFslSettingsApply.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
+        # groups
+        $ui.CmbFslList.SelectedItem = 'Exclude'
+        $ui.BtnFslExcludeAdmins.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
+        Test-Smoke 'groups: the local Administrators are in the exclude list; the groups of the domain controller are offered' ($script:FslFake.F.Store.Groups['FSLogix Profile Exclude List'] -contains 'S-1-5-32-544' -and $ui.TxtFslGroups.Text -like '*S-1-5-32-544*' -and @($ui.CmbFslGroup.ItemsSource) -contains 'AVD-Users') $ui.TxtFslGroupHint.Text
+        $ui.CmbFslGroup.Text = 'not-a-group'
+        $ui.BtnFslGroupAdd.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
+        Test-Smoke 'a name that is no group and no SID is refused with the reason' ($script:LastToast -like '*neither a group of the domain nor a SID*') $script:LastToast
+        # redirections.xml
+        $ui.TxtFslRedirFolder.Text = '\\stfake01.file.core.windows.net\profiles'
+        $ui.BtnFslRedirGenerate.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
+        $ui.BtnFslRedirValidate.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
+        Test-Smoke 'redirections.xml: generated from the template (Teams ticked), valid' ($ui.TxtFslRedirXml.Text -like '*MSTeams_8wekyb3d8bbwe*' -and $ui.TxtFslRedirState.Text -like 'Valid:*') $ui.TxtFslRedirState.Text
+        $good = $ui.TxtFslRedirXml.Text
+        $ui.TxtFslRedirXml.Text = $good.Replace('</Excludes>', '<Exclude Copy="0">AppData\Local\Microsoft\TokenBroker\Cache</Exclude></Excludes>')
+        $ui.BtnFslRedirValidate.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
+        Test-Smoke 'the token broker is refused with the single sign-on reason' ($ui.TxtFslRedirState.Text -like 'Not valid:*single sign-on*') $ui.TxtFslRedirState.Text
+        $ui.BtnFslRedirSave.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
+        Test-Smoke 'saving that text is refused, nothing is written' ($script:LastToast -like '*not valid*' -and -not $script:FslFake.F.Store.Files.ContainsKey('\\stfake01.file.core.windows.net\profiles\redirections.xml')) $script:LastToast
+        $ui.TxtFslRedirXml.Text = $good
+        $ui.BtnFslRedirSave.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
+        Test-Smoke 'redirections.xml saved to the folder, the folder is in the registry' ($script:FslFake.F.Store.Files['\\stfake01.file.core.windows.net\profiles\redirections.xml'] -ceq $good -and (& $script:Machine.RegGet 'HKLM:\SOFTWARE\FSLogix\Profiles' 'RedirXMLSourceFolder') -eq '\\stfake01.file.core.windows.net\profiles') $null
+        # Defender
+        $ui.BtnFslDefAdd.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
+        Test-Smoke 'Defender: the missing exclusions are added, the list says all are set' ($ui.TxtFslDefState.Text -like '* of * exclusions are set.*' -and @((Get-AVDTuneFSLogixDefenderState -F $script:FslFake.F -VhdLocations @('\\stfake01.file.core.windows.net\profiles')).Items | Where-Object { -not $_.Present }).Count -eq 0 -and $script:FslFake.F.Store.Defender.Processes -contains 'frxccds.exe') $ui.TxtFslDefState.Text
+        Show-Page 'FSLogix'; $window.UpdateLayout()
+        $sv = $ui.PageFSLogix.Children[0]
+        $sv.ScrollToVerticalOffset(1100); $window.UpdateLayout(); Save-SmokeShot '51-fslogix-groups-redirections-light'
+        $sv.ScrollToVerticalOffset(2400); $window.UpdateLayout(); Save-SmokeShot '52-fslogix-defender-light'
+        $sv.ScrollToVerticalOffset(0)
+        $true } }
+    @{ Name = 'fslogix: function test'; Do = {
+        if ($script:OverviewJob -or $script:ReadyJob -or $script:ReadyQueued -or $script:FslJob) { return $false }
+        if (-not $script:FslTestStep) {
+            $script:FslTestStep = 1
+            $script:FslFake.F.Store.Acl = @{ '\\stfake01.file.core.windows.net\profiles' = 'O:BAG:DUD:PAI(A;OICI;FA;;;WD)(A;OICI;FA;;;BA)' }
+            $ui.BtnFslTest.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
+            return $false
+        }
+        $window.UpdateLayout()
+        $r = $script:FslTest
+        Test-Smoke 'function test ran: result stored in the state, run record, change log note' ($r -and (Get-AVDTuneState $script:StateRoot).FSLogixTest.Overall -eq $r.Overall -and @(Get-AVDTuneRun -Root $script:StateRoot | Where-Object Plan -eq 'FSLogix-Test').Count -eq 1 -and @(Get-AVDTuneChangeLog -Root $script:StateRoot | Where-Object Component -eq 'FSLogix-Test').Count -eq 1) $null
+        Test-Smoke 'the typo in the registry is found (yellow); the write tests did not run (info); the real sign-in is info' ((@($r.Rows | Where-Object Id -eq 'fs.registry')[0].Status -eq 'yellow') -and (@($r.Rows | Where-Object Id -eq 'fs.loc1.rw')[0].Status -eq 'info') -and (@($r.Rows | Where-Object Id -eq 'fs.logon')[0].Status -eq 'info') -and @($script:FslFake.F.Log | Where-Object { $_ -like 'ShareWriteTest*' }).Count -eq 0) ((@($r.Rows | Where-Object Id -eq 'fs.registry')[0].Reason))
+        Test-Smoke 'the card shows the pill, the counts and one row per check' ($ui.TxtFslTestSummary.Text -like '*without the write tests*' -and $ui.PanelFslTest.Children.Count -eq @($r.Rows).Count) "$($ui.TxtFslTestPill.Text) $($ui.PanelFslTest.Children.Count)"
+        Test-Smoke 'the healthcheck follows: the readiness analysis has the FSLogix-Test row' ($script:Ready -and @($script:Ready.Rows | Where-Object Id -eq 'hy.fslogix-test').Count -eq 1) $null
+        $sv = $ui.PageFSLogix.Children[0]; Show-Page 'FSLogix'; $window.UpdateLayout()
+        $sv.ScrollToVerticalOffset(3000); $window.UpdateLayout(); Save-SmokeShot '53-fslogix-test-light'
+        $script:ConfirmAsked = ''
+        $ui.BtnFslTestWrite.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
+        Test-Smoke 'the write tests ask first and say what they create' ($script:ConfirmAsked -like '*test folder*VHDX*') $script:ConfirmAsked
+        $script:FslTestStep = 2
+        $true } }
+    @{ Name = 'fslogix: write tests and a red result'; Do = {
+        if ($script:OverviewJob -or $script:ReadyJob -or $script:ReadyQueued -or $script:FslJob) { return $false }
+        if ($script:FslTestStep -eq 2) {
+            $script:FslTestStep = 3
+            $r = $script:FslTest
+            Test-Smoke 'write tests: folder test and the frx VHDX test ran (create, attach, detach)' ($r.WriteTests -and @($script:FslFake.F.Log | Where-Object { $_ -like 'ShareWriteTest*' }).Count -eq 1 -and @($script:Machine.Log | Where-Object { $_ -like '*frx.exe end-edit-profile -cookie 4876*' }).Count -ge 1) $null
+            $script:FslFake.F.Store.Dns = @{ 'stfake01.file.core.windows.net' = @{ Ok = $false; Addresses = @(); Error = 'No such host is known' } }
+            $ui.BtnFslTest.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
+            return $false
+        }
+        $window.UpdateLayout()
+        $r = $script:FslTest
+        $dns = @($r.Rows | Where-Object Id -eq 'fs.loc1.dns')[0]
+        Test-Smoke 'DNS does not resolve (private DNS missing): red with the privatelink fix; the test is red' ($dns.Status -eq 'red' -and $dns.Fix -like '*privatelink*' -and $r.Overall -eq 'red') $r.Overall
+        Test-Smoke 'the readiness row is red and Finish is blocked by it' (@($script:Ready.Rows | Where-Object Id -eq 'hy.fslogix-test')[0].Status -eq 'red' -and $script:Ready.RedIds -contains 'hy.fslogix-test') $null
+        $ui.BoxReady.BringIntoView(); Show-Page 'Overview'; $window.UpdateLayout(); $ui.BoxReady.BringIntoView(); $window.UpdateLayout()
+        Save-SmokeShot '54-overview-fslogix-red-light'
+        $script:FslFake.F.Store.Dns = @{}
+        $true } }
+    @{ Name = 'fslogix: storage check'; Do = {
+        if ($script:OverviewJob -or $script:ReadyJob -or $script:ReadyQueued -or $script:FslJob) { return $false }
+        if (-not $script:FslStorageStep) {
+            $script:FslStorageStep = 1
+            $ad = @{ domainName = 'example.test'; netBiosDomainName = 'EXAMPLE'; forestName = 'example.test'; domainGuid = '11111111-2222-3333-4444-555555555555'; domainSid = 'S-1-5-21-1-2-3'; azureStorageSid = 'S-1-5-21-1-2-3-1500'; samAccountName = 'stfake01'; accountType = 'Computer' }
+            $script:FslFake.Arm.Store.Accounts = @(@{ Name = 'stfake01'; Rg = 'rg-example'; Kind = 'FileStorage'; Sku = 'Premium_LRS'
+                    Props = @{ azureFilesIdentityBasedAuthentication = @{ directoryServiceOptions = 'AD'; defaultSharePermission = 'StorageFileDataSmbShareContributor'; activeDirectoryProperties = $ad }; privateEndpointConnections = @(@{ id = 'pe1' }); publicNetworkAccess = 'Disabled' }
+                    FileService = @{ versions = 'SMB3.1.1'; authenticationMethods = 'Kerberos'; kerberosTicketEncryption = 'RC4-HMAC;AES-256'; channelEncryption = 'AES-256-GCM' } })
+            $script:FslFake.Ldap.Store.Account = @{ Sam = 'stfake01'; Sid = 'S-1-5-21-1-2-3-1500'; Spns = @('cifs/stfake01.file.core.windows.net'); PwdLastSet = (Get-Date).AddDays(-35); Uac = 4096; EncTypes = $null }
+            $script:FslFake.Files.Store.Acls = @{ '' = 'O:BAG:DUD:PAI(A;OICI;FA;;;WD)(A;OICI;FA;;;BA)' }; $script:FslFake.Files.Store.Folders = @()
+            $ui.CmbFslUsersGroup.Text = 'AVD-Users'; $ui.CmbFslAdminsGroup.Text = 'AVD-Admins'; $ui.TxtFslDc.Text = '10.0.0.10'; $ui.TxtFslUser.Text = 'EXAMPLE\test.user'; $ui.PwdFslPassword.Password = 'smoke-test-password-1'
+            $ui.BtnFslStorage.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
+            return $false
+        }
+        $window.UpdateLayout()
+        $r = $script:FslStorage
+        $by = @{}; foreach ($x in $r.Rows) { $by[$x.Id] = $x }
+        Test-Smoke 'storage check ran with the fake Azure: account found, identity AD, only GET against ARM' ($r -and $by['st.account'].Status -eq 'green' -and $by['st.identity'].Status -eq 'green' -and @($script:FslFake.Arm.Log | Where-Object { $_ -notlike 'GET *' }).Count -eq 0) (@($r.Rows | ForEach-Object { "$($_.Id)=$($_.Status)" }) -join ' ')
+        Test-Smoke 'password of the AD object almost expired (7 days): yellow with the rotation hint; RC4 allowed too: yellow; the ACL deviates: red with the diff offered' ($by['st.ad.password'].Status -eq 'yellow' -and $by['st.smb.kerberos'].Status -eq 'yellow' -and $by['st.acl.root'].Status -eq 'red' -and $r.AclDiff -and $ui.BtnFslAclSet.Visibility -eq 'Visible' -and $ui.TxtFslAclDiff.Text -like '*recommendation*') ($by['st.ad.password'].Reason)
+        Test-Smoke 'the access test ran as the domain user; the password field is empty again and the key was not used' ($by['st.access'].Status -eq 'green' -and $ui.PwdFslPassword.Password -eq '' -and -not $r.KeyUsed -and $script:FslFake.Arm.Store.KeyRequests -eq 0) $by['st.access'].Reason
+        Test-Smoke 'the result is stored, no password or token in the state folder' ((Get-AVDTuneState $script:StateRoot).StorageCheck.Account -eq 'stfake01' -and ((Get-ChildItem $script:StateRoot -Recurse -File | ForEach-Object { [IO.File]::ReadAllText($_.FullName) }) -join "`n") -notmatch 'smoke-test-password-1|fake-storage-token|fake-arm-token') $null
+        $sv = $ui.PageFSLogix.Children[0]; Show-Page 'FSLogix'; $window.UpdateLayout()
+        $sv.ScrollToVerticalOffset(99999); $window.UpdateLayout(); Save-SmokeShot '55-fslogix-storage-light'
+        # set the ACL after the diff
+        $ui.BtnFslAclSet.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
+        Test-Smoke 'set the recommended ACL: the confirmation names the diff, the share got it once with attributes preserved, the change log has it' ($script:ConfirmAsked -like '*recommended ACL*diff*' -and $script:FslFake.Files.Store.Puts.Count -eq 1 -and $script:FslFake.Files.Store.Puts[0].Attributes -eq 'preserve' -and @(Get-AVDTuneChangeLog -Root $script:StateRoot | Where-Object Component -eq 'Storage ACL').Count -eq 1) $ui.TxtFslState.Text
+        $true } }
     @{ Name = 'start: sign-out and dark'; Do = {
         Open-Stage 'SignIn'; $window.UpdateLayout()
         $ui.BtnStageAction2.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
@@ -801,9 +925,10 @@ $script:SmokeTimer.Add_Tick({
             return
         }
         $step = $script:SmokeSteps[0]
+        try { Set-Content (Join-Path $script:SmokeOut 'current-step.txt') ([string]$step.Name) } catch { }
         try { $done = & $step.Do $step }
         catch { Test-Smoke "step '$($step.Name)'" $false "$($_.Exception.Message) @ $($_.InvocationInfo.ScriptLineNumber) $($_.ScriptStackTrace -replace "s+", " ")"; $done = $true }
-        if ($done) { $script:SmokeSteps.RemoveAt(0) }
+        if ($done) { $script:SmokeSteps.RemoveAt(0); try { $script:SmokeResults | Set-Content (Join-Path $script:SmokeOut 'results-partial.txt') } catch { } }
     }
     catch {
         [void]$script:SmokeResults.Add("FAIL driver: $($_.Exception.Message)")

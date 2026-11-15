@@ -547,6 +547,26 @@ function Invoke-AVDTuneFSLogixInstall {
     finally { if ($dir) { try { & $F.RemoveFolder $dir } catch { } } }
 }
 
+function Invoke-AVDTuneFSLogixInstallRecorded {
+    <# The install or update of the FSLogix page: behind the write gate, with a run record (Plan 'FSLogix install'), LastChange and a change log entry. Returns the step-like Result and the Install answer. #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)]$Machine, [Parameter(Mandatory)]$F, [string]$Root = (Get-AVDTuneRoot), [string]$User, [string]$SnapshotId, [scriptblock]$Progress)
+    if (-not (Test-AVDTuneWriteAllowed)) { throw 'The snapshot gate is not confirmed: AVDTune is read only until a snapshot newer than its last change is confirmed on the Overview.' }
+    $started = & $Machine.Now
+    [void](Set-AVDTuneState -Root $Root -Values @{ LastChange = $started.ToString('o') })
+    $r = Invoke-AVDTuneFSLogixInstall -Machine $Machine -F $F -Root $Root -Progress $Progress
+    $res = [pscustomobject][ordered]@{ Id = 'fslogix.install'; Section = 'FSLogix'; Title = 'FSLogix Apps'; Mode = 'Apply'; Status = $r.Status; Before = $r.Before; After = $r.After; Message = $r.Message; Reboot = [bool]$r.Reboot -and $r.Status -eq 'Changed'; WhatIf = $false; At = $started.ToString('o'); Code = $r.Code }
+    $state = Get-AVDTuneState $Root
+    $run = [pscustomobject][ordered]@{ Id = $null; Plan = 'FSLogix install'; Started = $started.ToString('o'); Ended = (& $Machine.Now).ToString('o'); User = $User; SnapshotId = $SnapshotId; WhatIf = $false; ImageVersion = $state.ImageVersion; Reboot = $res.Reboot; Results = @($res) }
+    [void](Add-AVDTuneRun -Root $Root -Run $run)
+    if ($r.Status -in 'Changed', 'Failed') { [void](Set-AVDTuneState -Root $Root -Values @{ LastChange = (& $Machine.Now).ToString('o') }) }
+    if ($state.ImageVersion -and $r.Status -in 'Changed', 'Failed') {
+        $text = if ($r.Status -eq 'Changed') { "FSLogix Apps: $($r.Message)" } else { "FSLogix Apps: install FAILED ($($r.Code)) - $($r.Message)" }
+        [void](Add-AVDTuneChangeLogEntry -Root $Root -Version $state.ImageVersion -Category 'FSLogix' -Component 'FSLogix' -ChangeType $(if ($r.Status -eq 'Changed') { 'Updated' } else { 'Note' }) -Text $text -User $User -SnapshotId $SnapshotId -RunId ([string]$run.Id) -Source Step)
+    }
+    [pscustomobject]@{ Result = $res; Install = $r; Run = $run }
+}
+
 #endregion
 
 #region ACL (NTFS) of the share root against Microsoft's recommendation
@@ -995,6 +1015,6 @@ Export-ModuleMember -Function Get-AVDTuneFSLogixSettingCatalog, Test-AVDTuneFSLo
     New-AVDTuneFSLogixRegStep, Get-AVDTuneFSLogixGroupMembers, Get-AVDTuneFSLogixUndoPath, Set-AVDTuneFSLogixSettings, Undo-AVDTuneFSLogixSettings, Get-AVDTuneFSLogixLastChange, Test-AVDTuneSid, Get-AVDTuneFSLogixGroups,
     Get-AVDTuneFSLogixGroupChoices, Set-AVDTuneFSLogixGroupMember, Get-AVDTuneRedirectionTemplate, Test-AVDTuneRedirectionPath, New-AVDTuneRedirectionsXml,
     Test-AVDTuneRedirectionsXml, Get-AVDTuneRedirectionsTarget, Save-AVDTuneRedirections, Undo-AVDTuneRedirections, Get-AVDTuneFSLogixDefenderList,
-    Get-AVDTuneFSLogixDefenderState, Set-AVDTuneFSLogixDefender, Undo-AVDTuneFSLogixDefender, Get-AVDTuneFSLogixLatest, Invoke-AVDTuneFSLogixInstall,
+    Get-AVDTuneFSLogixDefenderState, Set-AVDTuneFSLogixDefender, Undo-AVDTuneFSLogixDefender, Get-AVDTuneFSLogixLatest, Invoke-AVDTuneFSLogixInstall, Invoke-AVDTuneFSLogixInstallRecorded,
     ConvertFrom-AVDTuneSddl, New-AVDTuneFSLogixRecommendedSddl, Compare-AVDTuneFSLogixAcl, Get-AVDTuneFSLogixLocations, Format-AVDTuneAce, Invoke-AVDTuneFSLogixTest,
     Invoke-AVDTuneFSLogixVhdxTest, Save-AVDTuneFSLogixTestRun, Get-AVDTuneFSLogixTestRecord, New-AVDTuneFSLogixAdapter

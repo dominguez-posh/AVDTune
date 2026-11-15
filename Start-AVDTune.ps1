@@ -26,7 +26,7 @@ Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, Sys
 $script:AppRoot = $PSScriptRoot
 $script:ToolVersion = (Get-Content -LiteralPath (Join-Path $PSScriptRoot 'VERSION') -Raw -Encoding UTF8).Trim()   # the file VERSION is also the version of the release
 Import-Module (Join-Path $PSScriptRoot 'Modules\AVDTune.psm1') -Force
-foreach ($part in 'Trust', 'Session', 'Snapshot', 'Directory', 'Start', 'UpdateBlock', 'Updates', 'Readiness', 'Watermark', 'Benchmark', 'Shortcut') { Import-Module (Join-Path $PSScriptRoot "Modules\AVDTune.$part.psm1") -Force }
+foreach ($part in 'Trust', 'Session', 'Snapshot', 'Directory', 'Start', 'UpdateBlock', 'Updates', 'Readiness', 'Watermark', 'Benchmark', 'Shortcut', 'FSLogix', 'Storage') { Import-Module (Join-Path $PSScriptRoot "Modules\AVDTune.$part.psm1") -Force }
 Import-Module (Join-Path $PSScriptRoot 'Modules\AVDTune.Release.psm1') -Force
 . (Join-Path $PSScriptRoot 'AVDTune-Theme.ps1')
 
@@ -151,7 +151,7 @@ $script:PageTable = @(
     @{ Key = 'Software'; Title = 'Software'; Glyph = 0xE71D; Phase = 4; Text = 'Packages of the PackTune library and the winget and Chocolatey catalog: install, update and remove, and detection of what is already on the master.' }
     @{ Key = 'Office'; Title = 'Office'; Glyph = 0xE8A5; Phase = 6; Text = 'Office Deployment Tool configuration (channel, 64 bit, languages, excluded apps, shared computer licensing, updates off), preview of configuration.xml, install, update and remove, build info.' }
     @{ Key = 'Optimization'; Title = 'Optimization'; Glyph = 0xE9D9; Phase = 6; Text = 'Optimizations for multi-session hosts: AppX, services, tasks and autologgers, visual effects, power plan, widgets and consumer features off, browser settings, Storage Sense, telemetry, hibernation, defrag. Each step with its reason and source.' }
-    @{ Key = 'FSLogix'; Title = 'FSLogix'; Glyph = 0xE8B7; Phase = 3; Text = 'FSLogix setup, settings, redirections.xml and a function test of the profile container.' }
+    @{ Key = 'FSLogix'; Title = 'FSLogix'; Glyph = 0xE8B7; Phase = 3 }
     @{ Key = 'AppMasking'; Title = 'App Masking'; Glyph = 0xE7B3; Phase = 3; Text = 'FSLogix hiding rules for icons and apps, with groups from the domain or Microsoft Entra ID.' }
     @{ Key = 'VdiComponents'; Title = 'VDI components'; Glyph = 0xE7F4; Phase = 6; Text = 'Defender onboarding for non-persistent VDI, new Teams for VDI, multimedia redirection, RDP Shortpath, time zone redirection and OneDrive per machine.' }
     @{ Key = 'UserExperience'; Title = 'User experience'; Glyph = 0xE771; Phase = 6; Text = 'Wallpaper, watermark, Start and taskbar layout and default apps for new profiles, public desktop shortcuts and web apps with App Masking rules per group.' }
@@ -196,6 +196,7 @@ function Show-Page([string]$Key) {
     $ui.PageUpdateBlock.Visibility = ConvertTo-Vis ($Key -eq 'UpdateBlock')
     $ui.PageUserExperience.Visibility = ConvertTo-Vis ($Key -eq 'UserExperience')
     $ui.PageBenchmark.Visibility = ConvertTo-Vis ($Key -eq 'Benchmark')
+    $ui.PageFSLogix.Visibility = ConvertTo-Vis ($Key -eq 'FSLogix')
     $ui.PagePlaceholder.Visibility = ConvertTo-Vis $isPlaceholder
     $ui["Nav$Key"].IsChecked = $true
     Update-ReadOnlyBanner
@@ -211,6 +212,7 @@ function Show-Page([string]$Key) {
     elseif ($Key -eq 'UpdateBlock') { Update-UpdateBlockView }
     elseif ($Key -eq 'UserExperience') { Update-WatermarkView }
     elseif ($Key -eq 'Benchmark') { Update-BenchmarkView }
+    elseif ($Key -eq 'FSLogix') { Update-FslView }
 }
 
 # ---------------------------------------------------------------- Overview
@@ -429,6 +431,7 @@ $script:ReadyFakeArm = $(if ($script:TestMode) { $script:Services.Arm } else { $
 . (Join-Path $PSScriptRoot 'AVDTune-UserExperience.ps1')
 . (Join-Path $PSScriptRoot 'AVDTune-Release.ps1')
 . (Join-Path $PSScriptRoot 'AVDTune-Benchmark.ps1')
+. (Join-Path $PSScriptRoot 'AVDTune-FSLogix.ps1')
 
 # ---------------------------------------------------------------- theme switch
 function Update-ThemeButton { $ui.BtnTheme.Content = [string][char]$(if ($script:Settings.Theme -eq 'Dark') { 0xE706 } else { 0xE708 }) }

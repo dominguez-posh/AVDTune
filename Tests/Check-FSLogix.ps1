@@ -195,6 +195,15 @@ try {
     Test-Check 'no release, bad zip, no installer in it, installer exit 1603, not registered afterwards: all Failed with a code' ($e6.Code -eq 'NoRelease' -and $e7.Code -eq 'Unpack' -and $e8.Code -eq 'NoInstaller' -and $e9.Code -eq 'Exit1603' -and $e10.Code -eq 'NotRegistered') "$($e6.Code) $($e7.Code) $($e8.Code) $($e9.Code) $($e10.Code)"
     Test-Check 'the real adapter is built without touching anything (members present)' ((New-AVDTuneFSLogixAdapter).PSObject.Properties.Name -contains 'Download' -and (New-AVDTuneFSLogixAdapter).Kind -eq 'Real') $null
 
+    Close-AVDTuneWriteGate
+    Test-Check 'recorded install without the gate is refused, nothing downloaded' ((Test-Throws { Invoke-AVDTuneFSLogixInstallRecorded -Machine (New-Master) -F (New-AVDTuneFakeFSLogix) -Root $tmp }) -and $true) $null
+    Open-AVDTuneWriteGate -SnapshotId 'snap-check' -ConfirmedBy 'Check Runner'
+    $fr = New-AVDTuneFakeFSLogix
+    $ri = Invoke-AVDTuneFSLogixInstallRecorded -Machine (New-Master) -F $fr -Root $tmp -User 'admin1' -SnapshotId 'snap-check'
+    Test-Check 'recorded install: run record, LastChange, change log entry (Updated, FSLogix), restart flag' ($ri.Result.Status -eq 'Changed' -and $ri.Result.Reboot -and @(Get-AVDTuneRun -Root $tmp | Where-Object Plan -eq 'FSLogix install').Count -eq 1 -and @(Get-AVDTuneChangeLog -Root $tmp | Where-Object { $_.Component -eq 'FSLogix' -and $_.ChangeType -eq 'Updated' }).Count -eq 1) $ri.Install.Message
+    $rbad = Invoke-AVDTuneFSLogixInstallRecorded -Machine (New-Master) -F (New-AVDTuneFakeFSLogix -Seed @{ DownloadFails = $true }) -Root $tmp -User 'admin1' -SnapshotId 'snap-check'
+    Test-Check 'a failed install is recorded too (note in the change log, LastChange set)' ($rbad.Result.Status -eq 'Failed' -and @(Get-AVDTuneChangeLog -Root $tmp | Where-Object { $_.Text -like '*install FAILED*' }).Count -eq 1) $null
+
     # ---------------------------------------------------------------- ACL
     $rs = New-AVDTuneFSLogixRecommendedSddl -UsersSid $sddlUsers -AdminsSid $sddlAdmins
     $cmpOk = Compare-AVDTuneFSLogixAcl -Sddl $rs -UsersSids @($sddlUsers) -AdminsSids @($sddlAdmins)

@@ -2,7 +2,7 @@
 
 Golden Master management for Azure Virtual Desktop: setup, updates, update block for users, optimization, benchmark, watermark, cleanup and finish, protocol and change log. Runs locally on the Golden Master. Same look as PackTune.
 
-Status: phases 1 and 2 (shell, engine, state, protocol and change log, Overview, start sequence, updates and update block) and the readiness analysis. See docs/plans/avdtune.md.
+Status: phases 1 and 2 (shell, engine, state, protocol and change log, Overview, start sequence, updates and update block) the readiness analysis, and the FSLogix side (phase 3a: setup, function test, storage check). See docs/plans/avdtune.md.
 
 ## Layout
 
@@ -10,6 +10,7 @@ Status: phases 1 and 2 (shell, engine, state, protocol and change log, Overview,
 - `Modules/AVDTune.psm1`: engine without UI (machine adapter, state, step contract, change log, Overview data, write gate).
 - `Modules/AVDTune.Start.psm1` (first-run questions, environment.json, start stages), `AVDTune.Session.psm1` (sign-in, tokens in memory), `AVDTune.Snapshot.psm1` (VM identity, snapshot, gate), `AVDTune.Directory.psm1` (domain controller over LDAP): the start sequence, see `docs/start-sequence.md`. `AVDTune-Start.ps1` is its part of the window.
 - `Modules/AVDTune.Readiness.psm1` and `readiness.json`: the readiness analysis (is the master ready for the v6/v7 VM sizes, and clean enough to become an image). Read only; the criteria are data, each with its Microsoft Learn source, the date it was read and whether Learn really states it (what it does not state is marked "not verified"). Green, yellow, red per check, "not checkable" when Azure cannot be read; red blocks "Abschliessen", yellow needs a confirmation that names every item. `AVDTune-Readiness.ps1` is its card on the Overview. Keep `readiness.json` current: new VM sizes come often.
+- `Modules/AVDTune.FSLogix.psm1`, `AVDTune.Storage.psm1`, `AVDTune-FSLogix.ps1` (the FSLogix page): install and update from Microsoft with the signature check, profile settings with Microsoft's recommended values and reasons, include/exclude lists, redirections.xml, Defender exclusions, the function test (part of the healthcheck) and the storage check through the Azure sign-in. Sources and what is not verified: `docs/fslogix.md`.
 - `AVDTune-Theme.ps1`, `AVDTune-Protocol.ps1`: AVDTune's own layer on top of the shared PackTune code.
 - `Shared/`: copies from PackTune, never edited here. `Tools\Sync-FromPackTune.ps1` copies them and writes `Shared/SOURCE.json` (PackTune commit, SHA256 per file). Change shared code in PackTune first, then sync.
 - `Modules/AVDTune.Release.psm1`, `AVDTune-Release.ps1`, `VERSION`: integrity check, update check, update, repair and rollback against GitHub releases (card "Integrity and updates" on the Overview), see Releases below. `Tools\New-AVDTuneRelease.ps1` and `.github/workflows/release.yml` build a release.
@@ -34,6 +35,6 @@ On the master the tool lives side by side in `C:\Program Files\AVDTune\<version>
 Run from Windows PowerShell, or from Git Bash with `env -u PSModulePath powershell.exe -NoProfile -File ...`:
 
 - `Tests\Check-All.ps1` runs all fast checks (`-Smoke` adds the GUI smoke test).
-- `Check-Shared.ps1`, `Check-AVDTune.ps1`, `Check-Readiness.ps1`, `Check-Start.ps1` (start sequence against the fakes in `Tests\Fakes\FakeServices.ps1`), `Check-Protocol.ps1`, `Check-Theme.ps1`, `Check-Release.ps1` (release script, integrity, update, repair, rollback against a fake HTTP adapter and temp folders), `Check-PublicContent.ps1`; `Invoke-GuiSmoke.ps1` drives the window off-screen with a fake machine and a temporary state folder.
+- `Check-Shared.ps1`, `Check-AVDTune.ps1`, `Check-Readiness.ps1`, `Check-FSLogix.ps1`, `Check-Storage.ps1`, `Check-Start.ps1` (start sequence against the fakes in `Tests\Fakes\FakeServices.ps1`), `Check-Protocol.ps1`, `Check-Theme.ps1`, `Check-Release.ps1` (release script, integrity, update, repair, rollback against a fake HTTP adapter and temp folders), `Check-PublicContent.ps1`; `Invoke-GuiSmoke.ps1` drives the window off-screen with a fake machine and a temporary state folder.
 
 Checks use fakes only. Real runs belong on a throwaway Windows 11 multi-session VM, never on a developer machine.
