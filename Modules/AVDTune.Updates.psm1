@@ -188,7 +188,7 @@ function Invoke-AVDTuneLocked {
 # Every native tool AVDTune starts elevated: who must have signed it and the original file name it must carry (VersionInfo; '.mui' is ignored).
 $script:ToolTrust = @{
     'winget.exe' = 'Microsoft'; 'teamsbootstrapper.exe' = 'Microsoft'; 'OfficeC2RClient.exe' = 'Microsoft'; 'MicrosoftEdgeUpdate.exe' = 'Microsoft'
-    'Dism.exe' = 'Microsoft'; 'sfc.exe' = 'Microsoft'; 'choco.exe' = 'Chocolatey'
+    'Dism.exe' = 'Microsoft'; 'sfc.exe' = 'Microsoft'; 'choco.exe' = 'Chocolatey'; 'FSLogixAppsSetup.exe' = 'Microsoft'; 'frx.exe' = 'Microsoft'
 }
 
 function Get-AVDTuneDnPart([string]$Dn, [string]$Key) {
