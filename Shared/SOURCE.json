@@ -1,0 +1,24 @@
+{
+    "Source":  "dominguez-posh/PackTune",
+    "Commit":  "faf4ff1ca2c31ea11614f8f2a13517e74dcc896c",
+    "Dirty":  false,
+    "SyncedAt":  "2026-11-15T09:49:04Z",
+    "Files":  [
+                  {
+                      "Path":  "UI/Theme.xaml",
+                      "Sha256":  "414dbe4fa50aacfaf06960ab7a700cb8aec490dfd14abd1421478e022f934196"
+                  },
+                  {
+                      "Path":  "Modules/Keevault.psm1",
+                      "Sha256":  "0baa96c6f43fb6e15c5b0503080afd7d50c461b24e52cce2931745ab90b3ad84"
+                  },
+                  {
+                      "Path":  "PackTune-Store.ps1",
+                      "Sha256":  "5c76db90dc95bf2cffe0173bb0b660fd726dd0c477d48dd0b5c0259ff58cfb09"
+                  },
+                  {
+                      "Path":  "PackTune-Protocol.ps1",
+                      "Sha256":  "86bbb820b4c6c76ea7259401817b4dafb4e6df53d8a591370d608b4a58878dc8"
+                  }
+              ]
+}

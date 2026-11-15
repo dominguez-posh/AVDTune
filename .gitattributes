@@ -1,0 +1,2 @@
+# Copies from PackTune keep their bytes: the SHA256 in Shared/SOURCE.json must match on every checkout
+Shared/** -text
