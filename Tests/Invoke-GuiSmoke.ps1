@@ -18,8 +18,12 @@ Import-Module (Join-Path $repo 'Modules\AVDTune.Trust.psm1') -Force
 $OutDir = [IO.Path]::GetFullPath($OutDir)
 if ($OutDir -eq [IO.Path]::GetPathRoot($OutDir)) { throw "-OutDir must not be a drive root: $OutDir" }
 "Smoke output folder: $OutDir"
+# Only a folder that is ours is cleared: the name starts with AVDTuneSmoke or the marker file is in it (written when the folder is created)
+$marker = Join-Path $OutDir '.avdtune-smoke'
+if ((Test-Path -LiteralPath $OutDir) -and (Split-Path $OutDir -Leaf) -notlike 'AVDTuneSmoke*' -and -not (Test-Path -LiteralPath $marker)) { throw "-OutDir $OutDir is not a smoke folder (name starting with AVDTuneSmoke or a .avdtune-smoke file in it); nothing was deleted." }
 Remove-AVDTuneFolderNoFollow $OutDir
 New-Item -ItemType Directory -Path $OutDir -Force | Out-Null
+[IO.File]::WriteAllText($marker, 'AVDTune GUI smoke output folder; may be cleared by the next run.')
 $results = Join-Path $OutDir 'results.txt'
 # The theme is pinned (otherwise it follows this computer's Windows setting)
 New-Item -ItemType Directory -Path (Join-Path $OutDir 'state\config') -Force | Out-Null

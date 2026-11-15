@@ -373,6 +373,12 @@ try {
     $smokeOut = Join-Path $tmp 'smoke-out'; New-Item -ItemType Directory -Path $smokeOut | Out-Null
     & cmd.exe /c mklink /J "$smokeOut\link" $outside | Out-Null
     Remove-AVDTuneFolderNoFollow $smokeOut
+    $smokeScript = Join-Path $PSScriptRoot 'Invoke-GuiSmoke.ps1'
+    $foreign = Join-Path $tmp 'foreign-folder'; New-Item -ItemType Directory -Path $foreign | Out-Null; [IO.File]::WriteAllText((Join-Path $foreign 'mine.txt'), 'mine')
+    $eap = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    $o1 = & $powershell -NoProfile -ExecutionPolicy Bypass -File $smokeScript -OutDir 'C:\' 2>&1 | Out-String
+    $o2 = & $powershell -NoProfile -ExecutionPolicy Bypass -File $smokeScript -OutDir $foreign 2>&1 | Out-String; $ErrorActionPreference = $eap
+    Test-Check 'smoke: -OutDir C:\ and a foreign folder without marker are refused and nothing is deleted' ($o1 -like '*drive root*' -and $o2 -like '*not a smoke folder*' -and (Test-Path (Join-Path $foreign 'mine.txt')) -and (Test-Path 'C:\Windows')) ($o1 + $o2)
     Test-Check 'smoke: a junction in the output folder is removed itself, the folder it points to stays' (-not (Test-Path $smokeOut) -and (Test-Path (Join-Path $outside 'keep.txt'))) $null
 }
 finally {
