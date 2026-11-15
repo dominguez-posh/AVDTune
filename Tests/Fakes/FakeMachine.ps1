@@ -25,10 +25,10 @@ function New-AVDTuneFakeMachine {
     foreach ($t in @($Seed.Tasks)) { if ($t) { $store.Tasks[(([string]$t.Path) + ([string]$t.Name)).ToLowerInvariant()] = [pscustomobject]@{ Path = $t.Path; Name = $t.Name; Enabled = [bool]$t.Enabled } } }
     $store.Imds = if ($Seed.ContainsKey('Imds')) { $Seed.Imds } else {
         [pscustomobject]@{ compute = [pscustomobject]@{
-                name = 'gm-test01'; resourceGroupName = 'rg-example'; location = 'westeurope'; vmSize = 'Standard_D4s_v5'
+                name = 'gm-test01'; resourceGroupName = 'rg-example'; subscriptionId = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'; vmId = '00000000-1111-2222-3333-444444444444'; location = 'westeurope'; vmSize = 'Standard_D4s_v5'
                 storageProfile = [pscustomobject]@{
                     imageReference = [pscustomobject]@{ publisher = 'microsoftwindowsdesktop'; offer = 'office-365'; sku = 'win11-25h2-avd-m365'; version = 'latest' }
-                    osDisk = [pscustomobject]@{ name = 'gm-test01_osdisk' }
+                    osDisk = [pscustomobject]@{ name = 'gm-test01_osdisk'; managedDisk = [pscustomobject]@{ id = '/subscriptions/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee/resourceGroups/rg-example/providers/Microsoft.Compute/disks/gm-test01_osdisk' } }
                 } } }
     }
     $store.Native['dsregcmd.exe /status'] = if ($Seed.Native -and $Seed.Native['dsregcmd.exe /status']) { $Seed.Native['dsregcmd.exe /status'] } else {
