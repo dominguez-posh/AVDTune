@@ -37,6 +37,129 @@ function Test-AVDTuneElevated {
     (New-Object Security.Principal.WindowsPrincipal $identity).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 }
 
+function Test-AVDTuneUnderPath([string]$Path, [string]$Folder) {
+    $f = [IO.Path]::GetFullPath($Folder).TrimEnd('\') + '\'
+    [IO.Path]::GetFullPath($Path).StartsWith($f, [StringComparison]::OrdinalIgnoreCase)
+}
+
+function Get-AVDTuneLongPath([string]$Path) {
+    # Full path without 8.3 short names (C:\PROGRA~1 is Program Files): the longest existing part is expanded by Windows, the rest is appended as given
+    if (-not ('AVDTune.LongPath' -as [type])) {
+        Add-Type -Namespace AVDTune -Name LongPath -MemberDefinition @'
+[System.Runtime.InteropServices.DllImport("kernel32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode, SetLastError = true)]
+public static extern uint GetLongPathName(string shortPath, System.Text.StringBuilder longPath, uint bufferSize);
+'@
+    }
+    $full = [IO.Path]::GetFullPath($Path).TrimEnd('\')
+    $rest = New-Object System.Collections.ArrayList
+    $cur = $full
+    while ($cur -and -not (Test-Path -LiteralPath $cur)) {
+        $parent = Split-Path $cur -Parent
+        if (-not $parent -or $parent -eq $cur) { return $full }
+        [void]$rest.Insert(0, (Split-Path $cur -Leaf)); $cur = $parent
+    }
+    $sb = New-Object System.Text.StringBuilder 1024
+    $n = [AVDTune.LongPath]::GetLongPathName($cur, $sb, 1024)
+    $long = $(if ($n -gt 0 -and $n -lt 1024) { $sb.ToString() } else { $cur })
+    foreach ($r in $rest) { $long = Join-Path $long $r }
+    $long.TrimEnd('\')
+}
+
+function Resolve-AVDTuneTestScript {
+    <#
+        The one gate for a test script that is dot-sourced (fake machine, fake services, smoke driver ...): the long path (no 8.3 names) must be a file below
+        <AppRoot>\Tests, and no part of the chain from AppRoot down to the file may be a link. Returns the full path or $null.
+    #>
+    param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][string]$AppRoot)
+    try {
+        $app = Get-AVDTuneLongPath $AppRoot
+        $tests = Join-Path $app 'Tests'
+        $full = Get-AVDTuneLongPath $Path
+        if (-not (Test-AVDTuneUnderPath $full $tests)) { return $null }
+        if (-not [IO.File]::Exists($full)) { return $null }
+        $cur = $app
+        if ([IO.File]::GetAttributes($cur) -band [IO.FileAttributes]::ReparsePoint) { return $null }
+        foreach ($p in @($full.Substring($app.Length).Trim('\').Split([char]92))) {
+            $cur = Join-Path $cur $p
+            if ([IO.File]::GetAttributes($cur) -band [IO.FileAttributes]::ReparsePoint) { return $null }
+        }
+        $full
+    } catch { $null }
+}
+
+$script:TestModeWarned = @{}
+$script:TestModeRefusals = New-Object System.Collections.ArrayList
+function Get-AVDTuneTestModeRefusal {
+    # The refused test mode requests of this process (Time, Reason; never a value), for the protocol after the state is initialised
+    @($script:TestModeRefusals)
+}
+
+function Test-AVDTuneTestMode {
+    <#
+        The one decision about the test mode (AVDTUNE_FAKE + AVDTUNE_ROOT, and AVDTUNE_SMOKE which only counts inside it). The test mode skips the elevation check and
+        dot-sources scripts, so an environment variable set by someone else (HKCU\Environment is read by an elevated process started from the same user's session)
+        must never switch it on:
+          - not an installed copy (long path, no 8.3 names): not below Program Files, and Get-AVDTuneInstallInfo does not say Installed,
+          - the variables come from the process environment only: the User and Machine values are empty,
+          - the fake script (and the smoke script) is a file below <AppRoot>\Tests (long path, no links from AppRoot down).
+        EnvReader: scriptblock (name, scope) for the User/Machine environment, injectable for checks. InstallRoot and ProgramFilesFolder are injectable too.
+        Returns Enabled, Smoke (test mode and AVDTUNE_SMOKE), FakeScript, FakeDir, SmokeScript, Reason.
+        Without any variable it is quiet; a refused request writes a warning (once per reason), is remembered (Get-AVDTuneTestModeRefusal) and the normal start follows.
+    #>
+    [CmdletBinding()]
+    param([string]$AppRoot = (Split-Path $PSScriptRoot -Parent), [scriptblock]$EnvReader = { param($n, $s) [Environment]::GetEnvironmentVariable($n, $s) },
+        [string]$InstallRoot = (Join-Path ([Environment]::GetFolderPath('ProgramFiles')) 'AVDTune'),
+        [string[]]$ProgramFilesFolder = @([Environment]::GetFolderPath('ProgramFiles'), [Environment]::GetFolderPath('ProgramFilesX86')))
+    $fake = [string]$env:AVDTUNE_FAKE; $root = [string]$env:AVDTUNE_ROOT; $smoke = [string]$env:AVDTUNE_SMOKE
+    $result = { param($ok, $why, $script, $smokeScript)
+        [pscustomobject]@{ Enabled = $ok; Smoke = [bool]($ok -and $smokeScript); FakeScript = $script; FakeDir = $(if ($script) { Split-Path $script -Parent } else { '' }); SmokeScript = $smokeScript; Reason = $why } }
+    if (-not $fake -and -not $root -and -not $smoke) { return (& $result $false '' $null $null) }
+    $why = ''; $script = $null; $smokeScript = $null
+    if (-not $fake -and -not $root) { $why = 'AVDTUNE_SMOKE is ignored without the test mode' }
+    elseif (-not $fake) { $why = 'AVDTUNE_ROOT is ignored without AVDTUNE_FAKE (test mode only)' }
+    elseif (-not $root) { $why = 'AVDTUNE_FAKE is ignored without AVDTUNE_ROOT (test mode only)' }
+    else {
+        $app = Get-AVDTuneLongPath $AppRoot
+        $installed = $false
+        foreach ($p in @($ProgramFilesFolder | Where-Object { $_ })) { if (Test-AVDTuneUnderPath $app (Get-AVDTuneLongPath $p)) { $installed = $true } }
+        try {
+            if ([string]::Equals((Split-Path $app -Parent).TrimEnd('\'), (Get-AVDTuneLongPath $InstallRoot), [StringComparison]::OrdinalIgnoreCase)) { $installed = $true }
+            if (-not $installed -and (Get-Command Get-AVDTuneInstallInfo -ErrorAction SilentlyContinue)) {
+                if ((Get-AVDTuneInstallInfo -AppRoot $app -InstallRoot (Get-AVDTuneLongPath $InstallRoot)).Mode -eq 'Installed') { $installed = $true }
+            }
+        } catch { $installed = $true }
+        $fromEnv = $false
+        foreach ($n in 'AVDTUNE_FAKE', 'AVDTUNE_ROOT', 'AVDTUNE_SMOKE') { foreach ($s in 'User', 'Machine') { if ([string](& $EnvReader $n $s)) { $fromEnv = $true } } }
+        if ($installed) { $why = 'AVDTUNE_FAKE/AVDTUNE_ROOT/AVDTUNE_SMOKE are ignored in an installed copy' }
+        elseif ($fromEnv) { $why = 'AVDTUNE_FAKE/AVDTUNE_ROOT/AVDTUNE_SMOKE are ignored because they are set in the user or machine environment, not only in this process' }
+        else {
+            $script = Resolve-AVDTuneTestScript -Path $fake -AppRoot $app
+            if (-not $script) { $why = 'AVDTUNE_FAKE is ignored: it is not a file below the Tests folder of this copy' }
+            elseif ($smoke) {
+                $smokeScript = Resolve-AVDTuneTestScript -Path $smoke -AppRoot $app
+                if (-not $smokeScript) { $why = 'AVDTUNE_SMOKE is ignored: it is not a file below the Tests folder of this copy' }
+            }
+        }
+    }
+    if ($why) {
+        $script = $null; $smokeScript = $null
+        if (-not $script:TestModeWarned[$why]) {
+            $script:TestModeWarned[$why] = $true
+            [void]$script:TestModeRefusals.Add([pscustomobject]@{ Time = [DateTime]::UtcNow.ToString('o'); Reason = $why })
+            Write-Warning "$why; normal start."
+        }
+    }
+    & $result (-not $why) $why $script $smokeScript
+}
+
+function Confirm-AVDTuneAction {
+    # A yes/no question. In the smoke run (Auto: test mode and AVDTUNE_SMOKE, from Test-AVDTuneTestMode) it answers yes without a dialog; otherwise Dialog shows it
+    # (injectable for checks; the window passes the message box).
+    param([Parameter(Mandatory)][string]$Text, [string]$Title = 'AVDTune', [bool]$Auto, [Parameter(Mandatory)][scriptblock]$Dialog)
+    if ($Auto) { return $true }
+    [bool](& $Dialog $Text $Title)
+}
+
 $script:RootWarned = $false
 function Get-AVDTuneRoot {
     [CmdletBinding()] param()
@@ -44,8 +167,8 @@ function Get-AVDTuneRoot {
     # environment variable set by someone else cannot move the state (and the WebView2 DLLs) of the elevated tool to a folder he controls.
     $default = Join-Path ([Environment]::GetFolderPath('CommonApplicationData')) 'AVDTune'
     if ($env:AVDTUNE_ROOT) {
-        if ($env:AVDTUNE_FAKE) { return $env:AVDTUNE_ROOT }
-        if (-not $script:RootWarned) { $script:RootWarned = $true; Write-Warning "AVDTUNE_ROOT is ignored without AVDTUNE_FAKE (test mode only); the state stays in $default." }
+        if ((Test-AVDTuneTestMode).Enabled) { return $env:AVDTUNE_ROOT }
+        if (-not $env:AVDTUNE_FAKE -and -not $script:RootWarned) { $script:RootWarned = $true; Write-Warning "AVDTUNE_ROOT is ignored without AVDTUNE_FAKE (test mode only); the state stays in $default." }
     }
     $default
 }
@@ -1127,7 +1250,7 @@ function Get-AVDTuneOverview {
 
 #endregion
 
-Export-ModuleMember -Function Get-AVDTuneProp, Test-AVDTuneElevated, Get-AVDTuneRoot, Test-AVDTuneDefaultRoot, ConvertTo-AVDTuneArgument, New-AVDTuneMachine, Invoke-AVDTuneMachine,
+Export-ModuleMember -Function Get-AVDTuneProp, Test-AVDTuneElevated, Get-AVDTuneRoot, Test-AVDTuneDefaultRoot, Test-AVDTuneTestMode, Resolve-AVDTuneTestScript, Get-AVDTuneLongPath, Get-AVDTuneTestModeRefusal, Confirm-AVDTuneAction, ConvertTo-AVDTuneArgument, New-AVDTuneMachine, Invoke-AVDTuneMachine,
     New-AVDTuneStateSecurity, Initialize-AVDTuneState, Read-AVDTuneAclInfo, Get-AVDTuneStateSecurityProblems, Move-AVDTuneStateToQuarantine, New-AVDTuneProtectedFolder, Assert-AVDTuneStateSecurity, Get-AVDTuneStateSecurityReport, Get-AVDTuneState, Set-AVDTuneState, Test-AVDTuneImageVersion, Get-AVDTuneNextImageVersion, Start-AVDTuneImageVersion,
     Add-AVDTuneRun, Get-AVDTuneRun, Get-AVDTuneLastChange, New-AVDTuneStep, Invoke-AVDTuneStep, New-AVDTuneStepFromData, Get-AVDTuneStepCatalog, Invoke-AVDTune,
     Add-AVDTuneChangeLogEntry, Get-AVDTuneChangeLog, Get-AVDTuneChangeLogVersions, ConvertTo-AVDTuneChangeLogDocument, Export-AVDTuneChangeLog,

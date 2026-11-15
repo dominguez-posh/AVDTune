@@ -3,7 +3,7 @@
 # Test mode: the runspace uses the fake machine and the fake benchmark adapter (Tests\Fakes\FakeBench.ps1): no process, no download, no service is touched.
 
 $script:BenchJob = $null
-$script:BenchFakeScript = $(if ($script:TestMode) { Join-Path (Split-Path $env:AVDTUNE_FAKE -Parent) 'FakeBench.ps1' } else { '' })
+$script:BenchFakeScript = $(if ($script:TestMode) { (Get-TestScript 'FakeBench.ps1') } else { '' })
 $script:BenchFakeSeed = $null   # test hook: hashtable for New-AVDTuneFakeBench
 $script:BenchLast = $null       # the result shown
 $script:BenchCatTitle = @{ cpu = 'CPU'; memory = 'Memory'; osdisk = 'OS disk'; display = 'Remote display'; network = 'Network'; apps = 'Applications' }
@@ -37,7 +37,7 @@ function Start-BenchJob([string]$Mode, [string]$Kind) {
             else { $m = New-AVDTuneMachine; $b = New-AVDTuneBenchAdapter }
             $progress = { param($t, $p) $Sync.Text = $t; if ($null -ne $p) { $Sync.Percent = [int]$p } }
             Invoke-AVDTuneBenchmark -Machine $m -Bench $b -Root $Root -Mode $Mode -Kind $Kind -User $User -Progress $progress -SkipIdleCheck:$skipIdle
-        }).AddArgument($script:AppRoot).AddArgument($(if ($script:TestMode) { $env:AVDTUNE_FAKE } else { '' })).AddArgument($script:BenchFakeScript).AddArgument($script:StateRoot).AddArgument($Mode).AddArgument($Kind).AddArgument($sync).AddArgument([string]$env:USERNAME).AddArgument($script:BenchFakeSeed).AddArgument($(if ($script:TestMode) { $script:Machine } else { $null }))
+        }).AddArgument($script:AppRoot).AddArgument($(if ($script:TestMode) { $script:TestInfo.FakeScript } else { '' })).AddArgument($script:BenchFakeScript).AddArgument($script:StateRoot).AddArgument($Mode).AddArgument($Kind).AddArgument($sync).AddArgument([string]$env:USERNAME).AddArgument($script:BenchFakeSeed).AddArgument($(if ($script:TestMode) { $script:Machine } else { $null }))
     $task = Start-AVDTuneUiTask -Kind 'benchmark' -Title "Benchmark ($($Mode.ToLower()) run)" -Step 'Starting' -Percent 0   # no Retry: a run pauses Windows Update and the indexer and is started on the page after its confirmation
     $script:BenchJob = @{ PS = $ps; Handle = $ps.BeginInvoke(); Mode = $Mode; Sync = $sync; Task = $task }
     Set-ShutdownBlock $true

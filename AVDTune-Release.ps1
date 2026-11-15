@@ -12,7 +12,7 @@ $script:RelPill = @{
     ok = @('SuccessBg', 'Success', 'Verified'); bad = @('ErrorBg', 'Danger', 'Files changed'); dev = @('Hover', 'Text', 'Development copy'); unprotected = @('WarningBg', 'Warning', 'Not protected')
     unverified = @('WarningBg', 'Warning', 'Not verified'); running = @('Hover', 'MutedText', 'Checking'); failed = @('ErrorBg', 'Danger', 'Check failed')
 }
-if ($script:TestMode) { . (Join-Path (Split-Path $env:AVDTUNE_FAKE -Parent) 'FakeRelease.ps1') }
+if ($script:TestMode) { . (Get-TestScript 'FakeRelease.ps1') }
 
 # Until the check has run, everything but the test mode's development copy is read only (the check is in the background and takes a moment)
 $script:Rel.Info = Get-AVDTuneInstallInfo -AppRoot $script:AppRoot -InstallRoot $script:RelInstallRoot -AllowDevelopment:$script:TestMode

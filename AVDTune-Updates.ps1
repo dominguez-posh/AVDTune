@@ -8,7 +8,7 @@ $script:UpdChecked = @{}
 $script:UpdJob = $null
 $script:UpdLastRun = $null
 $script:UpdStatus = $null
-$script:UpdFakeScript = $(if ($script:TestMode) { Join-Path (Split-Path $env:AVDTUNE_FAKE -Parent) 'FakeUpdates.ps1' } else { '' })
+$script:UpdFakeScript = $(if ($script:TestMode) { (Get-TestScript 'FakeUpdates.ps1') } else { '' })
 $script:UpdFakeSeed = $null   # test hook: hashtable for New-AVDTuneFakeUpdates
 $script:UpdFakeWua = @(
     @{ Id = 'u1'; Title = '2026-11 Cumulative Update for Windows 11 (KB5050001)'; Kbs = @('5050001'); IsDriver = $false; SizeMB = 600; Reboot = $true }
@@ -67,7 +67,7 @@ function Start-UpdJob([string]$Kind, $Argument) {
                 }
             }
             finally { $Sync.Done = $true }
-        }).AddArgument($script:AppRoot).AddArgument($(if ($script:TestMode) { $env:AVDTUNE_FAKE } else { '' })).AddArgument($script:UpdFakeScript).AddArgument($script:StateRoot).AddArgument($Kind).AddArgument($Argument).AddArgument($gate).AddArgument($sync).AddArgument([string]$env:USERNAME).AddArgument($script:UpdFakeSeed).AddArgument($script:UpdFakeWua).AddArgument($script:UpdFakeNative).AddArgument($(if ($script:TestMode) { $script:Machine } else { $null }))
+        }).AddArgument($script:AppRoot).AddArgument($(if ($script:TestMode) { $script:TestInfo.FakeScript } else { '' })).AddArgument($script:UpdFakeScript).AddArgument($script:StateRoot).AddArgument($Kind).AddArgument($Argument).AddArgument($gate).AddArgument($sync).AddArgument([string]$env:USERNAME).AddArgument($script:UpdFakeSeed).AddArgument($script:UpdFakeWua).AddArgument($script:UpdFakeNative).AddArgument($(if ($script:TestMode) { $script:Machine } else { $null }))
     # only the search is read only and can be started again from the list; everything else changes the master and is started on the page (with its confirmation)
     $task = Start-AVDTuneUiTask -Kind "update-$($Kind.ToLower())" -Title (Get-UpdTaskTitle $Kind) -Step 'Starting' -Retry $(if ($Kind -eq 'Scan') { @{ Command = 'Start-UpdJob'; Arguments = @('Scan', $null) } })
     $script:UpdJob = @{ PS = $ps; Handle = $ps.BeginInvoke(); Kind = $Kind; Sync = $sync; Task = $task }
