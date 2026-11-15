@@ -37,6 +37,7 @@ $script:StateRoot = Get-AVDTuneRoot
 # One decision for the whole process (Modules\AVDTune.psm1): process-only variables, not installed, fake script below Tests\; otherwise a warning and the normal start
 $script:TestInfo = Test-AVDTuneTestMode -AppRoot $script:AppRoot
 $script:TestMode = [bool]($script:TestInfo.Enabled -and -not (Test-AVDTuneDefaultRoot $script:StateRoot))
+$script:SmokeOn = [bool]($script:TestMode -and $script:TestInfo.Smoke)   # AVDTUNE_SMOKE counts only inside the test mode (no dialog skipped, no clipboard or timer change otherwise)
 function Get-TestScript([string]$Name) {
     # A script of the test mode next to the fake machine, through the same gate (below Tests\, no links)
     $p = Resolve-AVDTuneTestScript -Path (Join-Path $script:TestInfo.FakeDir $Name) -AppRoot $script:AppRoot
@@ -147,8 +148,8 @@ function Show-Toast([string]$Text) {
 }
 function Show-Error([string]$Text) { Show-Toast $Text }
 function Confirm-Action([string]$Text, [string]$Title = 'AVDTune') {
-    if ($env:AVDTUNE_SMOKE) { $script:ConfirmAsked = $Text; return $true }
-    [System.Windows.MessageBox]::Show($Text, $Title, 'YesNo', 'Question') -eq 'Yes'
+    if ($script:SmokeOn) { $script:ConfirmAsked = $Text }
+    Confirm-AVDTuneAction -Text $Text -Title $Title -Auto $script:SmokeOn -Dialog { param($t, $ti) [System.Windows.MessageBox]::Show($t, $ti, 'YesNo', 'Question') -eq 'Yes' }
 }
 
 # ---------------------------------------------------------------- pages
@@ -341,6 +342,7 @@ Add-Click $ui.BtnNewVersion { Start-NewVersion }
 # ---------------------------------------------------------------- protocol and change log
 # One journal for the whole session (Shared\PackTune-Protocol.ps1 with AVDTune groups), saved after every action to <state>\Protocols
 $script:Protocol = New-PackTuneProtocol -Admin ([string]$env:USERNAME) -Account ([string]$env:USERNAME) -Tenant ''
+foreach ($refused in (Get-AVDTuneTestModeRefusal)) { [void](Add-AVDTuneProtocolNote -Protocol $script:Protocol -Group 'other' -Subject "Test mode refused ($($refused.Time)): $($refused.Reason)") }
 $script:LastCopied = ''
 function Set-ProtocolImage {
     $state = Get-AVDTuneState $script:StateRoot
@@ -428,7 +430,7 @@ Add-Click $ui.BtnProtocolSave {
 }
 Add-Click $ui.BtnProtocolCopy {
     $text = Get-ProtocolShownText
-    if ($env:AVDTUNE_SMOKE) { $script:LastCopied = $text } else { [System.Windows.Clipboard]::SetText($text) }
+    if ($script:SmokeOn) { $script:LastCopied = $text } else { [System.Windows.Clipboard]::SetText($text) }
     Show-Toast 'Copied.'
 }
 
@@ -529,7 +531,7 @@ if ($stateRepair -and @($stateRepair.Quarantined).Count -gt 0) {
     # N2: a prepared state folder was set aside unread; the first run starts again. The administrator is told in the protocol and in a dialog.
     $asideText = "The state folder $($script:StateRoot) had been prepared by someone else ($(@($stateRepair.Problems | Select-Object -First 3 | ForEach-Object { $_.Problem }) -join '; ')). It was set aside unread as $(@($stateRepair.Quarantined) -join ', ') and a new one was created: the first-run questions, the domain controller pin and the sign-in start again. Check who prepared it, then delete the set-aside folder."
     Add-StartProtocol 'Warning: manipulated state folder set aside' $asideText 'failed'
-    if (-not $env:AVDTUNE_SMOKE) { [void][System.Windows.MessageBox]::Show($asideText, 'AVDTune', 'OK', 'Warning') } else { $script:StateAsideNotice = $asideText }
+    if (-not $script:SmokeOn) { [void][System.Windows.MessageBox]::Show($asideText, 'AVDTune', 'OK', 'Warning') } else { $script:StateAsideNotice = $asideText }
 }
 Update-Chip
 Show-Page 'Overview'
@@ -542,7 +544,7 @@ Start-ReadyJob 'Start' ''   # the readiness analysis runs at every start (read o
 # A maintenance mode that never ended (closed or crashed in the middle) is reported at once; the repair is on the Update block page
 if (Get-AVDTuneMaintenanceCrash -Root $script:StateRoot) { Show-Toast 'The last maintenance mode did not end properly: the update block may be lifted. Open Update block and repair it.' }
 # Test hook: AVDTUNE_SMOKE names a script that drives the window off-screen and renders every page (only in test mode).
-if ($env:AVDTUNE_SMOKE -and $script:TestMode) { . $env:AVDTUNE_SMOKE }
+if ($script:SmokeOn) { . $script:TestInfo.SmokeScript }
 $window.Show()
 [void]$window.Activate()
 [void][System.Windows.Application]::Current.Run()

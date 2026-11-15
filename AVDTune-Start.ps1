@@ -10,7 +10,7 @@ $script:Form = @{}
 $script:StageKinds = @{ Done = @('SuccessBg', 'Success', 'Done'); Pending = @('AccentSubtle', 'Primary', 'To do'); Locked = @('Hover', 'MutedText', 'Waiting'); Skipped = @('Hover', 'MutedText', 'Skipped'); Failed = @('ErrorBg', 'Danger', 'Failed') }
 $script:StageButton = @{ Environment = @('Answer', 'Change'); SignIn = @('Sign in', 'Sign in again'); Domain = @('Connect', 'Show'); Snapshot = @('Open', 'Open') }
 $script:SnapTimer = New-Object System.Windows.Threading.DispatcherTimer
-$script:SnapTimer.Interval = [TimeSpan]::FromMilliseconds($(if ($env:AVDTUNE_SMOKE) { 300 } else { 4000 }))
+$script:SnapTimer.Interval = [TimeSpan]::FromMilliseconds($(if ($script:SmokeOn) { 300 } else { 4000 }))
 $script:PendingSnapshot = $null
 
 # ---------------------------------------------------------------- services

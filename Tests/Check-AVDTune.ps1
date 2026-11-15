@@ -59,15 +59,57 @@ try {
     $tm = Test-AVDTuneTestMode -AppRoot $repo -EnvReader $emptyEnv -WarningAction SilentlyContinue
     Test-Check 'attack: a dot-dot path out of Tests\ is refused' (-not $tm.Enabled) $tm.Reason
     $env:AVDTUNE_FAKE = $savedFake
-    $link = Join-Path $repo 'Tests\Fakes\_link_check'
+    # a link inside the copy (below Tests) and above it (the chain from AppRoot): the junction check reports visibly when no junction can be made
+    $real = Join-Path $tmp 'real'
+    New-Item -ItemType Directory -Path (Join-Path $real 'Tests\Fakes') -Force | Out-Null
+    Set-Content -LiteralPath (Join-Path $real 'Tests\Fakes\FakeMachine.ps1') -Value '# x'
+    $linkTests = Join-Path $tmp 'linkedtests'
+    New-Item -ItemType Directory -Path $linkTests -Force | Out-Null
+    $jTests = Join-Path $real 'Tests\Fakes\inner'; $jApp = Join-Path $tmp 'jrepo'
     $linkOk = $false
-    try { New-Item -ItemType Junction -Path $link -Target $tmp | Out-Null; $linkOk = $true } catch { }
+    try { New-Item -ItemType Junction -Path $jTests -Target $linkTests | Out-Null; New-Item -ItemType Junction -Path $jApp -Target $real | Out-Null; $linkOk = $true } catch { }
     if ($linkOk) {
-        try {
-            $r = Resolve-AVDTuneTestScript -Path (Join-Path $link 'FakeMachine.ps1') -AppRoot $repo
-            Test-Check 'attack: a link below Tests\ is refused' ($null -eq $r) $r
-        } finally { [IO.Directory]::Delete($link) }
+        Set-Content -LiteralPath (Join-Path $linkTests 'f.ps1') -Value '# x'
+        Test-Check 'control: a plain copy resolves its fake script' ($null -ne (Resolve-AVDTuneTestScript -Path (Join-Path $real 'Tests\Fakes\FakeMachine.ps1') -AppRoot $real)) $null
+        Test-Check 'attack: a link below Tests\ is refused' ($null -eq (Resolve-AVDTuneTestScript -Path (Join-Path $jTests 'f.ps1') -AppRoot $real)) $null
+        Test-Check 'attack: a link in the chain at or above AppRoot is refused' ($null -eq (Resolve-AVDTuneTestScript -Path (Join-Path $jApp 'Tests\Fakes\FakeMachine.ps1') -AppRoot $jApp)) $null
+        [IO.Directory]::Delete($jTests); [IO.Directory]::Delete($jApp)
     }
+    else { Write-Warning 'SKIPPED: the link checks of the test mode gate (no junction could be created here)'; 'SKIPPED link checks of the test mode gate: no junction could be created' }
+
+    # 8.3 names and the install layout
+    $short = 'C:\PROGRA~1'
+    if (Test-Path -LiteralPath $short) {
+        $tm = Test-AVDTuneTestMode -AppRoot "$short\AVDTune\0.9.0" -EnvReader $emptyEnv -WarningAction SilentlyContinue
+        Test-Check 'attack: an 8.3 path below Program Files counts as installed (no test mode)' (-not $tm.Enabled -and $tm.Reason -like '*installed copy*') $tm.Reason
+    }
+    else { Write-Warning 'SKIPPED: no C:\PROGRA~1 (8.3 names off)'; 'SKIPPED 8.3 check: no C:\PROGRA~1' }
+    Test-Check 'long path expands 8.3 names' ((Get-AVDTuneLongPath 'C:\PROGRA~1') -eq (Get-AVDTuneLongPath ([Environment]::GetFolderPath('ProgramFiles')))) (Get-AVDTuneLongPath 'C:\PROGRA~1')
+    $instOther = Join-Path $tmp 'inst'
+    $tm = Test-AVDTuneTestMode -AppRoot (Join-Path $instOther '0.9.0') -InstallRoot $instOther -EnvReader $emptyEnv -WarningAction SilentlyContinue
+    Test-Check 'attack: installed by the install layout but not below Program Files gives no test mode' (-not $tm.Enabled -and $tm.Reason -like '*installed copy*') $tm.Reason
+
+    # AVDTUNE_SMOKE counts only inside the test mode
+    $savedSmoke = $env:AVDTUNE_SMOKE
+    $env:AVDTUNE_SMOKE = Join-Path $repo 'Tests\GuiSmokeDriver.ps1'
+    $tm = Test-AVDTuneTestMode -AppRoot $repo -EnvReader $emptyEnv
+    Test-Check 'smoke: process variables in a checkout give the smoke mode with the driver below Tests' ($tm.Enabled -and $tm.Smoke -and $tm.SmokeScript -like (Join-Path $repo 'Tests\*')) ($tm | Out-String)
+    $asked = @(); $dialog = { param($t, $ti) $script:dialogShown++; $false }; $script:dialogShown = 0
+    Test-Check 'smoke: Confirm answers yes without a dialog only in the smoke mode' ((Confirm-AVDTuneAction -Text 'q' -Auto $tm.Smoke -Dialog $dialog) -and $script:dialogShown -eq 0) $null
+    $tm = Test-AVDTuneTestMode -AppRoot $repo -EnvReader $userEnv -WarningAction SilentlyContinue
+    Test-Check 'attack: SMOKE set in the user environment gives no smoke mode and the dialog is shown' (-not $tm.Smoke -and -not (Confirm-AVDTuneAction -Text 'q' -Auto $tm.Smoke -Dialog $dialog) -and $script:dialogShown -eq 1) $tm.Reason
+    $env:AVDTUNE_SMOKE = Join-Path $tmp 'FakeMachine.ps1'
+    $tm = Test-AVDTuneTestMode -AppRoot $repo -EnvReader $emptyEnv -WarningAction SilentlyContinue
+    Test-Check 'attack: a smoke script outside Tests\ is refused' (-not $tm.Smoke -and -not $tm.Enabled) $tm.Reason
+    $env:AVDTUNE_SMOKE = Join-Path $repo 'Tests\GuiSmokeDriver.ps1'
+    $savedFake2 = $env:AVDTUNE_FAKE; $savedRoot2 = $env:AVDTUNE_ROOT; $env:AVDTUNE_FAKE = $null; $env:AVDTUNE_ROOT = $null
+    $tm = Test-AVDTuneTestMode -AppRoot $repo -EnvReader $emptyEnv -WarningAction SilentlyContinue
+    Test-Check 'attack: SMOKE alone gives no smoke mode and a dialog' (-not $tm.Smoke -and -not $tm.Enabled -and -not (Confirm-AVDTuneAction -Text 'q' -Auto $tm.Smoke -Dialog $dialog) -and $script:dialogShown -eq 2) $tm.Reason
+    $env:AVDTUNE_FAKE = $savedFake2; $env:AVDTUNE_ROOT = $savedRoot2; $env:AVDTUNE_SMOKE = $savedSmoke
+
+    # a refused request is remembered for the protocol: time and reason, never a value
+    $ref = @(Get-AVDTuneTestModeRefusal)
+    Test-Check 'refused requests are remembered with time and reason (no values)' ($ref.Count -ge 5 -and -not ($ref | Where-Object { -not $_.Time -or -not $_.Reason -or $_.Reason -like "*$tmp*" })) ($ref | Out-String)
 
     # ---------------------------------------------------------------- state
     [void](Initialize-AVDTuneState -Root $tmp)
