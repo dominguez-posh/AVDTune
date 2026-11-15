@@ -70,7 +70,7 @@ try {
     # ---------------------------------------------------------------- the data
     $data = Get-AVDTuneReadinessData
     $crit = @($data.Criteria.PSObject.Properties)
-    Test-Check 'data: loads, 27 criteria, a Stand date, 52 families' ($crit.Count -eq 27 -and $data.Stand -match '^\d{4}-\d{2}-\d{2}$' -and $data.Families.Count -eq 52) "$($crit.Count) / $($data.Families.Count)"
+    Test-Check 'data: loads, 28 criteria, a Stand date, 52 families' ($crit.Count -eq 28 -and $data.Stand -match '^\d{4}-\d{2}-\d{2}$' -and $data.Families.Count -eq 52) "$($crit.Count) / $($data.Families.Count)"
     Test-Check 'data: every criterion has a Microsoft Learn source, a date and the Verified flag' (-not (@($crit | Where-Object { $_.Value.Source -notmatch '^https://learn\.microsoft\.com/' -or $_.Value.Stand -notmatch '^\d{4}-\d{2}-\d{2}$' -or $_.Value.Verified -isnot [bool] }))) $null
     $unverified = @($crit | Where-Object { -not $_.Value.Verified } | ForEach-Object Name)
     Test-Check 'data: what Learn does not state is marked and explained (bitlocker, reboot markers, lcu thresholds, leftovers, public shortcut, FSLogix-Test)' ((($unverified | Sort-Object) -join ',') -eq 'hy.bitlocker,hy.fslogix-test,hy.lcu-age,hy.leftovers,hy.public-shortcut,hy.reboot' -and -not (@($crit | Where-Object { -not $_.Value.Verified -and -not $_.Value.Note }))) ($unverified -join ',')
