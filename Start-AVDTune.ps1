@@ -55,6 +55,8 @@ if ($script:TestMode) {
 else { $script:Machine = New-AVDTuneMachine }
 # The state folder is checked before it is trusted (owner, explicit rules, links; repaired when possible, Modules\AVDTune.psm1)
 try { [void](Initialize-AVDTuneState -Root $script:StateRoot) } catch { Stop-WithMessage $_.Exception.Message }
+# Staging folders of a Teams update that a crash left behind (Modules\AVDTune.Updates.psm1); after the check, links are never followed
+try { [void](Clear-AVDTuneStageFolder -Root $script:StateRoot) } catch { }
 $script:WorkRoot = $script:StateRoot
 . (Join-Path $PSScriptRoot 'AVDTune-Protocol.ps1')
 

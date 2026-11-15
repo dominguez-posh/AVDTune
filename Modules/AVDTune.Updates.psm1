@@ -192,10 +192,23 @@ $script:ToolTrust = @{
 }
 
 function Get-AVDTuneDnPart([string]$Dn, [string]$Key) {
-    # One part of a distinguished name, quotes removed: Get-AVDTuneDnPart 'CN=x, O="A, Inc"' 'O' -> 'A, Inc'
-    $m = [regex]::Match([string]$Dn, '(?:^|,)\s*' + [regex]::Escape($Key) + '=(?:"(?<q>[^"]*)"|(?<v>[^,]*))')
-    if (-not $m.Success) { return '' }
-    if ($m.Groups['q'].Success) { $m.Groups['q'].Value } else { $m.Groups['v'].Value.Trim() }
+    <#
+        One part of a distinguished name, parsed by Windows (X500DistinguishedName), quotes removed: Get-AVDTuneDnPart 'CN=x, O="A, Inc"' 'O'
+        -> 'A, Inc'. '' when the name cannot be parsed, the part is missing or appears more than once.
+    #>
+    if (-not $Dn) { return '' }
+    try { $lines = (New-Object System.Security.Cryptography.X509Certificates.X500DistinguishedName($Dn)).Decode([System.Security.Cryptography.X509Certificates.X500DistinguishedNameFlags]::UseNewLines) -split "\r?\n" }
+    catch { return '' }
+    $values = @(foreach ($l in $lines) {
+            $i = $l.IndexOf('=')
+            if ($i -gt 0 -and $l.Substring(0, $i).Trim() -ceq $Key) {
+                $v = $l.Substring($i + 1).Trim()
+                if ($v.Length -ge 2 -and $v.StartsWith('"') -and $v.EndsWith('"')) { $v = $v.Substring(1, $v.Length - 2).Replace('""', '"') }
+                $v
+            }
+        })
+    if ($values.Count -ne 1) { return '' }
+    $values[0]
 }
 
 function Test-AVDTuneToolTrust {
@@ -499,6 +512,8 @@ function Invoke-AVDTuneUpdateRun {
     if (-not (Test-AVDTuneWriteAllowed)) { throw 'The snapshot gate is not confirmed: AVDTune is read only until a snapshot of today is confirmed on the Overview.' }
     if ($selected.Count -eq 0) { return [pscustomobject]@{ WhatIf = $false; Results = @(); Run = $null; RepairOffered = $false; Reboot = $false } }
     $started = & $Machine.Now
+    # LastChange for the snapshot gate before the first item (also when the block was already off and the maintenance mode lifts nothing)
+    [void](Set-AVDTuneState -Root $Root -Values @{ LastChange = $started.ToString('o') })
     $results = New-Object System.Collections.ArrayList
     $maintError = $null
     try {
@@ -655,6 +670,42 @@ function Test-AVDTuneAdminOnlyPath {
     $true
 }
 
+function Remove-AVDTuneStageDir {
+    <#
+        Removes one staging folder: its plain files, then the folder. Links are removed as links, never followed; a file that is still in use
+        (the tool has just ended) is tried again for a few seconds. Returns $true when the folder is gone.
+    #>
+    param([Parameter(Mandatory)][string]$Dir, [int]$Tries = 15)
+    $d = New-Object IO.DirectoryInfo $Dir
+    for ($i = 0; $i -lt $Tries; $i++) {
+        $d.Refresh()
+        if (-not $d.Exists) { return $true }
+        try {
+            if (($d.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { $d.Delete(); return $true }   # the link only
+            foreach ($f in $d.GetFileSystemInfos()) {
+                if ($f -is [IO.DirectoryInfo]) { if (($f.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { $f.Delete() } }   # a link inside: the link only
+                else { $f.Attributes = [IO.FileAttributes]::Normal; $f.Delete() }
+            }
+            $d.Delete($false)
+            return $true
+        }
+        catch { Start-Sleep -Milliseconds 200 }
+    }
+    $d.Refresh()
+    -not $d.Exists
+}
+
+function Clear-AVDTuneStageFolder {
+    # At the start: staging folders left behind in <root>\temp (a crash during a Teams update) are removed. Returns the number removed.
+    param([Parameter(Mandatory)][string]$Root)
+    $temp = New-Object IO.DirectoryInfo (Join-Path $Root 'temp')
+    if (-not $temp.Exists) { return 0 }
+    if (($temp.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { $temp.Delete(); return 0 }
+    $n = 0
+    foreach ($c in $temp.GetDirectories()) { if ($c.Name -match '^[0-9a-f]{32}$' -and (Remove-AVDTuneStageDir -Dir $c.FullName -Tries 3)) { $n++ } }
+    $n
+}
+
 function Initialize-AVDTuneProcessTree {
     # A job object around a started tool, so a timeout ends the whole tree (installers started by winget or choco), not only the tool
     if ('AVDTune.ProcessTree' -as [type]) { return }
@@ -748,15 +799,14 @@ function New-AVDTuneUpdateAdapter {
         }
     }
     $u.Stage = {
-        # A copy of the tool in a new folder under <root>\temp that only SYSTEM, Administrators and this user can change; the copy is checked and run
+        <#
+            A copy of the tool in a new folder under <root>\temp; the copy is checked and run. The folder gets no rules of its own: it inherits
+            those of the protected state folder (Administrators and SYSTEM only), so no unelevated process, not even of the same administrator,
+            can swap the copy, and a folder left behind never looks prepared to the state folder check at the next start.
+        #>
         param($Path, $Root)
         $dir = Join-Path (Join-Path $Root 'temp') ([guid]::NewGuid().ToString('N'))
-        $sec = New-Object System.Security.AccessControl.DirectorySecurity
-        $sec.SetAccessRuleProtection($true, $false)
-        foreach ($sid in @('S-1-5-18', 'S-1-5-32-544', [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value)) {
-            $sec.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule((New-Object System.Security.Principal.SecurityIdentifier $sid), 'FullControl', 'ContainerInherit, ObjectInherit', 'None', 'Allow')))
-        }
-        [void][IO.Directory]::CreateDirectory($dir, $sec)
+        [void][IO.Directory]::CreateDirectory($dir)
         $copy = Join-Path $dir (Split-Path $Path -Leaf)
         [IO.File]::Copy($Path, $copy)
         $copy
@@ -764,7 +814,7 @@ function New-AVDTuneUpdateAdapter {
     $u.Unstage = {
         param($Path)
         $dir = Split-Path $Path -Parent
-        if ((Split-Path $dir -Leaf) -match '^[0-9a-f]{32}$' -and (Split-Path (Split-Path $dir -Parent) -Leaf) -eq 'temp') { Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue }
+        if ((Split-Path $dir -Leaf) -match '^[0-9a-f]{32}$' -and (Split-Path (Split-Path $dir -Parent) -Leaf) -eq 'temp') { [void](Remove-AVDTuneStageDir $dir) }
     }
     $u.Run = {
         <#
@@ -896,5 +946,5 @@ function New-AVDTuneUpdateAdapter {
 
 Export-ModuleMember -Function Get-AVDTuneUpdateSettings, Set-AVDTuneUpdateSettings, ConvertTo-AVDTuneKbList, Resolve-AVDTuneWuaError, Resolve-AVDTuneSoftwareError,
     ConvertFrom-AVDTuneWingetUpgrade, ConvertFrom-AVDTuneChocoOutdated, Invoke-AVDTuneLocked, Test-AVDTuneToolTrust, Test-AVDTuneAdminOnlyAcl, Test-AVDTuneAdminOnlyPath,
-    Select-AVDTuneNewestPackageFolder, Get-AVDTuneSystemFolder, Resolve-AVDTuneTool, Get-AVDTuneUpdateList, Invoke-AVDTuneUpdateRun, Invoke-AVDTuneRepair,
+    Select-AVDTuneNewestPackageFolder, Get-AVDTuneSystemFolder, Resolve-AVDTuneTool, Clear-AVDTuneStageFolder, Remove-AVDTuneStageDir, Get-AVDTuneUpdateList, Invoke-AVDTuneUpdateRun, Invoke-AVDTuneRepair,
     Get-AVDTuneUpdateHistory, New-AVDTuneUpdateAdapter

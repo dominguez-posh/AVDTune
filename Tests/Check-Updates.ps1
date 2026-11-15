@@ -185,7 +185,13 @@ try {
     [void](Set-AVDTuneState -Root $tmp -Values @{ LastChange = $old })
     [void](Invoke-AVDTuneRepair -Machine $lc.M -U $lc.U -Root $tmp -Kind Sfc -User 'admin1')
     $lcRep = [string](Get-AVDTuneState $tmp).LastChange
-    Test-Check 'LastChange in state.json is set by an update run and by a repair (snapshot gate)' ($lcRun -and $lcRun -ne $old -and $lcRep -and $lcRep -ne $old) "$lcRun | $lcRep"
+    $lcSeen = @{}
+    $lcOrigRun = $lc.U.Run
+    $lc.U.Run = { param($File, $Arguments, $Timeout) $lcSeen.AtFirstItem = [string](Get-AVDTuneState $tmp).LastChange; & $lcOrigRun $File $Arguments $Timeout }.GetNewClosure()
+    [void](Set-AVDTuneState -Root $tmp -Values @{ LastChange = $old })
+    [void](Invoke-AVDTuneUpdateRun -Machine $lc.M -U $lc.U -Root $tmp -Items @([pscustomobject]@{ Id = 'winget:7zip.7zip'; Group = 'Software'; Title = '7-Zip'; Installed = '1'; Kb = ''; Selectable = $true }) -User 'admin1')
+    Test-Check 'LastChange is set before the first item of a run, also with the block already off' ($lcSeen.AtFirstItem -and $lcSeen.AtFirstItem -ne $old) $lcSeen.AtFirstItem
+    Test-Check 'LastChange in state.json is set by an update run and by a repair (snapshot gate)'  ($lcRun -and $lcRun -ne $old -and $lcRep -and $lcRep -ne $old) "$lcRun | $lcRep"
 
     # ---------------------------------------------------------------- trusted tools (security review of #6)
     $ms = 'CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US'; $msCa = 'CN=Microsoft Code Signing PCA 2024, O=Microsoft Corporation, C=US'
@@ -200,6 +206,8 @@ try {
         @{ N = 'other original file name (a signed Microsoft tool renamed)'; Name = 'teamsbootstrapper.exe'; S = (& $sig $ms $msCa 'cmd.exe'); Ok = $false }
         @{ N = 'choco.exe signed by Microsoft'; Name = 'choco.exe'; S = (& $sig $ms $msCa 'choco.exe'); Ok = $false }
         @{ N = 'not valid'; Name = 'winget.exe'; S = (& $sig $ms $msCa 'winget.exe' $false); Ok = $false }
+        @{ N = 'two O= parts'; Name = 'winget.exe'; S = (& $sig 'CN=Microsoft Corporation, O=Evil, O=Microsoft Corporation' $msCa 'winget.exe'); Ok = $false }
+        @{ N = 'a name that cannot be parsed'; Name = 'winget.exe'; S = (& $sig 'garbage ,,=' $msCa 'winget.exe'); Ok = $false }
         @{ N = 'unknown tool'; Name = 'evil.exe'; S = (& $sig $ms $msCa 'evil.exe'); Ok = $false })
     $wrong = @($trustCases | Where-Object { (Test-AVDTuneToolTrust -Signature $_.S -Name $_.Name).Ok -ne $_.Ok } | ForEach-Object N)
     Test-Check 'tool signatures: publisher O and CN exact, issuer a CA of the publisher, original file name; everything else refused' ($wrong.Count -eq 0) ($wrong -join ', ')
@@ -252,10 +260,28 @@ try {
     $real = New-AVDTuneUpdateAdapter
     $staged = & $real.Stage (Join-Path $repo 'README.md') $tmp
     $sacl = Get-Acl -LiteralPath (Split-Path $staged -Parent)
-    $others = @($sacl.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier]) | Where-Object { $_.IdentityReference.Value -notin 'S-1-5-18', 'S-1-5-32-544', [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value })
+    $own = @($sacl.GetAccessRules($true, $false, [System.Security.Principal.SecurityIdentifier]))
     $stagedThere = Test-Path -LiteralPath $staged
     & $real.Unstage $staged
-    Test-Check 'real adapter: the staged copy lies in a protected folder under <root>\temp (no inherited or other entries) and is removed afterwards' ($stagedThere -and $staged -like "$tmp\temp\*\README.md" -and $sacl.AreAccessRulesProtected -and $others.Count -eq 0 -and -not (Test-Path -LiteralPath (Split-Path $staged -Parent))) $staged
+    Test-Check 'real adapter: the staged copy lies under <root>\temp in a folder without rules of its own (it inherits the protected state folder: no user entry) and is removed afterwards' ($stagedThere -and $staged -like "$tmp\temp\*\README.md" -and $own.Count -eq 0 -and -not $sacl.AreAccessRulesProtected -and -not (Test-Path -LiteralPath (Split-Path $staged -Parent))) "$staged | own rules: $(@($own | ForEach-Object { $_.IdentityReference.Value }) -join ',')"
+    # a copy still in use (the tool has just ended) is removed by the retry
+    $busy = & $real.Stage (Join-Path $repo 'README.md') $tmp
+    $flag = Join-Path $tmp 'busy.flag'
+    $holder = Start-Job -ScriptBlock { param($f, $flag) $s = [IO.File]::Open($f, 'Open', 'Read', 'None'); Set-Content -LiteralPath $flag -Value 1; Start-Sleep -Milliseconds 1500; $s.Dispose() } -ArgumentList $busy, $flag
+    try {
+        $until = (Get-Date).AddSeconds(30); while (-not (Test-Path -LiteralPath $flag) -and (Get-Date) -lt $until) { Start-Sleep -Milliseconds 100 }
+        & $real.Unstage $busy
+        Test-Check 'real adapter: Unstage tries again while the copy is still in use' ((Test-Path -LiteralPath $flag) -and -not (Test-Path -LiteralPath (Split-Path $busy -Parent))) $busy
+    }
+    finally { $holder | Wait-Job -Timeout 30 | Out-Null; $holder | Remove-Job -Force }
+    # leftovers of a crash are removed at the start; a link in there is removed as a link, its target is untouched
+    $left = & $real.Stage (Join-Path $repo 'README.md') $tmp
+    $outside = Join-Path $tmp 'outside'; [void](New-Item -ItemType Directory -Path $outside -Force); Set-Content -LiteralPath (Join-Path $outside 'keep.txt') -Value 'keep'
+    $link = Join-Path $tmp ('temp\' + [guid]::NewGuid().ToString('N'))
+    $cmd = Join-Path ([Environment]::GetFolderPath('System')) 'cmd.exe'
+    [void](& $cmd /c mklink /J $link $outside)
+    $cleared = Clear-AVDTuneStageFolder -Root $tmp
+    Test-Check 'start: staging folders left behind are removed, a junction only as a link (its target keeps its file)' ($cleared -eq 2 -and -not (Test-Path -LiteralPath (Split-Path $left -Parent)) -and -not (Test-Path -LiteralPath $link) -and (Test-Path -LiteralPath (Join-Path $outside 'keep.txt'))) "cleared $cleared"
 
     # the real Run with harmless processes this check starts itself (powershell.exe and ping.exe on 127.0.0.1); their PIDs are tracked and only they are stopped
     $ps = Join-Path ([Environment]::GetFolderPath('System')) 'WindowsPowerShell\v1.0\powershell.exe'
