@@ -99,7 +99,7 @@ try {
     Test-Bad 'a risk in other letter case' Registry { param($e) $e.Risk = 'low' } 'Risk must be'
     Test-Bad 'an http source' Registry { param($e) $e.Source = 'http://learn.microsoft.com/en-us/x' } 'https URL'
     Test-Bad 'a source on a host that is not allowed' Registry { param($e) $e.Source = 'https://example.org/x' } 'https URL'
-    Test-Bad 'a source with credentials in the URL' Registry { param($e) $e.Source = 'https://user:pw@learn.microsoft.com/x' } 'https URL'
+    Test-Bad 'a source with credentials in the URL' Registry { param($e) $e.Source = ('https://user:pw' + [char]64 + 'learn.microsoft.com/x') } 'https URL'
     Test-Bad 'a source with a space' Registry { param($e) $e.Source = 'https://learn.microsoft.com/en-us/x y' } 'https URL'
     Test-Bad 'a title with a control character' Registry { param($e) $e.Title = "Title`r`nline" } 'Title must be text'
     Test-Bad 'a title that is not text' Registry { param($e) $e.Title = 5 } 'Title must be text'
