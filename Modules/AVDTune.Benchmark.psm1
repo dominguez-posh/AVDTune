@@ -271,7 +271,7 @@ function New-AVDTuneBenchAdapter {
     $b.Download = {
         param([string]$Url, [string]$Path)
         if ($Url -notmatch '^https://') { throw 'Only https downloads are allowed.' }
-        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+        [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
         $wc = New-Object System.Net.WebClient
         try { $wc.DownloadFile($Url, $Path) } finally { $wc.Dispose() }
     }
@@ -304,8 +304,8 @@ function New-AVDTuneBenchAdapter {
     $b.RestoreTaskRegister = {
         # A SYSTEM task at start-up that runs the restore script from the protected state folder (never a script of the application folder)
         param([string]$ScriptPath)
-        $arg = '-NoProfile -ExecutionPolicy Bypass -File "' + $ScriptPath + '"'
-        $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $arg
+        $a = Get-AVDTuneBenchRestoreAction -ScriptPath $ScriptPath
+        $action = New-ScheduledTaskAction -Execute $a.Execute -Argument $a.Argument
         $trigger = New-ScheduledTaskTrigger -AtStartup
         $principal = New-ScheduledTaskPrincipal -UserId 'S-1-5-18' -LogonType ServiceAccount -RunLevel Highest
         [void](Register-ScheduledTask -TaskName $script:RestoreTaskName -Action $action -Trigger $trigger -Principal $principal -Force)
@@ -354,7 +354,7 @@ namespace AVDTuneBenchNative {
         # N parallel HTTP range streams, data discarded (never written), stops after the seconds; returns bytes and seconds
         param([string]$Url, [int]$Streams, [int]$Seconds, [long]$TotalBytes)
         if ($Url -notmatch '^https://') { throw 'Only https downloads are allowed.' }
-        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+        [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
         [Net.ServicePointManager]::DefaultConnectionLimit = [math]::Max(16, $Streams * 2)
         $bytes = New-Object long[] 1
         $errs = New-Object int[] 1
@@ -503,6 +503,12 @@ function Wait-AVDTuneUpdateIdle {
 
 #region quiet mode and restore journal
 
+function Get-AVDTuneBenchRestoreAction {
+    # What the SYSTEM task runs: Windows PowerShell by its full path (never a lookup through PATH as SYSTEM) with the restore script
+    param([Parameter(Mandatory)][string]$ScriptPath, [string]$SystemFolder = [Environment]::GetFolderPath('System'))
+    [pscustomobject]@{ Execute = (Join-Path $SystemFolder 'WindowsPowerShell\v1.0\powershell.exe'); Argument = ('-NoProfile -ExecutionPolicy Bypass -File "' + $ScriptPath + '"') }
+}
+
 function Get-AVDTuneBenchmarkJournalPath([string]$Root) { Join-Path $Root 'benchmark\restore.json' }
 function Get-AVDTuneBenchmarkRestoreScriptPath([string]$Root) { Join-Path $Root 'benchmark\restore.ps1' }
 
@@ -596,11 +602,19 @@ function Repair-AVDTuneBenchmarkCrash {
     [pscustomobject]@{ Repaired = $r.Clean; Message = $msg }
 }
 
+function Remove-AVDTuneDiskspdCache {
+    # At Finish (plan 7a): the downloaded diskspd is not part of the image
+    param([Parameter(Mandatory)][string]$Root)
+    $dir = Join-Path $Root 'tools\diskspd'
+    if (Test-Path -LiteralPath $dir) { Remove-Item -LiteralPath $dir -Recurse -Force }
+}
+
 function Test-AVDTuneBenchmarkClean {
     # Leftovers of a benchmark (design 6): work folders, restore journal, restore task, restore script. Empty list = clean
     param([Parameter(Mandatory)]$Bench, [Parameter(Mandatory)][string]$Root)
     $left = @()
     $work = Join-Path $Root 'benchmark\work'
+    if (Test-Path -LiteralPath (Join-Path $Root 'tools\diskspd')) { $left += 'diskspd cache (tools\diskspd, removed at Finish)' }
     if (Test-Path -LiteralPath $work) { foreach ($d in @(Get-ChildItem -LiteralPath $work -Force)) { $left += "work folder $($d.Name)" } }
     if (Test-Path -LiteralPath (Get-AVDTuneBenchmarkJournalPath $Root)) { $left += 'restore journal' }
     if (Test-Path -LiteralPath (Get-AVDTuneBenchmarkRestoreScriptPath $Root)) { $left += 'restore script' }
@@ -944,7 +958,8 @@ function Invoke-AVDTuneBenchmark {
         A full benchmark: preconditions, quiet mode, diskspd check, warm-up run (discarded), 3 runs (quick: 1), median, score, result file, state, change log.
         Mode Quick is marked as quick and not used for the finish. Everything that was changed (services) is put back in a finally block; if the process dies, the
         restore task or the next start of AVDTune does it (Repair-AVDTuneBenchmarkCrash). Progress is called with a text and a percentage (or $null).
-        No write gate: the benchmark changes nothing permanent.
+        No write gate: the benchmark changes nothing permanent. It does pause Windows Update and the indexer for the run; that is written to a journal first
+        and put back in the finally block (and by the restore task or the next start after a crash).
     #>
     [CmdletBinding()]
     param(
@@ -1036,6 +1051,10 @@ function Invoke-AVDTuneBenchmark {
     # the hash is taken over the parsed form, which is what a later reader sees (a fixpoint of write and read)
     $obj = ([pscustomobject]$result | ConvertTo-Json -Depth 12) | ConvertFrom-Json
     $obj.integrity.sha256 = Get-AVDTuneBenchmarkIntegrityHash $obj
+    # Own results are checked before they are written (no secret-like names or values, all fields). NOTE: a JSON file that comes from outside (a stand-alone or
+    # benchmark-only result imported later as "Vergleichssystem") is NOT trusted by its integrity hash: it must pass this same check on import and its values are untrusted data.
+    $problems = @(Test-AVDTuneBenchmarkResult -Result $obj)
+    if ($problems.Count -gt 0) { throw "The result was not stored: $($problems -join '; ')" }
     Write-AVDTuneFile $path ($obj | ConvertTo-Json -Depth 12)
     $label = Get-AVDTuneBenchmarkSummaryText $obj
     $state = Get-AVDTuneState $Root
@@ -1069,6 +1088,6 @@ function Get-AVDTuneBenchmarkSummaryText {
 Export-ModuleMember -Function Get-AVDTuneBenchRound, Get-AVDTuneBenchmarkConfig, Get-AVDTuneBenchmarkReference, Get-AVDTuneBenchCategoryKey, Get-AVDTuneBenchMedian, Get-AVDTuneBenchCv, Get-AVDTuneBenchIndex,
     Get-AVDTuneBenchGeometricMean, Get-AVDTuneBenchWeightedGeometricMean, Get-AVDTuneBenchPercentile, Get-AVDTuneBenchmarkScores, ConvertFrom-AVDTuneDiskspdXml, New-AVDTuneBenchAdapter,
     Get-AVDTuneDiskspd, Test-AVDTuneBenchmarkPreconditions, Wait-AVDTuneUpdateIdle, Get-AVDTuneBenchmarkJournalPath, Get-AVDTuneBenchmarkRestoreScriptPath, New-AVDTuneBenchmarkRestoreScript,
-    Start-AVDTuneBenchmarkQuiet, Stop-AVDTuneBenchmarkQuiet, Get-AVDTuneBenchmarkCrash, Repair-AVDTuneBenchmarkCrash, Test-AVDTuneBenchmarkClean, Invoke-AVDTuneBenchDisk, Invoke-AVDTuneBenchNetwork,
+    Start-AVDTuneBenchmarkQuiet, Stop-AVDTuneBenchmarkQuiet, Get-AVDTuneBenchmarkCrash, Repair-AVDTuneBenchmarkCrash, Test-AVDTuneBenchmarkClean, Get-AVDTuneBenchRestoreAction, Remove-AVDTuneDiskspdCache, Invoke-AVDTuneBenchDisk, Invoke-AVDTuneBenchNetwork,
     Invoke-AVDTuneBenchRun, ConvertTo-AVDTuneBenchAggregate, Get-AVDTuneBenchmarkSystem, Get-AVDTuneBenchmarkIntegrityHash, Test-AVDTuneBenchmarkResult, Get-AVDTuneBenchmarkResultFolder,
     Get-AVDTuneBenchmarkResult, Set-AVDTuneBenchmarkBaseline, Get-AVDTuneBenchmarkBaseline, Compare-AVDTuneBenchmark, Invoke-AVDTuneBenchmark, Get-AVDTuneBenchmarkSummaryText, New-AVDTuneBenchmarkRunId

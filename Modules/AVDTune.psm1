@@ -1079,6 +1079,12 @@ function Get-AVDTuneHealth {
     @($rows)
 }
 
+function Get-AVDTuneBenchmarkHealthRow([string]$Root) {
+    # An open restore journal at the start: a benchmark was interrupted and Windows Update or the indexer may still be paused
+    if (-not (Test-Path -LiteralPath (Join-Path $Root 'benchmark\restore.json'))) { return @() }
+    [pscustomobject]@{ Id = 'benchmark'; Title = 'Benchmark'; Status = 'bad'; Detail = 'A benchmark did not end properly: Windows Update or the indexer may still be paused. Restore them on the Benchmark page.' }
+}
+
 function Get-AVDTuneOverview {
     # Everything the Overview page shows, from the machine adapter and the state
     param([Parameter(Mandatory)]$Machine, [string]$Root = (Get-AVDTuneRoot), $UpdateBlock)
@@ -1092,7 +1098,7 @@ function Get-AVDTuneOverview {
         Office = Get-AVDTuneOfficeInfo $Machine
         LastUpdate = $(if ($state.LastUpdate) { [string]$state.LastUpdate } else { '' })
         LastBenchmark = $(if ($state.LastBenchmark) { [string]$state.LastBenchmark } else { '' })
-        Health = @(Get-AVDTuneHealth $Machine $state $UpdateBlock)
+        Health = @(@(Get-AVDTuneHealth $Machine $state $UpdateBlock) + @(Get-AVDTuneBenchmarkHealthRow $Root))
         UpdateBlock = $(if ($UpdateBlock) { [string]$UpdateBlock.State } else { [string]$state.UpdateBlock })
         Sealed = [bool]$state.Sealed
     }

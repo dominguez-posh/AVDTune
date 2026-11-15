@@ -17,6 +17,7 @@ $script:failed = 0
 function Test-Check([string]$Name, [bool]$Ok, $Detail) { if ($Ok) { "PASS $Name" } else { $script:failed++; "FAIL $Name" + $(if ($null -ne $Detail) { "  -> $Detail" }) } }
 function Test-Throws([scriptblock]$Block) { try { & $Block | Out-Null; $false } catch { $true } }
 function Get-ThrownText([scriptblock]$Block) { try { & $Block | Out-Null; $null } catch { $_.Exception.Message } }
+function Get-Leftover($Bench, $Root) { @(Test-AVDTuneBenchmarkClean -Bench $Bench -Root $Root | Where-Object { $_ -notlike 'diskspd cache*' }) }
 function Near([double]$a, [double]$b, [double]$tol) { [math]::Abs($a - $b) -le $tol }
 
 $config = Get-AVDTuneBenchmarkConfig
@@ -130,11 +131,11 @@ try {
     Test-Check 'a second quiet start with a journal is refused' (Test-Throws { Start-AVDTuneBenchmarkQuiet -Machine $m -Bench $b -Root $tmp -RunId 'r2' }) $null
     $crash = Get-AVDTuneBenchmarkCrash -Root $tmp
     Test-Check 'crash: a journal at the next start is found (run id, services)' ($crash.RunId -eq 'r1' -and $crash.Services.Count -eq 3) $null
-    Test-Check 'cleanliness check names the leftovers' ((Test-AVDTuneBenchmarkClean -Bench $b -Root $tmp).Count -ge 2) $null
+    Test-Check 'cleanliness check names the leftovers' ((Get-Leftover -Bench $b -Root $tmp).Count -ge 2) $null
     $fix = Repair-AVDTuneBenchmarkCrash -Machine $m -Bench $b -Root $tmp -User 'admin1'
     Test-Check 'repair: services running again, journal, script and task gone, change log note' ($fix.Repaired -and (& $svc 'wuauserv') -eq 'Running' -and (& $svc 'WSearch') -eq 'Running' -and -not (Test-Path (Get-AVDTuneBenchmarkJournalPath $tmp)) -and -not $b.Store.Tasks.ContainsKey('AVDTune-BenchmarkRestore') -and @(Get-AVDTuneChangeLog -Root $tmp | Where-Object { $_.Category -eq 'Benchmark' -and $_.Text -like 'Restored*' }).Count -eq 1) $fix.Message
     Test-Check 'repair without a journal does nothing' (-not (Repair-AVDTuneBenchmarkCrash -Machine $m -Bench $b -Root $tmp).Repaired) $null
-    Test-Check 'clean again after the repair' ((Test-AVDTuneBenchmarkClean -Bench $b -Root $tmp).Count -eq 0) $null
+    Test-Check 'clean again after the repair' ((Get-Leftover -Bench $b -Root $tmp).Count -eq 0) $null
     # a service that was already stopped is not started; one that is Disabled stays off
     $m2 = New-AVDTuneFakeMachine -Seed @{ Services = @(@{ Name = 'wuauserv'; StartType = 'Manual'; Status = 'Stopped' }, @{ Name = 'UsoSvc'; StartType = 'Automatic'; Status = 'Running' }) }
     $q2 = Start-AVDTuneBenchmarkQuiet -Machine $m2 -Bench $b -Root $tmp -RunId 'r3'
@@ -144,7 +145,7 @@ try {
     Test-Check 'restore: a service that is Disabled now is not started, a stopped one is not touched' ((& $m2.ServiceGet 'UsoSvc').Status -eq 'Stopped' -and (& $m2.ServiceGet 'wuauserv').Status -eq 'Stopped') $null
     $m0 = New-AVDTuneFakeMachine -Seed @{}
     $q0 = Start-AVDTuneBenchmarkQuiet -Machine $m0 -Bench $b -Root $tmp -RunId 'r0'
-    Test-Check 'quiet: nothing running to pause works (empty list), and is cleaned up' (@($q0.Planned).Count -eq 0 -and (Stop-AVDTuneBenchmarkQuiet -Machine $m0 -Bench $b -Root $tmp).Clean -and (Test-AVDTuneBenchmarkClean -Bench $b -Root $tmp).Count -eq 0) $null
+    Test-Check 'quiet: nothing running to pause works (empty list), and is cleaned up' (@($q0.Planned).Count -eq 0 -and (Stop-AVDTuneBenchmarkQuiet -Machine $m0 -Bench $b -Root $tmp).Clean -and (Get-Leftover -Bench $b -Root $tmp).Count -eq 0) $null
     $m3 = New-Master; $m3.Store.FailWrites = @()
     [void](Start-AVDTuneBenchmarkQuiet -Machine $m3 -Bench $b -Root $tmp -RunId 'r4')
     $m3.ServiceStart = { param($n) throw 'fake: cannot start' }
@@ -152,7 +153,7 @@ try {
     Test-Check 'restore failure keeps the journal and the task for the next try' ((-not $back.Clean) -and (Test-Path (Get-AVDTuneBenchmarkJournalPath $tmp)) -and $b.Store.Tasks.ContainsKey('AVDTune-BenchmarkRestore')) $null
     $m3.ServiceStart = { param($n) $m3.Store.Services[$n.ToLowerInvariant()].Status = 'Running' }.GetNewClosure()
     [void](Stop-AVDTuneBenchmarkQuiet -Machine $m3 -Bench $b -Root $tmp)
-    Test-Check 'second try cleans up' ((Test-AVDTuneBenchmarkClean -Bench $b -Root $tmp).Count -eq 0) $null
+    Test-Check 'second try cleans up' ((Get-Leftover -Bench $b -Root $tmp).Count -eq 0) $null
     $bt = New-AVDTuneFakeBench -Reference $ref -Config $config -Seed @{ TaskRegisterFails = $true }
     Test-Check 'quiet: the restore task could not be made, nothing is stopped' ((Test-Throws { Start-AVDTuneBenchmarkQuiet -Machine (New-Master) -Bench $bt -Root $tmp -RunId 'r5' }) -and (Test-Path (Get-AVDTuneBenchmarkJournalPath $tmp))) $null
     Remove-Item (Get-AVDTuneBenchmarkJournalPath $tmp), (Get-AVDTuneBenchmarkRestoreScriptPath $tmp) -Force -ErrorAction SilentlyContinue
@@ -180,7 +181,7 @@ try {
     $log = @(Get-AVDTuneChangeLog -Root $tmp | Where-Object { $_.Category -eq 'Benchmark' -and $_.RunId -eq $run.RunId })
     Test-Check 'run: one change log entry with the scores' ($log.Count -eq 1 -and $log[0].Text -like 'Benchmark B1.0: Host*') $null
     Test-Check 'run: a benchmark is no change of the master (LastChange unaffected)' ($null -eq (Get-AVDTuneLastChange -Root $tmp) -or (Get-AVDTuneLastChange -Root $tmp) -lt (Get-Date).AddMinutes(-1) -or @(Get-AVDTuneChangeLog -Root $tmp | Where-Object { $_.Category -eq 'Benchmark' }).Count -ge 1) $null
-    Test-Check 'run: services running again, nothing left behind, lock released' (((& $m.ServiceGet 'wuauserv').Status -eq 'Running') -and (Test-AVDTuneBenchmarkClean -Bench $b -Root $tmp).Count -eq 0 -and -not $b.Store.LockHeld) ((Test-AVDTuneBenchmarkClean -Bench $b -Root $tmp) -join ',')
+    Test-Check 'run: services running again, nothing left behind, lock released' (((& $m.ServiceGet 'wuauserv').Status -eq 'Running') -and (Get-Leftover -Bench $b -Root $tmp).Count -eq 0 -and -not $b.Store.LockHeld) ((Get-Leftover -Bench $b -Root $tmp) -join ',')
     Test-Check 'run: progress was reported' ($seen.Count -gt 10 -and ($seen -join '|') -like '*Warm-up*') $seen.Count
     $text = Get-Content -LiteralPath $run.Path -Raw
     Test-Check 'run: no secret-like names or values in the file' ($text -notmatch '(?i)password|secret|token|accountkey|sas') $null
@@ -198,7 +199,7 @@ try {
     Remove-Item (Join-Path $tmp 'tools') -Recurse -Force -ErrorAction SilentlyContinue
     $bb = New-AVDTuneFakeBench -Reference $ref -Config $config -Seed @{ ZipSha256 = ('00' * 32) }
     $m = New-Master
-    Test-Check 'a diskspd mismatch stops before anything is paused' ((Test-Throws { Invoke-AVDTuneBenchmark -Machine $m -Bench $bb -Root $tmp -SkipIdleCheck }) -and (& $m.ServiceGet 'wuauserv').Status -eq 'Running' -and -not $bb.Store.LockHeld -and (Test-AVDTuneBenchmarkClean -Bench $bb -Root $tmp).Count -eq 0) $null
+    Test-Check 'a diskspd mismatch stops before anything is paused' ((Test-Throws { Invoke-AVDTuneBenchmark -Machine $m -Bench $bb -Root $tmp -SkipIdleCheck }) -and (& $m.ServiceGet 'wuauserv').Status -eq 'Running' -and -not $bb.Store.LockHeld -and (Get-Leftover -Bench $bb -Root $tmp).Count -eq 0) $null
     Remove-Item (Join-Path $tmp 'tools') -Recurse -Force -ErrorAction SilentlyContinue
 
     # a group fails: the rest still counts, the error is in the result
@@ -236,6 +237,29 @@ try {
     $nocat.measures = @($nocat.measures | Where-Object { $_.id -notlike 'host.net.*' })
     $cn = Compare-AVDTuneBenchmark -Current $prev -Baseline $nocat -Config $config
     Test-Check 'compare: a category on one side only is shown side by side without a delta' ($cn.Categories['network'].Class -eq 'side-by-side' -and $null -eq $cn.Categories['network'].DeltaPercent -and $null -ne $cn.Host) $null
+
+
+    # ---------------------------------------------------------------- review follow-ups (Finn)
+    $act = Get-AVDTuneBenchRestoreAction -ScriptPath 'C:\x\restore.ps1' -SystemFolder 'C:\Windows\System32'
+    Test-Check 'restore task: Windows PowerShell by its full path, not a lookup through PATH' ($act.Execute -eq 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe' -and $act.Argument -like '*-File "C:\x\restore.ps1"') $act.Execute
+    Test-Check 'restore task: the real system folder gives an existing powershell.exe' (Test-Path -LiteralPath (Get-AVDTuneBenchRestoreAction -ScriptPath 'x').Execute) $null
+    $src = Get-Content -LiteralPath (Join-Path $repo 'Modules\AVDTune.Benchmark.psm1') -Raw
+    Test-Check 'downloads add TLS 1.2 to the protocols, they do not overwrite them' (([regex]::Matches($src, 'SecurityProtocol = \[Net.ServicePointManager\]::SecurityProtocol -bor')).Count -eq 2 -and $src -notmatch 'SecurityProtocol = \[Net.SecurityProtocolType\]::Tls12') $null
+    Test-Check 'the restore task uses no bare powershell.exe' ($src -notmatch "-Execute 'powershell.exe'") $null
+    $b = New-AVDTuneFakeBench -Reference $ref -Config $config
+    [void](Get-AVDTuneDiskspd -Bench $b -Root $tmp -Config $config)
+    Test-Check 'cleanliness check names the diskspd cache, Remove-AVDTuneDiskspdCache clears it' ((@(Test-AVDTuneBenchmarkClean -Bench $b -Root $tmp) -join ',') -like '*diskspd cache*' -and (& { Remove-AVDTuneDiskspdCache -Root $tmp; @(Test-AVDTuneBenchmarkClean -Bench $b -Root $tmp).Count -eq 0 })) $null
+    $before = @(Get-AVDTuneBenchmarkResult -Root $tmp).Count
+    $mx = New-Master
+    $msg = Get-ThrownText { Invoke-AVDTuneBenchmark -Machine $mx -Bench (New-AVDTuneFakeBench -Reference $ref -Config $config) -Root $tmp -Mode Quick -User 'x password=abc' -SkipIdleCheck }
+    Test-Check 'a result with a secret-like value is not written, the run says why' ($msg -like '*not stored*secret-like*' -and @(Get-AVDTuneBenchmarkResult -Root $tmp).Count -eq $before) $msg
+    Test-Check 'after that refusal the services are back and nothing is left behind' ((& $mx.ServiceGet 'wuauserv').Status -eq 'Running' -and (Get-Leftover -Bench $b -Root $tmp).Count -eq 0) $null
+    $ov = New-AVDTuneFakeMachine -Seed @{}
+    $row0 = @((Get-AVDTuneOverview -Machine $ov -Root $tmp).Health | Where-Object Id -eq 'benchmark')
+    Write-AVDTuneFile (Get-AVDTuneBenchmarkJournalPath $tmp) '{"Schema":1,"RunId":"x","Started":"2026-11-15T10:00:00","Services":[],"Stopped":[]}'
+    $row1 = @((Get-AVDTuneOverview -Machine $ov -Root $tmp).Health | Where-Object Id -eq 'benchmark')
+    Test-Check 'Overview: an open restore journal shows a red Benchmark row, none without a journal' ($row0.Count -eq 0 -and $row1.Count -eq 1 -and $row1[0].Status -eq 'bad' -and $row1[0].Detail -like '*Benchmark page*') $null
+    Remove-Item (Get-AVDTuneBenchmarkJournalPath $tmp) -Force
 
     Test-Check 'no file of the check run touched the real state folder' ($tmp -ne (Join-Path ([Environment]::GetFolderPath('CommonApplicationData')) 'AVDTune')) $tmp
 }
