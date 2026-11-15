@@ -60,6 +60,25 @@ Documentation: the wizard answers and every created or checked resource (resourc
 - Step contract: Id, Section, Title, Why, Risk, Reboot, Source URL, Test -> state, Apply -> Changed/Unchanged/Failed with before and after, optional Undo. Idempotent; nothing runs without a visible selection; dry run first.
 - Shared with PackTune: Theme, sign-in (`Modules/Keevault.psm1`), package store (`PackTune-Store.ps1`), protocol (`PackTune-Protocol.ps1`, new category set), winget/Chocolatey helpers. They live in `Shared/` as copies: `Tools\Sync-FromPackTune.ps1` copies them from a PackTune clone and writes `Shared/SOURCE.json` (PackTune commit, SHA256 per file); `Tests\Check-Shared.ps1` fails when a file in `Shared/` differs from its recorded hash. Changes to shared code are made in PackTune first, then synced.
 
+## 2a. Readiness analysis: is the master set up correctly, ready for current VM sizes (added 2026-11-15)
+
+A read-only analysis on the Overview ("Bereitschaft"), run at every start and as part of the seal checklist. Each check is green/yellow/red with the reason, the source (Microsoft Learn) and a fix where AVDTune can do it (always as a step with confirmation and change log entry). The list of VM families and what they need is data (`AVDTune/readiness.json`), checked against Microsoft Learn when the analysis is built and kept current with releases, because new sizes come often.
+
+Hardware generation (v6/v7 sizes and later):
+- **NVMe**: the current OS disk controller of the VM (ARM: `storageProfile.diskControllerType`, IMDS); the Windows NVMe driver `stornvme` present and set to start at boot (Microsoft's NVMe conversion sets it for Windows; a master that only ever ran on SCSI may not have it); if the VM still runs on SCSI, the conversion path is shown (switch the controller with the VM deallocated, script from Microsoft).
+- **Network adapter**: the Microsoft Azure Network Adapter (MANA) driver present (needed for accelerated networking on the newer sizes) besides the Mellanox driver of older sizes; accelerated networking on the VM's NIC.
+- **No temp disk / NVMe temp disk**: many new sizes have no temp disk or only an NVMe temp disk that is not formatted at start; the page file and any path on `D:` (page file, FSLogix temp, TEMP variables, application caches) are flagged, because a master built on a size with a `D:` drive breaks on such sizes.
+- **Generation 2 / Trusted Launch**: UEFI boot, Secure Boot, vTPM on the VM; the image definition in the Azure Compute Gallery (when it can be read with the sign-in) has the features `DiskControllerTypes` = `SCSI, NVMe`, `SecurityType` = Trusted Launch supported, accelerated networking supported, architecture x64. A capture into a definition without NVMe would produce an image that cannot start on v6/v7.
+- **Sizes**: list of the v6/v7 families that this master can run on, and what is missing for the others (e.g. Arm64 families need an Arm64 image: shown as not possible, not as a fix).
+
+Image hygiene (from the same analysis):
+- Windows 11 multi-session edition and build, servicing state (supported or end of service), last cumulative update age.
+- AVD agent and boot loader not installed, master not domain or Entra joined, no host pool registration token in the registry, BitLocker off, no pending reboot, no pending Windows setup operations.
+- Update block for users active (section 4), FSLogix test passed (5a), Defender onboarding not executed on the master itself, language packs complete for all users.
+- Azure VM agent present and current, time sync, no leftovers of earlier tools (old scheduled tasks, VBS launchers, folders such as installer exports).
+
+Result: stored with every run, in the change log of the version and in the SharePoint list; a red item blocks the seal, a yellow one needs a typed acknowledgement.
+
 ## 3. Pages
 
 | Page | Content |
