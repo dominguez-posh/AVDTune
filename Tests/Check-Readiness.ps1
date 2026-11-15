@@ -342,6 +342,13 @@ try {
     $fr = & $fslRun ([pscustomobject]@{ At = '2026-11-15T09:00:00.0000000'; Overall = 'red'; Red = 1; Yellow = 0; OpenIds = @('fs.services') })
     Test-Check 'FSLogix-Test not run: yellow with the fix; green test: green; yellow test: yellow with the ids; red test: red (blocks Finish)' ((Get-Row $fn 'hy.fslogix-test').Status -eq 'yellow' -and (Get-Row $fn 'hy.fslogix-test').Fix -like '*FSLogix page*' -and (Get-Row $fg 'hy.fslogix-test').Status -eq 'green' -and (Get-Row $fy 'hy.fslogix-test').Status -eq 'yellow' -and (Get-Row $fy 'hy.fslogix-test').Reason -like '*fs.defender*' -and (Get-Row $fr 'hy.fslogix-test').Status -eq 'red' -and $fr.RedIds -contains 'hy.fslogix-test') $null
     Test-Check 'FSLogix-Test row carries its source and says it is AVDTune''s own criterion (not verified)' ((Get-Row $fg 'hy.fslogix-test').Source -like 'https://learn.microsoft.com/*' -and -not (Get-Row $fg 'hy.fslogix-test').Verified -and (Get-Row $fg 'hy.fslogix-test').Note -like '*own criterion*') $null
+    $greenRec = [pscustomobject]@{ At = '2026-11-15T09:00:00.0000000'; Overall = 'green'; Red = 0; Yellow = 0; OpenIds = @() }
+    [void](Set-AVDTuneState -Root $tmp -Values @{ LastChange = '2026-11-15T10:00:00.0000000' })
+    $fStale = Invoke-AVDTuneReadiness -Machine (New-Master) -Arm $null -Token '' -GalleryImageId $defId -UpdateBlock $goodBlock -FSLogixApplies $true -FSLogixTest $greenRec -Root $tmp
+    [void](Set-AVDTuneState -Root $tmp -Values @{ LastChange = '2026-11-15T08:00:00.0000000' })
+    $fFresh = Invoke-AVDTuneReadiness -Machine (New-Master) -Arm $null -Token '' -GalleryImageId $defId -UpdateBlock $goodBlock -FSLogixApplies $true -FSLogixTest $greenRec -Root $tmp
+    [void](Set-AVDTuneState -Root $tmp -Values @{ LastChange = $null })
+    Test-Check 'FSLogix-Test green only when the test is younger than the last change: older test yellow with the fix, younger test green' ((Get-Row $fStale 'hy.fslogix-test').Status -eq 'yellow' -and (Get-Row $fStale 'hy.fslogix-test').Reason -like '*older than the last change*' -and (Get-Row $fFresh 'hy.fslogix-test').Status -eq 'green') ((Get-Row $fStale 'hy.fslogix-test').Reason + ' | ' + (Get-Row $fFresh 'hy.fslogix-test').Reason)
     Test-Check 'update block without a given status is read live from the machine (a fresh master: off, red)' ((Get-Row $r 'hy.update-block').Status -eq 'red') $null
     $r = Invoke-Readiness (New-Master -Reg @{ 'HKLM:\SOFTWARE\Microsoft\Windows Advanced Threat Protection|senseGuid' = 'abc' }) (New-Arm)
     Test-Check 'Defender onboarding done on the master (senseGuid): red' ((Get-Row $r 'hy.defender-onboarding').Status -eq 'red') $null

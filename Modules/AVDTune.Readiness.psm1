@@ -336,7 +336,7 @@ function Invoke-AVDTuneReadiness {
     #>
     [CmdletBinding()]
     param(
-        [Parameter(Mandatory)]$Machine, $Arm, [string]$Token, [string]$NoTokenReason, [string]$GalleryImageId, $Data, $UpdateBlock, [bool]$FSLogixApplies = $false, $FSLogixTest
+        [Parameter(Mandatory)]$Machine, $Arm, [string]$Token, [string]$NoTokenReason, [string]$GalleryImageId, $Data, $UpdateBlock, [bool]$FSLogixApplies = $false, $FSLogixTest, [string]$Root
     )
     if (-not $Data) { $Data = Get-AVDTuneReadinessData }
     $now = & $Machine.Now
@@ -613,6 +613,7 @@ function Invoke-AVDTuneReadiness {
         Invoke-Check 'hy.fslogix-test' $hy {
             $t = $FSLogixTest
             if (-not $t) { Add-Row 'hy.fslogix-test' $hy 'yellow' 'The FSLogix function test has not been run on this master.' 'Run the FSLogix test on the FSLogix page.' }
+            elseif ([string]$t.Overall -eq 'green' -and $Root -and ($lastChange = Get-AVDTuneLastChange -Root $Root) -and ([datetime]::Parse([string]$t.At, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind)).ToUniversalTime() -lt $lastChange.ToUniversalTime()) { Add-Row 'hy.fslogix-test' $hy 'yellow' "The last green FSLogix function test is older than the last change AVDTune made on this master ($($lastChange.ToString('yyyy-MM-dd HH:mm')))." 'Run the FSLogix test again on the FSLogix page.' }
             elseif ([string]$t.Overall -eq 'green') { Add-Row 'hy.fslogix-test' $hy 'green' "The FSLogix function test passed (green) on $(([datetime]::Parse([string]$t.At, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind)).ToString('yyyy-MM-dd HH:mm'))." }
             elseif ([string]$t.Overall -eq 'red') { Add-Row 'hy.fslogix-test' $hy 'red' "The last FSLogix function test is red ($($t.Red) red item(s): $(@($t.OpenIds) -join ', ')). Profiles will not work." 'Fix the red items on the FSLogix page and run the test again.' }
             else { Add-Row 'hy.fslogix-test' $hy 'yellow' "The last FSLogix function test is yellow ($($t.Yellow) item(s): $(@($t.OpenIds) -join ', '))." 'Look at the yellow items on the FSLogix page, fix them or run the test again.' }

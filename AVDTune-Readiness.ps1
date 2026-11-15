@@ -88,7 +88,7 @@ function Start-ReadyJob([string]$Kind, [string]$FixId) {
         $res = $null; $err = ''
         try {
             $res = if ($Kind -eq 'Fix') { Invoke-AVDTuneReadinessFix -Machine $script:Machine -Root $script:StateRoot -FixId $FixId -User ([string]$env:USERNAME) -SnapshotId ([string]$gate.SnapshotId) }
-            else { Invoke-AVDTuneReadiness -Machine $script:Machine -Arm $script:ReadyFakeArm -Token $tok.Token -NoTokenReason $tok.Reason -GalleryImageId $gallery -FSLogixApplies (Test-FslApplies) -FSLogixTest (Get-AVDTuneFSLogixTestRecord -Root $script:StateRoot) }
+            else { Invoke-AVDTuneReadiness -Machine $script:Machine -Arm $script:ReadyFakeArm -Token $tok.Token -NoTokenReason $tok.Reason -GalleryImageId $gallery -FSLogixApplies (Test-FslApplies) -FSLogixTest (Get-AVDTuneFSLogixTestRecord -Root $script:StateRoot) -Root $script:StateRoot }
         }
         catch { $err = $_.Exception.Message }
         $script:ReadyJob = @{ Inline = $true; Result = $res; Err = $err; Kind = $Kind; FixId = $FixId; Task = (New-ReadyTask $Kind $FixId) }
@@ -107,7 +107,7 @@ function Start-ReadyJob([string]$Kind, [string]$FixId) {
                 if ($Gate) { Open-AVDTuneWriteGate -SnapshotId $Gate.SnapshotId -ConfirmedBy $Gate.ConfirmedBy }
                 Invoke-AVDTuneReadinessFix -Machine $m -Root $Root -FixId $FixId -User $User -SnapshotId $Gate.SnapshotId
             }
-            else { Invoke-AVDTuneReadiness -Machine $m -Arm (New-AVDTuneArmAdapter) -Token $Token -NoTokenReason $Reason -GalleryImageId $Gallery -FSLogixApplies $FslApplies -FSLogixTest $FslTest }
+            else { Invoke-AVDTuneReadiness -Machine $m -Arm (New-AVDTuneArmAdapter) -Token $Token -NoTokenReason $Reason -GalleryImageId $Gallery -FSLogixApplies $FslApplies -FSLogixTest $FslTest -Root $Root }
         }).AddArgument($script:AppRoot).AddArgument($script:StateRoot).AddArgument($Kind).AddArgument($FixId).AddArgument($tok.Token).AddArgument($tok.Reason).AddArgument($gallery).AddArgument($gate).AddArgument([string]$env:USERNAME).AddArgument((Test-FslApplies)).AddArgument((Get-AVDTuneFSLogixTestRecord -Root $script:StateRoot))
     $script:ReadyJob = @{ PS = $ps; Handle = $ps.BeginInvoke(); Kind = $Kind; FixId = $FixId; Task = (New-ReadyTask $Kind $FixId) }
     Set-ReadyBusy $true
