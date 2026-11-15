@@ -62,6 +62,7 @@ function Start-UpdJob([string]$Kind, $Argument) {
             finally { $Sync.Done = $true }
         }).AddArgument($script:AppRoot).AddArgument($(if ($script:TestMode) { $env:AVDTUNE_FAKE } else { '' })).AddArgument($script:UpdFakeScript).AddArgument($script:StateRoot).AddArgument($Kind).AddArgument($Argument).AddArgument($gate).AddArgument($sync).AddArgument([string]$env:USERNAME).AddArgument($script:UpdFakeSeed).AddArgument($script:UpdFakeWua).AddArgument($script:UpdFakeNative).AddArgument($(if ($script:TestMode) { $script:Machine } else { $null }))
     $script:UpdJob = @{ PS = $ps; Handle = $ps.BeginInvoke(); Kind = $Kind; Sync = $sync }
+    Set-ShutdownBlock $true   # Windows shows why log off or shut down should wait (Start-AVDTune.ps1)
     Set-UpdateBusy $true
 }
 function Set-UpdateBusy([bool]$Busy) {
@@ -73,6 +74,7 @@ function Complete-UpdJob {
     if (-not $job) { return }
     if (-not $job.Handle.IsCompleted) { if ($job.Sync.Text -and $script:CurrentPage -eq 'Updates') { $ui.TxtUpdState.Text = $job.Sync.Text }; return }
     $script:UpdJob = $null
+    Set-ShutdownBlock $false
     $result = $null; $err = ''
     try {
         $out = @($job.PS.EndInvoke($job.Handle))

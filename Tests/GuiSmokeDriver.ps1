@@ -302,9 +302,14 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
             $window.Close()
             Test-Smoke 'closing during an update operation is refused with a hint, the window closes after it' ($window.IsVisible -and $script:UpdJob -and $script:CloseWhenDone -and $script:LastToast -like '*closes by itself when it is done*') $script:LastToast
             $script:CloseWhenDone = $false   # the smoke goes on
+            $sessionEnd = [pscustomobject]@{ Cancel = $false }
+            Invoke-SessionEnding $sessionEnd
+            Test-Smoke 'log off or shut down during an update operation is held back, Windows shows the reason' ($sessionEnd.Cancel -and (Get-ShutdownBlockReason) -like 'AVDTune is running an update operation*') (Get-ShutdownBlockReason)
             return $false
         }
         if ($script:UpdJob) { return $false }
+        $sessionIdle = [pscustomobject]@{ Cancel = $false }; Invoke-SessionEnding $sessionIdle
+        Test-Smoke 'after the operation log off is not held back and the reason is gone' (-not $sessionIdle.Cancel -and -not (Get-ShutdownBlockReason)) (Get-ShutdownBlockReason)
         $window.UpdateLayout()
         $ids = @($script:UpdItems | ForEach-Object Id)
         Test-Smoke 'search: Windows (driver excluded), M365, Edge, Teams, OneDrive, FSLogix detect-only, Defender, winget and choco apps' ($ids -contains 'windows:u1' -and (@($script:UpdItems | Where-Object Id -eq 'windows:u3')[0].Status -eq 'Excluded') -and $ids -contains 'm365' -and $ids -contains 'edge' -and $ids -contains 'teams' -and $ids -contains 'onedrive' -and (@($script:UpdItems | Where-Object Id -eq 'fslogix')[0].Status -eq 'DetectOnly') -and $ids -contains 'defender' -and $ids -contains 'winget:7zip.7zip' -and $ids -contains 'choco:git') (@($script:UpdItems | ForEach-Object { "$($_.Id)=$($_.Status)" }) -join ',')

@@ -442,7 +442,41 @@ $window.Add_Closing({
     Show-Toast "$what. AVDTune closes by itself when it is done (the update block is restored first)."
 })
 
+# Log off or shut down during an update operation would end it the same way: Windows is asked to wait (SessionEnding is cancelled) and shows
+# the reason (ShutdownBlockReasonCreate) while an operation runs. Start-UpdJob and Complete-UpdJob switch the reason on and off.
+if (-not ('AVDTune.ShutdownBlock' -as [type])) {
+    Add-Type -Namespace AVDTune -Name ShutdownBlock -MemberDefinition @'
+[DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern bool ShutdownBlockReasonCreate(IntPtr hWnd, string reason);
+[DllImport("user32.dll")] public static extern bool ShutdownBlockReasonDestroy(IntPtr hWnd);
+[DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern bool ShutdownBlockReasonQuery(IntPtr hWnd, System.Text.StringBuilder buffer, ref uint size);
+'@
+}
+$script:ShutdownReason = 'AVDTune is running an update operation. Wait until it is done: the update block for users is restored at the end.'
+function Get-WindowHandle { (New-Object System.Windows.Interop.WindowInteropHelper $window).Handle }
+function Set-ShutdownBlock([bool]$On) {
+    try {
+        $h = Get-WindowHandle
+        if ($h -eq [IntPtr]::Zero) { return }
+        if ($On) { [void][AVDTune.ShutdownBlock]::ShutdownBlockReasonCreate($h, $script:ShutdownReason) } else { [void][AVDTune.ShutdownBlock]::ShutdownBlockReasonDestroy($h) }
+    }
+    catch { }
+}
+function Get-ShutdownBlockReason {
+    $h = Get-WindowHandle
+    $sb = New-Object System.Text.StringBuilder 1024
+    [uint32]$size = 1024
+    if ($h -ne [IntPtr]::Zero -and [AVDTune.ShutdownBlock]::ShutdownBlockReasonQuery($h, $sb, [ref]$size)) { $sb.ToString() } else { '' }
+}
+function Invoke-SessionEnding($EventArgs) {
+    if (-not $script:UpdJob) { return }
+    $EventArgs.Cancel = $true
+    Show-Toast 'Log off or shut down was held back: an update operation is still running. Try again when it is done.'
+}
+$script:SessionEndingHandler = [System.Windows.SessionEndingCancelEventHandler]{ param($src, $e) Invoke-SessionEnding $e }
+[System.Windows.Application]::Current.add_SessionEnding($script:SessionEndingHandler)
+
 $window.Add_Closed({
+    try { [System.Windows.Application]::Current.remove_SessionEnding($script:SessionEndingHandler) } catch { }   # a handler left on the application keeps the process from ending
     $script:Timer.Stop()
     try { $script:SnapTimer.Stop() } catch { }
     try { if ($script:StartContext.Session) { Disconnect-AVDTuneSession $script:StartContext.Session } } catch { }   # tokens leave the memory with the window
