@@ -6,9 +6,12 @@
       * LDAPS 636 first. The certificate of the DC is probed WITHOUT sending credentials and shown (thumbprint); the administrator pins it
         for this environment. Later connections accept exactly that certificate (no chain, no name check: the pin is the trust).
         A changed certificate stops the connection (no bind, no fallback); re-pinning is a separate, logged action.
-      * Fallback LDAP 389 only when 636 does not answer, only when this DC was never seen with LDAPS (no downgrade of a pinned DC), and only
-        with Negotiate signing and sealing. A simple bind (clear text) and anonymous binds do not exist in this code: Assert-AVDTuneLdapOptions
-        refuses every option set that is not Negotiate over LDAPS-with-pin or over 389-with-signing-and-sealing, and the checks scan this file.
+      * LDAP 389 never silently: only when 636 does not answer, only when this DC was never seen with LDAPS (no downgrade of a pinned DC),
+        only with signing and sealing, and only after the administrator confirmed the risk in the window (status NeedsConfirmation first,
+        nothing is sent before; the confirmation goes into the protocol). With a DNS name the bind is Kerberos only (Kerberos authenticates
+        the DC, NTLM is refused); with an IP address Kerberos cannot work, so it is Negotiate (NTLM), which does not authenticate the server:
+        relay of the login and offline cracking are possible, the warning says so. A simple bind (clear text) and anonymous binds do not exist
+        in this code: Assert-AVDTuneLdapOptions refuses every other option set, and the checks scan this file.
       * The password is a SecureString in memory (NetworkCredential takes it as is), never in a file, log, protocol or error text.
 
     LDAP is an adapter ($Ldap): Probe, Open, Search, Close. New-AVDTuneLdapAdapter is the real one, Tests\Fakes\FakeServices.ps1 has the fake.
@@ -37,17 +40,22 @@ function Test-AVDTuneDomainUser([string]$User) {
     ($User.Length -le 256) -and ($User -match '^[A-Za-z0-9._ -]{1,64}\\[^\\/:*?"<>|\x00-\x1F]{1,104}$' -or $User -match '^[^@\\/:*?"<>|\s\x00-\x1F]{1,64}@[A-Za-z0-9.-]{1,190}$')
 }
 
+function Test-AVDTuneIpAddress([string]$Server) { $Server -match '^(\d{1,3}\.){3}\d{1,3}$' }
+
 function New-AVDTuneLdapOptions {
-    <# The only way to describe a connection. Mode Ldaps: SSL on 636, certificate pinned. Mode Signed: 389 with Negotiate signing and sealing. #>
-    param([Parameter(Mandatory)][string]$Server, [Parameter(Mandatory)][ValidateSet('Ldaps', 'Signed')][string]$Mode, [string]$PinnedSha256)
-    if ($Mode -eq 'Ldaps') { [pscustomobject]@{ Server = $Server; Port = 636; Ssl = $true; Signing = $false; Sealing = $false; AuthType = 'Negotiate'; PinnedSha256 = $PinnedSha256; Mode = $Mode } }
-    else { [pscustomobject]@{ Server = $Server; Port = 389; Ssl = $false; Signing = $true; Sealing = $true; AuthType = 'Negotiate'; PinnedSha256 = ''; Mode = $Mode } }
+    <#
+        The only way to describe a connection. Mode Ldaps: SSL on 636, certificate pinned, Negotiate. Mode Signed: 389 with signing and sealing,
+        Kerberos for a DNS name, Negotiate for an IP address; needs -RiskConfirmed (the administrator confirmed the warning).
+    #>
+    param([Parameter(Mandatory)][string]$Server, [Parameter(Mandatory)][ValidateSet('Ldaps', 'Signed')][string]$Mode, [string]$PinnedSha256, [switch]$RiskConfirmed)
+    if ($Mode -eq 'Ldaps') { [pscustomobject]@{ Server = $Server; Port = 636; Ssl = $true; Signing = $false; Sealing = $false; AuthType = 'Negotiate'; PinnedSha256 = $PinnedSha256; Mode = $Mode; RiskConfirmed = $false } }
+    else { [pscustomobject]@{ Server = $Server; Port = 389; Ssl = $false; Signing = $true; Sealing = $true; AuthType = $(if (Test-AVDTuneIpAddress $Server) { 'Negotiate' } else { 'Kerberos' }); PinnedSha256 = ''; Mode = $Mode; RiskConfirmed = [bool]$RiskConfirmed } }
 }
 
 function Assert-AVDTuneLdapOptions {
     # Called by every adapter before a bind. Throws for anything that would put the password on the wire unprotected.
     param([Parameter(Mandatory)]$Options)
-    if ($Options.AuthType -ne 'Negotiate') { throw "LDAP authentication '$($Options.AuthType)' is not allowed (Negotiate only; never a simple bind)." }
+    if ($Options.AuthType -notin 'Negotiate', 'Kerberos') { throw "LDAP authentication '$($Options.AuthType)' is not allowed (Negotiate or Kerberos only; never a simple bind)." }
     if ($Options.Port -eq 636) {
         if (-not $Options.Ssl) { throw 'Port 636 needs SSL.' }
         if (-not $Options.PinnedSha256) { throw 'LDAPS needs a pinned certificate (confirm the thumbprint first).' }
@@ -55,6 +63,9 @@ function Assert-AVDTuneLdapOptions {
     elseif ($Options.Port -eq 389) {
         if ($Options.Ssl) { throw 'Port 389 is plain LDAP here (signing and sealing); LDAPS is 636.' }
         if (-not ($Options.Signing -and $Options.Sealing)) { throw 'LDAP on port 389 is only allowed with signing and sealing.' }
+        $confirmed = $Options.PSObject.Properties['RiskConfirmed'] -and [bool]$Options.RiskConfirmed
+        if (-not $confirmed) { throw 'LDAP on port 389 needs the confirmation of the administrator (LDAPS did not answer).' }
+        if (-not (Test-AVDTuneIpAddress ([string]$Options.Server)) -and $Options.AuthType -ne 'Kerberos') { throw 'LDAP on port 389 with a DNS name is Kerberos only (NTLM does not authenticate the server).' }
     }
     else { throw "Port $($Options.Port) is not allowed (636 or 389)." }
     $true
@@ -76,14 +87,19 @@ function ConvertTo-AVDTuneLdapFilterValue([string]$Value) {
 function Connect-AVDTuneDirectory {
     <#
         Status of the result
-          NeedsPin            first contact over LDAPS: Certificate is shown, nothing was sent. Pin it (Set-AVDTuneDcPin in AVDTune.Start.psm1), connect again.
+          NeedsPin            first contact over LDAPS: Certificate is shown (with chain status and name match as extra facts), nothing was sent.
+                              Pin it (Set-AVDTuneDcPin in AVDTune.Start.psm1), connect again.
+          NeedsConfirmation   636 does not answer: Warning names the risk, nothing was sent. Connect again with -ConfirmWithoutLdaps after the
+                              administrator confirmed it (the window logs the confirmation).
           CertificateChanged  the certificate differs from the pin: no bind, no fallback (Expected, Certificate).
           Connected           Connection (adapter handle), Security (text for the protocol), Port.
           Failed              Message (no password, no certificate details beyond the thumbprint).
         Pins: hashtable server (lower case) -> sha256 thumbprint (hex).
     #>
     [CmdletBinding()]
-    param([Parameter(Mandatory)]$Ldap, [Parameter(Mandatory)][string]$Server, [Parameter(Mandatory)][string]$User, [Parameter(Mandatory)][System.Security.SecureString]$Password, [hashtable]$Pins = @{})
+    param([Parameter(Mandatory)]$Ldap, [Parameter(Mandatory)][string]$Server, [Parameter(Mandatory)][string]$User, [Parameter(Mandatory)][System.Security.SecureString]$Password, [hashtable]$Pins = @{},
+        # The administrator read the warning of NeedsConfirmation and accepts LDAP 389 for this connection
+        [switch]$ConfirmWithoutLdaps)
     $Server = $Server.Trim().ToLowerInvariant()
     if (-not (Test-AVDTuneDcServer $Server)) { return [pscustomobject]@{ Status = 'Failed'; Message = 'The domain controller must be an IP address or a DNS name.' } }
     if (-not (Test-AVDTuneDomainUser $User)) { return [pscustomobject]@{ Status = 'Failed'; Message = 'The domain account must look like DOMAIN\user or user@domain.example.' } }
@@ -101,8 +117,22 @@ function Connect-AVDTuneDirectory {
     if ($pin) {
         return [pscustomobject]@{ Status = 'Failed'; Message = "$Server answered over LDAPS before but not now ($($probe.Error)). AVDTune does not fall back to a weaker connection for a pinned domain controller." }
     }
-    # No LDAPS at all (and never seen with it): LDAP 389 with signing and sealing, still Negotiate
-    Open-AVDTuneConnection -Ldap $Ldap -Options (New-AVDTuneLdapOptions -Server $Server -Mode Signed) -User $User -Password $Password -Security 'LDAP 389 with Negotiate signing and sealing (no LDAPS available)' -Note "LDAPS 636 did not answer: $($probe.Error)"
+    # No LDAPS at all (and never seen with it): LDAP 389 only after the confirmation; Kerberos for a DNS name, Negotiate (NTLM) for an IP address
+    $ip = Test-AVDTuneIpAddress $Server
+    if (-not $ConfirmWithoutLdaps) {
+        return [pscustomobject]@{ Status = 'NeedsConfirmation'; Server = $Server; IsIp = $ip; Reason = [string]$probe.Error; Warning = (Get-AVDTuneLdapRiskText -Server $Server); Message = "LDAPS (636) on $Server does not answer ($($probe.Error)). Nothing was sent." }
+    }
+    $security = if ($ip) { 'LDAP 389 with Negotiate (NTLM) signing and sealing, no LDAPS, server not authenticated: confirmed by the administrator' } else { 'LDAP 389 with Kerberos signing and sealing (NTLM refused), no LDAPS: confirmed by the administrator' }
+    Open-AVDTuneConnection -Ldap $Ldap -Options (New-AVDTuneLdapOptions -Server $Server -Mode Signed -RiskConfirmed) -User $User -Password $Password -Security $security -Note "LDAPS 636 did not answer: $($probe.Error)"
+}
+
+function Get-AVDTuneLdapRiskText {
+    # The warning the window shows before LDAP 389 is used
+    param([Parameter(Mandatory)][string]$Server)
+    if (Test-AVDTuneIpAddress $Server) {
+        return "LDAPS (636) does not answer. Without LDAPS and with an IP address AVDTune can only sign in with NTLM over LDAP 389. NTLM does not prove that $Server is your domain controller: a machine in the network path can pass the login on to another server (relay) or record it and try to crack the password offline. Signing and sealing protect the content, not against this. Better: enable LDAPS on the domain controller, or enter its DNS name (then Kerberos is used). Continue only if the network path to $Server is trusted."
+    }
+    "LDAPS (636) does not answer. AVDTune would use LDAP 389 with Kerberos only (NTLM is refused): Kerberos proves the identity of the domain controller and signing and sealing protect the content, but there is no pinned certificate. Better: enable LDAPS on the domain controller. Continue only if this is expected."
 }
 
 function Open-AVDTuneConnection {
@@ -242,18 +272,30 @@ function New-AVDTuneLdapAdapter {
             if (-not $wait.AsyncWaitHandle.WaitOne(5000)) { return [pscustomobject]@{ Ok = $false; Error = 'timeout'; Certificate = $null } }
             $tcp.EndConnect($wait)
             $captured = $null
-            $callback = [System.Net.Security.RemoteCertificateValidationCallback] { param($s, $cert, $chain, $errors) $script:AVDTuneProbeCert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2 $cert; $true }
+            # The probe accepts every certificate (the pin is the trust), but keeps what Windows says about it: chain and name, shown on first contact
+            $callback = [System.Net.Security.RemoteCertificateValidationCallback] {
+                param($s, $cert, $chain, $errors)
+                $script:AVDTuneProbeCert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2 $cert
+                $script:AVDTuneProbeErrors = $errors
+                $script:AVDTuneProbeChain = @(if ($chain) { $chain.ChainStatus | ForEach-Object { [string]$_.Status } })
+                $true
+            }
             $ssl = New-Object System.Net.Security.SslStream($tcp.GetStream(), $false, $callback)
             $ssl.ReadTimeout = 5000; $ssl.WriteTimeout = 5000
-            $script:AVDTuneProbeCert = $null
+            $script:AVDTuneProbeCert = $null; $script:AVDTuneProbeErrors = 0; $script:AVDTuneProbeChain = @()
             try { $ssl.AuthenticateAsClient($Server) } finally { $ssl.Dispose() }
             $cert = $script:AVDTuneProbeCert
             if (-not $cert) { return [pscustomobject]@{ Ok = $false; Error = 'no certificate'; Certificate = $null } }
             $sha = [Security.Cryptography.SHA256]::Create()
             try { $hash = ($sha.ComputeHash($cert.RawData) | ForEach-Object { $_.ToString('X2') }) -join '' } finally { $sha.Dispose() }
+            $errors = [System.Net.Security.SslPolicyErrors]$script:AVDTuneProbeErrors
+            $chainOk = -not ($errors -band [System.Net.Security.SslPolicyErrors]::RemoteCertificateChainErrors)
+            $nameOk = -not ($errors -band [System.Net.Security.SslPolicyErrors]::RemoteCertificateNameMismatch)
+            $chainText = if ($chainOk) { 'trusted by this computer' } else { 'not trusted by this computer: ' + ((@($script:AVDTuneProbeChain) | Where-Object { $_ -and $_ -ne 'NoError' } | Select-Object -Unique) -join ', ') }
             [pscustomobject]@{ Ok = $true; Error = ''; Certificate = [pscustomobject]@{
                     Thumbprint = $cert.Thumbprint; Sha256 = $hash; Subject = $cert.Subject; Issuer = $cert.Issuer
-                    NotBefore = $cert.NotBefore.ToString('o'); NotAfter = $cert.NotAfter.ToString('o') } }
+                    NotBefore = $cert.NotBefore.ToString('o'); NotAfter = $cert.NotAfter.ToString('o')
+                    ChainOk = [bool]$chainOk; ChainStatus = $chainText; NameMatches = [bool]$nameOk } }
         }
         catch { [pscustomobject]@{ Ok = $false; Error = $_.Exception.Message; Certificate = $null } }
         finally { $tcp.Close() }
@@ -261,9 +303,11 @@ function New-AVDTuneLdapAdapter {
     $adapter.Open = {
         param($Options, $User, $Password)
         [void](Assert-AVDTuneLdapOptions $Options)
-        $id = New-Object System.DirectoryServices.Protocols.LdapDirectoryIdentifier($Options.Server, [int]$Options.Port, $false, $false)
+        # fullyQualifiedDnsHostName = $true: the name is used as given (no short-name lookup that another host could answer)
+        $id = New-Object System.DirectoryServices.Protocols.LdapDirectoryIdentifier($Options.Server, [int]$Options.Port, $true, $false)
         $cred = if ($User -match '^([^\\]+)\\(.+)$') { New-Object System.Net.NetworkCredential($Matches[2], $Password, $Matches[1]) } else { New-Object System.Net.NetworkCredential($User, $Password) }
-        $conn = New-Object System.DirectoryServices.Protocols.LdapConnection($id, $cred, [System.DirectoryServices.Protocols.AuthType]::Negotiate)
+        $authType = if ($Options.AuthType -eq 'Kerberos') { [System.DirectoryServices.Protocols.AuthType]::Kerberos } else { [System.DirectoryServices.Protocols.AuthType]::Negotiate }
+        $conn = New-Object System.DirectoryServices.Protocols.LdapConnection($id, $cred, $authType)
         $conn.SessionOptions.ProtocolVersion = 3
         $conn.SessionOptions.ReferralChasing = [System.DirectoryServices.Protocols.ReferralChasingOptions]::None
         $conn.Timeout = [TimeSpan]::FromSeconds(60)
@@ -316,5 +360,5 @@ function New-AVDTuneLdapAdapter {
 
 #endregion
 
-Export-ModuleMember -Function Test-AVDTuneDcServer, Test-AVDTuneDomainUser, New-AVDTuneLdapOptions, Assert-AVDTuneLdapOptions, ConvertTo-AVDTuneLdapFilterValue, Connect-AVDTuneDirectory,
+Export-ModuleMember -Function Test-AVDTuneIpAddress, Get-AVDTuneLdapRiskText, Test-AVDTuneDcServer, Test-AVDTuneDomainUser, New-AVDTuneLdapOptions, Assert-AVDTuneLdapOptions, ConvertTo-AVDTuneLdapFilterValue, Connect-AVDTuneDirectory,
     Disconnect-AVDTuneDirectory, Get-AVDTuneDirectoryInfo, Save-AVDTuneDirectoryInfo, ConvertTo-AVDTuneSid, Get-AVDTuneOuTree, Get-AVDTuneLevelName, New-AVDTuneLdapAdapter

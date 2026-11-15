@@ -140,7 +140,7 @@ function New-AVDTuneFakeLdap {
         [BitConverter]::GetBytes([uint32]333333333).CopyTo($bytes, 20); [BitConverter]::GetBytes($Rid).CopyTo($bytes, 24)
         , $bytes
     }
-    $cert = { param($n) @{ Sha256 = ('{0:X2}' -f $n) * 32; Thumbprint = ('{0:X2}' -f $n) * 20; Subject = 'CN=dc1.example.test'; Issuer = 'CN=Example Test CA'; NotBefore = '2026-01-01T00:00:00Z'; NotAfter = '2027-01-01T00:00:00Z' } }
+    $cert = { param($n) @{ Sha256 = ('{0:X2}' -f $n) * 32; Thumbprint = ('{0:X2}' -f $n) * 20; Subject = 'CN=dc1.example.test'; Issuer = 'CN=Example Test CA'; NotBefore = '2026-01-01T00:00:00Z'; NotAfter = '2027-01-01T00:00:00Z'; ChainOk = $true; ChainStatus = 'trusted by this computer'; NameMatches = $false } }
     $dn = 'DC=example,DC=test'
     $cfg = "CN=Configuration,$dn"
     $entry = { param($dnName, $attrs) $t = New-Object 'System.Collections.Hashtable' $attrs, ([StringComparer]::OrdinalIgnoreCase); [pscustomobject]@{ Dn = $dnName; Attributes = $t } }

@@ -348,6 +348,7 @@ function Show-DirectorySummary($Info, [string]$Security) {
 }
 function Format-Thumbprint([string]$Hex) { (($Hex -split '(?<=\G.{2})' | Where-Object { $_ }) -join ':') }
 function Invoke-DomainConnect {
+    param([switch]$ConfirmWithoutLdaps)
     $f = $script:Form
     if ($f.PasswordBox.SecurePassword.Length -eq 0) { Set-StageMessage 'Enter the password of the domain account.' 'error'; return }
     $e = Get-AVDTuneEnvironment $script:StateRoot
@@ -355,11 +356,25 @@ function Invoke-DomainConnect {
     $f.Secure = $f.PasswordBox.SecurePassword
     $ldap = Get-StartLdap
     $pins = Get-AVDTuneDcPins $e
-    $r = Invoke-Busy "Connecting to $server ..." { Connect-AVDTuneDirectory -Ldap $ldap -Server $server -User $user -Password $f.Secure -Pins $pins }
+    $r = Invoke-Busy "Connecting to $server ..." { Connect-AVDTuneDirectory -Ldap $ldap -Server $server -User $user -Password $f.Secure -Pins $pins -ConfirmWithoutLdaps:$ConfirmWithoutLdaps }
     switch ($r.Status) {
+        'NeedsConfirmation' {
+            # LDAPS does not answer: no bind until the administrator accepts the named risk; the acceptance goes into the protocol
+            Set-StageMessage ("$($r.Message)`n$($r.Warning)") 'warn'
+            Add-StartProtocol "Domain controller without LDAPS ($server)" "LDAPS 636 does not answer ($($r.Reason)); nothing sent, waiting for the confirmation" 'skipped'
+            $f.PendingServer = $server
+            $ui.BtnStageAction2.Content = 'I accept the risk: connect over LDAP 389'; $ui.BtnStageAction2.Visibility = 'Visible'
+            $script:StageAction2 = {
+                $srv = $script:Form.PendingServer
+                if (-not (Confirm-Action ((Get-AVDTuneLdapRiskText -Server $srv) + "`n`nConnect to $srv over LDAP 389 anyway?") 'Connect without LDAPS')) { return }
+                Add-StartProtocol "Domain controller without LDAPS confirmed ($srv)" ("Confirmed by $env:USERDOMAIN\$env:USERNAME" + $(if ($script:StartContext.Session -and $script:StartContext.Session.Account) { " (signed in as $($script:StartContext.Session.Account))" }) + ': ' + $(if (Test-AVDTuneIpAddress $srv) { 'NTLM over 389, server not authenticated' } else { 'Kerberos over 389, no certificate pin' }))
+                $ui.BtnStageAction2.Visibility = 'Collapsed'
+                Invoke-DomainConnect -ConfirmWithoutLdaps
+            }
+        }
         'NeedsPin' {
             $c = $r.Certificate
-            Set-StageMessage ("First contact with $server over LDAPS. Nothing was sent yet. Check that this is your domain controller's certificate:`nSubject: $($c.Subject)`nIssuer: $($c.Issuer)`nValid: $(([string]$c.NotBefore).Substring(0, [Math]::Min(10, ([string]$c.NotBefore).Length))) to $(([string]$c.NotAfter).Substring(0, [Math]::Min(10, ([string]$c.NotAfter).Length)))`nSHA-256: $(Format-Thumbprint ([string]$c.Sha256))`nSHA-1 thumbprint: $(Format-Thumbprint ([string]$c.Thumbprint))") 'warn'
+            Set-StageMessage ("First contact with $server over LDAPS. Nothing was sent yet. Check that this is your domain controller's certificate:`nSubject: $($c.Subject)`nIssuer: $($c.Issuer)`nValid: $(([string]$c.NotBefore).Substring(0, [Math]::Min(10, ([string]$c.NotBefore).Length))) to $(([string]$c.NotAfter).Substring(0, [Math]::Min(10, ([string]$c.NotAfter).Length)))`nSHA-256: $(Format-Thumbprint ([string]$c.Sha256))`nSHA-1 thumbprint: $(Format-Thumbprint ([string]$c.Thumbprint))`nChain (extra information, the pin is the trust): $(if ($c.PSObject.Properties['ChainStatus']) { $c.ChainStatus } else { 'unknown' })`nName: $(if ($c.PSObject.Properties['NameMatches']) { if ($c.NameMatches) { "matches $server" } else { "does not match $server" } } else { 'unknown' })") 'warn'
             $f.PendingCert = $c; $f.PendingServer = $server
             $ui.BtnStageAction.Content = 'Connect and read'
             $ui.BtnStageAction2.Content = 'Pin this certificate and continue'; $ui.BtnStageAction2.Visibility = 'Visible'
