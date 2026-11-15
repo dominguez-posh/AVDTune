@@ -79,6 +79,25 @@ Documentation: the wizard answers and every created or checked resource (resourc
 | Cleanup & seal | the last button of a version: a checklist that must be green (no pending reboot, update block on, FSLogix test passed, no AVD agent, no join, no tokens), then DISM component cleanup, temp/logs/caches, default profile check, AppX-per-user check (sysprep blocker), BitLocker off, tokens and sign-in caches of AVDTune removed, snapshot reminder, sysprep `/generalize /oobe /shutdown /mode:vm` as the interactive admin (never SYSTEM), typed confirmation |
 | Protocol & change log | session protocol like PackTune (ticket text), change log per image version (Version, date, category, component, change type, text) with automatic entries from every step and free notes, export HTML/Markdown, copy to the library folder `AVDTune/<image>` |
 
+## 3a. Web apps (PWA) as a fourth software source (added 2026-11-15)
+
+Software sources: winget, Chocolatey, custom applications (PackTune library) and web apps (PWA).
+
+Findings in the current script (`deploy-pwa-apps-goldenmaster.ps1` of a customer environment):
+- The value names of `WebAppInstallForceList` are written as `[string]1`, `[string]2` ... (PowerShell passes `-Name [string]$counter` as the text "[string]1"; checked). Edge reads a list policy only from values named 1, 2, 3, so most likely no web app was ever force-installed; the users get the shortcuts only.
+- The shortcuts start `msedge.exe --app=<url>`. Such a window is not the installed web app: the taskbar groups it by Edge's own identity, so the icon of the shortcut is not the icon of the running window and a pinned icon does not match the window. This is the icon problem.
+- The counter starts at 1 on every run and overwrites force-list entries made by other means.
+- `$fslogixRules` is used but never set (error at the first `Test-Path`); the FSLogix rules are made by hand afterwards.
+- `StartupBoostEnabled=1` and `BackgroundModeEnabled=1` keep an Edge process per user in the background: on a multi-session host this costs memory for every session and contradicts the browser optimization.
+- The icons are base64 inside the script (1.1 MB script).
+
+New:
+- A web app entry: name, start URL, optional manifest id, icon (upload `.ico`/`.png`/`.svg`; or read from the site's web manifest and pick the largest; AVDTune makes a multi-size `.ico` 16 to 256 px and shows it in taskbar size as a preview), window mode, shortcut on the public desktop and/or Start menu, optional App Masking group (section 5b; the rule is made with it).
+- Stored as a package of the kind `webapp` in the PackTune library (manifest with SHA256 like the other kinds; icon as file), so PackTune can later deploy the same web apps through Intune. The store format change is made in PackTune first, then synced.
+- Install: Edge policy `WebAppInstallForceList` with correct value names, merged with existing entries (AVDTune only touches the entries it owns, marked by URL). The shortcut starts the installed app the way Edge does (`msedge_proxy.exe --profile-directory=Default --app-id=<id>`) and carries the same AppUserModelID as the app window, so the taskbar shows the chosen icon for the shortcut, the pinned entry and the running window. The icon is also set for the installed app (policy option for a custom icon where Edge supports it, otherwise the app's own manifest icon and only the shortcut uses the custom icon). Sites that are not installable (no manifest) get an app window with its own AppUserModelID set on the shortcut.
+- The exact app id and AppUserModelID scheme of Edge and which policy options Edge honours (`custom_name`, `custom_icon`) are verified in a spike on a Windows 11 multi-session VM before the build: pinned icon, running window, Start menu, after a logon with FSLogix.
+- Migration: AVDTune reads the existing list (names, URLs, base64 icons) from such a script and offers to import it as web app entries.
+
 ## 4. Updates hidden for users, maintenance mode
 
 One switch with a clear state on the Overview. "Blocked" (normal state, also in the image):
@@ -193,7 +212,7 @@ Elevated tool on a machine that becomes the image of all users: runs from a prot
 | 1 | Shell in PackTune look, elevation, engine, state, protocol and change log, Overview; first-run question of the identity model (stored, used by the start sequence); start sequence: M365/Azure sign-in, DC connection and discovery when a DC is used, snapshot gate with name confirmation |
 | 2 | Updates page (Windows, Office, Edge/Teams/OneDrive/FSLogix/Defender, software) and update block with maintenance mode |
 | 3 | Environment wizard (identity model), FSLogix setup and function test, automatic storage setup (Premium account, share, private endpoint, identity, permissions), storage check; App Masking with groups in AD or Entra; SharePoint change log list; environment document |
-| 4 | Software from the library and catalog |
+| 4 | Software from the library and catalog, web apps (PWA) with icon (spike first) |
 | 5 | Benchmark: design for approval, then new engine incl. GPU, comparison per version, AVD-Benchmark repo stand-alone |
 | 6 | Setup: Office, language, VDI components, optimizations, user experience, watermark |
 | 7 | Cleanup & seal (last button, checklist), export, docs and demo |
