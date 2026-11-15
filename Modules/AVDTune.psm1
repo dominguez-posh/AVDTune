@@ -296,6 +296,19 @@ function New-AVDTuneMachine {
         }
         catch { $null }
     }
+    $m.FirmwareType = {
+        # 'UEFI' / 'BIOS' from kernel32 GetFirmwareType (FirmwareTypeBios = 1, FirmwareTypeUefi = 2); $null when it cannot be asked.
+        # (The registry value PEFirmwareType exists only in Windows PE, not on an installed Windows.)
+        try {
+            if (-not ('AVDTune.Native.Firmware' -as [type])) {
+                Add-Type -Namespace 'AVDTune.Native' -Name 'Firmware' -MemberDefinition '[System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true)] public static extern bool GetFirmwareType(out uint firmwareType);' -ErrorAction Stop
+            }
+            $type = [uint32]0
+            if (-not [AVDTune.Native.Firmware]::GetFirmwareType([ref]$type)) { return $null }
+            switch ($type) { 1 { 'BIOS' } 2 { 'UEFI' } default { $null } }
+        }
+        catch { $null }
+    }
     # Members of the watermark (docs\plans\avdtune.md, section 5): folders, files, ACL report and tasks with their definition
     $m.KnownFolder = {
         param($Name)

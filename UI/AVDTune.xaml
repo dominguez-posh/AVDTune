@@ -189,10 +189,11 @@
                                             </StackPanel>
                                             <StackPanel Orientation="Horizontal" Margin="0,14,0,0">
                                                 <TextBlock Text="Image definition" VerticalAlignment="Center" Margin="0,0,10,0"/>
-                                                <TextBox x:Name="TxtReadyGallery" Width="520" Margin="0,0,8,0" Padding="8,6" AutomationProperties.Name="Resource ID of the Azure Compute Gallery image definition"/>
-                                                <Button x:Name="BtnReadyGallery" Content="Save" AutomationProperties.Name="Save the image definition"/>
+                                                <ComboBox x:Name="CmbReadyGallery" Width="520" Margin="0,0,8,0" AutomationProperties.Name="Image definition in the Azure Compute Gallery"/>
+                                                <Button x:Name="BtnReadyGallery" Content="Use" Margin="0,0,8,0" AutomationProperties.Name="Use the chosen image definition"/>
+                                                <Button x:Name="BtnReadyGalleryClear" Content="Clear" Visibility="Collapsed" AutomationProperties.Name="Clear the chosen image definition"/>
                                             </StackPanel>
-                                            <TextBlock Style="{DynamicResource Hint}" Margin="0,4,0,0" TextWrapping="Wrap" Text="Resource ID of the gallery image definition the image is captured into (optional; read with the sign-in, read only). Without it, the VM's own gallery image is used when it has one."/>
+                                            <TextBlock x:Name="TxtReadyGalleryState" Style="{DynamicResource Hint}" Margin="0,4,0,0" TextWrapping="Wrap"/>
                                         </StackPanel>
                                     </Border>
                                 </StackPanel>

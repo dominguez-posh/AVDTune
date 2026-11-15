@@ -56,7 +56,7 @@ function Invoke-AVDTuneArm {
 function ConvertTo-AVDTuneArmPath([string]$Path) {
     # A nextLink is an absolute URL: only the ARM host is accepted, the host part is dropped
     if ($Path -like "$($script:ArmHost)/*") { return $Path.Substring($script:ArmHost.Length) }
-    if ($Path.StartsWith('/subscriptions/')) { return $Path }
+    if ($Path.StartsWith('/subscriptions/') -or $Path.StartsWith('/subscriptions?')) { return $Path }
     throw 'Azure returned a link to another host; it is not followed.'
 }
 
@@ -298,13 +298,15 @@ function Confirm-AVDTuneSnapshotGate {
 
 function New-AVDTuneArmAdapter {
     <#
-        The real ARM adapter: HTTPS to management.azure.com only (any other host or a path outside /subscriptions is refused), bearer token,
+        The real ARM adapter: HTTPS to management.azure.com only (any other host or a path outside /subscriptions/<id>/ is refused, except
+        GET /subscriptions?api-version=... for the list of subscriptions), bearer token,
         no redirects followed, never throws (Status 0 = no connection). Not used by the checks (they use the fake).
     #>
     $adapter = [ordered]@{ Kind = 'Real' }
     $adapter.Invoke = {
         param($Method, $Path, $Token, $Body)
-        if ($Path -notmatch '^/subscriptions/[0-9a-fA-F-]{36}/' -or $Path -match '\.\.' -or $Path -match '#' -or [regex]::Matches($Path, '\?').Count -gt 1 -or $Path -match '[\s\x00-\x1F]') { return [pscustomobject]@{ Status = 0; Body = $null; Error = 'Refused: not an ARM resource path.' } }
+        # A resource path of one subscription, or the list of the subscriptions (GET /subscriptions?api-version=..., readiness: gallery search)
+        if (($Path -notmatch '^/subscriptions/[0-9a-fA-F-]{36}/' -and -not ($Method -eq 'GET' -and $Path -match '^/subscriptions\?api-version=')) -or $Path -match '\.\.' -or $Path -match '#' -or [regex]::Matches($Path, '\?').Count -gt 1 -or $Path -match '[\s\x00-\x1F]') { return [pscustomobject]@{ Status = 0; Body = $null; Error = 'Refused: not an ARM resource path.' } }
         # .NET Framework 4.x may still offer TLS 1.0/1.1 by default: TLS 1.2 is asked for explicitly (added, never removed: TLS 1.3 stays when the system has it)
         [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
         try {
@@ -335,5 +337,5 @@ function New-AVDTuneArmAdapter {
 
 #endregion
 
-Export-ModuleMember -Function Get-AVDTuneSnapshotClockBuffer, Get-AVDTuneGateText, Invoke-AVDTuneArm, Get-AVDTuneVmIdentity, Get-AVDTuneDefaultSnapshotNamePattern, Test-AVDTuneSnapshotNamePattern, Get-AVDTuneSnapshotName, Get-AVDTuneOsDiskSnapshots, Start-AVDTuneSnapshot,
+Export-ModuleMember -Function Get-AVDTuneSnapshotClockBuffer, Get-AVDTuneGateText, Invoke-AVDTuneArm, ConvertTo-AVDTuneArmPath, Get-AVDTuneVmIdentity, Get-AVDTuneDefaultSnapshotNamePattern, Test-AVDTuneSnapshotNamePattern, Get-AVDTuneSnapshotName, Get-AVDTuneOsDiskSnapshots, Start-AVDTuneSnapshot,
     Get-AVDTuneSnapshotState, Wait-AVDTuneSnapshot, Test-AVDTuneConfirmationName, Get-AVDTuneGateStatus, Confirm-AVDTuneSnapshotGate, New-AVDTuneArmAdapter

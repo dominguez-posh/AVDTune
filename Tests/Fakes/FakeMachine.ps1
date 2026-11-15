@@ -4,7 +4,7 @@
 # Seed keys (all optional): Registry (hashtable 'path|name' -> value), Keys (array of registry keys that exist), Services (array of
 # @{ Name; Status; StartType }), Tasks (array of @{ Path; Name; Enabled }), Imds (object or $null), Native (hashtable 'file args' -> @{ ExitCode; Output }),
 # ComputerName, Now (datetime, fixed clock), and for the readiness analysis: Paths (array of existing paths), Dirs (hashtable folder -> names), Hotfixes (array of @{ Id; InstalledOn }),
-# NetAdapters (array of @{ Name; Description; Status }), Pnp (array of PnP instance IDs that are present), Arch ('AMD64' or 'ARM64'), Tpm ($true/$false/$null). A Native entry can carry Registry (hashtable) that is applied when the command runs. $m.Store.FailWrites = @('part of a key|name') makes RegSet throw for matching values (error path checks).
+# NetAdapters (array of @{ Name; Description; Status }), Pnp (array of PnP instance IDs that are present), Arch ('AMD64' or 'ARM64'), Tpm ($true/$false/$null), Firmware ('UEFI'/'BIOS'/$null, GetFirmwareType). A Native entry can carry Registry (hashtable) that is applied when the command runs. $m.Store.FailWrites = @('part of a key|name') makes RegSet throw for matching values (error path checks).
 
 function New-AVDTuneFakeMachine {
     param([hashtable]$Seed = @{})
@@ -13,6 +13,7 @@ function New-AVDTuneFakeMachine {
         ComputerName = $(if ($Seed.ComputerName) { $Seed.ComputerName } else { 'GM-TEST01' }); Now = $Seed.Now; Imds = $null; FailWrites = @()
         Paths = @(@($Seed.Paths) | Where-Object { $_ }); Dirs = $(if ($Seed.Dirs) { $Seed.Dirs } else { @{} }); Hotfixes = @(@($Seed.Hotfixes) | Where-Object { $_ }); NetAdapters = @(@($Seed.NetAdapters) | Where-Object { $_ })
         Files = @{}; Folders = @{}; Acl = $(if ($Seed.Acl) { $Seed.Acl } else { @{} }); Pnp = @(@($Seed.Pnp) | Where-Object { $_ }); Arch = $(if ($Seed.Arch) { $Seed.Arch } else { 'AMD64' }); Tpm = $(if ($Seed.ContainsKey('Tpm')) { $Seed.Tpm } else { $null })
+        Firmware = $(if ($Seed.ContainsKey('Firmware')) { $Seed.Firmware } else { $null })
     }
     $win = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion'
     $office = 'HKLM:\SOFTWARE\Microsoft\Office\ClickToRun\Configuration'
@@ -101,6 +102,7 @@ function New-AVDTuneFakeMachine {
     $m.PnpPresent = { param($Pattern) (@($store.Pnp | Where-Object { $_ -match $Pattern })).Count -gt 0 }.GetNewClosure()
     $m.OsArchitecture = { $store.Arch }.GetNewClosure()
     $m.TpmPresent = { $store.Tpm }.GetNewClosure()
+    $m.FirmwareType = { $store.Firmware }.GetNewClosure()
     $m.KnownFolder = {
         param($Name)
         switch ($Name) { 'ProgramFiles' { 'X:\Fake\Program Files' } 'CommonAppData' { 'X:\Fake\ProgramData' } 'System' { 'X:\Fake\Windows\System32' } default { throw "Unknown folder '$Name'." } }

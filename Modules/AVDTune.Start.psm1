@@ -2,7 +2,7 @@
     AVDTune start: the first-run questions (identity model) with environment.json, and the start sequence on the Overview.
 
     environment.json (C:\ProgramData\AVDTune\environment.json, next to state.json): the answers, the tenant and client ID of the app
-    registration, the snapshot name pattern, the domain controller (name, account name, pinned certificate thumbprints, summary of what was read). Never a secret:
+    registration, the snapshot name pattern, the chosen gallery image definition (readiness), the domain controller (name, account name, pinned certificate thumbprints, summary of what was read). Never a secret:
     only fields of the table below are written, text is cleaned, and no password, token or key has a field.
 
     Start sequence (docs\plans\avdtune.md 1a): Environment -> Sign-in -> Domain (only with a DC) -> Snapshot gate. Every stage has a status the
@@ -178,6 +178,7 @@ function Save-AVDTuneEnvironment {
         SignIn = [ordered]@{ TenantId = (& $clean $tenant 255).Trim(); ClientId = (& $clean $Answers.ClientId 36).Trim() }
         Snapshot = [ordered]@{ NamePattern = $(if ([string](Get-AVDTuneProp $Answers 'SnapshotNamePattern')) { (& $clean $Answers.SnapshotNamePattern 80).Trim() } else { Get-AVDTuneDefaultSnapshotNamePattern }) }
         Dc = $(if ($old -and (Get-AVDTuneProp $old 'Dc')) { Get-AVDTuneProp $old 'Dc' } else { [ordered]@{ Server = ''; User = ''; Pins = [ordered]@{}; Discovery = $null } })
+        Gallery = $(if ($old) { Get-AVDTuneProp $old 'Gallery' } else { $null })
         Updated = (Get-Date).ToString('o'); UpdatedBy = (& $clean $User 80)
     }
     Write-AVDTuneFile (Get-AVDTuneEnvironmentPath $Root) ($envObj | ConvertTo-Json -Depth 8)
@@ -233,7 +234,7 @@ function Set-AVDTuneDcPin {
 
 function Update-AVDTuneEnvironmentDc {
     param([string]$Root, $Environment, $Dc)
-    $copy = [ordered]@{ Schema = 1; Answers = $Environment.Answers; SignIn = $Environment.SignIn; Snapshot = (Get-AVDTuneProp $Environment 'Snapshot'); Dc = $Dc; Updated = (Get-Date).ToString('o'); UpdatedBy = [string](Get-AVDTuneProp $Environment 'UpdatedBy') }
+    $copy = [ordered]@{ Schema = 1; Answers = $Environment.Answers; SignIn = $Environment.SignIn; Snapshot = (Get-AVDTuneProp $Environment 'Snapshot'); Dc = $Dc; Gallery = (Get-AVDTuneProp $Environment 'Gallery'); Updated = (Get-Date).ToString('o'); UpdatedBy = [string](Get-AVDTuneProp $Environment 'UpdatedBy') }
     Write-AVDTuneFile (Get-AVDTuneEnvironmentPath $Root) ($copy | ConvertTo-Json -Depth 10)
 }
 
@@ -271,11 +272,42 @@ function Set-AVDTuneEnvironmentSignIn {
         if ($client -ne $oldClient) { $changes += "Client ID of AVDTune's own app registration saved: $(if ($oldClient) { "$oldClient -> " })$client" }
     }
     if ($changes.Count -eq 0) { return @() }
-    $copy = [ordered]@{ Schema = 1; Answers = $envObj.Answers; SignIn = [ordered]@{ TenantId = $tenant; ClientId = $client }; Snapshot = (Get-AVDTuneProp $envObj 'Snapshot'); Dc = (Get-AVDTuneProp $envObj 'Dc'); Updated = (Get-Date).ToString('o'); UpdatedBy = (Remove-AVDTuneControlCharacters $User 80) }
+    $copy = [ordered]@{ Schema = 1; Answers = $envObj.Answers; SignIn = [ordered]@{ TenantId = $tenant; ClientId = $client }; Snapshot = (Get-AVDTuneProp $envObj 'Snapshot'); Dc = (Get-AVDTuneProp $envObj 'Dc'); Gallery = (Get-AVDTuneProp $envObj 'Gallery'); Updated = (Get-Date).ToString('o'); UpdatedBy = (Remove-AVDTuneControlCharacters $User 80) }
     Write-AVDTuneFile (Get-AVDTuneEnvironmentPath $Root) ($copy | ConvertTo-Json -Depth 10)
     $version = [string](Get-AVDTuneState $Root).ImageVersion
     if ($version) { foreach ($c in $changes) { [void](Add-AVDTuneChangeLogEntry -Root $Root -Version $version -Category 'Setup' -Component 'Environment' -ChangeType Changed -Text $c -User $User -Source Note) } }
     @($changes)
+}
+
+$script:GalleryDefinitionPattern = '^/subscriptions/[0-9a-fA-F-]{36}/resourceGroups/[A-Za-z0-9._()-]+/providers/Microsoft\.Compute/galleries/[A-Za-z0-9._()-]+/images/[A-Za-z0-9._()-]+$'
+
+function Get-AVDTuneEnvironmentGallery {
+    # The chosen gallery image definition (environment.json Gallery.ImageDefinitionId), '' when none or not a definition ID
+    param($Environment)
+    $id = [string](Get-AVDTuneProp (Get-AVDTuneProp $Environment 'Gallery') 'ImageDefinitionId')
+    if ($id -match $script:GalleryDefinitionPattern) { $id } else { '' }
+}
+
+function Set-AVDTuneEnvironmentGallery {
+    <#
+        Saves the image definition the image is captured into (chosen on the Readiness card from the definitions the gallery search found), or clears it
+        with an empty -DefinitionId. Only a gallery image definition ID is accepted. A change goes into the change log (needs an image version) and is returned.
+    #>
+    param([string]$Root = (Get-AVDTuneRoot), [string]$DefinitionId, [string]$Label, [string]$User)
+    $envObj = Get-AVDTuneEnvironment $Root
+    if (-not $envObj) { throw 'Answer the first-run questions first.' }
+    $id = ([string]$DefinitionId).Trim()
+    if ($id -and $id -notmatch $script:GalleryDefinitionPattern) { throw 'That is not the Resource ID of a gallery image definition.' }
+    $old = Get-AVDTuneEnvironmentGallery $envObj
+    if ($old -ieq $id) { return '' }
+    $gallery = if ($id) { [ordered]@{ ImageDefinitionId = $id; Label = (Remove-AVDTuneControlCharacters $Label 200); ChosenBy = (Remove-AVDTuneControlCharacters $User 80); ChosenAt = (Get-Date).ToString('o') } } else { $null }
+    $copy = [ordered]@{ Schema = 1; Answers = $envObj.Answers; SignIn = (Get-AVDTuneProp $envObj 'SignIn'); Snapshot = (Get-AVDTuneProp $envObj 'Snapshot'); Dc = (Get-AVDTuneProp $envObj 'Dc'); Gallery = $gallery; Updated = (Get-Date).ToString('o'); UpdatedBy = (Remove-AVDTuneControlCharacters $User 80) }
+    Write-AVDTuneFile (Get-AVDTuneEnvironmentPath $Root) ($copy | ConvertTo-Json -Depth 10)
+    $short = { param($v) if ($v) { (($v -split '/')[-3]) + '/' + (($v -split '/')[-1]) } else { 'none' } }
+    $text = "Image definition for the readiness check: $(& $short $old) -> $(& $short $id)"
+    $version = [string](Get-AVDTuneState $Root).ImageVersion
+    if ($version) { [void](Add-AVDTuneChangeLogEntry -Root $Root -Version $version -Category 'Setup' -Component 'Environment' -ChangeType Changed -Text $text -User $User -Source Note) }
+    $text
 }
 
 #endregion
@@ -381,5 +413,5 @@ function Get-AVDTuneNextStage {
 #endregion
 
 Export-ModuleMember -Function Get-AVDTuneQuestions, Get-AVDTuneEnvironmentDefaults, Test-AVDTuneEnvironmentAnswers, Get-AVDTuneAzureFilesAuthChoices, Resolve-AVDTuneEnvironmentPlan,
-    Get-AVDTuneEnvironment, Get-AVDTuneEnvironmentAnswers, Save-AVDTuneEnvironment, Get-AVDTuneDcPins, Set-AVDTuneDcPin, Save-AVDTuneDcDiscovery, Set-AVDTuneEnvironmentSignIn, Invoke-AVDTuneStartSignIn,
+    Get-AVDTuneEnvironment, Get-AVDTuneEnvironmentAnswers, Save-AVDTuneEnvironment, Get-AVDTuneDcPins, Set-AVDTuneDcPin, Save-AVDTuneDcDiscovery, Set-AVDTuneEnvironmentSignIn, Get-AVDTuneEnvironmentGallery, Set-AVDTuneEnvironmentGallery, Invoke-AVDTuneStartSignIn,
     New-AVDTuneStartContext, Get-AVDTuneStartStages, Get-AVDTuneNextStage
