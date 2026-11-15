@@ -29,6 +29,8 @@ public sealed class Options
     public int Threads = Environment.ProcessorCount;
     public bool Sustained;
     public bool Quiet;
+    /// <summary>Work folder for the file measure (an existing folder; the program creates and removes its own sub folder).</summary>
+    public string? Dir;
 
     public static Options Parse(string[] args)
     {
@@ -44,6 +46,7 @@ public sealed class Options
                 case "--threads": o.Threads = int.Parse(Next(), System.Globalization.CultureInfo.InvariantCulture); break;
                 case "--sustained": o.Sustained = true; break;
                 case "--quiet": o.Quiet = true; break;
+                case "--dir": o.Dir = Next(); break;
                 default:
                     if (a.StartsWith("--")) throw new ArgumentException($"Unknown option {a}.");
                     if (o.Command != "") throw new ArgumentException($"Unexpected argument {a}.");

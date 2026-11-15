@@ -23,6 +23,7 @@ public static class TestMain
         Determinism(print);
         Workloads(print);
         Clips(print);
+        Files();
         OptionsAndJson();
         Console.WriteLine(_failed == 0 ? "ALL OK" : $"{_failed} FAILED");
         return _failed == 0 ? 0 : 1;
@@ -126,6 +127,22 @@ public static class TestMain
         Check("clips are deterministic (generated twice, same hash)", Display.ClipHash(d) == Display.ClipHash(Display.DesktopClip(320, 180, 6)) && Display.ClipHash(v) == Display.ClipHash(Display.VideoClip(320, 180, 6)));
         if (print) Console.WriteLine($"PIN desktopClip {Display.ClipHash(d).Substring(0, 16)} videoClip {Display.ClipHash(v).Substring(0, 16)}");
         Check("clips match their pinned hashes", Display.ClipHash(d).Substring(0, 16) == Pins.Data["desktopClip"] && Display.ClipHash(v).Substring(0, 16) == Pins.Data["videoClip"]);
+    }
+
+    private static void Files()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "avdtune-bench-test-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        try
+        {
+            var o = new Options { Dir = dir, DataScale = 0.02 };
+            var r = FilesBench.Run(o);
+            Check("files: a measure host.disk.smallfiles with a positive rate", r.Count == 1 && r[0].Id == "host.disk.smallfiles" && r[0].Status == "ok" && r[0].Value > 0, r.Count > 0 ? r[0].Reason : "");
+            Check("files: the work sub folder is removed afterwards", Directory.GetFileSystemEntries(dir).Length == 0);
+            Check("files: a missing work folder is a failed measure, not a crash", FilesBench.Run(new Options { Dir = Path.Combine(dir, "nope") })[0].Status == "failed");
+            Check("files: no work folder given is a failed measure", FilesBench.Run(new Options())[0].Status == "failed");
+        }
+        finally { Directory.Delete(dir, true); }
     }
 
     private static void OptionsAndJson()

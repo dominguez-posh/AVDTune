@@ -1,0 +1,36 @@
+{
+  "benchmarkVersion": "B1.0",
+  "reference": "references-B1.0",
+  "categories": {
+    "apps":    { "title": "Applications",   "weight": 30, "prefixes": ["host.app."],  "built": false },
+    "cpu":     { "title": "CPU",            "weight": 25, "prefixes": ["host.cpu."],  "built": true },
+    "osdisk":  { "title": "OS disk",        "weight": 20, "prefixes": ["host.disk."], "built": true },
+    "memory":  { "title": "Memory",         "weight": 10, "prefixes": ["host.mem."],  "built": true },
+    "display": { "title": "Remote display", "weight": 10, "prefixes": ["host.disp."], "built": true },
+    "network": { "title": "Network",        "weight": 5,  "prefixes": ["host.net."],  "built": true }
+  },
+  "run": { "runs": 3, "unstableCvPercent": 10, "deltaThresholdPercent": 10, "preconditions": { "minUptimeMinutes": 5, "maxCpuPercent": 10, "idleSecondsFull": 60, "idleSecondsQuick": 10, "minFreeGiB": 10, "updateWaitMinutes": 10 } },
+  "diskspd": {
+    "version": "2.3",
+    "url": "https://github.com/microsoft/diskspd/releases/download/v2.3/DiskSpd.ZIP",
+    "zipBytes": 3606329,
+    "zipSha256": "18609981e8b04b4f645f1fd182ad0541615fe71722de36a9a933c54f747218a3",
+    "exeInZip": "amd64/diskspd.exe",
+    "exeSha256": "dd4e57e1e8ccaf5d6437938f8aab7f17e9a1e6d8fba8a093006b7cadf16faea2",
+    "signerSubjectContains": "Microsoft",
+    "fileSizeGiB": 4,
+    "seconds": 12, "secondsShort": 5, "warmup": 3, "cooldown": 2,
+    "tests": [
+      { "key": "rr.qd1",  "args": "-b4K -r -o1 -t1 -w0 -d{d} -W3 -C2 -Sh -L -Z1M -Rxml",       "measures": [ { "id": "host.disk.rr.qd1.p50", "metric": "readLatencyP50", "unit": "ms", "better": "lower" }, { "id": "host.disk.rr.qd1.p99", "metric": "readLatencyP99", "unit": "ms", "better": "lower" } ] },
+      { "key": "rw.qd1",  "args": "-b4K -r -o1 -t1 -w100 -d{d} -W3 -C2 -Sh -L -Z1M -Rxml",     "measures": [ { "id": "host.disk.rw.qd1.p50", "metric": "writeLatencyP50", "unit": "ms", "better": "lower" }, { "id": "host.disk.rw.qd1.p99", "metric": "writeLatencyP99", "unit": "ms", "better": "lower" } ] },
+      { "key": "mix.qd32", "args": "-b4K -r -o8 -t4 -w30 -d{d} -W3 -C2 -Sh -L -Z1M -Rxml",     "measures": [ { "id": "host.disk.mix.qd32", "metric": "iops", "unit": "IOPS", "better": "higher" } ] },
+      { "key": "seq.read", "args": "-b1M -si -o8 -t1 -w0 -d{d} -W3 -C2 -Sh -Rxml",              "measures": [ { "id": "host.disk.seq.read", "metric": "readMiBps", "unit": "MiB/s", "better": "higher" } ] },
+      { "key": "seq.write", "args": "-b1M -si -o8 -t1 -w100 -d{d} -W3 -C2 -Sh -Z1M -Rxml",     "measures": [ { "id": "host.disk.seq.write", "metric": "writeMiBps", "unit": "MiB/s", "better": "higher" } ] }
+    ]
+  },
+  "network": {
+    "dnsNames": ["rdweb.wvd.microsoft.com", "rdbroker.wvd.microsoft.com", "rdgateway.wvd.microsoft.com", "login.microsoftonline.com"],
+    "dnsRepeats": 10, "tcpPort": 443, "tcpRepeats": 20, "tcpIntervalMs": 200, "tcpTimeoutMs": 3000,
+    "download": { "url": "https://download.microsoft.com/download/ae6d2014-e692-45fa-a88b-ee552567cdc1/FSLogix_26.08.zip", "bytes": 119201073, "streams": 4, "seconds": 30 }
+  }
+}

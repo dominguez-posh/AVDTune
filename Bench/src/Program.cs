@@ -13,6 +13,7 @@ Commands:
   cpu     CPU mix single/multi thread, sustained (with --sustained), AES, SHA
   mem     memory bandwidth, latency, allocation
   disp    remote display: software H.264 (two clips), WARP 3D, WARP 2D
+  files   small-file test (create, read, delete 5000 files) in --dir, through the normal Windows cache
   info    system facts (CPU model, cores, RAM)
   all     cpu + mem + disp
 Options:
@@ -20,6 +21,7 @@ Options:
   --data-scale <f>  scale data sizes (default 1; for tests)
   --threads <n>     threads for the multi-thread measures (default: logical processors)
   --sustained       also run the 60 s sustained CPU measure
+  --dir <folder>    work folder for files (must exist; own sub folder is made and removed)
   --quiet           no progress on stderr
 Result: one JSON document on stdout, progress on stderr. Exit code 0 when it ran, 2 on a usage error, 1 on an error.";
 
@@ -42,6 +44,7 @@ Result: one JSON document on stdout, progress on stderr. Exit code 0 when it ran
                 case "mem": measures.AddRange(MemoryBench.Run(o)); break;
                 case "disp": measures.AddRange(Display.Run(o)); break;
                 case "all": measures.AddRange(Cpu.Run(o)); measures.AddRange(MemoryBench.Run(o)); measures.AddRange(Display.Run(o)); break;
+                case "files": measures.AddRange(FilesBench.Run(o)); break;
                 case "info": break;
                 default: Console.Error.WriteLine($"Unknown command '{o.Command}'."); Console.Error.WriteLine(Usage); return 2;
             }
