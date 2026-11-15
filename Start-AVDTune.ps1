@@ -189,7 +189,7 @@ foreach ($page in $script:PageTable) {
 
 function Show-Page([string]$Key) {
     $script:CurrentPage = $Key
-    $isPlaceholder = $Key -notin 'Overview', 'Protocol', 'Updates', 'UpdateBlock', 'UserExperience', 'Benchmark'
+    $isPlaceholder = $Key -notin 'Overview', 'Protocol', 'Updates', 'UpdateBlock', 'UserExperience', 'Benchmark', 'FSLogix'
     $ui.PageOverview.Visibility = ConvertTo-Vis ($Key -eq 'Overview')
     $ui.PageProtocol.Visibility = ConvertTo-Vis ($Key -eq 'Protocol')
     $ui.PageUpdates.Visibility = ConvertTo-Vis ($Key -eq 'Updates')

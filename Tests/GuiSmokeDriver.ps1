@@ -142,7 +142,7 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         $keepWidth = $window.Width
         foreach ($width in 1280, 960) {
             $window.Width = $width
-            foreach ($head in @(@('Overview', 'TxtOverviewSubtitle', 'PanelOverviewHead'), @('Updates', 'TxtUpdSubtitle', 'PanelUpdHead'), @('UpdateBlock', 'TxtBlockSubtitle', 'PanelBlockHead'), @('UserExperience', 'FSLogix', 'TxtUxSubtitle', 'PanelUxHead'), @('Protocol', 'TxtProtocolSubtitle', 'PanelProtocolHead'), @('FSLogix', 'TxtFslSubtitle', 'PanelFslHead'))) {
+            foreach ($head in @(@('Overview', 'TxtOverviewSubtitle', 'PanelOverviewHead'), @('Updates', 'TxtUpdSubtitle', 'PanelUpdHead'), @('UpdateBlock', 'TxtBlockSubtitle', 'PanelBlockHead'), @('UserExperience', 'FSLogix', 'TxtUxSubtitle', 'PanelUxHead'), @('UserExperience', 'TxtUxSubtitle', 'PanelUxHead'), @('Protocol', 'TxtProtocolSubtitle', 'PanelProtocolHead'), @('FSLogix', 'TxtFslSubtitle', 'PanelFslHead'))) {
                 Show-Page $head[0]; $window.UpdateLayout()
                 Test-Smoke "page $($head[0]) at $width px: the intro text does not run under the buttons" (Test-HeadClear $ui[$head[1]] $ui[$head[2]]) "$(Get-SmokeBounds $ui[$head[1]]) / $(Get-SmokeBounds $ui[$head[2]])"
             }
