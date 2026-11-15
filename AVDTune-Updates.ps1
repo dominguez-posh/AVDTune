@@ -101,7 +101,7 @@ function Complete-UpdJob {
             }
             Update-UpdatesView; Start-OverviewRefresh; Update-UpdateBlockView
             # the list is stale after a run: search again
-            if (-not $script:UpdJob) { Start-UpdJob 'Scan' $null }
+            if (-not $script:UpdJob -and -not $script:CloseWhenDone) { Start-UpdJob 'Scan' $null }
         }
         'Repair-*' {
             if ($err) { Show-Error $err } elseif ($result) { Register-StepResult $result; Show-Toast "$($result.Title): $($result.Status). $($result.Message)"; $ui.TxtUpdState.Text = "$($result.Title): $($result.Status). $($result.Message)" }
@@ -117,6 +117,10 @@ function Complete-UpdJob {
             }
             Update-UpdateBlockView; Start-OverviewRefresh
         }
+    }
+    # the window was closed during the operation (Add_Closing in Start-AVDTune.ps1): close it now, unless it failed and the message has to be read
+    if ($script:CloseWhenDone -and -not $script:UpdJob) {
+        if ($err) { $script:CloseWhenDone = $false; Show-Error "Not closed because the operation failed: $err" } else { $window.Close() }
     }
 }
 $script:Timer.Add_Tick({ try { Complete-UpdJob } catch { Show-Error $_.Exception.Message } })

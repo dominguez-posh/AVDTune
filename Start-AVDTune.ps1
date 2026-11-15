@@ -430,6 +430,18 @@ Add-Click $ui.BtnMinimize { $window.WindowState = 'Minimized' }
 Add-Click $ui.BtnMaximize { $window.WindowState = if ($window.WindowState -eq 'Maximized') { 'Normal' } else { 'Maximized' } }
 Add-Click $ui.BtnClose { $window.Close() }
 
+# Closing during an update operation would end the process in the middle of it: the finally block of the maintenance mode would not run and the
+# update block would stay lifted. So the window stays open; it closes by itself when the operation is done (Complete-UpdJob).
+$script:CloseWhenDone = $false
+$window.Add_Closing({
+    param($src, $e)
+    if (-not $script:UpdJob) { return }
+    $e.Cancel = $true
+    $script:CloseWhenDone = $true
+    $what = if ($script:UpdJob.Kind -eq 'Scan') { 'The update search is still running' } else { 'An update operation is still running' }
+    Show-Toast "$what. AVDTune closes by itself when it is done (the update block is restored first)."
+})
+
 $window.Add_Closed({
     $script:Timer.Stop()
     try { $script:SnapTimer.Stop() } catch { }

@@ -298,6 +298,10 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
             Show-Page 'Updates'; $window.UpdateLayout()
             Test-Smoke 'Updates page: own page (no placeholder), buttons, empty list hint' ($ui.PageUpdates.Visibility -eq 'Visible' -and $ui.PagePlaceholder.Visibility -eq 'Collapsed' -and $ui.TxtUpdState.Text -like 'Nothing searched*') $ui.TxtUpdState.Text
             $ui.BtnUpdScan.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
+            # closing while an operation runs would end the process before the maintenance mode restores the block: the window stays open
+            $window.Close()
+            Test-Smoke 'closing during an update operation is refused with a hint, the window closes after it' ($window.IsVisible -and $script:UpdJob -and $script:CloseWhenDone -and $script:LastToast -like '*closes by itself when it is done*') $script:LastToast
+            $script:CloseWhenDone = $false   # the smoke goes on
             return $false
         }
         if ($script:UpdJob) { return $false }
@@ -377,7 +381,28 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         Close-Stage
         $ui.BtnTheme.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
         $true } }
+    @{ Name = 'close after the operation'; Do = {
+        # last step: closing during a search is held back and the window closes by itself when the search is done (the Closed handler below records it)
+        if (-not $script:CloseStepStarted) {
+            $script:CloseStepStarted = Get-Date
+            Show-Page 'Updates'
+            Start-UpdJob 'Scan' $null
+            $window.Close()
+            Test-Smoke 'closing during the search is held back' ($window.IsVisible -and $script:CloseWhenDone) $null
+            $script:SmokeAwaitAutoClose = $true
+            $script:SmokeResults | Set-Content (Join-Path $script:SmokeOut 'results.txt')
+            return $false
+        }
+        if (((Get-Date) - $script:CloseStepStarted).TotalSeconds -lt 60) { return $false }
+        $script:SmokeAwaitAutoClose = $false; $script:CloseWhenDone = $false
+        Test-Smoke 'the window closes by itself after the operation' $false 'still open after 60 s'
+        $true } }
 )
+$window.Add_Closed({
+    if (-not $script:SmokeAwaitAutoClose) { return }
+    Test-Smoke 'the window closes by itself after the operation' (-not $script:UpdJob) $null
+    $script:SmokeResults | Set-Content (Join-Path $script:SmokeOut 'results.txt')
+})
 
 $script:SmokeTimer = New-Object System.Windows.Threading.DispatcherTimer
 $script:SmokeTimer.Interval = [TimeSpan]::FromMilliseconds(400)
