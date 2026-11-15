@@ -152,6 +152,16 @@ function Get-AVDTuneFinishCrash {
     if ($r -and (Get-AVDTuneProp $r 'Active')) { $r } else { $null }
 }
 
+function Get-AVDTuneFinishConfirmText {
+    <# The text of the confirmation dialog: the version, when the healthcheck ran, and that changes made outside AVDTune are not seen by the gate. #>
+    param([string]$Root = (Get-AVDTuneRoot))
+    $state = Get-AVDTuneState $Root
+    $rec = Get-AVDTuneReadinessRecord -Root $Root
+    $when = 'at an unknown time'
+    if ($rec -and $rec.At) { try { $when = 'on ' + (ConvertTo-AVDTuneFinishDate $rec.At).ToString('yyyy-MM-dd HH:mm') } catch { } }
+    "Finish image version $([string]$state.ImageVersion)?`nThe last healthcheck ran $when. Changes made outside AVDTune (for example in a Bastion session, the Defender portal or by a script) are NOT detected: if you changed something there since, cancel and run the healthcheck again.`nAVDTune cleans up, puts the update block in its end state, removes every token and closes the version. You are signed out of Microsoft in AVDTune afterwards."
+}
+
 function Save-AVDTuneFinishRecord {
     param([string]$Root, $Record, [hashtable]$Extra = @{})
     $values = @{ Finish = $Record }
@@ -469,4 +479,4 @@ function Invoke-AVDTuneFinish {
 #endregion
 
 Export-ModuleMember -Function New-AVDTuneFinishAdapter, Clear-AVDTuneFolderContents, Find-AVDTuneTokenFiles, Test-AVDTuneNoLinkChain, Get-AVDTuneFinishRecord, Get-AVDTuneFinishCrash,
-    Start-AVDTuneFinishLift, Restore-AVDTuneFinishLift, Repair-AVDTuneFinishCrash, Test-AVDTuneFinishGate, Get-AVDTuneFinishSteps, Invoke-AVDTuneFinish
+    Start-AVDTuneFinishLift, Restore-AVDTuneFinishLift, Get-AVDTuneFinishConfirmText, Repair-AVDTuneFinishCrash, Test-AVDTuneFinishGate, Get-AVDTuneFinishSteps, Invoke-AVDTuneFinish

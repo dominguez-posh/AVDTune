@@ -97,7 +97,7 @@ $script:Timer.Add_Tick({ try { Complete-SealJob } catch { Show-Error $_.Exceptio
 Add-Click $ui.BtnSealRun {
     $gate = Test-AVDTuneFinishGate -Root $script:StateRoot
     if (-not $gate.Allowed) { Update-SealView; throw "The finish is not allowed: $(@($gate.Reasons) -join ' ')" }
-    if (-not (Confirm-Action "Finish image version $($gate.Version)?`nAVDTune cleans up, puts the update block in its end state, removes every token and closes the version. You are signed out of Microsoft in AVDTune afterwards." 'Finish')) { return }
+    if (-not (Confirm-Action (Get-AVDTuneFinishConfirmText -Root $script:StateRoot) 'Finish')) { return }
     Start-SealJob
 }
 Add-Click $ui.BtnSealRepair {

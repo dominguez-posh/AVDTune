@@ -111,6 +111,13 @@ try {
     $s.Versions[0].Started = (Get-Date).AddHours(1).ToString('o'); Write-AVDTuneFile (Join-Path $old 'state.json') ($s | ConvertTo-Json -Depth 6)
     Test-Check 'gate: a healthcheck from before the version was started blocks' ((Test-AVDTuneFinishGate -Root $old).Reasons -join ' ' -like '*from before image version*') ((Test-AVDTuneFinishGate -Root $old).Reasons -join '|')
 
+    # ---------------------------------------------------------------- confirmation text
+    $ct = Get-AVDTuneFinishConfirmText -Root $root
+    $when = (ConvertTo-Json (Get-AVDTuneReadinessRecord -Root $root).At)
+    Test-Check 'confirmation text: names the version, when the healthcheck ran, and that changes outside AVDTune are not detected' ($ct -like "*$((Get-AVDTuneState $root).ImageVersion)*" -and $ct -match 'healthcheck ran on \d{4}-\d{2}-\d{2} \d{2}:\d{2}' -and $ct -like '*outside AVDTune*Bastion*NOT detected*') $ct
+    $noRec = New-Root
+    Test-Check 'confirmation text without a healthcheck record still warns' ((Get-AVDTuneFinishConfirmText -Root $noRec) -like '*unknown time*NOT detected*') $null
+    Test-Check 'the Finish button asks with exactly this text (page script)' (([IO.File]::ReadAllText((Join-Path $repo 'AVDTune-Seal.ps1'))) -match 'Confirm-Action \(Get-AVDTuneFinishConfirmText') $null
     # ---------------------------------------------------------------- dry run
     $dry = Invoke-AVDTuneFinish -Machine $m -Fin $f -Root $root -WhatIf
     Test-Check 'dry run lists the steps and writes nothing' ($dry.WhatIf -and @($dry.Results).Count -eq 7 -and @($dry.Results | Where-Object { $_.Status -notin 'WhatIf', 'Unchanged' }).Count -eq 0 -and $m.Log.Count -eq 0 -and -not ($f.Log -like 'ClearFolder*') -and -not ($f.Log -like 'RemoveFolder*') -and $null -eq (Get-AVDTuneFinishRecord $root)) ((@($dry.Results | ForEach-Object Status)) -join ',')
