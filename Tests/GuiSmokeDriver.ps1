@@ -79,7 +79,7 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         foreach ($page in $script:PageTable) {
             Show-Page $page.Key
             $window.UpdateLayout()
-            $placeholder = $page.Key -notin 'Overview', 'Protocol', 'Updates', 'UpdateBlock'
+            $placeholder = $page.Key -notin 'Overview', 'Protocol', 'Updates', 'UpdateBlock', 'UserExperience'
             $ok = ($script:CurrentPage -eq $page.Key -and $ui["Nav$($page.Key)"].IsChecked -and $ui.PagePlaceholder.Visibility -eq (ConvertTo-Vis $placeholder))
             if ($placeholder) { $ok = $ok -and $ui.TxtPhTitle.Text -eq $page.Title -and $ui.TxtPhPhase.Text -eq "Planned for phase $($page.Phase)" -and $ui.TxtPhText.Text.Length -gt 40 }
             Test-Smoke "page $($page.Key) shows" $ok $null
@@ -89,7 +89,7 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         $keepWidth = $window.Width
         foreach ($width in 1280, 960) {
             $window.Width = $width
-            foreach ($head in @(@('Overview', 'TxtOverviewSubtitle', 'PanelOverviewHead'), @('Updates', 'TxtUpdSubtitle', 'PanelUpdHead'), @('UpdateBlock', 'TxtBlockSubtitle', 'PanelBlockHead'), @('Protocol', 'TxtProtocolSubtitle', 'PanelProtocolHead'))) {
+            foreach ($head in @(@('Overview', 'TxtOverviewSubtitle', 'PanelOverviewHead'), @('Updates', 'TxtUpdSubtitle', 'PanelUpdHead'), @('UpdateBlock', 'TxtBlockSubtitle', 'PanelBlockHead'), @('UserExperience', 'TxtUxSubtitle', 'PanelUxHead'), @('Protocol', 'TxtProtocolSubtitle', 'PanelProtocolHead'))) {
                 Show-Page $head[0]; $window.UpdateLayout()
                 Test-Smoke "page $($head[0]) at $width px: the intro text does not run under the buttons" (Test-HeadClear $ui[$head[1]] $ui[$head[2]]) "$(Get-SmokeBounds $ui[$head[1]]) / $(Get-SmokeBounds $ui[$head[2]])"
             }
@@ -364,6 +364,53 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
             return $false
         }
         Test-Smoke 'repair from the page: block back, no record Active, change log entry' ($ui.TxtBlockPill.Text -eq 'Blocked' -and -not (Get-AVDTuneMaintenanceCrash -Root $script:StateRoot) -and @(Get-AVDTuneChangeLog -Root $script:StateRoot | Where-Object { $_.Text -like '*did not end properly*' }).Count -eq 1) $ui.TxtBlockPill.Text
+        $true } }
+    @{ Name = 'watermark page'; Do = {
+        if ($script:OverviewJob -or $script:ReadyJob) { return $false }   # the fake machine is not thread safe
+        $click = { param($b) $b.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent))) }
+        $keepName = & $script:Machine.ComputerName
+        Show-Page 'UserExperience'; $window.UpdateLayout()
+        Test-Smoke 'User experience page: own page, not installed, defaults in the form, name preview says no for this host' ($ui.PageUserExperience.Visibility -eq 'Visible' -and $ui.PagePlaceholder.Visibility -eq 'Collapsed' -and $ui.TxtWmPill.Text -eq 'Not installed' -and $ui.TxtWmPattern.Text -eq '^avd-pilot-' -and $ui.TxtWmText.Text -eq 'PILOTUMGEBUNG' -and $ui.TxtWmMatch.Text -like '*would show the watermark: no*') "$($ui.TxtWmPill.Text) / $($ui.TxtWmMatch.Text)"
+        $ui.TxtWmTryName.Text = 'avd-pilot-04'; $window.UpdateLayout()
+        Test-Smoke 'a name to try: the preview says yes for it' ($ui.TxtWmMatch.Text -like "*'avd-pilot-04': yes*") $ui.TxtWmMatch.Text
+        $ui.TxtWmPattern.Text = '('; $window.UpdateLayout()
+        Test-Smoke 'an invalid pattern: the reason is shown and Save is off' ($ui.TxtWmErrors.Text -like '*regular expression*' -and -not $ui.BtnWmSave.IsEnabled -and $ui.TxtWmMatch.Text -like 'Not a valid*') $ui.TxtWmErrors.Text
+        $ui.TxtWmPattern.Text = '^avd-pilot-'; $ui.TxtWmOpacity.Text = '5'; $window.UpdateLayout()
+        Test-Smoke 'opacity out of range: the reason is shown' ($ui.TxtWmErrors.Text -like '*opacity*10 to 100*') $ui.TxtWmErrors.Text
+        $ui.TxtWmOpacity.Text = '60'
+        $ui.CmbWmCorner.SelectedItem = 'TopLeft'; $window.UpdateLayout()
+        $left = [System.Windows.Controls.Canvas]::GetLeft($ui.TxtWmPreview); $top = [System.Windows.Controls.Canvas]::GetTop($ui.TxtWmPreview)
+        Test-Smoke 'preview: the label moves to the chosen corner (top left, 16 px at 30 percent)' ($left -eq 8 -and $top -eq 8 -and $ui.TxtWmErrors.Text -eq '') "$left,$top"
+        $ui.CmbWmCorner.SelectedItem = 'BottomRight'; $ui.TxtWmColor.Text = '#C62828'; $window.UpdateLayout()
+        $left = [System.Windows.Controls.Canvas]::GetLeft($ui.TxtWmPreview); $top = [System.Windows.Controls.Canvas]::GetTop($ui.TxtWmPreview)
+        Test-Smoke 'preview: bottom right sits inside the work area above the taskbar strip' (($left + $ui.TxtWmPreview.DesiredSize.Width) -le 480 -and ($top + $ui.TxtWmPreview.DesiredSize.Height) -le (270 - 20) -and $left -gt 240 -and $top -gt 130) "$left,$top"
+        & $click $ui.BtnWmSave
+        $saved = Read-AVDTuneJson (Join-Path $script:StateRoot 'config\watermark.json')
+        Test-Smoke 'Save writes config\watermark.json of the state folder' ($saved.Color -eq '#C62828' -and $saved.Corner -eq 'BottomRight') $null
+        $script:Machine.Store.ComputerName = 'AVD-PILOT-02'
+        Update-WatermarkView; $ui.TxtWmTryName.Text = 'AVD-PILOT-02'; $window.UpdateLayout()
+        Test-Smoke 'a host that matches: the page says the watermark would appear here' ($ui.TxtWmHost.Text -like '*would appear here: yes*') $ui.TxtWmHost.Text
+        # an old overlay on the master
+        $script:Machine.Store.Tasks['\pilotoverlay'] = [pscustomobject]@{ Path = '\'; Name = 'PilotOverlay'; Enabled = $true; Xml = '<Task xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task"><Triggers><LogonTrigger/></Triggers><Principals><Principal><GroupId>S-1-5-32-545</GroupId></Principal></Principals><Actions><Exec><Command>wscript.exe</Command><Arguments>x</Arguments></Exec></Actions></Task>' }
+        & $script:Machine.FileWrite 'X:\Fake\ProgramData\PilotOverlayLauncher.vbs' 'old' 'Admin'
+        Update-WatermarkView; $window.UpdateLayout()
+        Test-Smoke 'old overlay found: warning card with the task and the launcher, items marked Found' ($ui.BoxWmLegacy.Visibility -eq 'Visible' -and $ui.TxtWmLegacy.Text -like '*PilotOverlay*PilotOverlayLauncher.vbs*' -and (Find-Text $ui.PanelWmItems 'Found')) $ui.TxtWmLegacy.Text
+        Save-SmokeShot '40-watermark-settings'
+        $script:ConfirmAsked = ''
+        & $click $ui.BtnWmInstall
+        $st = Get-AVDTuneWatermarkStatus -Machine $script:Machine -Root $script:StateRoot -SourceRoot $script:WmSourceRoot
+        Test-Smoke 'Install asks first, then installs: pill Installed, task and files on the (fake) master, old overlay untouched' ($script:ConfirmAsked -like 'Install the watermark*old overlay is not touched*' -and $ui.TxtWmPill.Text -eq 'Installed' -and $st.State -eq 'Installed' -and $st.Legacy.Present) "$($ui.TxtWmPill.Text) / $script:ConfirmAsked"
+        Test-Smoke 'Install: change log entry and state' (@(Get-AVDTuneChangeLog -Root $script:StateRoot | Where-Object { $_.Component -eq 'Watermark' -and $_.ChangeType -eq 'Added' }).Count -eq 1 -and (Get-AVDTuneProp (Get-AVDTuneState $script:StateRoot) 'Watermark') -eq 'Installed') $null
+        Test-Smoke 'nothing under C:\ProgramData\AVDTune was written by the fake machine' (-not (@($script:Machine.Log | Where-Object { $_ -match 'ProgramData\\AVDTune[\\ ]' }).Count)) $null
+        $script:ConfirmAsked = ''
+        & $click $ui.BtnWmLegacy
+        Test-Smoke 'Remove the old overlay asks first and removes task and launcher' ($script:ConfirmAsked -like 'Remove the old overlay*' -and $ui.BoxWmLegacy.Visibility -eq 'Collapsed' -and -not (& $script:Machine.TaskDetail '\' 'PilotOverlay')) $script:ConfirmAsked
+        Save-SmokeShot '41-watermark-installed'
+        $script:ConfirmAsked = ''
+        & $click $ui.BtnWmRemove
+        Test-Smoke 'Remove asks first and takes everything away again' ($script:ConfirmAsked -like 'Remove the watermark*' -and $ui.TxtWmPill.Text -eq 'Not installed' -and -not (& $script:Machine.TaskDetail '\' 'AVDTune Watermark')) $ui.TxtWmPill.Text
+        $script:Machine.Store.ComputerName = $keepName
+        Show-Page 'Overview'
         $true } }
     @{ Name = 'overview shows the block'; Do = {
         if (-not $script:OvStep) { $script:OvStep = 1; Show-Page 'Overview'; Start-OverviewRefresh; return $false }

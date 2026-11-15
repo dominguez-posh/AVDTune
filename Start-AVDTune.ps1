@@ -26,7 +26,7 @@ Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, Sys
 $script:AppRoot = $PSScriptRoot
 $script:ToolVersion = '0.1.0'
 Import-Module (Join-Path $PSScriptRoot 'Modules\AVDTune.psm1') -Force
-foreach ($part in 'Trust', 'Session', 'Snapshot', 'Directory', 'Start', 'UpdateBlock', 'Updates', 'Readiness') { Import-Module (Join-Path $PSScriptRoot "Modules\AVDTune.$part.psm1") -Force }
+foreach ($part in 'Trust', 'Session', 'Snapshot', 'Directory', 'Start', 'UpdateBlock', 'Updates', 'Readiness', 'Watermark') { Import-Module (Join-Path $PSScriptRoot "Modules\AVDTune.$part.psm1") -Force }
 . (Join-Path $PSScriptRoot 'AVDTune-Theme.ps1')
 
 # ---------------------------------------------------------------- test mode, elevation, one instance
@@ -187,11 +187,12 @@ foreach ($page in $script:PageTable) {
 
 function Show-Page([string]$Key) {
     $script:CurrentPage = $Key
-    $isPlaceholder = $Key -notin 'Overview', 'Protocol', 'Updates', 'UpdateBlock'
+    $isPlaceholder = $Key -notin 'Overview', 'Protocol', 'Updates', 'UpdateBlock', 'UserExperience'
     $ui.PageOverview.Visibility = ConvertTo-Vis ($Key -eq 'Overview')
     $ui.PageProtocol.Visibility = ConvertTo-Vis ($Key -eq 'Protocol')
     $ui.PageUpdates.Visibility = ConvertTo-Vis ($Key -eq 'Updates')
     $ui.PageUpdateBlock.Visibility = ConvertTo-Vis ($Key -eq 'UpdateBlock')
+    $ui.PageUserExperience.Visibility = ConvertTo-Vis ($Key -eq 'UserExperience')
     $ui.PagePlaceholder.Visibility = ConvertTo-Vis $isPlaceholder
     $ui["Nav$Key"].IsChecked = $true
     Update-ReadOnlyBanner
@@ -205,6 +206,7 @@ function Show-Page([string]$Key) {
     elseif ($Key -eq 'Protocol') { Update-ProtocolView }
     elseif ($Key -eq 'Updates') { Update-UpdatesView }
     elseif ($Key -eq 'UpdateBlock') { Update-UpdateBlockView }
+    elseif ($Key -eq 'UserExperience') { Update-WatermarkView }
 }
 
 # ---------------------------------------------------------------- Overview
@@ -417,6 +419,7 @@ Add-Click $ui.BtnProtocolCopy {
 . (Join-Path $PSScriptRoot 'AVDTune-Updates.ps1')
 $script:ReadyFakeArm = $(if ($script:TestMode) { $script:Services.Arm } else { $null })
 . (Join-Path $PSScriptRoot 'AVDTune-Readiness.ps1')
+. (Join-Path $PSScriptRoot 'AVDTune-UserExperience.ps1')
 
 # ---------------------------------------------------------------- theme switch
 function Update-ThemeButton { $ui.BtnTheme.Content = [string][char]$(if ($script:Settings.Theme -eq 'Dark') { 0xE706 } else { 0xE708 }) }

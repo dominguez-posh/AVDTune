@@ -12,7 +12,7 @@ function New-AVDTuneFakeMachine {
         Registry = @{}; Keys = @{}; Services = @{}; Tasks = @{}; Native = @{}; Log = (New-Object System.Collections.ArrayList)
         ComputerName = $(if ($Seed.ComputerName) { $Seed.ComputerName } else { 'GM-TEST01' }); Now = $Seed.Now; Imds = $null; FailWrites = @()
         Paths = @(@($Seed.Paths) | Where-Object { $_ }); Dirs = $(if ($Seed.Dirs) { $Seed.Dirs } else { @{} }); Hotfixes = @(@($Seed.Hotfixes) | Where-Object { $_ }); NetAdapters = @(@($Seed.NetAdapters) | Where-Object { $_ })
-        Pnp = @(@($Seed.Pnp) | Where-Object { $_ }); Arch = $(if ($Seed.Arch) { $Seed.Arch } else { 'AMD64' }); Tpm = $(if ($Seed.ContainsKey('Tpm')) { $Seed.Tpm } else { $null })
+        Files = @{}; Folders = @{}; Acl = $(if ($Seed.Acl) { $Seed.Acl } else { @{} }); Pnp = @(@($Seed.Pnp) | Where-Object { $_ }); Arch = $(if ($Seed.Arch) { $Seed.Arch } else { 'AMD64' }); Tpm = $(if ($Seed.ContainsKey('Tpm')) { $Seed.Tpm } else { $null })
     }
     $win = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion'
     $office = 'HKLM:\SOFTWARE\Microsoft\Office\ClickToRun\Configuration'
@@ -25,7 +25,8 @@ function New-AVDTuneFakeMachine {
     if ($Seed.Registry) { foreach ($k in $Seed.Registry.Keys) { $store.Registry[([string]$k).ToLowerInvariant()] = $Seed.Registry[$k] } }
     foreach ($k in @($Seed.Keys)) { if ($k) { $store.Keys[([string]$k).ToLowerInvariant()] = $true } }
     foreach ($s in @($Seed.Services)) { if ($s) { $store.Services[([string]$s.Name).ToLowerInvariant()] = [pscustomobject]@{ Name = $s.Name; Status = $(if ($s.Status) { $s.Status } else { 'Running' }); StartType = $(if ($s.StartType) { $s.StartType } else { 'Automatic' }) } } }
-    foreach ($t in @($Seed.Tasks)) { if ($t) { $store.Tasks[(([string]$t.Path) + ([string]$t.Name)).ToLowerInvariant()] = [pscustomobject]@{ Path = $t.Path; Name = $t.Name; Enabled = [bool]$t.Enabled } } }
+    foreach ($t in @($Seed.Tasks)) { if ($t) { $store.Tasks[(([string]$t.Path) + ([string]$t.Name)).ToLowerInvariant()] = [pscustomobject]@{ Path = $t.Path; Name = $t.Name; Enabled = [bool]$t.Enabled; Xml = $(if ($t -is [System.Collections.IDictionary] -and $t.Contains('Xml')) { $t['Xml'] } else { $null }) } } }
+    if ($Seed.Files) { foreach ($k in @($Seed.Files.Keys)) { $store.Files[([string]$k).ToLowerInvariant()] = [pscustomobject]@{ Text = [string]$Seed.Files[$k]; Access = 'Admin' }; $store.Folders[([IO.Path]::GetDirectoryName([string]$k)).ToLowerInvariant()] = $true } }
     $store.Imds = if ($Seed.ContainsKey('Imds')) { $Seed.Imds } else {
         [pscustomobject]@{ compute = [pscustomobject]@{
                 name = 'gm-test01'; resourceGroupName = 'rg-example'; subscriptionId = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'; vmId = '00000000-1111-2222-3333-444444444444'; location = 'westeurope'; vmSize = 'Standard_D4s_v5'
@@ -93,12 +94,59 @@ function New-AVDTuneFakeMachine {
         foreach ($k in @($store.Keys.Keys) + @($store.Registry.Keys | ForEach-Object { $_.Split('|')[0] })) { if ($k.StartsWith($prefix)) { $names[$k.Substring($prefix.Length).Split('\')[0]] = $true } }
         @($names.Keys)
     }.GetNewClosure()
-    $m.PathExists = { param($Path) (@($store.Paths) | Where-Object { $_ -eq $Path }).Count -gt 0 }.GetNewClosure()
+    $m.PathExists = { param($Path) $k = ([string]$Path).ToLowerInvariant(); (@($store.Paths) | Where-Object { $_ -eq $Path }).Count -gt 0 -or $store.Files.ContainsKey($k) -or $store.Folders.ContainsKey($k.TrimEnd([char]92)) }.GetNewClosure()
     $m.DirList = { param($Path, $Filter = '*') @(@($store.Dirs[$Path]) | Where-Object { $_ -and $_ -like $Filter }) }.GetNewClosure()
     $m.Hotfixes = { $store.Hotfixes }.GetNewClosure()
     $m.NetAdapters = { $store.NetAdapters }.GetNewClosure()
     $m.PnpPresent = { param($Pattern) (@($store.Pnp | Where-Object { $_ -match $Pattern })).Count -gt 0 }.GetNewClosure()
     $m.OsArchitecture = { $store.Arch }.GetNewClosure()
     $m.TpmPresent = { $store.Tpm }.GetNewClosure()
+    $m.KnownFolder = {
+        param($Name)
+        switch ($Name) { 'ProgramFiles' { 'X:\Fake\Program Files' } 'CommonAppData' { 'X:\Fake\ProgramData' } 'System' { 'X:\Fake\Windows\System32' } default { throw "Unknown folder '$Name'." } }
+    }.GetNewClosure()
+    $m.FileText = { param($Path) $k = ([string]$Path).ToLowerInvariant(); if ($store.Files.ContainsKey($k)) { $store.Files[$k].Text } else { $null } }.GetNewClosure()
+    $m.FileWrite = {
+        param($Path, $Text, $Access = 'Admin')
+        $folder = [IO.Path]::GetDirectoryName([string]$Path).ToLowerInvariant()
+        $k = ([string]$Path).ToLowerInvariant()
+        foreach ($bad in @($store.FailWrites)) { if ($bad -and $k -like "*$($bad.ToLowerInvariant())*") { throw "fake: write refused for $Path" } }
+        $check = switch ($Access) { 'Admin' { @([IO.Path]::GetDirectoryName($folder), $folder, $k) } 'UsersRead' { @($folder, $k) } default { @() } }
+        foreach ($c in $check) { if ($c -and $store.Acl.ContainsKey($c) -and @($store.Acl[$c].Problems).Count -gt 0) { throw "$c is not safe ($(@($store.Acl[$c].Problems) -join '; ')). Nothing was written." } }
+        if ($Access -eq 'AdminNew' -and $store.Files.ContainsKey($k)) { throw "$Path exists already. It is not overwritten." }
+        $p = $folder; while ($p) { $store.Folders[$p] = $true; $p = [IO.Path]::GetDirectoryName($p) }
+        $store.Files[$k] = [pscustomobject]@{ Text = [string]$Text; Access = $Access }
+        [void]$store.Log.Add("FileWrite $Path ($Access)")
+    }.GetNewClosure()
+    $m.FileRemove = { param($Path) $k = ([string]$Path).ToLowerInvariant(); if ($store.Files.ContainsKey($k)) { $store.Files.Remove($k); [void]$store.Log.Add("FileRemove $Path") } }.GetNewClosure()
+    $m.DirRemoveEmpty = {
+        param($Path)
+        $p = ([string]$Path).ToLowerInvariant().TrimEnd('\')
+        $has = @($store.Files.Keys | Where-Object { $_.StartsWith($p + '\') }).Count -gt 0
+        if ($store.Folders.ContainsKey($p) -and -not $has) { $store.Folders.Remove($p); [void]$store.Log.Add("DirRemoveEmpty $Path") }
+    }.GetNewClosure()
+    $m.AclReport = {
+        param($Path)
+        $k = ([string]$Path).ToLowerInvariant().TrimEnd('\')
+        $exists = $store.Files.ContainsKey($k) -or $store.Folders.ContainsKey($k) -or $store.Acl.ContainsKey($k)
+        if (-not $exists) { return [pscustomobject]@{ Exists = $false; Link = $false; Owner = ''; Protected = $false; Rules = @(); Problems = @() } }
+        $seed = $store.Acl[$k]
+        [pscustomobject]@{ Exists = $true; Link = $false; Owner = 'S-1-5-32-544'; Protected = $true; Rules = $(if ($seed -and @($seed.Problems).Count -gt 0) { @([pscustomobject]@{ Sid = 'S-1-5-32-545'; Write = $true; Inherited = $false }) } else { @() }); Problems = $(if ($seed) { @($seed.Problems) } else { @() }) }
+    }.GetNewClosure()
+    $m.TaskDetail = {
+        param($Path, $Name)
+        $k = (([string]$Path) + ([string]$Name)).ToLowerInvariant()
+        if (-not $store.Tasks.ContainsKey($k)) { return $null }
+        $t = $store.Tasks[$k]
+        $info = if ($t.Xml) { Get-AVDTuneTaskInfoFromXml $t.Xml } else { [pscustomobject]@{ Execute = ''; Arguments = ''; GroupSid = ''; UserSid = ''; Logon = $false; Enabled = $t.Enabled } }
+        [pscustomobject]@{ Path = $t.Path; Name = $t.Name; Enabled = [bool]$t.Enabled; Execute = $info.Execute; Arguments = $info.Arguments; GroupSid = $info.GroupSid; UserSid = $info.UserSid; Logon = $info.Logon; Xml = $t.Xml }
+    }.GetNewClosure()
+    $m.TaskRegisterXml = {
+        param($Path, $Name, $Xml)
+        $k = (([string]$Path) + ([string]$Name)).ToLowerInvariant()
+        foreach ($bad in @($store.FailWrites)) { if ($bad -and $k -like "*$($bad.ToLowerInvariant())*") { throw "fake: task refused for $Path$Name" } }
+        $store.Tasks[$k] = [pscustomobject]@{ Path = $Path; Name = $Name; Enabled = $true; Xml = [string]$Xml }; [void]$store.Log.Add("TaskRegisterXml $Path$Name")
+    }.GetNewClosure()
+    $m.TaskRemove = { param($Path, $Name) $k = (([string]$Path) + ([string]$Name)).ToLowerInvariant(); $store.Tasks.Remove($k); [void]$store.Log.Add("TaskRemove $Path$Name") }.GetNewClosure()
     [pscustomobject]$m
 }

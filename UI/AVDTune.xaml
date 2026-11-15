@@ -308,6 +308,101 @@
                             </ScrollViewer>
                         </Grid>
 
+                        <!-- ============ User experience ============ -->
+                        <Grid x:Name="PageUserExperience" Visibility="Collapsed">
+                            <ScrollViewer Style="{DynamicResource PageScroll}">
+                                <StackPanel Margin="40,32,40,28" MaxWidth="1000" HorizontalAlignment="Left">
+                                    <Grid>
+                                        <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+                                        <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                                        <TextBlock Text="User experience" Style="{DynamicResource PageTitle}"/>
+                                        <TextBlock x:Name="TxtUxSubtitle" Grid.Row="1" Grid.ColumnSpan="2" Style="{DynamicResource Subtitle}" Text="What users see on the desktop of the image. Now: the watermark for pilot hosts. Wallpaper, Start layout and shortcuts follow."/>
+                                        <StackPanel x:Name="PanelUxHead" Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center" Margin="24,0,0,0">
+                                            <Button x:Name="BtnWmRemove" Content="Remove from this master" Margin="0,0,8,0" AutomationProperties.Name="Remove the watermark from this master"/>
+                                            <Button x:Name="BtnWmInstall" Style="{DynamicResource PrimaryButton}" Content="Install on this master" AutomationProperties.Name="Install the watermark on this master"/>
+                                        </StackPanel>
+                                    </Grid>
+                                    <Border Style="{DynamicResource CardBox}" Margin="0,16,0,0" Background="{DynamicResource Card}" Padding="20,16">
+                                        <StackPanel>
+                                            <TextBlock Text="Watermark" Style="{DynamicResource CardTitle}"/>
+                                            <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
+                                                <Border x:Name="PillWm" Style="{DynamicResource Pill}" Padding="10,2" VerticalAlignment="Center"><TextBlock x:Name="TxtWmPill" FontSize="12" FontWeight="SemiBold"/></Border>
+                                                <TextBlock x:Name="TxtWmSummary" Margin="12,0,0,0" VerticalAlignment="Center" TextWrapping="Wrap"/>
+                                            </StackPanel>
+                                            <TextBlock x:Name="TxtWmHost" Style="{DynamicResource Hint}" Margin="0,8,0,0" TextWrapping="Wrap"/>
+                                        </StackPanel>
+                                    </Border>
+                                    <Border x:Name="BoxWmLegacy" Visibility="Collapsed" Style="{DynamicResource CardBox}" Margin="0,16,0,0" Background="{DynamicResource WarningBg}" Padding="20,14">
+                                        <StackPanel>
+                                            <TextBlock Text="The old overlay is still on this master" FontWeight="SemiBold" Foreground="{DynamicResource Warning}"/>
+                                            <TextBlock x:Name="TxtWmLegacy" TextWrapping="Wrap" Margin="0,4,0,0"/>
+                                            <Button x:Name="BtnWmLegacy" Content="Remove the old overlay" HorizontalAlignment="Left" Margin="0,10,0,0" AutomationProperties.Name="Remove the old overlay"/>
+                                        </StackPanel>
+                                    </Border>
+                                    <Grid Margin="0,16,0,0">
+                                        <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="16"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                                        <Border Style="{DynamicResource CardBox}" Background="{DynamicResource Card}" Padding="20,16">
+                                            <StackPanel>
+                                                <TextBlock Text="Settings" Style="{DynamicResource CardTitle}"/>
+                                                <Grid Margin="0,10,0,0">
+                                                    <Grid.ColumnDefinitions><ColumnDefinition Width="140"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                                                    <Grid.RowDefinitions>
+                                                        <RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/>
+                                                        <RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/>
+                                                    </Grid.RowDefinitions>
+                                                    <TextBlock Text="Computer name pattern" VerticalAlignment="Center" Margin="0,0,0,8" TextWrapping="Wrap"/>
+                                                    <TextBox x:Name="TxtWmPattern" Grid.Column="1" Padding="8,6" Margin="0,0,0,8" AutomationProperties.Name="Computer name pattern, a regular expression"/>
+                                                    <TextBlock Text="Try a name" Grid.Row="1" VerticalAlignment="Center" Margin="0,0,0,2"/>
+                                                    <TextBox x:Name="TxtWmTryName" Grid.Row="1" Grid.Column="1" Padding="8,6" Margin="0,0,0,2" AutomationProperties.Name="Computer name to try the pattern on"/>
+                                                    <TextBlock x:Name="TxtWmMatch" Grid.Row="2" Grid.ColumnSpan="2" Style="{DynamicResource Hint}" TextWrapping="Wrap" Margin="0,0,0,10"/>
+                                                    <TextBlock Text="Text" Grid.Row="3" VerticalAlignment="Center" Margin="0,0,0,8"/>
+                                                    <TextBox x:Name="TxtWmText" Grid.Row="3" Grid.Column="1" Padding="8,6" Margin="0,0,0,8" AutomationProperties.Name="Watermark text"/>
+                                                    <TextBlock Text="Colour" Grid.Row="4" VerticalAlignment="Center" Margin="0,0,0,8"/>
+                                                    <StackPanel Grid.Row="4" Grid.Column="1" Orientation="Horizontal" Margin="0,0,0,8">
+                                                        <TextBox x:Name="TxtWmColor" Width="110" Padding="8,6" AutomationProperties.Name="Colour as #RRGGBB"/>
+                                                        <Border x:Name="BoxWmSwatch" Width="28" Height="28" CornerRadius="4" Margin="10,0,0,0" BorderThickness="1" BorderBrush="{DynamicResource Border}"/>
+                                                    </StackPanel>
+                                                    <TextBlock Text="Opacity (10-100 %)" Grid.Row="5" VerticalAlignment="Center" Margin="0,0,0,8"/>
+                                                    <TextBox x:Name="TxtWmOpacity" Grid.Row="5" Grid.Column="1" Width="110" HorizontalAlignment="Left" Padding="8,6" Margin="0,0,0,8" AutomationProperties.Name="Opacity in percent"/>
+                                                    <TextBlock Text="Font size (8-96)" Grid.Row="6" VerticalAlignment="Center" Margin="0,0,0,8"/>
+                                                    <TextBox x:Name="TxtWmSize" Grid.Row="6" Grid.Column="1" Width="110" HorizontalAlignment="Left" Padding="8,6" Margin="0,0,0,8" AutomationProperties.Name="Font size"/>
+                                                    <TextBlock Text="Corner" Grid.Row="7" VerticalAlignment="Center" Margin="0,0,0,8"/>
+                                                    <ComboBox x:Name="CmbWmCorner" Grid.Row="7" Grid.Column="1" Width="170" HorizontalAlignment="Left" Margin="0,0,0,8" AutomationProperties.Name="Corner of every monitor"/>
+                                                    <TextBlock Text="Distance (0-500 px)" Grid.Row="8" VerticalAlignment="Center" Margin="0,0,0,8"/>
+                                                    <TextBox x:Name="TxtWmMargin" Grid.Row="8" Grid.Column="1" Width="110" HorizontalAlignment="Left" Padding="8,6" Margin="0,0,0,8" AutomationProperties.Name="Distance from the edge in pixels"/>
+                                                </Grid>
+                                                <CheckBox x:Name="ChkWmHeadless" Content="Start without any console window flash (conhost --headless)" Margin="0,6,0,2"/>
+                                                <TextBlock Text="powershell.exe -WindowStyle Hidden opens its console window before it hides it, so one can flash for a moment at logon. conhost --headless avoids that on current Windows 10 and 11, but Microsoft does not document it and some security tools flag it. Off by default." Style="{DynamicResource Hint}" TextWrapping="Wrap" Margin="24,0,0,8"/>
+                                                <CheckBox x:Name="ChkWmMs" Content="Also switch on the Microsoft QR code watermark (connection ID in every remote session)" Margin="0,6,0,2"/>
+                                                <TextBlock Text="For forensics: a photo of the screen can be traced to a session. Once it is on, only clients that support watermarking can connect (the others fail with an unspecific error); RemoteApp is not marked." Style="{DynamicResource Hint}" TextWrapping="Wrap" Margin="24,0,0,8"/>
+                                                <TextBlock x:Name="TxtWmErrors" Foreground="{DynamicResource Danger}" TextWrapping="Wrap" Margin="0,4,0,0"/>
+                                                <Button x:Name="BtnWmSave" Content="Save settings" HorizontalAlignment="Left" Margin="0,10,0,0"/>
+                                            </StackPanel>
+                                        </Border>
+                                        <Border Grid.Column="2" Style="{DynamicResource CardBox}" Background="{DynamicResource Card}" Padding="16" VerticalAlignment="Top">
+                                            <StackPanel>
+                                                <TextBlock Text="Preview" Style="{DynamicResource CardTitle}"/>
+                                                <Border x:Name="BoxWmDesktop" Width="480" Height="270" Margin="0,10,0,0" Background="#FF3E5C8A" ClipToBounds="True" AutomationProperties.Name="Preview of one monitor">
+                                                    <Canvas x:Name="CanvasWm">
+                                                        <Rectangle x:Name="RectWmTaskbar" Width="480" Height="8" Fill="#CC101820" Canvas.Top="262"/>
+                                                        <TextBlock x:Name="TxtWmPreview" FontWeight="Bold" Canvas.Left="0" Canvas.Top="0" AutomationProperties.Name="Watermark preview"/>
+                                                    </Canvas>
+                                                </Border>
+                                                <TextBlock x:Name="TxtWmPreviewNote" Style="{DynamicResource Hint}" TextWrapping="Wrap" Width="480" Margin="0,8,0,0"/>
+                                            </StackPanel>
+                                        </Border>
+                                    </Grid>
+                                    <Border Style="{DynamicResource CardBox}" Margin="0,16,0,0" Background="{DynamicResource Card}" Padding="20,16">
+                                        <StackPanel>
+                                            <TextBlock Text="On this master" Style="{DynamicResource CardTitle}"/>
+                                            <StackPanel x:Name="PanelWmItems" Margin="0,6,0,0"/>
+                                            <TextBlock x:Name="TxtWmNotes" Style="{DynamicResource Hint}" Margin="0,10,0,0" TextWrapping="Wrap"/>
+                                        </StackPanel>
+                                    </Border>
+                                </StackPanel>
+                            </ScrollViewer>
+                        </Grid>
+
                         <!-- ============ Pages that come in later phases ============ -->
                         <Grid x:Name="PagePlaceholder" Visibility="Collapsed">
                             <ScrollViewer Style="{DynamicResource PageScroll}">
