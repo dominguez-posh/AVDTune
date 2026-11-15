@@ -242,21 +242,25 @@ function New-AVDTuneUsersReadSecurity {
 
 function New-AVDTuneFileSecurity {
     # A file that everybody may read and run and only Administrators/SYSTEM may change; protected (no inheritance), owner Administrators when elevated
+    # -AdminOnly: nobody else may even read it (state files)
+    param([switch]$AdminOnly)
     $security = New-Object System.Security.AccessControl.FileSecurity
     $security.SetAccessRuleProtection($true, $false)
     if (Test-AVDTuneElevated) { $security.SetOwner((New-Object System.Security.Principal.SecurityIdentifier 'S-1-5-32-544')) }
     foreach ($sid in 'S-1-5-32-544', 'S-1-5-18') {
         $security.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule((New-Object System.Security.Principal.SecurityIdentifier $sid), 'FullControl', 'Allow')))
     }
-    $security.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule((New-Object System.Security.Principal.SecurityIdentifier 'S-1-5-32-545'), 'ReadAndExecute', 'Allow')))
+    # AVDTune runs elevated; only a check run (not elevated) needs its own user as well, or it could not move its own file
+    if ($AdminOnly -and -not (Test-AVDTuneElevated)) { $security.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule([Security.Principal.WindowsIdentity]::GetCurrent().User, 'FullControl', 'Allow'))) }
+    if (-not $AdminOnly) { $security.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule((New-Object System.Security.Principal.SecurityIdentifier 'S-1-5-32-545'), 'ReadAndExecute', 'Allow'))) }
     $security
 }
 
 function Write-AVDTuneAccessFile {
     <#
         The real FileWrite of the machine adapter. The file never keeps an ACL that was there before (File.Replace would): it is created new
-        (CreateNew, temp name) with the explicit protected ACL of New-AVDTuneFileSecurity, an existing file is deleted and the new one moved
-        into place, and the result is checked again with Get-AVDTuneAclProblems (a file that fails is removed again and the call throws).
+        (CreateNew, temp name) with the explicit protected ACL of New-AVDTuneFileSecurity, an existing file is replaced atomically
+        (MoveFileEx) by the new one, and the result is checked again with Get-AVDTuneAclProblems (a file that fails is removed again and the call throws).
           Admin      folder created with the ACL it inherits (Program Files); its parent folder, the folder and an existing target must pass the check first
           UsersRead  folder created in one step with New-AVDTuneUsersReadSecurity; an existing folder and target must pass the check first
           AdminNew   only a file that is not there yet (restore of the old launcher in ProgramData: the folder is shared, so only the new file is checked)
@@ -273,13 +277,13 @@ function Write-AVDTuneAccessFile {
         if ($problems.Count -gt 0) { throw "$c is not safe ($($problems -join '; ')). Nothing was written. Check it as administrator." }
     }
     if ($Access -eq 'AdminNew' -and (Test-Path -LiteralPath $Path)) { throw "$Path exists already. It is not overwritten." }
-    $temp = "$Path.$([guid]::NewGuid().ToString('N').Substring(0, 8)).tmp"
+    $temp = "$Path.$([guid]::NewGuid().ToString('N')).tmp"
     $bytes = (New-Object Text.UTF8Encoding $false).GetBytes($Text)
     try {
         $stream = New-Object IO.FileStream($temp, [IO.FileMode]::CreateNew, [Security.AccessControl.FileSystemRights]'Write, ReadPermissions', [IO.FileShare]::None, 4096, [IO.FileOptions]::None, (New-AVDTuneFileSecurity))
-        try { $stream.Write($bytes, 0, $bytes.Length) } finally { $stream.Dispose() }
+        try { $stream.Write($bytes, 0, $bytes.Length); $stream.Flush($true) } finally { $stream.Dispose() }
         if ($Access -eq 'AdminNew') { [IO.File]::Move($temp, $Path) }
-        else { if (Test-Path -LiteralPath $Path) { [IO.File]::Delete($Path) }; [IO.File]::Move($temp, $Path) }
+        else { Move-AVDTuneFileReplace $temp $Path }
     }
     finally { if (Test-Path -LiteralPath $temp) { Remove-Item -LiteralPath $temp -Force -ErrorAction SilentlyContinue } }
     $after = @(Get-AVDTuneAclProblems (Read-AVDTuneAclReport $Path) -ExtraTrusted $ExtraTrusted)
@@ -495,15 +499,31 @@ function New-AVDTuneStateSecurity {
     $security
 }
 
+# The native type is created once at import (not at the first write), a second runspace that created it first is fine
+try { Add-Type -Namespace AVDTune -Name NativeMove -MemberDefinition '[System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true, CharSet = System.Runtime.InteropServices.CharSet.Unicode)] public static extern bool MoveFileEx(string existing, string target, int flags);' -ErrorAction Stop }
+catch { if (-not ('AVDTune.NativeMove' -as [type])) { throw } }
+
+function Move-AVDTuneFileReplace {
+    # Atomic replace: MoveFileEx(REPLACE_EXISTING | WRITE_THROUGH) on the same volume. The target exists at every moment (old or new file) and the new file
+    # keeps the ACL of the temp file; the old ACL is gone. Throws when the move fails (the target is then unchanged).
+    param([Parameter(Mandatory)][string]$Temp, [Parameter(Mandatory)][string]$Target)
+    if (-not [AVDTune.NativeMove]::MoveFileEx($Temp, $Target, 0x1 -bor 0x8)) {
+        throw (New-Object ComponentModel.Win32Exception([Runtime.InteropServices.Marshal]::GetLastWin32Error()))
+    }
+}
+
 function Write-AVDTuneFile {
-    # Written next to the target, then moved over it: a crash leaves the old or the new file, never half of one
+    # Written next to the target with an explicit protected admin-only ACL (CreateNew), then moved over it atomically: a crash leaves the old or the new file,
+    # never half of one, and the file never keeps an ACL that was there before (File.Replace would keep it)
     param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][string]$Text)
     $folder = Split-Path $Path -Parent
     if (-not (Test-Path -LiteralPath $folder)) { New-Item -ItemType Directory -Path $folder -Force | Out-Null }
-    $temp = "$Path.$([guid]::NewGuid().ToString('N').Substring(0, 8)).tmp"
+    $temp = "$Path.$([guid]::NewGuid().ToString('N')).tmp"
+    $bytes = (New-Object Text.UTF8Encoding $false).GetBytes($Text)
     try {
-        [IO.File]::WriteAllText($temp, $Text, (New-Object Text.UTF8Encoding $false))
-        if (Test-Path -LiteralPath $Path) { [IO.File]::Replace($temp, $Path, [NullString]::Value) } else { [IO.File]::Move($temp, $Path) }
+        $stream = New-Object IO.FileStream($temp, [IO.FileMode]::CreateNew, [Security.AccessControl.FileSystemRights]'Write, ReadPermissions', [IO.FileShare]::None, 4096, [IO.FileOptions]::None, (New-AVDTuneFileSecurity -AdminOnly))
+        try { $stream.Write($bytes, 0, $bytes.Length); $stream.Flush($true) } finally { $stream.Dispose() }
+        Move-AVDTuneFileReplace $temp $Path
     }
     finally { if (Test-Path -LiteralPath $temp) { Remove-Item -LiteralPath $temp -Force -ErrorAction SilentlyContinue } }
 }
