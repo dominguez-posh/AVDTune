@@ -142,6 +142,9 @@ try {
     $m2.Store.Services['usosvc'].StartType = 'Disabled'
     [void](Stop-AVDTuneBenchmarkQuiet -Machine $m2 -Bench $b -Root $tmp)
     Test-Check 'restore: a service that is Disabled now is not started, a stopped one is not touched' ((& $m2.ServiceGet 'UsoSvc').Status -eq 'Stopped' -and (& $m2.ServiceGet 'wuauserv').Status -eq 'Stopped') $null
+    $m0 = New-AVDTuneFakeMachine -Seed @{}
+    $q0 = Start-AVDTuneBenchmarkQuiet -Machine $m0 -Bench $b -Root $tmp -RunId 'r0'
+    Test-Check 'quiet: nothing running to pause works (empty list), and is cleaned up' (@($q0.Planned).Count -eq 0 -and (Stop-AVDTuneBenchmarkQuiet -Machine $m0 -Bench $b -Root $tmp).Clean -and (Test-AVDTuneBenchmarkClean -Bench $b -Root $tmp).Count -eq 0) $null
     $m3 = New-Master; $m3.Store.FailWrites = @()
     [void](Start-AVDTuneBenchmarkQuiet -Machine $m3 -Bench $b -Root $tmp -RunId 'r4')
     $m3.ServiceStart = { param($n) throw 'fake: cannot start' }

@@ -508,10 +508,10 @@ function Get-AVDTuneBenchmarkRestoreScriptPath([string]$Root) { Join-Path $Root 
 
 function New-AVDTuneBenchmarkRestoreScript {
     # The script the restore task runs as SYSTEM. It only holds service names (checked against a strict pattern) and the paths of the journal and itself
-    param([Parameter(Mandatory)][string]$Root, [Parameter(Mandatory)][string[]]$Services)
+    param([Parameter(Mandatory)][string]$Root, [Parameter(Mandatory)][AllowEmptyCollection()][string[]]$Services)
     foreach ($s in $Services) { if ($s -notmatch '^[A-Za-z0-9_.-]{1,64}$') { throw "Invalid service name '$s'." } }
     if ($Root -match "[`"'`$`r`n``%]") { throw 'The state folder path has characters that are not allowed in the restore script.' }
-    $names = ($Services | ForEach-Object { "'$_'" }) -join ', '
+    $names = (@($Services) | ForEach-Object { "'$_'" }) -join ', '
     $journal = Get-AVDTuneBenchmarkJournalPath $Root
     @(
         '# AVDTune benchmark restore (made by AVDTune, runs once at start-up and removes itself). Services it starts again: ' + ($Services -join ', ')
