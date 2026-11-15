@@ -6,11 +6,13 @@
 .EXAMPLE
     .\Tests\Invoke-GuiSmoke.ps1
 #>
+# Default -OutDir: one folder per checkout (AVDTuneSmoke-<folder of the repo>), so two worktrees can run the smoke side by side without sharing screenshots
 [CmdletBinding()]
-param([string]$OutDir = (Join-Path ([IO.Path]::GetTempPath()) 'AVDTuneSmoke'))
+param([string]$OutDir)
 
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path $PSScriptRoot -Parent
+if (-not $OutDir) { $OutDir = Join-Path ([IO.Path]::GetTempPath()) ('AVDTuneSmoke-' + (Split-Path $repo -Leaf)) }
 if (Test-Path $OutDir) { Remove-Item $OutDir -Recurse -Force }
 New-Item -ItemType Directory -Path $OutDir -Force | Out-Null
 $results = Join-Path $OutDir 'results.txt'

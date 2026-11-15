@@ -12,6 +12,7 @@
 Set-StrictMode -Version 2.0
 Import-Module (Join-Path $PSScriptRoot 'AVDTune.psm1')
 Import-Module (Join-Path $PSScriptRoot 'AVDTune.Snapshot.psm1')
+Import-Module (Join-Path $PSScriptRoot 'AVDTune.Session.psm1')
 
 #region questions
 
@@ -74,13 +75,14 @@ function Test-AVDTuneEnvironmentAnswers {
         $v = [string](Get-AVDTuneProp $Answers $field)
         if ($v -and $v -notmatch '^[A-Za-z0-9_./ -]{1,200}$') { [void]$errors.Add("The $field name has characters that Azure does not allow.") }
     }
+    # The tenant is no question any more (it comes from the sign-in); a saved one (GUID, or a domain from an older environment.json) stays valid
     $t = [string](Get-AVDTuneProp $Answers 'TenantId')
-    if ($t -and $t -notmatch '^([0-9a-fA-F-]{36}|[A-Za-z0-9][A-Za-z0-9.-]{0,250}\.[A-Za-z]{2,})$') { [void]$errors.Add('The tenant must be a tenant ID (GUID) or a domain name.') }
+    if ($t -and $t -notmatch '^([0-9a-fA-F-]{36}|[A-Za-z0-9][A-Za-z0-9.-]{0,250}\.[A-Za-z]{2,})$') { [void]$errors.Add('The saved tenant must be a tenant ID (GUID) or a domain name.') }
     $c = [string](Get-AVDTuneProp $Answers 'ClientId')
-    if ($c -and $c -notmatch '^[0-9a-fA-F-]{36}$') { [void]$errors.Add('The client ID must be a GUID.') }
+    if ($c -and -not (Test-AVDTuneTenantGuid $c.Trim())) { [void]$errors.Add('The client ID must be a GUID.') }
     $pattern = [string](Get-AVDTuneProp $Answers 'SnapshotNamePattern')
     if ($pattern) { $problem = Test-AVDTuneSnapshotNamePattern $pattern; if ($problem) { [void]$errors.Add($problem) } }
-    if ($c -ieq '14d82eec-204b-4c2f-b7e8-296a70dab67e') { [void]$errors.Add("That is Microsoft's setup app; AVDTune needs the client ID of the own app registration (the one PackTune uses).") }
+    if ($c -ieq '14d82eec-204b-4c2f-b7e8-296a70dab67e') { [void]$errors.Add("That is Microsoft's setup app; AVDTune needs the client ID of its own app registration (leave the field empty and AVDTune creates it at the sign-in).") }
     [pscustomobject]@{ Errors = @($errors); Warnings = @($warnings) }
 }
 
@@ -154,14 +156,17 @@ function Save-AVDTuneEnvironment {
     <#
         Writes the answers. Throws when the combination is invalid. Keeps the domain controller part (pins) as it is. When an answer changed
         after an environment existed, the change goes into the change log (needs an image version; without one the diff is only returned).
+        The tenant is not asked: an empty TenantId keeps the saved one; -ForgetTenant removes it (the next sign-in sets it again).
         Returns @{ Environment; Changes = 'Name: old -> new' ... }.
     #>
     [CmdletBinding()]
-    param([string]$Root = (Get-AVDTuneRoot), [Parameter(Mandatory)]$Answers, [string]$User)
+    param([string]$Root = (Get-AVDTuneRoot), [Parameter(Mandatory)]$Answers, [string]$User, [switch]$ForgetTenant)
     $check = Test-AVDTuneEnvironmentAnswers $Answers
     if ($check.Errors.Count -gt 0) { throw ($check.Errors -join ' ') }
     $old = Get-AVDTuneEnvironment $Root
     $oldAnswers = if ($old) { Get-AVDTuneEnvironmentAnswers $old } else { $null }
+    $tenant = [string](Get-AVDTuneProp $Answers 'TenantId')
+    if ($ForgetTenant) { $tenant = '' } elseif (-not $tenant.Trim() -and $oldAnswers) { $tenant = [string]$oldAnswers.TenantId }
     $clean = { param($v, $n) Remove-AVDTuneControlCharacters ([string]$v) $n }
     $plan = Resolve-AVDTuneEnvironmentPlan $Answers
     $envObj = [ordered]@{
@@ -170,7 +175,7 @@ function Save-AVDTuneEnvironment {
             Join = [string]$Answers.Join; Dc = [string]$Answers.Dc; Identities = [string]$Answers.Identities; Profiles = [string]$Answers.Profiles
             AzureFilesAuth = [string]$plan.AzureFilesAuth; Network = [ordered]@{ Endpoint = [string]$Answers.Endpoint; VNet = (& $clean $Answers.VNet 200); Subnet = (& $clean $Answers.Subnet 200); DnsZone = [string]$Answers.DnsZone }
         }
-        SignIn = [ordered]@{ TenantId = (& $clean $Answers.TenantId 255).Trim(); ClientId = (& $clean $Answers.ClientId 36).Trim() }
+        SignIn = [ordered]@{ TenantId = (& $clean $tenant 255).Trim(); ClientId = (& $clean $Answers.ClientId 36).Trim() }
         Snapshot = [ordered]@{ NamePattern = $(if ([string](Get-AVDTuneProp $Answers 'SnapshotNamePattern')) { (& $clean $Answers.SnapshotNamePattern 80).Trim() } else { Get-AVDTuneDefaultSnapshotNamePattern }) }
         Dc = $(if ($old -and (Get-AVDTuneProp $old 'Dc')) { Get-AVDTuneProp $old 'Dc' } else { [ordered]@{ Server = ''; User = ''; Pins = [ordered]@{}; Discovery = $null } })
         Updated = (Get-Date).ToString('o'); UpdatedBy = (& $clean $User 80)
@@ -245,6 +250,81 @@ function Save-AVDTuneDcDiscovery {
     Update-AVDTuneEnvironmentDc -Root $Root -Environment $envObj -Dc $dc
 }
 
+function Set-AVDTuneEnvironmentSignIn {
+    <#
+        Writes the tenant and/or the client ID that the sign-in found (tid of the token, AVDTune's own app registration) into environment.json.
+        A value that changes goes into the change log (needs an image version) and is returned as text.
+    #>
+    param([string]$Root = (Get-AVDTuneRoot), [string]$TenantId, [string]$ClientId, [string]$User, [string]$Account)
+    $envObj = Get-AVDTuneEnvironment $Root
+    if (-not $envObj) { throw 'Answer the first-run questions first.' }
+    $oldTenant = [string](Get-AVDTuneProp $envObj.SignIn 'TenantId'); $oldClient = [string](Get-AVDTuneProp $envObj.SignIn 'ClientId')
+    $tenant = $oldTenant; $client = $oldClient; $changes = @()
+    if ($TenantId) {
+        if ($TenantId -notmatch '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$') { throw 'The tenant of the sign-in is not a GUID.' }
+        $tenant = $TenantId.ToLowerInvariant()
+        if ($tenant -ne $oldTenant) { $changes += "Tenant taken from the sign-in: $(if ($oldTenant) { "$oldTenant -> " })$tenant$(if ($Account) { " (account $(Remove-AVDTuneControlCharacters $Account 120))" })" }
+    }
+    if ($ClientId) {
+        if ($ClientId -notmatch '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$' -or $ClientId -ieq '14d82eec-204b-4c2f-b7e8-296a70dab67e') { throw 'The client ID of the app registration is not usable.' }
+        $client = $ClientId.ToLowerInvariant()
+        if ($client -ne $oldClient) { $changes += "Client ID of AVDTune's own app registration saved: $(if ($oldClient) { "$oldClient -> " })$client" }
+    }
+    if ($changes.Count -eq 0) { return @() }
+    $copy = [ordered]@{ Schema = 1; Answers = $envObj.Answers; SignIn = [ordered]@{ TenantId = $tenant; ClientId = $client }; Snapshot = (Get-AVDTuneProp $envObj 'Snapshot'); Dc = (Get-AVDTuneProp $envObj 'Dc'); Updated = (Get-Date).ToString('o'); UpdatedBy = (Remove-AVDTuneControlCharacters $User 80) }
+    Write-AVDTuneFile (Get-AVDTuneEnvironmentPath $Root) ($copy | ConvertTo-Json -Depth 10)
+    $version = [string](Get-AVDTuneState $Root).ImageVersion
+    if ($version) { foreach ($c in $changes) { [void](Add-AVDTuneChangeLogEntry -Root $Root -Version $version -Category 'Setup' -Component 'Environment' -ChangeType Changed -Text $c -User $User -Source Note) } }
+    @($changes)
+}
+
+#endregion
+
+#region sign-in step
+
+function Invoke-AVDTuneStartSignIn {
+    <#
+        The sign-in step of the Overview. Tenant and client ID come from environment.json; what is missing comes from the sign-in:
+          -Setup         also with a saved client ID: that registration is checked (and replaced when it is not safe) and the signed-in
+                         administrator is assigned and gets the consent (how another administrator is added)
+          no client ID   AVDTune's own app registration is created (Install-AVDTuneAppRegistration, setup sign-in through
+                         'Microsoft Graph Command Line Tools'); its tenant and client ID are saved, then the normal sign-in follows with the
+                         account of the setup as login hint.
+          no tenant      with an account (name@domain) the tenant of its domain (OpenID discovery); when that fails, 'organizations'.
+        After the sign-in the tid of the token is saved as the tenant (change log). A saved tenant must match the sign-in (Connect-AVDTuneSession).
+        Returns Info (session summary, no token), Notes (lines for the protocol), Registration, ConsentNote. Throws readable text.
+    #>
+    [CmdletBinding()]
+    param([string]$Root = (Get-AVDTuneRoot), [Parameter(Mandatory)]$Session, [string]$Account, [string]$User, [int]$RetryDelaySeconds = 5, [switch]$Setup)
+    $envObj = Get-AVDTuneEnvironment $Root
+    if (-not $envObj) { throw 'Answer the first-run questions first.' }
+    $tenant = ([string](Get-AVDTuneProp $envObj.SignIn 'TenantId')).Trim()
+    $client = ([string](Get-AVDTuneProp $envObj.SignIn 'ClientId')).Trim()
+    $Account = ([string]$Account).Trim()
+    if ($Account -and -not (Get-AVDTuneAccountDomain $Account)) { throw 'The account must look like name@domain.' }
+    $notes = New-Object System.Collections.ArrayList
+    $registration = $null
+    if (-not $client -or $Setup) {
+        $registration = Install-AVDTuneAppRegistration -Auth $Session.Auth -TenantId $tenant -LoginHint $Account -ExistingClientId $client -TempRoot $Session.TempRoot -RetryDelaySeconds $RetryDelaySeconds
+        foreach ($n in @($registration.Notes)) { [void]$notes.Add($n) }
+        foreach ($c in @(Set-AVDTuneEnvironmentSignIn -Root $Root -TenantId $registration.TenantId -ClientId $registration.ClientId -User $User -Account $registration.Account)) { [void]$notes.Add($c) }
+        $client = $registration.ClientId; $tenant = $registration.TenantId
+        if (-not $Account) { $Account = [string]$registration.Account }
+        if ($Account -and -not (Get-AVDTuneAccountDomain $Account)) { $Account = '' }
+    }
+    elseif (-not $tenant -and $Account) {
+        $domain = Get-AVDTuneAccountDomain $Account
+        try {
+            $tenant = Resolve-AVDTuneTenantFromDomain -Auth $Session.Auth -Domain $domain
+            [void]$notes.Add("Tenant of the domain $domain found: $tenant")
+        }
+        catch { [void]$notes.Add("The tenant of the domain $domain was not found ($($_.Exception.Message)); the sign-in goes through 'organizations' (needs a multi-tenant app registration).") }
+    }
+    $info = Connect-AVDTuneSession -Session $Session -TenantId $tenant -ClientId $client -LoginHint $Account
+    foreach ($c in @(Set-AVDTuneEnvironmentSignIn -Root $Root -TenantId $info.TenantId -User $User -Account $info.Account)) { [void]$notes.Add($c) }
+    [pscustomobject]@{ Info = $info; Notes = @($notes); Registration = $registration; ConsentNote = $(if ($registration) { Get-AVDTuneSetupConsentNote } else { '' }) }
+}
+
 #endregion
 
 #region start sequence
@@ -301,5 +381,5 @@ function Get-AVDTuneNextStage {
 #endregion
 
 Export-ModuleMember -Function Get-AVDTuneQuestions, Get-AVDTuneEnvironmentDefaults, Test-AVDTuneEnvironmentAnswers, Get-AVDTuneAzureFilesAuthChoices, Resolve-AVDTuneEnvironmentPlan,
-    Get-AVDTuneEnvironment, Get-AVDTuneEnvironmentAnswers, Save-AVDTuneEnvironment, Get-AVDTuneDcPins, Set-AVDTuneDcPin, Save-AVDTuneDcDiscovery,
+    Get-AVDTuneEnvironment, Get-AVDTuneEnvironmentAnswers, Save-AVDTuneEnvironment, Get-AVDTuneDcPins, Set-AVDTuneDcPin, Save-AVDTuneDcDiscovery, Set-AVDTuneEnvironmentSignIn, Invoke-AVDTuneStartSignIn,
     New-AVDTuneStartContext, Get-AVDTuneStartStages, Get-AVDTuneNextStage
