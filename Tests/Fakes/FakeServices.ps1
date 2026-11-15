@@ -14,7 +14,9 @@ function ConvertTo-FakeJson($Object) { $Object | ConvertTo-Json -Depth 10 | Conv
 function New-FakeJwt([hashtable]$Claims) { (ConvertTo-FakeBase64Url '{"alg":"none"}') + '.' + (ConvertTo-FakeBase64Url ($Claims | ConvertTo-Json -Compress)) + '.fakesignature' }
 
 # ------------------------------------------------------------------ sign-in, tenant discovery, Graph of the setup
-# Switches in .Store: Offline, Cancel, ConsentMissing (array of audiences: 'Arm', 'Sites', 'Graph'), WrongTenant, ExpiresIn (seconds), NoRefreshToken,
+# Switches in .Store: Offline, Cancel, ConsentMissing (array of audiences: 'Arm', 'Sites', 'Graph', 'Storage'), StorageScopes (scp of the storage token, default user_impersonation),
+# StorageAud (aud of the storage token instead of https://storage.azure.com), StorageSpMissing (no Azure Storage service principal in the tenant),
+# ArmAud (aud of the ARM token instead of https://management.azure.com), StorageWrongTenant (tid of another tenant on the storage token only), StorageUseRoles (the storage token has a roles claim instead of scp), WrongTenant, ExpiresIn (seconds), NoRefreshToken,
 # Consented (resource -> consented scopes, all of them go into every token of that resource), ExtraScopes (resource -> scopes beyond AVDTune's),
 # SingleTenant (a sign-in of AVDTune's app at 'organizations' fails with AADSTS50194, like a single-tenant registration), SetupNoConsent (the setup
 # token lacks Application.ReadWrite.All), Domains (domain -> tenant ID of the OpenID discovery; others: 400), DiscoveryOffline, DiscoveryIssuer (issuer
@@ -27,7 +29,8 @@ function New-AVDTuneFakeAuth {
     $graphSp = @{ id = 'sp-graph-0001'; appId = '00000003-0000-0000-c000-000000000000'; oauth2PermissionScopes = @(
             'Group.Read.All', 'DeviceManagementApps.Read.All', 'Sites.Selected', 'offline_access', 'openid', 'profile', 'User.Read' | ForEach-Object { @{ id = "scope-$_"; value = $_ } }) }
     $armSp = @{ id = 'sp-arm-0001'; appId = '797f4846-ba00-4fd7-ba43-dac1f8f63013'; oauth2PermissionScopes = @(@{ id = 'scope-user_impersonation'; value = 'user_impersonation' }) }
-    $store = @{ Offline = $false; Cancel = $false; ConsentMissing = @(); WrongTenant = $false; ExpiresIn = 3600; NoRefreshToken = $false; SingleTenant = $false; SetupNoConsent = $false
+    $storageSp = @{ id = 'sp-storage-0001'; appId = 'e406a681-f3d4-42a8-90b6-c2b029497af1'; oauth2PermissionScopes = @(@{ id = 'scope-storage-user_impersonation'; value = 'user_impersonation' }) }
+    $store = @{ ArmAud = ''; StorageWrongTenant = $false; StorageUseRoles = $false; StorageScopes = @('user_impersonation'); StorageAud = ''; StorageSpMissing = $false; Offline = $false; Cancel = $false; ConsentMissing = @(); WrongTenant = $false; ExpiresIn = 3600; NoRefreshToken = $false; SingleTenant = $false; SetupNoConsent = $false
         Upn = 'admin.example@contoso.example'; Name = 'Alex Example'; Tenant = $script:FakeTenant; Log = (New-Object System.Collections.ArrayList); Counter = 0
         Consented = @{ 'https://graph.microsoft.com' = @('Group.Read.All', 'DeviceManagementApps.Read.All', 'Sites.Selected'); 'https://management.azure.com' = @('user_impersonation') }
         ExtraScopes = @{}; Domains = @{ 'contoso.example' = $script:FakeTenant }; DiscoveryOffline = $false; DiscoveryIssuer = ''
@@ -40,6 +43,7 @@ function New-AVDTuneFakeAuth {
     if (-not $store.NoCliGrant) { [void]$store.Grants.Add(@{ id = 'grant-cli-own'; clientId = 'sp-cli-0001'; consentType = 'Principal'; principalId = 'oid-fake'; resourceId = 'sp-graph-0001'; scope = 'openid profile User.Read Application.ReadWrite.All DelegatedPermissionGrant.ReadWrite.All' }) }
     if ($store.CliOrgGrant) { [void]$store.Grants.Add(@{ id = 'grant-cli-org'; clientId = 'sp-cli-0001'; consentType = 'AllPrincipals'; principalId = $null; resourceId = 'sp-graph-0001'; scope = 'User.Read Application.ReadWrite.All' }) }
     if (-not $store.ArmSpMissing) { [void]$store.ServicePrincipals.Add($armSp) }
+    if (-not $store.StorageSpMissing) { [void]$store.ServicePrincipals.Add($storageSp) }
     $make = {
         param($Scopes)
         $urls = @($Scopes)
@@ -48,8 +52,14 @@ function New-AVDTuneFakeAuth {
         $names = @(@($store.Consented[$resource]) + @($store.ExtraScopes[$resource]) | Where-Object { $_ } | Select-Object -Unique)
         if ($names.Count -eq 0) { $names = @($urls | ForEach-Object { $_ -replace '^https://[^/]+/', '' }) }
         $audience = if ($resource -eq 'https://graph.microsoft.com') { 'https://graph.microsoft.com' } else { $resource }
+        if ($resource -eq 'https://management.azure.com' -and $store.ArmAud) { $audience = $store.ArmAud }
+        if ($resource -eq 'https://storage.azure.com') { $names = @($store.StorageScopes); if ($store.StorageAud) { $audience = $store.StorageAud } }
         $store.Counter++
         $claims = @{ aud = $audience; tid = $(if ($store.WrongTenant) { '99999999-0000-0000-0000-000000000000' } else { $store.Tenant }); upn = $store.Upn; name = $store.Name; oid = 'oid-fake'; scp = ($names -join ' '); n = $store.Counter }
+        if ($resource -eq 'https://storage.azure.com') {
+            if ($store.StorageWrongTenant) { $claims.tid = '99999999-0000-0000-0000-000000000000' }
+            if ($store.StorageUseRoles) { $claims.Remove('scp'); $claims.roles = @($names) }
+        }
         [pscustomobject]@{ access_token = (New-FakeJwt $claims); refresh_token = $(if ($store.NoRefreshToken) { $null } else { "fake-refresh-$($store.Counter)" }); expires_in = $store.ExpiresIn; scope = ($names -join ' ') }
     }.GetNewClosure()
     $a = [ordered]@{ Kind = 'Fake'; Store = $store; Log = $store.Log }
@@ -79,7 +89,7 @@ function New-AVDTuneFakeAuth {
         [void]$store.Log.Add("Refresh tenant=$TenantId scopes=$(@($Scopes) -join ',') hasRefreshToken=$([bool]$RefreshToken)")
         if ($store.Offline) { throw 'Unable to connect to the remote server' }
         $res = ($Scopes[0] -replace '^https://([^/]+)/.*$', '$1')
-        $audience = if ($res -like 'graph*') { if ($Scopes[0] -like '*Sites.Selected') { 'Sites' } else { 'Graph' } } else { 'Arm' }
+        $audience = if ($res -like 'graph*') { if ($Scopes[0] -like '*Sites.Selected') { 'Sites' } else { 'Graph' } } elseif ($res -like 'storage.azure.com*') { 'Storage' } else { 'Arm' }
         if ($audience -in @($store.ConsentMissing)) { throw "Token request failed: AADSTS65001: The user or administrator has not consented to use the application (audience $audience)." }
         & $make $Scopes
     }.GetNewClosure()
@@ -107,9 +117,10 @@ function New-AVDTuneFakeAuth {
         $newId = { $store.NextId++; '{0:d8}-aaaa-bbbb-cccc-{1:d12}' -f $store.NextId, $store.NextId }
         if ($p -eq '/v1.0/servicePrincipals') {
             if ($Method -eq 'GET') { return (& $ok @{ value = @($store.ServicePrincipals | Where-Object { & $match $_ }) }) }
-            if ($store.SpCreateFailures -gt 0 -and $Body.appId -ne '797f4846-ba00-4fd7-ba43-dac1f8f63013') { $store.SpCreateFailures--; return [pscustomobject]@{ Status = 400; Body = (ConvertTo-FakeJson @{ error = @{ message = 'The appId of the service principal does not reference a valid application object.' } }); Error = '' } }
+            if ($store.SpCreateFailures -gt 0 -and $Body.appId -notin '797f4846-ba00-4fd7-ba43-dac1f8f63013', 'e406a681-f3d4-42a8-90b6-c2b029497af1') { $store.SpCreateFailures--; return [pscustomobject]@{ Status = 400; Body = (ConvertTo-FakeJson @{ error = @{ message = 'The appId of the service principal does not reference a valid application object.' } }); Error = '' } }
             $sp = @{ id = "sp-$(& $newId)"; appId = $Body.appId; oauth2PermissionScopes = @(); appRoleAssignmentRequired = [bool]$Body.appRoleAssignmentRequired; Assigned = (New-Object System.Collections.ArrayList) }
             if ($Body.appId -eq '797f4846-ba00-4fd7-ba43-dac1f8f63013') { $sp.oauth2PermissionScopes = @(@{ id = 'scope-user_impersonation'; value = 'user_impersonation' }) }
+            if ($Body.appId -eq 'e406a681-f3d4-42a8-90b6-c2b029497af1') { $sp.oauth2PermissionScopes = @(@{ id = 'scope-storage-user_impersonation'; value = 'user_impersonation' }) }
             [void]$store.ServicePrincipals.Add($sp); return (& $ok $sp 201)
         }
         if ($p -match '^/v1\.0/servicePrincipals/([^/]+)/appRoleAssignedTo$') {

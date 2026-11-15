@@ -1,9 +1,13 @@
 <#
-    AVDTune sign-in session: one Microsoft sign-in, three token audiences, tokens in memory only.
+    AVDTune sign-in session: one Microsoft sign-in, four token audiences, tokens in memory only.
 
       Graph   Microsoft Graph, read only (Entra groups, Intune app notes for the package trust anchor)
       Sites   Microsoft Graph, Sites.Selected (the SharePoint site of the environment / package store)
       Arm     Azure Resource Manager (snapshot of the OS disk, VM size and region), delegated user_impersonation
+      Storage Azure Storage (https://storage.azure.com/, delegated user_impersonation; issue 18): the NTFS rows of the FSLogix storage check
+              (Azure Files REST with OAuth, header x-ms-file-request-intent: backup). OPTIONAL: an app registration made before issue 18 has no
+              consent for it; the sign-in then works without this token, Session.Unavailable names the reason (set up again, docs\fslogix.md) and
+              nothing is changed silently. The token goes only to <account>.file.core.windows.net of the checked storage account (Storage module).
 
     The interactive sign-in is the normal Microsoft sign-in of the shared module (Shared\Modules\PackTune.SignIn.psm1: Invoke-PackTuneBrowserSignIn,
     embedded sign-in window, authorization code with PKCE; the administrator signs in himself). Keevault is not used (user decision
@@ -32,12 +36,14 @@ Import-Module (Join-Path $PSScriptRoot 'AVDTune.Trust.psm1')
 
 $script:GraphResource = 'https://graph.microsoft.com'
 $script:ArmResource = 'https://management.azure.com'
+$script:StorageResource = 'https://storage.azure.com'
 # Microsoft's "Microsoft Graph Command Line Tools" app is for the setup of the app registration only, never for the tool itself (same rule as PackTune)
 $script:SetupClientId = '14d82eec-204b-4c2f-b7e8-296a70dab67e'
 # What the setup sign-in asks for: only for creating the app registration and its admin consent, never for the daily work
 $script:SetupScopes = @('Application.ReadWrite.All', 'DelegatedPermissionGrant.ReadWrite.All', 'User.Read')
 $script:GraphAppId = '00000003-0000-0000-c000-000000000000'
 $script:ArmAppId = '797f4846-ba00-4fd7-ba43-dac1f8f63013'   # Windows Azure Service Management API
+$script:StorageAppId = 'e406a681-f3d4-42a8-90b6-c2b029497af1'   # Azure Storage
 $script:AppName = 'AVDTune'
 $script:AppTag = 'AVDTune'
 $script:AppNote = 'Created by AVDTune for its own sign-in (public client, http://localhost, delegated permissions only, assigned accounts only). Not used by PackTune.'
@@ -45,6 +51,7 @@ $script:AppNote = 'Created by AVDTune for its own sign-in (public client, http:/
 $script:AppPermissions = [ordered]@{
     '00000003-0000-0000-c000-000000000000' = @('Group.Read.All', 'DeviceManagementApps.Read.All', 'Sites.Selected', 'offline_access', 'openid', 'profile')
     '797f4846-ba00-4fd7-ba43-dac1f8f63013' = @('user_impersonation')
+    'e406a681-f3d4-42a8-90b6-c2b029497af1' = @('user_impersonation')
 }
 $script:SetupConsentNote = "The setup sign-in gives Microsoft's app 'Microsoft Graph Command Line Tools' the permissions Application.ReadWrite.All and DelegatedPermissionGrant.ReadWrite.All for your account. At the end AVDTune takes these two out of your own consent for that app again; the rest of that consent (for example User.Read) and the grant itself stay. If you confirmed the consent for the whole organization in the sign-in window, that one stays: remove the two permissions there (Entra admin center > Enterprise applications > Microsoft Graph Command Line Tools > Permissions, or with Microsoft Graph PowerShell Update-MgOauth2PermissionGrant; never needed by AVDTune afterwards)."
 $script:RoleText = 'Creating the app registration and assigning your account needs the role Application Administrator or Cloud Application Administrator; the consent for Microsoft Graph permissions needs Privileged Role Administrator (or Global Administrator).'
@@ -54,8 +61,14 @@ function Get-AVDTuneSetupConsentNote { $script:SetupConsentNote }
 $script:Audiences = [ordered]@{
     Graph = @{ Scopes = @('Group.Read.All', 'DeviceManagementApps.Read.All'); Resource = $script:GraphResource; Purpose = 'Microsoft Graph (read: groups, Intune app notes)' }
     Sites = @{ Scopes = @('Sites.Selected'); Resource = $script:GraphResource; Purpose = 'SharePoint site of the environment (Sites.Selected)' }
-    Arm   = @{ Scopes = @('user_impersonation'); Resource = $script:ArmResource; Purpose = 'Azure Resource Manager (snapshot, VM size, region)' }
+    # Alt: other exact forms of the audience. The ARM scope is asked for on management.azure.com; Microsoft's v1 style tokens of Azure Service Management name management.core.windows.net (not verified on a real tenant, so both exact forms, with and without a trailing slash, are accepted and nothing else)
+    Arm   = @{ Scopes = @('user_impersonation'); Resource = $script:ArmResource; Alt = @('https://management.core.windows.net'); Purpose = 'Azure Resource Manager (snapshot, VM size, region)' }
+    Storage = @{ Scopes = @('user_impersonation'); Resource = $script:StorageResource; Purpose = 'Azure Storage (NTFS rights of the FSLogix share; optional)'; Optional = $true }
 }
+
+$script:StorageSetupHint = "Open the sign-in step and choose 'Set up again (authorize this administrator)': that adds the permission Azure Storage user_impersonation to AVDTune's app registration and your consent for it (docs\fslogix.md). Until then the NTFS rows of the storage check say 'not checkable' (or use the key fallback you confirm for a run)."
+
+function Get-AVDTuneStorageSetupHint { $script:StorageSetupHint }
 
 function Get-AVDTuneAudience { $script:Audiences }
 
@@ -126,13 +139,19 @@ function New-AVDTuneSession {
     # Empty session; Connect-AVDTuneSession fills it
     # TempRoot: where the sign-in window leaves its temporary profiles (the temp folder of this user; a test folder in the checks)
     param([Parameter(Mandatory)]$Auth, [string]$TempRoot = [IO.Path]::GetTempPath())
-    [pscustomobject]@{ Auth = $Auth; TempRoot = $TempRoot; TenantId = ''; ClientId = ''; Account = ''; Name = ''; Tokens = @{}; Refresh = $null; Connected = $false; Warnings = @() }
+    [pscustomobject]@{ Auth = $Auth; TempRoot = $TempRoot; TenantId = ''; ClientId = ''; Account = ''; Name = ''; Tokens = @{}; Refresh = $null; Connected = $false; Warnings = @(); Unavailable = @{} }
 }
 
-function Set-AVDTuneSessionToken($Session, [string]$Audience, $Response) {
+function Test-AVDTuneConsentError([string]$Message) { [string]$Message -match 'AADSTS(65001|70011|90094|650056)' }
+
+function Set-AVDTuneSessionToken {
+    # Checks first, keeps afterwards: the claims (audience, scope, tenant) are verified BEFORE the access token and the rotated refresh token are stored; a failing check throws and changes nothing.
+    # Returns the scopes beyond what AVDTune asks for on this resource.
+    param($Session, [string]$Audience, $Response, [string]$TenantId)
     $access = [string](Get-AVDTuneProp $Response 'access_token')
     if (-not $access) { throw "The sign-in returned no access token for $Audience." }
     $claims = Get-AVDTuneTokenClaims $access
+    $extra = @(Assert-AVDTuneTokenClaims -Claims $claims -Audience $Audience -TenantId $TenantId)
     $expires = (Get-Date).AddSeconds([int](Get-AVDTuneProp $Response 'expires_in')).ToUniversalTime()
     $scopes = @(([string](Get-AVDTuneProp $claims 'scp')) -split ' ' | Where-Object { $_ })
     $old = $Session.Tokens[$Audience]
@@ -142,7 +161,7 @@ function Set-AVDTuneSessionToken($Session, [string]$Audience, $Response) {
     }
     $refresh = [string](Get-AVDTuneProp $Response 'refresh_token')
     if ($refresh) { if ($Session.Refresh) { $Session.Refresh.Dispose() }; $Session.Refresh = ConvertTo-AVDTuneSecure $refresh }
-    $claims
+    $extra
 }
 
 function Assert-AVDTuneTokenClaims {
@@ -151,7 +170,8 @@ function Assert-AVDTuneTokenClaims {
     param($Claims, [string]$Audience, [string]$TenantId)
     $a = $script:Audiences[$Audience]
     $aud = [string](Get-AVDTuneProp $Claims 'aud')
-    $okAud = if ($a.Resource -eq $script:GraphResource) { $aud -in @($script:GraphResource, '00000003-0000-0000-c000-000000000000') } else { $aud -like "$($a.Resource)*" }
+    # Exact audience (no prefix match: a look-alike host must not pass)
+    $okAud = if ($a.Resource -eq $script:GraphResource) { $aud -in @($script:GraphResource, '00000003-0000-0000-c000-000000000000') } else { $aud -in @(@($a.Resource) + @($(if ($a.ContainsKey('Alt')) { $a.Alt })) | ForEach-Object { $_; "$_/" }) }
     if (-not $okAud) { throw "The token for $Audience is for another resource ($aud)." }
     $have = @(([string](Get-AVDTuneProp $Claims 'scp')) -split ' ' | Where-Object { $_ })
     foreach ($need in $a.Scopes) { if ($need -notin $have) { throw "The token for $Audience lacks the permission $need (granted: $($have -join ', '))." } }
@@ -160,6 +180,8 @@ function Assert-AVDTuneTokenClaims {
     $expected = @(Get-AVDTuneExpectedScopes $Audience)
     @($have | Where-Object { $_ -notin $expected })
 }
+
+function Get-AVDTuneOptionalAudienceHint([string]$Audience) { if ($Audience -eq 'Storage') { $script:StorageSetupHint } else { '' } }
 
 function Get-AVDTuneScopeWarning([string]$Audience, [string[]]$Extra) {
     "The $Audience token carries permissions AVDTune does not ask for: $($Extra -join ', '). Check the API permissions of the app registration."
@@ -230,9 +252,25 @@ function Connect-AVDTuneSession {
         foreach ($audience in $script:Audiences.Keys) {
             $current = $audience
             $urls = @(Get-AVDTuneAudienceScopeUrls $audience)
+            if ($script:Audiences[$audience].ContainsKey('Optional')) {
+                # An optional audience (Storage): a registration without its consent still signs in; the reason is kept, nothing is changed
+                # Only the expected failure is caught here: Microsoft refuses the token because there is no consent (AADSTS65001, 70011, 90094, 650056).
+                # Everything else (wrong audience, missing scope, other tenant, network) ends the whole sign-in like for the other audiences.
+                $response = $null
+                try { $response = & $Session.Auth.Refresh $tid $ClientId (ConvertFrom-AVDTuneSecure $Session.Refresh) $urls }
+                catch {
+                    if (-not (Test-AVDTuneConsentError $_.Exception.Message)) { throw }
+                    $why = ConvertTo-AVDTuneAuthError -Message $_.Exception.Message -Audience $audience
+                    $Session.Unavailable[$audience] = "No $audience token: $why $(Get-AVDTuneOptionalAudienceHint $audience)"
+                    [void]$warnings.Add($Session.Unavailable[$audience])
+                    continue
+                }
+                $extra = @(Set-AVDTuneSessionToken $Session $audience $response $tid)
+                if ($extra.Count -gt 0) { [void]$warnings.Add((Get-AVDTuneScopeWarning $audience $extra)) }
+                continue
+            }
             $response = & $Session.Auth.Refresh $tid $ClientId (ConvertFrom-AVDTuneSecure $Session.Refresh) $urls
-            $c = Set-AVDTuneSessionToken $Session $audience $response
-            $extra = @(Assert-AVDTuneTokenClaims -Claims $c -Audience $audience -TenantId $tid)
+            $extra = @(Set-AVDTuneSessionToken $Session $audience $response $tid)
             if ($extra.Count -gt 0) { [void]$warnings.Add((Get-AVDTuneScopeWarning $audience $extra)) }
         }
         $Session.Warnings = @($warnings)
@@ -250,18 +288,22 @@ function Connect-AVDTuneSession {
 function Get-AVDTuneAccessToken {
     # The plain access token of an audience, for one request. Refreshed when it expires within 3 minutes.
     [CmdletBinding()]
-    param([Parameter(Mandatory)]$Session, [Parameter(Mandatory)][ValidateSet('Graph', 'Sites', 'Arm')][string]$Audience)
+    param([Parameter(Mandatory)]$Session, [Parameter(Mandatory)][ValidateSet('Graph', 'Sites', 'Arm', 'Storage')][string]$Audience)
     $t = $Session.Tokens[$Audience]
+    if ($Session.Connected -and -not $t -and $Session.Unavailable -and $Session.Unavailable[$Audience]) { throw $Session.Unavailable[$Audience] }
     if (-not $Session.Connected -or -not $t) { throw "Not signed in (no $Audience token). Sign in first on the Overview." }
     if ($t.ExpiresOn -lt (Get-Date).ToUniversalTime().AddMinutes(3)) {
         try {
             $urls = @(Get-AVDTuneAudienceScopeUrls $Audience)
             $response = & $Session.Auth.Refresh $Session.TenantId $Session.ClientId (ConvertFrom-AVDTuneSecure $Session.Refresh) $urls
-            $c = Set-AVDTuneSessionToken $Session $Audience $response
-            $extra = @(Assert-AVDTuneTokenClaims -Claims $c -Audience $Audience -TenantId $Session.TenantId)
+            $extra = @(Set-AVDTuneSessionToken $Session $Audience $response $Session.TenantId)
             if ($extra.Count -gt 0) { $Session.Warnings = @(@($Session.Warnings) + (Get-AVDTuneScopeWarning $Audience $extra) | Select-Object -Unique) }
         }
-        catch { throw (ConvertTo-AVDTuneAuthError -Message $_.Exception.Message -Audience $Audience) }
+        catch {
+            $text = ConvertTo-AVDTuneAuthError -Message $_.Exception.Message -Audience $Audience
+            if ($script:Audiences[$Audience].ContainsKey('Optional') -and (Test-AVDTuneConsentError $_.Exception.Message)) { $text = "$text $(Get-AVDTuneOptionalAudienceHint $Audience)" }
+            throw $text
+        }
         $t = $Session.Tokens[$Audience]
     }
     ConvertFrom-AVDTuneSecure $t.Access
@@ -276,6 +318,7 @@ function Get-AVDTuneSessionInfo {
                 $t = $Session.Tokens[$_]
                 [pscustomobject]@{ Audience = $_; Purpose = $script:Audiences[$_].Purpose; Scopes = @($t.Scopes); ExpiresOn = $t.ExpiresOn.ToString('o') }
             })
+        Unavailable = @($Session.Unavailable.Keys | ForEach-Object { [pscustomobject]@{ Audience = $_; Reason = [string]$Session.Unavailable[$_] } })
     }
 }
 
@@ -285,7 +328,7 @@ function Disconnect-AVDTuneSession {
     foreach ($key in @($Session.Tokens.Keys)) { $t = $Session.Tokens[$key]; if ($t -and $t.Access) { $t.Access.Dispose() } }
     $Session.Tokens.Clear()
     if ($Session.Refresh) { $Session.Refresh.Dispose() }
-    $Session.Refresh = $null; $Session.Connected = $false; $Session.Account = ''; $Session.Name = ''; $Session.Warnings = @()
+    $Session.Unavailable = @{}; $Session.Refresh = $null; $Session.Connected = $false; $Session.Account = ''; $Session.Name = ''; $Session.Warnings = @()
     [void](Remove-AVDTuneSignInLeftovers -TempRoot $Session.TempRoot)
 }
 
@@ -394,7 +437,7 @@ function Install-AVDTuneAppRegistration {
           enterprise app appRoleAssignmentRequired = true: only assigned accounts can sign in
           assignment     the signed-in admin (default role 00000000-0000-0000-0000-000000000000)
           consent        oauth2PermissionGrant consentType 'Principal' for the signed-in admin only, one per resource (Graph, Azure
-                         Service Management); no consent for the whole organization
+                         Service Management, Azure Storage); no consent for the whole organization
         Another administrator is added by running the setup as that administrator (sign-in step: "Set up again"), or by hand (docs).
         At the end the two setup permissions are taken out of the admin's own consent for 'Microsoft Graph Command Line Tools' again
         (the grant itself stays). No secret, no certificate. The setup token is dropped. Returns TenantId, ClientId, Account, Created, Notes.
@@ -434,10 +477,11 @@ function Install-AVDTuneAppRegistration {
         $access = @(); $resourceSp = @{}
         foreach ($resApp in $script:AppPermissions.Keys) {
             $sp = @(& $list (Get-AVDTuneGraphFilterPath 'servicePrincipals' "appId eq '$resApp'" 'id,appId,oauth2PermissionScopes') 'read the service principal of a resource') | Select-Object -First 1
-            if (-not $sp -and $resApp -eq $script:ArmAppId) {
-                # Azure Service Management has no service principal in a tenant that never used Azure: it is added (Microsoft's own app)
-                $sp = & $g POST '/v1.0/servicePrincipals' @{ appId = $resApp } 'add Azure Service Management to the tenant'
-                [void]$notes.Add('Azure Service Management was added to the tenant (service principal of Microsoft''s app).')
+            if (-not $sp -and $resApp -in $script:ArmAppId, $script:StorageAppId) {
+                # Azure Service Management and Azure Storage have no service principal in a tenant that never used them: added (Microsoft's own apps)
+                $resName = if ($resApp -eq $script:ArmAppId) { 'Azure Service Management' } else { 'Azure Storage' }
+                $sp = & $g POST '/v1.0/servicePrincipals' @{ appId = $resApp } "add $resName to the tenant"
+                [void]$notes.Add("$resName was added to the tenant (service principal of Microsoft's app).")
             }
             if (-not $sp) { throw "The resource $resApp was not found in the tenant." }
             $resourceSp[$resApp] = [string]$sp.id
@@ -612,6 +656,6 @@ function New-AVDTuneAuthAdapter {
 
 #endregion
 
-Export-ModuleMember -Function Get-AVDTuneAudience, Get-AVDTuneAudienceScopeUrls, Get-AVDTuneExpectedScopes, Get-AVDTuneSignInLeftovers, Remove-AVDTuneSignInLeftovers, ConvertTo-AVDTuneSecure, ConvertFrom-AVDTuneSecure, Get-AVDTuneTokenClaims, ConvertTo-AVDTuneAuthError,
+Export-ModuleMember -Function Get-AVDTuneStorageSetupHint, Get-AVDTuneAudience, Get-AVDTuneAudienceScopeUrls, Get-AVDTuneExpectedScopes, Get-AVDTuneSignInLeftovers, Remove-AVDTuneSignInLeftovers, ConvertTo-AVDTuneSecure, ConvertFrom-AVDTuneSecure, Get-AVDTuneTokenClaims, ConvertTo-AVDTuneAuthError,
     New-AVDTuneSession, Connect-AVDTuneSession, Get-AVDTuneAccessToken, Get-AVDTuneSessionInfo, Disconnect-AVDTuneSession, Test-AVDTuneSessionClear, New-AVDTuneAuthAdapter,
     Test-AVDTuneTenantGuid, Test-AVDTuneDomainName, Get-AVDTuneAccountDomain, Resolve-AVDTuneTenantFromDomain, Install-AVDTuneAppRegistration, Get-AVDTuneAppRegistrationProblems, Get-AVDTuneSetupConsentNote

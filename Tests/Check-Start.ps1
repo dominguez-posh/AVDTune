@@ -2,7 +2,7 @@
 <#
 .SYNOPSIS
     Checks the start sequence against fakes (Tests\Fakes\FakeServices.ps1, FakeMachine.ps1): first-run questions and environment.json,
-    the sign-in session (three audiences, tokens in memory), the snapshot gate (IMDS, ARM, confirmation by name, read-only until then),
+    the sign-in session (four audiences, tokens in memory), the snapshot gate (IMDS, ARM, confirmation by name, read-only until then),
     the domain controller connection (LDAPS pinning, signed fallback, never a simple bind) and discovery, including the error paths:
     no network, 403 (missing role), changed LDAPS certificate, LDAPS blocked, snapshot older than the last change, one-word name. No real sign-in, tenant, Azure or domain controller.
 #>
@@ -75,8 +75,8 @@ try {
     $auth = New-AVDTuneFakeAuth
     $session = New-AVDTuneSession -TempRoot $signTemp -Auth $auth
     $info = Connect-AVDTuneSession -Session $session -TenantId $tenant -ClientId $clientId
-    Test-Check 'sign-in: connected, account known, three audiences; Sites and ARM tokens carry their permission' ($info.Connected -and $info.Account -like 'admin.example@*' -and $info.Audiences.Count -eq 3 -and ($info.Audiences | Where-Object Audience -eq 'Sites').Scopes -contains 'Sites.Selected' -and ($info.Audiences | Where-Object Audience -eq 'Arm').Scopes -join ',' -eq 'user_impersonation') ($info | ConvertTo-Json -Compress -Depth 4)
-    Test-Check 'one interactive sign-in only; the other tokens come from the refresh token' (@($auth.Log | Where-Object { $_ -like 'SignIn*' }).Count -eq 1 -and @($auth.Log | Where-Object { $_ -like 'Refresh*hasRefreshToken=True' }).Count -eq 3) ($auth.Log -join ' | ')
+    Test-Check 'sign-in: connected, account known, four audiences; Sites, ARM and Storage tokens carry their permission' ($info.Connected -and $info.Account -like 'admin.example@*' -and $info.Audiences.Count -eq 4 -and ($info.Audiences | Where-Object Audience -eq 'Sites').Scopes -contains 'Sites.Selected' -and ($info.Audiences | Where-Object Audience -eq 'Arm').Scopes -join ',' -eq 'user_impersonation') ($info | ConvertTo-Json -Compress -Depth 4)
+    Test-Check 'one interactive sign-in only; the other tokens come from the refresh token' (@($auth.Log | Where-Object { $_ -like 'SignIn*' }).Count -eq 1 -and @($auth.Log | Where-Object { $_ -like 'Refresh*hasRefreshToken=True' }).Count -eq 4) ($auth.Log -join ' | ')
     $graphScopes = ($info.Audiences | Where-Object Audience -eq 'Graph').Scopes
     # v2 tokens carry every consented scope of their resource: the two Graph tokens are not separated by scope (finding 5), only Graph and ARM are
     Test-Check 'honest separation: both Graph tokens carry all Graph permissions, the ARM token none of them' ((@($graphScopes | Sort-Object) -join ',') -eq (@(($info.Audiences | Where-Object Audience -eq 'Sites').Scopes | Sort-Object) -join ',') -and $graphScopes -contains 'Sites.Selected' -and @(($info.Audiences | Where-Object Audience -eq 'Arm').Scopes | Where-Object { $_ -in $graphScopes }).Count -eq 0) ($graphScopes -join ',')
@@ -118,6 +118,79 @@ try {
     $s2 = New-AVDTuneSession -TempRoot $signTemp -Auth (New-AVDTuneFakeAuth -Seed @{ Offline = $true })
     $e = Get-ThrownText { Connect-AVDTuneSession -Session $s2 -TenantId $tenant -ClientId $clientId }
     Test-Check 'sign-in without network: readable text, session stays empty' ($e -like 'No connection to Microsoft sign-in*' -and (Test-AVDTuneSessionClear $s2)) $e
+    # ---------------------------------------------------------------- storage audience (issue 18)
+    $sAuth = New-AVDTuneFakeAuth
+    $sSession = New-AVDTuneSession -TempRoot $signTemp -Auth $sAuth
+    $sInfo = Connect-AVDTuneSession -Session $sSession -TenantId $tenant -ClientId $clientId
+    $stTok = Get-AVDTuneAccessToken -Session $sSession -Audience Storage
+    $stClaims = Get-AVDTuneTokenClaims $stTok
+    Test-Check 'storage token: audience https://storage.azure.com, scope user_impersonation, the tenant of the sign-in, a SecureString in the session' ($stClaims.aud -eq 'https://storage.azure.com' -and $stClaims.scp -eq 'user_impersonation' -and $stClaims.tid -eq $tenant -and $sSession.Tokens.Storage.Access -is [System.Security.SecureString] -and @($sInfo.Unavailable).Count -eq 0) ($sInfo | ConvertTo-Json -Compress -Depth 4)
+    Test-Check 'the storage token is fetched with the Storage scope from the refresh token (no second interactive sign-in)' (@($sAuth.Log | Where-Object { $_ -like 'SignIn*' }).Count -eq 1 -and @($sAuth.Log | Where-Object { $_ -eq 'Refresh tenant=' + $tenant + ' scopes=https://storage.azure.com/user_impersonation hasRefreshToken=True' }).Count -eq 1) ($sAuth.Log -join ' | ')
+    Test-Check 'the session info and the log hold no storage token' ((($sInfo | ConvertTo-Json -Depth 5) + ($sAuth.Log -join ' ')) -notmatch 'eyJ|fake-refresh-\d|fakesignature') $null
+    $sSession.Tokens.Storage.ExpiresOn = (Get-Date).ToUniversalTime().AddMinutes(1)
+    $stTok2 = Get-AVDTuneAccessToken -Session $sSession -Audience Storage
+    Test-Check 'an expiring storage token is refreshed like the others' ($stTok2 -ne $stTok -and (Get-AVDTuneTokenClaims $stTok2).aud -eq 'https://storage.azure.com') $null
+    Disconnect-AVDTuneSession $sSession
+    Test-Check 'disconnect removes the storage token too' ((Test-AVDTuneSessionClear $sSession) -and $sSession.Unavailable.Count -eq 0 -and $null -ne (Get-ThrownText { Get-AVDTuneAccessToken -Session $sSession -Audience Storage })) $null
+    # counter-tests: only a missing consent makes the storage token "not available"; everything else ends the sign-in like for the other audiences
+    $cc = New-AVDTuneSession -TempRoot $signTemp -Auth (New-AVDTuneFakeAuth -Seed @{ ConsentMissing = @('Storage') })
+    $cci = Connect-AVDTuneSession -Session $cc -TenantId $tenant -ClientId $clientId
+    $why = Get-ThrownText { Get-AVDTuneAccessToken -Session $cc -Audience Storage }
+    Test-Check 'storage, no consent (AADSTS65001): the sign-in works with three tokens, no storage token, the reason names the consent and the fix (Set up again), in the warnings too' ($cci.Connected -and -not $cc.Tokens.ContainsKey('Storage') -and @($cci.Audiences).Count -eq 3 -and $why -like '*no consent*Storage*user_impersonation*' -and $why -like '*Set up again (authorize this administrator)*' -and @($cci.Unavailable).Count -eq 1 -and (@($cci.Warnings) -join ' ') -like '*No Storage token*') "$why"
+    Disconnect-AVDTuneSession $cc
+    foreach ($case in @(
+            @{ Name = 'the audience of another resource (ARM)'; Seed = @{ StorageAud = 'https://management.azure.com' }; Like = '*another resource*' },
+            @{ Name = 'a look-alike host as audience (prefix of the real one)'; Seed = @{ StorageAud = 'https://storage.azure.com.evil.example' }; Like = '*another resource*' },
+            @{ Name = 'the audience in GUID form'; Seed = @{ StorageAud = 'e406a681-f3d4-42a8-90b6-c2b029497af1' }; Like = '*another resource*' },
+            @{ Name = 'a token without the scope user_impersonation'; Seed = @{ StorageScopes = @('Other.Scope') }; Like = '*lacks the permission user_impersonation*' },
+            @{ Name = 'a roles claim instead of scp (application permission, not the delegated one)'; Seed = @{ StorageUseRoles = $true }; Like = '*lacks the permission user_impersonation*' },
+            @{ Name = 'a tid of another tenant on the storage token only'; Seed = @{ StorageWrongTenant = $true }; Like = '*tenant*' })) {
+        $cs = New-AVDTuneSession -TempRoot $signTemp -Auth (New-AVDTuneFakeAuth -Seed $case.Seed)
+        $why = Get-ThrownText { Connect-AVDTuneSession -Session $cs -TenantId $tenant -ClientId $clientId }
+        Test-Check "storage: $($case.Name): the whole sign-in fails, nothing kept, no 'Set up again' hint" ($why -like $case.Like -and $why -notlike '*Set up again*' -and (Test-AVDTuneSessionClear $cs)) "$why"
+    }
+    # check first, keep afterwards: a refresh with a wrong audience keeps the old access token AND the old refresh token; the second call fails again
+    $rAuth = New-AVDTuneFakeAuth
+    $rs = New-AVDTuneSession -TempRoot $signTemp -Auth $rAuth
+    [void](Connect-AVDTuneSession -Session $rs -TenantId $tenant -ClientId $clientId)
+    $refreshBefore = ConvertFrom-AVDTuneSecure $rs.Refresh
+    $accessBefore = ConvertFrom-AVDTuneSecure $rs.Tokens.Storage.Access
+    $rAuth.Store.StorageAud = 'https://storage.azure.com.evil.example'
+    $rs.Tokens.Storage.ExpiresOn = (Get-Date).ToUniversalTime().AddMinutes(1)
+    $w1 = Get-ThrownText { Get-AVDTuneAccessToken -Session $rs -Audience Storage }
+    $w2 = Get-ThrownText { Get-AVDTuneAccessToken -Session $rs -Audience Storage }
+    Test-Check 'a refresh with a wrong audience throws, also the second call; the checked token and the refresh token are not replaced by the bad answer' ($w1 -like '*another resource*' -and $w2 -like '*another resource*' -and (ConvertFrom-AVDTuneSecure $rs.Refresh) -eq $refreshBefore -and (ConvertFrom-AVDTuneSecure $rs.Tokens.Storage.Access) -eq $accessBefore) "$w1 | $w2"
+    $rAuth.Store.StorageAud = ''
+    Test-Check 'with a good answer again the refresh works' ((Get-AVDTuneTokenClaims (Get-AVDTuneAccessToken -Session $rs -Audience Storage)).aud -eq 'https://storage.azure.com') $null
+    $rAuth.Store.ConsentMissing = @('Storage'); $rs.Tokens.Storage.ExpiresOn = (Get-Date).ToUniversalTime().AddMinutes(1)
+    $w3 = Get-ThrownText { Get-AVDTuneAccessToken -Session $rs -Audience Storage }
+    Test-Check 'consent withdrawn later: the refresh says so and gives the Set up again hint; any other refresh error has no hint' ($w3 -like '*Set up again*' -and (Get-ThrownText { $rAuth.Store.ConsentMissing = @(); $rAuth.Store.Offline = $true; $rs.Tokens.Storage.ExpiresOn = (Get-Date).ToUniversalTime().AddMinutes(1); Get-AVDTuneAccessToken -Session $rs -Audience Storage }) -notlike '*Set up again*') "$w3"
+    Disconnect-AVDTuneSession $rs
+    # ARM: both known audience forms exactly, nothing else
+    foreach ($armAud in @('https://management.azure.com', 'https://management.azure.com/', 'https://management.core.windows.net', 'https://management.core.windows.net/')) {
+        $ra = New-AVDTuneFakeAuth; $ra.Store.ExpiresIn = 3600
+        $raS = New-AVDTuneSession -TempRoot $signTemp -Auth $ra
+        [void](Connect-AVDTuneSession -Session $raS -TenantId $tenant -ClientId $clientId)
+        $ra.Store.ArmAud = $armAud; $raS.Tokens.Arm.ExpiresOn = (Get-Date).ToUniversalTime().AddMinutes(1)
+        $armOk = Get-ThrownText { [void](Get-AVDTuneAccessToken -Session $raS -Audience Arm) }
+        Test-Check "ARM audience $armAud is accepted" ($null -eq $armOk) $armOk
+        Disconnect-AVDTuneSession $raS
+    }
+    $ra = New-AVDTuneFakeAuth; $raS = New-AVDTuneSession -TempRoot $signTemp -Auth $ra
+    [void](Connect-AVDTuneSession -Session $raS -TenantId $tenant -ClientId $clientId)
+    foreach ($badAud in @('https://management.azure.com.evil.example', 'https://management.core.windows.net.evil.example', 'https://storage.azure.com')) {
+        $ra.Store.ArmAud = $badAud; $raS.Tokens.Arm.ExpiresOn = (Get-Date).ToUniversalTime().AddMinutes(1)
+        Test-Check "ARM audience $badAud is refused" ((Get-ThrownText { [void](Get-AVDTuneAccessToken -Session $raS -Audience Arm) }) -like '*another resource*') $null
+    }
+    Disconnect-AVDTuneSession $raS
+    $wrongTid = New-AVDTuneSession -TempRoot $signTemp -Auth (New-AVDTuneFakeAuth -Seed @{ WrongTenant = $true })
+    Test-Check 'a token of another tenant still fails the whole sign-in (the optional audience does not relax the tenant check)' ($null -ne (Get-ThrownText { Connect-AVDTuneSession -Session $wrongTid -TenantId $tenant -ClientId $clientId }) -and (Test-AVDTuneSessionClear $wrongTid)) $null
+    $silentAuth = New-AVDTuneFakeAuth -Seed @{ ConsentMissing = @('Storage') }
+    $silent = New-AVDTuneSession -TempRoot $signTemp -Auth $silentAuth
+    [void](Connect-AVDTuneSession -Session $silent -TenantId $tenant -ClientId $clientId)
+    Test-Check 'an old registration without the scope: the sign-in changes nothing in the tenant (no Graph call, no consent, no registration change)' (@($silentAuth.Log | Where-Object { $_ -like 'Graph *' }).Count -eq 0 -and $silentAuth.Store.Apps.Count -eq 0 -and $silentAuth.Store.Grants.Count -eq 1) ($silentAuth.Log -join ' | ')
+    Disconnect-AVDTuneSession $silent
+
     $s3 = New-AVDTuneSession -TempRoot $signTemp -Auth (New-AVDTuneFakeAuth -Seed @{ ConsentMissing = @('Arm') })
     $e = Get-ThrownText { Connect-AVDTuneSession -Session $s3 -TenantId $tenant -ClientId $clientId }
     Test-Check 'missing consent for Azure Service Management: names the audience and the scope, no tokens kept' ($e -like '*no consent*audience Arm*user_impersonation*' -and (Test-AVDTuneSessionClear $s3)) $e
@@ -164,7 +237,7 @@ try {
     $a1 = New-AVDTuneFakeAuth
     $res1 = Invoke-AVDTuneStartSignIn -Root $r1 -Session (New-AVDTuneSession -TempRoot $signTemp -Auth $a1) -Account 'admin.example@contoso.example' -User 'admin1'
     $e1 = Get-AVDTuneEnvironment $r1
-    Test-Check 'no saved tenant: the tenant of the account domain is used, with the account as login hint' (@($a1.Log | Where-Object { $_ -like "SignIn tenant=$tenant client=$clientId hint=admin.example@contoso.example*" }).Count -eq 1 -and @($a1.Log | Where-Object { $_ -like "Refresh tenant=$tenant*" }).Count -eq 3) ($a1.Log -join ' | ')
+    Test-Check 'no saved tenant: the tenant of the account domain is used, with the account as login hint' (@($a1.Log | Where-Object { $_ -like "SignIn tenant=$tenant client=$clientId hint=admin.example@contoso.example*" }).Count -eq 1 -and @($a1.Log | Where-Object { $_ -like "Refresh tenant=$tenant*" }).Count -eq 4) ($a1.Log -join ' | ')
     Test-Check 'the tid of the token is saved in environment.json with a change log entry' ($e1.SignIn.TenantId -eq $tenant -and $e1.SignIn.ClientId -eq $clientId -and @(Get-AVDTuneChangeLog -Root $r1 | Where-Object { $_.Text -like "Tenant taken from the sign-in: $tenant (account admin.example@contoso.example)" }).Count -eq 1 -and $res1.Info.TenantId -eq $tenant) (Get-AVDTuneChangeLog -Root $r1 | ConvertTo-Json -Compress)
     # tid differs from the discovery
     $r2 = & $newRoot '' $clientId
@@ -216,11 +289,11 @@ try {
     $graphAccess = @($def.requiredResourceAccess | Where-Object { $_.resourceAppId -eq '00000003-0000-0000-c000-000000000000' })[0]
     $armAccess = @($def.requiredResourceAccess | Where-Object { $_.resourceAppId -eq '797f4846-ba00-4fd7-ba43-dac1f8f63013' })[0]
     Test-Check "registration 'AVDTune' created: public client, redirect http://localhost only, single tenant, tag, note with date, computer and account, no secret or certificate" ($a7.Store.Apps.Count -eq 1 -and $def.displayName -eq 'AVDTune' -and (@($def.publicClient.redirectUris) -join ',') -eq 'http://localhost' -and $def.signInAudience -eq 'AzureADMyOrg' -and $def.isFallbackPublicClient -eq $false -and @($def.tags) -contains 'AVDTune' -and $def.notes -like "Created by AVDTune*Created on ????-??-?? on $env:COMPUTERNAME by admin.example@contoso.example." -and -not $def.ContainsKey('passwordCredentials') -and -not $def.ContainsKey('keyCredentials') -and -not $def.ContainsKey('web') -and -not $def.ContainsKey('spa') -and -not $def.ContainsKey('identifierUris')) ($def | ConvertTo-Json -Depth 6 -Compress)
-    Test-Check 'its permissions: Graph Group.Read.All, DeviceManagementApps.Read.All, Sites.Selected, offline_access (+ openid, profile); Azure Service Management user_impersonation; delegated only' ((@($graphAccess.resourceAccess | ForEach-Object { $_.id }) -join ',') -eq 'scope-Group.Read.All,scope-DeviceManagementApps.Read.All,scope-Sites.Selected,scope-offline_access,scope-openid,scope-profile' -and (@($armAccess.resourceAccess | ForEach-Object { $_.id }) -join ',') -eq 'scope-user_impersonation' -and @($def.requiredResourceAccess | ForEach-Object { $_.resourceAccess } | Where-Object { $_.type -ne 'Scope' }).Count -eq 0 -and @($def.requiredResourceAccess).Count -eq 2) ($def.requiredResourceAccess | ConvertTo-Json -Depth 5 -Compress)
+    Test-Check 'its permissions: Graph Group.Read.All, DeviceManagementApps.Read.All, Sites.Selected, offline_access (+ openid, profile); Azure Service Management user_impersonation; Azure Storage user_impersonation; delegated only' ((@($graphAccess.resourceAccess | ForEach-Object { $_.id }) -join ',') -eq 'scope-Group.Read.All,scope-DeviceManagementApps.Read.All,scope-Sites.Selected,scope-offline_access,scope-openid,scope-profile' -and (@($armAccess.resourceAccess | ForEach-Object { $_.id }) -join ',') -eq 'scope-user_impersonation' -and @($def.requiredResourceAccess | ForEach-Object { $_.resourceAccess } | Where-Object { $_.type -ne 'Scope' }).Count -eq 0 -and @($def.requiredResourceAccess).Count -eq 3 -and (@(@($def.requiredResourceAccess | Where-Object { $_.resourceAppId -eq 'e406a681-f3d4-42a8-90b6-c2b029497af1' })[0].resourceAccess | ForEach-Object { $_.id }) -join ',') -eq 'scope-storage-user_impersonation') ($def.requiredResourceAccess | ConvertTo-Json -Depth 5 -Compress)
     $sp7 = @($a7.Store.ServicePrincipals | Where-Object { $_.appId -eq $app7.appId })
     $grants7 = @($a7.Store.Grants | Where-Object { $_.clientId -eq $sp7[0].id })
     Test-Check 'enterprise app requires an assignment; the signed-in admin (oid) is assigned with the default role' ($sp7.Count -eq 1 -and $sp7[0].appRoleAssignmentRequired -eq $true -and @($sp7[0].Assigned).Count -eq 1 -and $sp7[0].Assigned[0].principalId -eq 'oid-fake' -and $sp7[0].Assigned[0].appRoleId -eq '00000000-0000-0000-0000-000000000000' -and $sp7[0].Assigned[0].resourceId -eq $sp7[0].id) ($sp7 | ConvertTo-Json -Depth 4 -Compress)
-    Test-Check 'consent only for the signed-in admin (Principal) for Graph and Azure Service Management; none for the whole organization' ($grants7.Count -eq 2 -and @($grants7 | Where-Object { $_.consentType -ne 'Principal' -or $_.principalId -ne 'oid-fake' }).Count -eq 0 -and @($grants7 | Where-Object { $_.resourceId -eq 'sp-graph-0001' -and $_.scope -eq 'Group.Read.All DeviceManagementApps.Read.All Sites.Selected offline_access openid profile' }).Count -eq 1 -and @($grants7 | Where-Object { $_.resourceId -eq 'sp-arm-0001' -and $_.scope -eq 'user_impersonation' }).Count -eq 1 -and @($a7.Store.Grants | Where-Object { $_.consentType -eq 'AllPrincipals' }).Count -eq 0) ($grants7 | ConvertTo-Json -Compress)
+    Test-Check 'consent only for the signed-in admin (Principal) for Graph, Azure Service Management and Azure Storage; none for the whole organization' ($grants7.Count -eq 3 -and @($grants7 | Where-Object { $_.resourceId -eq 'sp-storage-0001' -and $_.scope -eq 'user_impersonation' }).Count -eq 1 -and @($grants7 | Where-Object { $_.consentType -ne 'Principal' -or $_.principalId -ne 'oid-fake' }).Count -eq 0 -and @($grants7 | Where-Object { $_.resourceId -eq 'sp-graph-0001' -and $_.scope -eq 'Group.Read.All DeviceManagementApps.Read.All Sites.Selected offline_access openid profile' }).Count -eq 1 -and @($grants7 | Where-Object { $_.resourceId -eq 'sp-arm-0001' -and $_.scope -eq 'user_impersonation' }).Count -eq 1 -and @($a7.Store.Grants | Where-Object { $_.consentType -eq 'AllPrincipals' }).Count -eq 0) ($grants7 | ConvertTo-Json -Compress)
     $cliGrant = @($a7.Store.Grants | Where-Object { $_.id -eq 'grant-cli-own' })[0]
     Test-Check "the setup permissions are taken out of the admin's own consent for Graph CLI Tools again; the rest and the grant stay" ($cliGrant -and $cliGrant.scope -eq 'openid profile User.Read' -and (@($res7.Notes) -join ' ') -like "*taken out of your own consent for 'Microsoft Graph Command Line Tools'*") $cliGrant.scope
     $normal7 = @($a7.Log | Where-Object { $_ -like "SignIn tenant=$tenant client=$($app7.appId) hint=admin.example@contoso.example*" })
@@ -270,10 +343,11 @@ try {
     $rc = & $newRoot $tenant $clean.appId
     $resc = Invoke-AVDTuneStartSignIn -Root $rc -Session (New-AVDTuneSession -TempRoot $signTemp -Auth $ac) -User 'admin1' -RetryDelaySeconds 0 -Setup
     $spc = @($ac.Store.ServicePrincipals | Where-Object { $_.appId -eq $clean.appId })[0]
-    Test-Check 'set up again with a clean saved registration: checked, kept, the signed-in admin assigned and consented (Principal), no new registration' ($ac.Store.Apps.Count -eq 1 -and $clean.Patched -and (Get-AVDTuneEnvironment $rc).SignIn.ClientId -eq $clean.appId -and $spc.appRoleAssignmentRequired -eq $true -and @($spc.Assigned | Where-Object { $_.principalId -eq 'oid-fake' }).Count -eq 1 -and @($ac.Store.Grants | Where-Object { $_.clientId -eq $spc.id -and $_.consentType -eq 'Principal' -and $_.principalId -eq 'oid-fake' }).Count -eq 2 -and (@($resc.Notes) -join ' ') -like '*was checked*is used*' -and $resc.Info.Connected) (@($resc.Notes) -join ' | ')
+    Test-Check 'set up again with a clean saved registration: checked, kept, the signed-in admin assigned and consented (Principal), no new registration' ($ac.Store.Apps.Count -eq 1 -and $clean.Patched -and (Get-AVDTuneEnvironment $rc).SignIn.ClientId -eq $clean.appId -and $spc.appRoleAssignmentRequired -eq $true -and @($spc.Assigned | Where-Object { $_.principalId -eq 'oid-fake' }).Count -eq 1 -and @($ac.Store.Grants | Where-Object { $_.clientId -eq $spc.id -and $_.consentType -eq 'Principal' -and $_.principalId -eq 'oid-fake' }).Count -eq 3 -and (@($resc.Notes) -join ' ') -like '*was checked*is used*' -and $resc.Info.Connected) (@($resc.Notes) -join ' | ')
+    Test-Check 'set up again retrofits an older registration (saved without the Storage permission): the permission is added to it and the admin consents to it; the sign-in then has a storage token' (@($clean.Definition.requiredResourceAccess | Where-Object { $_.resourceAppId -eq 'e406a681-f3d4-42a8-90b6-c2b029497af1' }).Count -eq 1 -and @($ac.Store.Grants | Where-Object { $_.clientId -eq $spc.id -and $_.resourceId -eq 'sp-storage-0001' -and $_.scope -eq 'user_impersonation' }).Count -eq 1 -and @($resc.Info.Audiences | Where-Object Audience -eq 'Storage').Count -eq 1) (@($resc.Notes) -join ' | ')
     $ac.Log.Clear()
     [void](Invoke-AVDTuneStartSignIn -Root $rc -Session (New-AVDTuneSession -TempRoot $signTemp -Auth $ac) -User 'admin1' -RetryDelaySeconds 0 -Setup)
-    Test-Check 'a second setup run assigns and grants nothing twice' (@($spc.Assigned).Count -eq 1 -and @($ac.Store.Grants | Where-Object { $_.clientId -eq $spc.id }).Count -eq 2 -and @($ac.Log | Where-Object { $_ -like 'Graph POST*' }).Count -eq 0) ($ac.Log -join ' | ')
+    Test-Check 'a second setup run assigns and grants nothing twice' (@($spc.Assigned).Count -eq 1 -and @($ac.Store.Grants | Where-Object { $_.clientId -eq $spc.id }).Count -eq 3 -and @($ac.Log | Where-Object { $_ -like 'Graph POST*' }).Count -eq 0) ($ac.Log -join ' | ')
     # Graph CLI Tools consented for the whole organization: not changed, named
     $ao = New-AVDTuneFakeAuth -Seed @{ CliOrgGrant = $true }
     $ro = & $newRoot '' ''
@@ -297,6 +371,9 @@ try {
     $a10 = New-AVDTuneFakeAuth -Seed @{ SpCreateFailures = 2; ArmSpMissing = $true }
     $res10 = Invoke-AVDTuneStartSignIn -Root $r9 -Session (New-AVDTuneSession -TempRoot $signTemp -Auth $a10) -User 'admin1' -RetryDelaySeconds 0
     Test-Check 'the new enterprise app is retried while Graph does not know the registration yet; Azure Service Management is added when missing' ($res10.Info.Connected -and @($a10.Log | Where-Object { $_ -eq 'Graph POST /v1.0/servicePrincipals' }).Count -eq 4 -and (@($res10.Notes) -join ' ') -like '*Azure Service Management was added*') ($a10.Log -join ' | ')
+    $a12 = New-AVDTuneFakeAuth -Seed @{ StorageSpMissing = $true }
+    $res12 = Invoke-AVDTuneStartSignIn -Root (& $newRoot '' '') -Session (New-AVDTuneSession -TempRoot $signTemp -Auth $a12) -User 'admin1' -RetryDelaySeconds 0
+    Test-Check 'Azure Storage is added to the tenant when its service principal is missing (named in the notes), then consented and the storage token works' ($res12.Info.Connected -and @($res12.Info.Audiences | Where-Object Audience -eq 'Storage').Count -eq 1 -and (@($res12.Notes) -join ' ') -like '*Azure Storage was added to the tenant*' -and @($a12.Log | Where-Object { $_ -eq 'Graph POST /v1.0/servicePrincipals' }).Count -ge 2 -and @($a12.Store.ServicePrincipals | Where-Object { $_.appId -eq 'e406a681-f3d4-42a8-90b6-c2b029497af1' }).Count -eq 1) (@($res12.Notes) -join ' | ')
     $r11 = & $newRoot $tenant ''
     $e = Get-ThrownText { Invoke-AVDTuneStartSignIn -Root $r11 -Session (New-AVDTuneSession -TempRoot $signTemp -Auth (New-AVDTuneFakeAuth -Seed @{ WrongTenant = $true })) -User 'admin1' -RetryDelaySeconds 0 }
     Test-Check 'setup with a saved tenant: an admin of another tenant is refused before any Graph call' ($e -like '*belongs to tenant*' -and (Get-AVDTuneEnvironment $r11).SignIn.ClientId -eq '') $e
@@ -311,7 +388,7 @@ try {
     # Graph only through the adapter, only graph.microsoft.com
     $sessSrc = [IO.File]::ReadAllText((Join-Path $repo 'Modules\AVDTune.Session.psm1'))
     $hosts = @([regex]::Matches($sessSrc, 'https?://(?>([A-Za-z0-9.-]+))(?!\\)') | ForEach-Object { $_.Groups[1].Value.TrimEnd('.') } | Sort-Object -Unique)
-    Test-Check 'the session module talks to graph.microsoft.com, login.microsoftonline.com and names management.azure.com only; no Invoke-RestMethod or WebRequest of its own' (@($hosts | Where-Object { $_ -notin 'graph.microsoft.com', 'login.microsoftonline.com', 'management.azure.com', 'localhost' }).Count -eq 0 -and $sessSrc -notmatch 'Invoke-RestMethod|Invoke-WebRequest|WebClient') ($hosts -join ',')
+    Test-Check 'the session module talks to graph.microsoft.com, login.microsoftonline.com and names management.azure.com, management.core.windows.net and storage.azure.com only; no Invoke-RestMethod or WebRequest of its own' (@($hosts | Where-Object { $_ -notin 'graph.microsoft.com', 'login.microsoftonline.com', 'management.azure.com', 'storage.azure.com', 'management.core.windows.net', 'localhost' }).Count -eq 0 -and $sessSrc -notmatch 'Invoke-RestMethod|Invoke-WebRequest|WebClient') ($hosts -join ',')
     $real = New-AVDTuneAuthAdapter -CacheFolder (Join-Path $tmp 'wv2-unused')
     $refused = @(
         (& $real.Graph 'GET' '/beta/applications' 'x' $null), (& $real.Graph 'DELETE' '/v1.0/applications/x' 'x' $null), (& $real.Graph 'GET' '/v1.0/../x' 'x' $null),

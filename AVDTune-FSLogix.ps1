@@ -3,7 +3,7 @@
 # exclusions are quick and run on the UI thread. Everything that changes the master is behind the write gate (snapshot confirmed).
 # Test mode: the fake machine, the fake FSLogix adapter and the fake Azure, file share and LDAP services run inline on the UI thread (their closures belong to this
 # runspace); no network, no tenant, no share, no Defender of this computer.
-# The Azure storage token is not one of the three audiences of the shared sign-in yet (issue 11 owns that file): without it the ACL rows say so.
+# The Azure storage token is the Storage audience of the sign-in (issue 18, optional: a registration without its consent signs in without it): without it the ACL rows say why.
 
 $script:FslFake = $null
 if ($script:TestMode) {
@@ -354,6 +354,12 @@ function New-FslTask([string]$Kind, [bool]$Write) {
     $retry = if ($Kind -eq 'Test' -and -not $Write) { @{ Command = 'Start-FslJob'; Arguments = @('Test', @{ Write = $false }) } } elseif ($Kind -eq 'Storage') { @{ Command = 'Start-FslJob'; Arguments = @('Storage', @{}) } }
     Start-AVDTuneUiTask -Kind "fslogix-$($Kind.ToLower())" -Title $title -Step $step -Retry $retry
 }
+function Get-FslStorageToken {
+    # The Storage audience token for the ACL rows (memory only, goes to the Files adapter of the checked account). Without it the reason says why (not signed in, or the registration was made before issue 18: set up again).
+    $s = $script:StartContext.Session
+    if (-not $s -or -not $s.Connected) { return @{ Token = ''; Reason = 'no token for Azure Storage (https://storage.azure.com/): not signed in. Sign in on the Overview.' } }
+    try { @{ Token = (Get-AVDTuneAccessToken -Session $s -Audience Storage); Reason = '' } } catch { @{ Token = ''; Reason = 'no token for Azure Storage (https://storage.azure.com/): ' + $_.Exception.Message } }
+}
 function Start-FslJob([string]$Kind, [hashtable]$Arg = @{}) {
     if ($script:FslJob) { throw 'Another FSLogix operation is still running.' }
     $sids = Get-FslSids
@@ -364,10 +370,11 @@ function Start-FslJob([string]$Kind, [hashtable]$Arg = @{}) {
         $vm = Get-AVDTuneVmIdentity -Machine $script:Machine
         if ($vm.Available) { $sub = @($vm.SubscriptionId) + $sub }
         $arm = Get-ReadyToken
+        $st = Get-FslStorageToken
         $dir = $null; try { $dir = Read-AVDTuneJson (Join-Path $script:StateRoot 'config\directory.json') } catch { }
         $env = $null; try { $env = Get-AVDTuneEnvironment $script:StateRoot } catch { }
         $common += @{ Locations = @(Get-AVDTuneFSLogixLocations -Machine $script:Machine); SubscriptionIds = $sub; AllowKey = [bool]$ui.ChkFslKey.IsChecked; ArmToken = $arm.Token; NoArmReason = $arm.Reason
-            StorageToken = ''; NoStorageReason = 'no token for Azure Storage (https://storage.azure.com/). The sign-in of AVDTune does not request that audience yet (it needs a change in AVDTune.Session.psm1, issue 11).'
+            StorageToken = $st.Token; NoStorageReason = $st.Reason
             TestUser = $ui.TxtFslUser.Text.Trim(); TestPassword = $(if ($ui.PwdFslPassword.SecurePassword.Length -gt 0) { $ui.PwdFslPassword.SecurePassword } else { $null }); Dc = $ui.TxtFslDc.Text.Trim()
             Pins = $(if ($env) { Get-AVDTuneDcPins $env } else { @{} }); DefaultNc = $(if ($dir -and (Get-AVDTuneProp $dir 'Directory')) { [string]$dir.Directory.DefaultNamingContext } else { '' }); CallerOid = '' }
         $s = $script:StartContext.Session
@@ -375,10 +382,11 @@ function Start-FslJob([string]$Kind, [hashtable]$Arg = @{}) {
     }
     if ($script:TestMode) {
         $c = $common.Clone(); $c.Machine = $script:Machine; $c.F = $script:FslFake.F; $c.Progress = $null
-        if ($Kind -eq 'Storage') { $c.Arm = $script:FslFake.Arm; $c.Files = $script:FslFake.Files; $c.Ldap = $script:FslFake.Ldap; $c.FakeLdap = $true; $c.ArmToken = 'fake-arm-token'; $c.StorageToken = 'fake-storage-token' }
+        if ($Kind -eq 'Storage') { $c.Arm = $script:FslFake.Arm; $c.Files = $script:FslFake.Files; $c.Ldap = $script:FslFake.Ldap; $c.FakeLdap = $true; $c.ArmToken = 'fake-arm-token' }   # the storage token comes from the fake session through Get-FslStorageToken (in $common), like in real use
         $res = $null; $err = ''
         try { $res = & ([scriptblock]::Create($script:FslWorkerText)) $Kind $c } catch { $err = $_.Exception.Message }
-        $script:FslJob = @{ Inline = $true; Result = $res; Err = $err; Kind = $Kind; Write = [bool]$Arg.Write; Task = (New-FslTask $Kind ([bool]$Arg.Write)) }
+        $c.StorageToken = $null; $c.ArmToken = $null; $c.TestPassword = $null
+        $script:FslJob = @{ Inline = $true; Result = $res; Err = $err; Kind = $Kind; Write = [bool]$Arg.Write; Task = (New-FslTask $Kind ([bool]$Arg.Write)); Common = $common }
     }
     else {
         $sync = [hashtable]::Synchronized(@{ Text = '' })
@@ -393,7 +401,7 @@ function Start-FslJob([string]$Kind, [hashtable]$Arg = @{}) {
                 if ($Gate) { Open-AVDTuneWriteGate -SnapshotId $Gate.SnapshotId -ConfirmedBy $Gate.ConfirmedBy }
                 & ([scriptblock]::Create($WorkerText)) $Kind $c
             }).AddArgument($script:AppRoot).AddArgument($Kind).AddArgument($common).AddArgument($gate).AddArgument($sync).AddArgument($script:FslWorkerText)
-        $script:FslJob = @{ PS = $ps; Handle = $ps.BeginInvoke(); Kind = $Kind; Sync = $sync; Write = [bool]$Arg.Write; Task = (New-FslTask $Kind ([bool]$Arg.Write)) }
+        $script:FslJob = @{ PS = $ps; Handle = $ps.BeginInvoke(); Kind = $Kind; Sync = $sync; Write = [bool]$Arg.Write; Task = (New-FslTask $Kind ([bool]$Arg.Write)); Common = $common }
     }
     Set-ShutdownBlock $true
     Set-FslBusy $true
@@ -415,6 +423,8 @@ function Complete-FslJob {
         catch { $err = $_.Exception.Message }
         finally { $job.PS.Dispose() }
     }
+    # No token or password stays referenced after the run (the hashtable of the job, the copy of the worker was local to it)
+    if ($job.Common) { foreach ($k in 'StorageToken', 'ArmToken', 'TestPassword') { if ($job.Common.ContainsKey($k)) { $job.Common[$k] = $null } }; $job.Common = $null }
     Set-FslBusy $false
     if ($job.Kind -eq 'Storage') { $ui.PwdFslPassword.Clear(); $ui.ChkFslKey.IsChecked = $false }   # the password and the key confirmation are for one run, also after an error
     if ($err -or -not $result) { Complete-AVDTuneUiTask $job.Task -Failed -Summary "The $($job.Kind.ToLower()) failed: $err"; $ui.TxtFslState.Text = "The $($job.Kind.ToLower()) failed: $err"; Show-Error $ui.TxtFslState.Text; Update-FslView; return }
@@ -479,7 +489,7 @@ Add-Click $ui.BtnFslAclSet {
     if (-not $share.Account -or -not $share.Share) { throw 'The diff does not name the share: run the storage check again.' }
     $files = if ($script:TestMode) { $script:FslFake.Files } else { New-AVDTuneFilesAdapter }
     $token = if ($script:TestMode) { 'fake-storage-token' } else { '' }
-    if (-not $token) { throw 'No token for Azure Storage: the sign-in of AVDTune does not request that audience yet (issue 11).' }
+    if (-not $token) { throw 'Setting the NTFS ACL is not built yet: it comes in its own issue (write gate, confirmed hash of the diff, intent backup on the PUT). Until then the check only reads.' }
     $res = Invoke-FslChange -Kind 'fslogix-acl' -Title 'Setting the NTFS ACL of the share root' -Step 'Reading the ACL again and setting the recommended one' -Block { Set-AVDTuneStorageRootAcl -Files $files -Account $share.Account -Share $share.Share -Token $token -UsersSid $sids.Users[0] -AdminsSid $sids.Admins[0] -ConfirmedHash $d.Hash -Root $script:StateRoot -User (Get-FslUser) -SnapshotId (Get-FslGateSnapshot) }
     $ui.TxtFslState.Text = "NTFS ACL: $($res.Status). $($res.Message)"; Show-Toast $ui.TxtFslState.Text
     [void](Add-AVDTuneProtocolNote -Protocol $script:Protocol -Group 'fslogix' -Subject 'NTFS ACL of the share root' -Note "$($res.Status). $($res.Message)"); Save-Protocol
