@@ -282,13 +282,59 @@ When it runs (user decision 2026-11-15):
 - Any time by hand in between (e.g. after optimization).
 - Every result goes into the protocol, the change log of the version and the SharePoint list, with the comparison to the baseline and to the benchmark of the previous sealed version (better/worse per area, threshold 10%).
 
-GPU (for NV/NC VMs, skipped with a note on VMs without GPU):
-- Detect: adapter, driver version, VRAM, vGPU partition (`Get-CimInstance Win32_VideoController`, `nvidia-smi`/AMD tools when present), whether the RDS policies use the hardware adapter, H.264/AVC444 and hardware encoding.
-- Render: a fixed off-screen Direct3D scene (WPF/D3D11 through a small included .NET program) with frames per second at a fixed resolution, and the same scene through the software renderer as a reference.
-- Encode/decode: Media Foundation hardware H.264/HEVC encode of a fixed clip (frames per second), hardware decode of a fixed video.
-- Compute: optional OpenCL/DirectCompute kernel time.
+### 6a. Measures and scores (draft 2026-11-15, for the user's approval)
 
-Findings in the current script:
+Three separate scores (user decision: GPU and FSLogix separated), never mixed, because they measure different things (the image and VM, the storage, the graphics card) and a VM without GPU or without FSLogix must still get a comparable host score:
+
+| Score | What it says | When |
+|---|---|---|
+| **AVDTune Host-Score** (the overall score) | how fast this image on this VM size is for a user session | always |
+| **FSLogix-Score** | how fast profiles load and work on the share of the environment | when FSLogix is used |
+| **GPU-Score** | graphics and video power of the GPU | only on VMs with a GPU (otherwise "nicht vorhanden", not 0) |
+
+Scoring method (like SPEC/Geekbench): every measure is turned into an index against fixed reference values (measured once on a reference configuration and frozen per benchmark version; reference = 1000). Times and latencies count inversely. A category is the geometric mean of its measures, a score is the weighted geometric mean of its categories. So no single extreme value dominates, a 10% faster disk is worth the same everywhere, and results of the same benchmark version are comparable across masters and VM sizes. A new benchmark version (new reference) is never compared with an old one without saying so.
+
+Repeatability: warm-up run discarded, then 3 runs, median; the spread (coefficient of variation) is shown, above 10% the measure is marked unstable. Runs only when no other user session is active and AVDTune is not doing anything else; Windows Update, Defender scan and indexing are paused for the run and restored. Each result stores benchmark version, VM size, region, CPU model (from the processor, Azure can give different CPUs to the same size), vCPU/RAM, disk type and size, Windows build, Office build, image version, time. Modes: full (about 15 min) and quick (about 3 min, fewer repetitions, marked as quick and not used for the seal).
+
+**Host-Score: categories, measures, weights**
+
+| Category (weight) | Measures |
+|---|---|
+| CPU (20%) | single thread (compiled .NET workload: compression, hashing, JSON parse, regex), all cores (same workload in parallel), scaling factor all cores / single, sustained load 60 s (drop of performance = throttling or noisy neighbour), AES and SHA throughput (TLS, SMB encryption) |
+| Memory (10%) | bandwidth (copy), latency (random pointer chase), allocation speed of .NET |
+| OS disk (15%) | 4K random read and write at queue depth 1 (latency p50/p99: what a user feels), 4K random 70/30 at queue depth 32 (IOPS), 1 MB sequential throughput, small-file test (create/read/delete 5000 files: includes Defender and filter drivers) |
+| Applications (25%) | cold and warm start of Word, Excel, Outlook (without profile, offline), Edge, Teams, File Explorer until the window is ready; Edge browser benchmark (Speedometer 3, open source, run offline from a local copy); PowerShell/.NET start. This is the part that shows the effect of optimizations and of software added to the image |
+| Session (15%) | logon of a temporary local test user: profile creation from the default profile, Active Setup, shell start until the desktop is ready (measures the default profile and everything that runs at logon); the user and profile are removed afterwards |
+| Remote display (10%) | software H.264 encode of a fixed desktop and video clip (frames per second: the CPU cost of the RDP stream per session on VMs without GPU), software rendering (WARP) of a fixed 2D/3D scene |
+| Network (5%) | DNS resolution time, TCP connect latency (p50/p95) to the AVD gateway and broker endpoints and to the Azure region, jitter, download throughput of a fixed Microsoft file with known size (several streams) |
+
+Shown as information without score: logon times of real user logons on session hosts (from the status script, section 5a), number of Run keys, Active Setup entries, scheduled tasks at logon, services set to automatic (they explain a worse Session or Applications category), and an estimate "users per host" from CPU and memory per session measured during the application test.
+
+**FSLogix-Score** (share of the environment, the test user of section 5a)
+
+| Category (weight) | Measures |
+|---|---|
+| Latency (35%) | 4K random read and write at queue depth 1 on the share (p50/p99), SMB open/close per second, round-trip time to the storage endpoint (private endpoint) |
+| Throughput (20%) | 4K random 70/30 at queue depth 32 (IOPS), 1 MB sequential read and write |
+| Metadata (15%) | create, stat, delete of 2000 small files |
+| Profile container (30%) | create a test VHDX, attach, write 200 MB of mixed files, detach, re-attach (time of each step = what a logon and logoff costs), also with 5 parallel containers to show how the share behaves when several users log on at once |
+
+Shown as information: storage account kind, tier, provisioned size, IOPS and throughput limits (ARM), private endpoint yes/no, SMB channel encryption, so a bad score can be traced to the storage configuration.
+
+**GPU-Score** (NV/NC and other GPU sizes)
+
+| Category (weight) | Measures |
+|---|---|
+| 3D rendering (35%) | fixed Direct3D 11 scene off screen at 1920x1080 and 3840x2160 (frames per second), DirectX 12 if supported |
+| Video encode (30%) | hardware H.264, HEVC and AV1 (if supported) encode of a fixed clip (frames per second: the GPU part of the RDP stream and of video conferencing) |
+| Video decode (15%) | hardware decode of fixed H.264/HEVC/AV1 videos |
+| Compute (20%) | DirectCompute kernel (GFLOPS), GPU memory bandwidth |
+
+Shown as information: adapter, driver version, VRAM, vGPU profile/partition (`nvidia-smi` or AMD tools when present), whether the RDS policies use the hardware adapter, AVC444 and hardware encoding. A GPU VM whose RDS policies do not use the GPU gets a red hint: the GPU is measured but the users do not get it.
+
+Report: the three scores large, each category with its index and the change to the baseline and to the last sealed version (green/red above 10%), every measure in a detail table, the information blocks, the run details. HTML, PDF, change log, SharePoint list (one row per run with the scores and categories as columns, so they can be charted there).
+
+Tools: our own compiled .NET measure program (source in the repo, built by the release workflow, hash in the manifest), diskspd (Microsoft, MIT, downloaded and checked), Speedometer 3 (open source, local copy with licence), Media Foundation and Direct3D of Windows. No third-party binaries without a licence that allows redistribution.
 
 Findings in the current script:
 - The internet test downloads the start page of windows.net (a few KB) and computes as if it were 1 GB; on error it reports a fixed 150 Mbps. The value is not real.
@@ -299,12 +345,9 @@ Findings in the current script:
 - The HTML report is cut off: the here-string is never closed and never written, so the script does not finish.
 - The FSLogix share path is hard coded and names a customer storage account in a public repository; `speedtest.exe` (Ookla) is bundled although its licence does not allow redistribution.
 
-New benchmark in AVDTune:
-- Fixed profiles with stored parameters: disk local and FSLogix share (diskspd 4K random 70/30 read/write, 64K sequential, latency percentiles), metadata test (small files create/delete on the share), CPU single and multi core (compiled .NET loop or `7z b` if present), memory bandwidth, network: latency to the region and the AVD gateway, download of a fixed Microsoft test file with real size, optional throughput to the share.
-- Logon time per phase from the last real logons (User Profile Service events, FSLogix logs) where available.
-- Every test 3 times, median, stored as JSON with image version, Windows build, Office build, VM size and region. Comparison with the previous image version, threshold 10%, score per area. Report in the change log and as HTML.
-- diskspd downloaded from Microsoft's GitHub release (MIT) and checked; no Ookla binary. The share path comes from the settings (FSLogix `VHDLocations` as default).
-- AVD-Benchmark repo: becomes the stand-alone version of the same engine (one script for hosts without AVDTune), customer path removed.
+Other points:
+- The share path comes from the environment (FSLogix `VHDLocations`). No Ookla binary.
+- AVD-Benchmark repo: becomes the stand-alone version of the same engine (one script for session hosts without AVDTune, e.g. to compare a running host pool with the master), same scores and report.
 
 ## 7. State, protocol, change log
 
