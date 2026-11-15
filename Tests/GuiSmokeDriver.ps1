@@ -307,6 +307,26 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         $ok = (Invoke-AVDTuneStep -Step (New-AVDTuneStep -Id 'setup.smoke' -Section Setup -Title 'x' -Test { $true } -Apply { }) -Machine $script:Machine -Mode Apply).Status
         Test-Smoke 'the engine accepts a change after the confirmation' ($ok -eq 'Unchanged') $ok
         $true } }
+    @{ Name = 'start: snapshot found before any image version'; Do = {
+        # An existing finished snapshot, no image version yet (seen on the test VM, #20): Confirm starts the first version and confirms
+        Close-AVDTuneWriteGate
+        [void](Set-AVDTuneState -Root $script:StateRoot -Values @{ ImageVersion = ''; Versions = @(); SnapshotGate = $null })
+        $store = $script:ReadyFakeArm.Store
+        $name = 'gm-test01_osdisk-found-1'
+        $id = "/subscriptions/$($script:FakeSubscription)/resourceGroups/$($store.ResourceGroup)/providers/Microsoft.Compute/snapshots/$name"
+        $store.Snapshots[$id.ToLowerInvariant()] = @{ id = $id; name = $name; location = $store.Location; tags = @{ CreatedWith = 'Someone else' }
+            properties = @{ timeCreated = (Get-Date).AddSeconds(5).ToUniversalTime().ToString('o'); provisioningState = 'Succeeded'; incremental = $true
+                creationData = @{ createOption = 'Copy'; sourceResourceId = $store.DiskId } } }
+        $script:ConfirmAsked = ''
+        Open-Stage 'Snapshot'; $window.UpdateLayout()
+        Test-Smoke 'a finished snapshot and no image version: it is listed and can be confirmed' ($script:Form.Valid.Count -ge 1 -and $ui.BtnStageAction.IsEnabled -and -not $script:Form.ImageVersion -and -not (Test-AVDTuneWriteAllowed)) $ui.TxtStageMessage.Text
+        $script:Form.NameBox.Text = 'Alex Example'
+        $ui.BtnStageAction.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
+        $window.UpdateLayout()
+        $state = Get-AVDTuneState $script:StateRoot
+        $expected = (Get-Date).ToString('yyyy.MM') + '.001'
+        Test-Smoke 'Confirm asks for the first image version, starts it and confirms the snapshot in it (no ImageVersion binding error)' ($script:ConfirmAsked -like "Start image version $expected*" -and $state.ImageVersion -eq $expected -and (Test-AVDTuneWriteAllowed) -and $state.SnapshotGate.SnapshotName -like 'gm-test01_osdisk-*' -and $script:OpenStage -ne 'Snapshot') "asked='$script:ConfirmAsked' version=$($state.ImageVersion) gate=$($state.SnapshotGate | ConvertTo-Json -Compress) msg=$($ui.TxtStageMessage.Text)"
+        $true } }
     @{ Name = 'updates page'; Do = {
         # the page is read only until the gate is open (it is open here: the start sequence ran). Search runs in a background runspace with the fake adapter.
         if (-not $script:UpdStep) {
