@@ -322,7 +322,8 @@ function New-AVDTuneArmAdapter {
             $response = $request.GetResponse()
         }
         catch {
-            $response = Get-AVDTuneProp $_.Exception 'Response'
+            # An HTTP error answer (400/403/404...) is a response on the inner WebException, not "no connection"
+            $response = Get-AVDTuneWebResponse $_.Exception
             if (-not $response) { return [pscustomobject]@{ Status = 0; Body = $null; Error = $_.Exception.Message } }
         }
         try {

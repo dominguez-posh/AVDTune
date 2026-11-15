@@ -371,6 +371,34 @@ try {
     $ovn = Get-AVDTuneOverview -Machine $noAzure -Root $tmp
     Test-Check 'outside Azure and without Office the overview still works' (-not $ovn.SourceImage.Available -and -not $ovn.Office.Installed) $null
 
+    # ---------------------------------------------------------------- HTTP error answers are responses, not "no connection" (#28)
+    # A local TCP server answers 400 with an ARM-style error body; the HttpWebRequest error reaches PowerShell wrapped like in the adapters
+    $listener = New-Object Net.Sockets.TcpListener ([Net.IPAddress]::Loopback, 0); $listener.Start()
+    $port = ([Net.IPEndPoint]$listener.LocalEndpoint).Port
+    $errJson = '{"error":{"code":"InvalidParameter","message":"Test reason from Azure"}}'
+    $srv = [PowerShell]::Create()
+    [void]$srv.AddScript({
+        param($L, $Json)
+        $c = $L.AcceptTcpClient(); $s = $c.GetStream(); $buf = New-Object byte[] 4096; $seen = ''
+        while ($seen -notmatch "`r`n`r`n") { $n = $s.Read($buf, 0, $buf.Length); if ($n -le 0) { break }; $seen += [Text.Encoding]::ASCII.GetString($buf, 0, $n) }
+        $body = [Text.Encoding]::UTF8.GetBytes($Json)
+        $head = [Text.Encoding]::ASCII.GetBytes("HTTP/1.1 400 Bad Request`r`nContent-Type: application/json`r`nContent-Length: $($body.Length)`r`nConnection: close`r`n`r`n")
+        $s.Write($head, 0, $head.Length); $s.Write($body, 0, $body.Length); $s.Flush(); $c.Close()
+    }).AddArgument($listener).AddArgument($errJson)
+    $srvRun = $srv.BeginInvoke()
+    $wrapped = $null
+    try { $rq = [Net.HttpWebRequest]::Create("http://127.0.0.1:$port/subscriptions/x"); $rq.Timeout = 10000; $rq.GetResponse().Close() } catch { $wrapped = $_.Exception }
+    [void]$srv.EndInvoke($srvRun); $srv.Dispose(); $listener.Stop()
+    $wr = Get-AVDTuneWebResponse $wrapped
+    $wrText = $null; if ($wr) { try { $wrText = (New-Object IO.StreamReader($wr.GetResponseStream())).ReadToEnd() } finally { $wr.Close() } }
+    Test-Check 'a 400 answer is found behind the wrapping exception (status and Azure error body), the outer exception has no Response' ($null -ne $wrapped -and $null -eq (Get-AVDTuneProp $wrapped 'Response') -and $wr -and [int]$wr.StatusCode -eq 400 -and $wrText -eq $errJson) $(if ($wrapped) { $wrapped.GetType().FullName })
+    $closed = New-Object Net.Sockets.TcpListener ([Net.IPAddress]::Loopback, 0); $closed.Start(); $closedPort = ([Net.IPEndPoint]$closed.LocalEndpoint).Port; $closed.Stop()
+    $noConn = $null
+    try { $rq = [Net.HttpWebRequest]::Create("http://127.0.0.1:$closedPort/"); $rq.Timeout = 5000; $rq.GetResponse().Close() } catch { $noConn = $_.Exception }
+    Test-Check 'no answer at all stays "no connection" (no response found)' ($null -ne $noConn -and $null -eq (Get-AVDTuneWebResponse $noConn)) $null
+    $adapterSources = (Get-Content -Raw (Join-Path $repo 'Modules\AVDTune.Snapshot.psm1')) + (Get-Content -Raw (Join-Path $repo 'Modules\AVDTune.Storage.psm1'))
+    Test-Check 'the ARM and the Files adapter read error answers through Get-AVDTuneWebResponse, not from the outer exception' (([regex]::Matches($adapterSources, 'Get-AVDTuneWebResponse \$_\.Exception')).Count -eq 2 -and $adapterSources -notmatch "Get-AVDTuneProp \`$_\.Exception 'Response'") $null
+
     # ---------------------------------------------------------------- the real machine, read only
     $real = New-AVDTuneMachine
     $rw = Get-AVDTuneWindowsInfo $real
