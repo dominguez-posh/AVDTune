@@ -39,7 +39,7 @@ $script:AllowedGuids = @{
     '797f4846-ba00-4fd7-ba43-dac1f8f63013' = 'Azure Service Management resource ID'
 }
 $script:DocIpPrefixes = @('192.0.2.', '198.51.100.', '203.0.113.')
-$script:PublicIps = @{ '169.254.169.254' = 'Azure instance metadata service (link-local, same everywhere)'; '168.63.129.16' = 'Azure wire server / platform DNS (same everywhere)'; '0.0.0.0' = 'any'; '255.255.255.255' = 'broadcast' }
+$script:PublicIps = @{ '169.254.169.254' = 'Azure instance metadata service (link-local, same everywhere)'; '168.63.129.16' = 'Azure wire server / platform DNS (same everywhere)'; '51.5.0.0' = 'Microsoft AVD relay network 51.5.0.0/16 (UDP 3478), publicly documented in the required FQDN and endpoint list of Azure Virtual Desktop on Microsoft Learn (learn.microsoft.com/azure/virtual-desktop/required-fqdn-endpoint)'; '0.0.0.0' = 'any'; '255.255.255.255' = 'broadcast' }
 $script:HostSuffixes = 'file\.core\.windows\.net|blob\.core\.windows\.net|vault\.azure\.net|onmicrosoft\.com|sharepoint\.com'
 $script:HostPlaceholders = '^(example|contoso[\w-]*|fabrikam[\w-]*|account|accountname|storageaccount|yourstorageaccount|mystorageaccount|sample|privatelink|tenant|yourtenant|vaultname|yourvault|myvault|name)$'
 $script:MailPlaceholderDomain = '(?i)(^|\.)(example\.(com|org|net|invalid)|contoso\.[a-z.]+|fabrikam\.[a-z.]+|[a-z0-9-]+\.invalid|[a-z0-9.-]*\.(example|test|localhost)|odata\.bind)$'
