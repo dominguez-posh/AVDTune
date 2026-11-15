@@ -20,6 +20,10 @@ Import-Module (Join-Path $PSScriptRoot 'AVDTune.psm1')
 
 $script:ArmHost = 'https://management.azure.com'
 $script:ComputeApi = '2023-10-02'
+# The snapshot time comes from Azure, the last change from the clock of this VM: a snapshot must be at least this many minutes newer, so a
+# clock of the VM that runs a few minutes behind cannot make a snapshot from before the change look newer
+$script:ClockBufferMinutes = 10
+function Get-AVDTuneSnapshotClockBuffer { $script:ClockBufferMinutes }
 $script:ConfirmationText = 'Ich bestaetige, dass vor diesem Lauf ein Snapshot des Golden Masters erstellt wurde und ein Rollback moeglich ist.'
 
 function Get-AVDTuneGateText { $script:ConfirmationText }
@@ -132,7 +136,7 @@ function Get-AVDTuneSnapshotName {
 function ConvertTo-AVDTuneTagValue([string]$Text) { (Remove-AVDTuneControlCharacters $Text 256) -replace '[<>%&\\?/]', '_' }
 
 function ConvertTo-AVDTuneSnapshotInfo {
-    # Valid: finished (Succeeded) and newer than the last change of AVDTune on the master (any finished one when there was none)
+    # Valid: finished (Succeeded) and at least ClockBufferMinutes newer than the last change of AVDTune on the master (any finished one when there was none)
     param($Item, $LastChange)
     $p = Get-AVDTuneProp $Item 'properties'
     $tags = Get-AVDTuneProp $Item 'tags'
@@ -146,7 +150,7 @@ function ConvertTo-AVDTuneSnapshotInfo {
         Incremental = [bool](Get-AVDTuneProp $p 'incremental'); ByAVDTune = $byTool
         ImageVersion = [string](Get-AVDTuneProp $tags 'ImageVersion'); CreatedBy = [string](Get-AVDTuneProp $tags 'CreatedBy')
         Finished = ($state -eq 'Succeeded')
-        Valid = [bool]($created -and $state -eq 'Succeeded' -and ($null -eq $LastChange -or $created.ToUniversalTime() -gt ([datetime]$LastChange).ToUniversalTime()))
+        Valid = [bool]($created -and $state -eq 'Succeeded' -and ($null -eq $LastChange -or $created.ToUniversalTime() -gt ([datetime]$LastChange).ToUniversalTime().AddMinutes($script:ClockBufferMinutes)))
     }
 }
 
@@ -246,7 +250,7 @@ function Get-AVDTuneGateStatus {
     $list = @($Snapshots | Where-Object { $_ })
     $valid = @($list | Where-Object { $_.Valid })
     $chosen = $valid | Select-Object -First 1
-    $since = if ($LastChange) { "newer than the last change by AVDTune ($(([datetime]$LastChange).ToString('yyyy-MM-dd HH:mm')))" } else { 'that is finished (AVDTune has not changed this master yet)' }
+    $since = if ($LastChange) { "made at least $($script:ClockBufferMinutes) minutes after the last change by AVDTune ($(([datetime]$LastChange).ToString('yyyy-MM-dd HH:mm')); the margin covers a clock of this VM that runs behind Azure)" } else { 'that is finished (AVDTune has not changed this master yet)' }
     if ($Confirmed) { return [pscustomobject]@{ Status = 'Confirmed'; Detail = 'The snapshot is confirmed; the pages can change the master.'; Chosen = $chosen; Snapshots = $list } }
     if ($chosen) { return [pscustomobject]@{ Status = 'SnapshotReady'; Detail = "A snapshot $since exists: $($chosen.Name). Confirm it to unlock the pages."; Chosen = $chosen; Snapshots = $list } }
     [pscustomobject]@{ Status = 'NoValidSnapshot'; Detail = "No snapshot of the OS disk $since. Create one now."; Chosen = $null; Snapshots = $list }
@@ -266,8 +270,8 @@ function Confirm-AVDTuneSnapshotGate {
     )
     if ([string]$Snapshot.State -ne 'Succeeded' -or -not $Snapshot.Created) { throw 'Only a finished snapshot can be confirmed.' }
     $last = Get-AVDTuneLastChange -Root $Root
-    if ($last -and ([datetime]$Snapshot.Created).ToUniversalTime() -le $last.ToUniversalTime()) {
-        throw "The snapshot $($Snapshot.Name) ($(([datetime]$Snapshot.Created).ToString('yyyy-MM-dd HH:mm'))) is older than the last change AVDTune made on this master ($($last.ToString('yyyy-MM-dd HH:mm'))): a rollback to it would lose that change. Create a new snapshot."
+    if ($last -and ([datetime]$Snapshot.Created).ToUniversalTime() -le $last.ToUniversalTime().AddMinutes($script:ClockBufferMinutes)) {
+        throw "The snapshot $($Snapshot.Name) ($(([datetime]$Snapshot.Created).ToString('yyyy-MM-dd HH:mm'))) is older than the last change AVDTune made on this master ($($last.ToString('yyyy-MM-dd HH:mm'))) plus $($script:ClockBufferMinutes) minutes for clock differences between this VM and Azure: a rollback to it could lose that change. Create a new snapshot."
     }
     $check = Test-AVDTuneConfirmationName -Typed $TypedName
     if (-not $check.Ok) { throw $check.Message }
@@ -331,5 +335,5 @@ function New-AVDTuneArmAdapter {
 
 #endregion
 
-Export-ModuleMember -Function Get-AVDTuneGateText, Invoke-AVDTuneArm, Get-AVDTuneVmIdentity, Get-AVDTuneDefaultSnapshotNamePattern, Test-AVDTuneSnapshotNamePattern, Get-AVDTuneSnapshotName, Get-AVDTuneOsDiskSnapshots, Start-AVDTuneSnapshot,
+Export-ModuleMember -Function Get-AVDTuneSnapshotClockBuffer, Get-AVDTuneGateText, Invoke-AVDTuneArm, Get-AVDTuneVmIdentity, Get-AVDTuneDefaultSnapshotNamePattern, Test-AVDTuneSnapshotNamePattern, Get-AVDTuneSnapshotName, Get-AVDTuneOsDiskSnapshots, Start-AVDTuneSnapshot,
     Get-AVDTuneSnapshotState, Wait-AVDTuneSnapshot, Test-AVDTuneConfirmationName, Get-AVDTuneGateStatus, Confirm-AVDTuneSnapshotGate, New-AVDTuneArmAdapter

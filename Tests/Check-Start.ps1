@@ -219,7 +219,10 @@ try {
     Test-Check 'Get-AVDTuneLastChange also reads run records and automatic change log entries' (@(Get-AVDTuneRun -Root $tmp | Where-Object { $_.Results[0].Status -eq 'Changed' }).Count -eq 1) $null
 
     # an existing snapshot made by someone else after the last change
-    $armOther = New-AVDTuneFakeArm -Seed @{ Snapshots = @(@{ Name = 'manual-snap-before-patching'; Created = $last2.AddMinutes(5) }) }
+    $armClock = New-AVDTuneFakeArm -Seed @{ Snapshots = @(@{ Name = 'just-after-the-change'; Created = $last2.AddMinutes(5) }) }
+    $listClock = @(Get-AVDTuneOsDiskSnapshots -Arm $armClock -Token $armToken -Vm $vm -LastChange $last2)
+    Test-Check 'clock margin: a snapshot only 5 minutes after the last change (VM clock may run behind Azure) does not count, 10 minutes are explained' ((Get-AVDTuneSnapshotClockBuffer) -eq 10 -and -not $listClock[0].Valid -and (Get-AVDTuneGateStatus -Vm $vm -Snapshots $listClock -Confirmed $false -LastChange $last2).Detail -like '*at least 10 minutes after the last change*clock*' -and (Get-ThrownText { Confirm-AVDTuneSnapshotGate -Root $tmp -Snapshot $listClock[0] -TypedName 'Alex Example' -ImageVersion '2026.11.001' -Machine $machine }) -like '*plus 10 minutes*') $null
+    $armOther = New-AVDTuneFakeArm -Seed @{ Snapshots = @(@{ Name = 'manual-snap-before-patching'; Created = $last2.AddMinutes(11) }) }
     $listOther = @(Get-AVDTuneOsDiskSnapshots -Arm $armOther -Token $armToken -Vm $vm -LastChange $last2)
     Test-Check 'an existing snapshot newer than the last change is found and counts (not made by AVDTune)' ($listOther.Count -eq 1 -and $listOther[0].Valid -and -not $listOther[0].ByAVDTune) ($listOther | ConvertTo-Json -Compress -Depth 3)
     [void](Confirm-AVDTuneSnapshotGate -Root $tmp -Snapshot $listOther[0] -TypedName 'Alex Example' -SignedInAccount 'admin.example@contoso.example' -ImageVersion '2026.11.001' -Machine $machine)
@@ -285,12 +288,14 @@ try {
     $ldap2 = New-AVDTuneFakeLdap -Seed @{ Servers = @{ 'dc2.example.test' = @{ Ldaps = $false; Ldap389 = $true; Cert = $null; BadPassword = $false }; '10.0.0.20' = @{ Ldaps = $false; Ldap389 = $true; Cert = $null; BadPassword = $false } } }
     $r5n = Connect-AVDTuneDirectory -Ldap $ldap2 -Server 'DC2.example.test' -User 'svc@example.test' -Password $pw -Pins @{}
     Test-Check 'attack: 636 blocked, no confirmation: NeedsConfirmation with a warning, no bind at all' ($r5n.Status -eq 'NeedsConfirmation' -and $ldap2.Opened.Count -eq 0 -and $r5n.Warning -like '*Kerberos*') ($r5n | ConvertTo-Json -Compress)
-    $r5 = Connect-AVDTuneDirectory -Ldap $ldap2 -Server 'DC2.example.test' -User 'svc@example.test' -Password $pw -Pins @{} -ConfirmWithoutLdaps
+    $r5 = Connect-AVDTuneDirectory -Ldap $ldap2 -Server 'DC2.example.test' -User 'svc@example.test' -Password $pw -Pins @{} -ConfirmedServer 'dc2.example.test'
     $o2 = $ldap2.Opened[0]
     Test-Check 'DNS name, confirmed: LDAP 389 with Kerberos only (NTLM refused), signing and sealing' ($r5.Status -eq 'Connected' -and $o2.Port -eq 389 -and -not $o2.Ssl -and $o2.Signing -and $o2.Sealing -and $o2.AuthType -eq 'Kerberos' -and $o2.RiskConfirmed -and $r5.Security -like '*Kerberos*confirmed*') ($o2 | ConvertTo-Json -Compress)
     $r6n = Connect-AVDTuneDirectory -Ldap $ldap2 -Server '10.0.0.20' -User 'EXAMPLE\svc' -Password $pw -Pins @{}
     Test-Check 'IP address, 636 blocked: the warning names NTLM, relay and offline cracking; nothing sent' ($r6n.Status -eq 'NeedsConfirmation' -and $r6n.IsIp -and $r6n.Warning -like '*NTLM*relay*crack the password offline*' -and $ldap2.Opened.Count -eq 1) $r6n.Warning
-    $r6 = Connect-AVDTuneDirectory -Ldap $ldap2 -Server '10.0.0.20' -User 'EXAMPLE\svc' -Password $pw -Pins @{} -ConfirmWithoutLdaps
+    $r6x = Connect-AVDTuneDirectory -Ldap $ldap2 -Server '10.0.0.20' -User 'EXAMPLE\svc' -Password $pw -Pins @{} -ConfirmedServer 'dc2.example.test'
+    Test-Check 'N3: a confirmation given for another server does not count: warning again, no bind' ($r6x.Status -eq 'NeedsConfirmation' -and $ldap2.Opened.Count -eq 1) $r6x.Status
+    $r6 = Connect-AVDTuneDirectory -Ldap $ldap2 -Server '10.0.0.20' -User 'EXAMPLE\svc' -Password $pw -Pins @{} -ConfirmedServer '10.0.0.20'
     Test-Check 'IP address, confirmed: Negotiate over 389 with signing and sealing, marked as not authenticated' ($r6.Status -eq 'Connected' -and $ldap2.Opened[1].AuthType -eq 'Negotiate' -and $r6.Security -like '*NTLM*not authenticated*confirmed*') $r6.Security
     Disconnect-AVDTuneDirectory -Ldap $ldap2 -Connection $r6.Connection
     # option validator: nothing weaker exists
@@ -316,7 +321,7 @@ try {
     Test-Check 'a refused account or password: readable text without the password' ($rb.Status -eq 'Failed' -and $rb.Message -like '*refused*' -and $rb.Message -notlike "*$secretPassword*") $rb.Message
     $ldapDown = New-AVDTuneFakeLdap -Seed @{ Servers = @{} }
     $rd0 = Connect-AVDTuneDirectory -Ldap $ldapDown -Server '10.9.9.9' -User 'EXAMPLE\svc' -Password $pw
-    $rd = Connect-AVDTuneDirectory -Ldap $ldapDown -Server '10.9.9.9' -User 'EXAMPLE\svc' -Password $pw -ConfirmWithoutLdaps
+    $rd = Connect-AVDTuneDirectory -Ldap $ldapDown -Server '10.9.9.9' -User 'EXAMPLE\svc' -Password $pw -ConfirmedServer '10.9.9.9'
     Test-Check 'an unreachable DC: first the LDAPS question, after the confirmation Failed with a readable message' ($rd0.Status -eq 'NeedsConfirmation' -and $rd.Status -eq 'Failed' -and $rd.Message -like '*10.9.9.9*') $rd.Message
 
     # discovery
