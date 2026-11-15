@@ -69,6 +69,8 @@ The first run ends with one guided "Erstanalyse" after the environment wizard (1
 4. Baseline benchmark (section 6), with the share of the environment.
 The result is the document "Ausgangszustand" (version 0 of the change log): stored locally, in the SharePoint list of the environment, and the reference for every later benchmark and diff. It can be repeated by hand (e.g. after a rollback to the snapshot), and the user chooses which run stays the baseline.
 
+Before every seal the same check runs again as "Healthcheck" (user decision 2026-11-15): readiness and hygiene (2a), inventory, FSLogix and storage check (5a) and the benchmark (6). It is required: the seal button stays locked until a healthcheck of the current state passed (red items fixed, yellow ones acknowledged by typed name) and nothing was changed after it. The result is logged in the protocol, the change log of the version ("Healthcheck vor Seal", with the diff to the baseline and to the last sealed version) and the SharePoint list. The healthcheck can also be run by hand at any time.
+
 While the benchmark engine is not built yet (phase 5), the initial analysis runs without step 4 and says so; the baseline benchmark is then offered once at the next start, marked as "taken after changes" when AVDTune changed something in between.
 
 ## 2a. Readiness analysis: is the master set up correctly, ready for current VM sizes (added 2026-11-15)
