@@ -282,6 +282,10 @@ One row per run: RunId, Date, System, Kind, Mode, ImageVersion, BenchmarkVersion
 | D10 | RDP encode cost per simulated user in the capacity simulation (VMs without GPU) | yes / no | **yes**: on CPU-only hosts it is a large part of the load |
 | D11 | AVD-Benchmark repo | a) AVDTune workflow publishes the ZIP as AVD-Benchmark release; old content removed, and the public history rewritten to remove `diskspd.exe`/`.pdb` and the customer storage account name (force push, user's go needed), b) same without history rewrite, c) new repo, old one archived | **a)**; also add a licence for AVD-Benchmark (none today; AVDTune has none either) |
 
+## 10. Decisions of the user (2026-11-15)
+
+All recommendations of section 9 were accepted: D1 reference host D8s_v5 with Premium SSD P10 in Germany West Central; D2 FSLogix reference Premium share 1 TiB LRS with private endpoint; D3 GPU reference NV12ads_A10_v5; D4 measure program on .NET 10 self-contained; D5 DiskSpd downloaded at run time from Microsoft with hash and signature check, never bundled; D6 cold start by clearing the standby list (checked on the reference system); D7 an unstable measure before Finish is repeated once, then yellow with name confirmation; D8 scaling factor, DirectX 12, region latency and relay RTT as information only; D9 VirtDisk API for the score, frx stays in the FSLogix test; D10 RDP encode load per simulated user; D11 the AVDTune workflow publishes the stand-alone ZIP as a release in AVD-Benchmark. Done the same day: DiskSpd binaries removed from the AVD-Benchmark history (force push), MIT license added to AVD-Benchmark and AVDTune.
+
 ## Sources (fetched 2026-11-15)
 
 - diskspd releases and licence: https://github.com/microsoft/diskspd/releases (v2.3, 2026-09-04, asset digest), https://github.com/microsoft/diskspd/blob/master/LICENSE (MIT), `EULA` file inside `DiskSpd.ZIP` v2.3 (Microsoft Software License Terms); signature and file hash checked locally.
