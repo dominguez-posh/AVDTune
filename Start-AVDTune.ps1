@@ -53,7 +53,8 @@ if ($script:TestMode) {
     $script:Services = @{ Auth = (New-AVDTuneFakeAuth); Arm = (New-AVDTuneFakeArm); Ldap = (New-AVDTuneFakeLdap) }
 }
 else { $script:Machine = New-AVDTuneMachine }
-[void](Initialize-AVDTuneState -Root $script:StateRoot)
+# The state folder is checked before it is trusted (owner, explicit rules, links; repaired when possible, Modules\AVDTune.psm1)
+try { [void](Initialize-AVDTuneState -Root $script:StateRoot) } catch { Stop-WithMessage $_.Exception.Message }
 $script:WorkRoot = $script:StateRoot
 . (Join-Path $PSScriptRoot 'AVDTune-Protocol.ps1')
 
@@ -434,6 +435,8 @@ $window.Add_Closed({
 
 # ---------------------------------------------------------------- start
 Set-ProtocolImage
+$stateRepair = Get-AVDTuneStateSecurityReport
+if ($stateRepair) { Add-StartProtocol 'State folder security repaired' ("$(@($stateRepair.Problems).Count) problem(s) of owner, rights or links in $($script:StateRoot) found and repaired (logs\security.log): " + (@($stateRepair.Problems | Select-Object -First 3 | ForEach-Object { $_.Problem }) -join '; ')) }
 Update-Chip
 Show-Page 'Overview'
 # First run: the questions open by themselves

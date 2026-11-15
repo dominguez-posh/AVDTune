@@ -23,7 +23,7 @@ try {
     $env:AVDTUNE_ROOT = $null
     $realRoot = Get-AVDTuneRoot
     Test-Check 'default root is ProgramData\AVDTune and counts as the real one' ($realRoot -like '*\AVDTune' -and (Test-AVDTuneDefaultRoot $realRoot) -and -not (Test-AVDTuneDefaultRoot $tmp)) $realRoot
-    $env:AVDTUNE_ROOT = $tmp
+    $env:AVDTUNE_ROOT = $tmp; $env:AVDTUNE_FAKE = Join-Path $PSScriptRoot 'Fakes\FakeMachine.ps1'
     Test-Check 'AVDTUNE_ROOT overrides the root' ((Get-AVDTuneRoot) -eq $tmp) $null
 
     # ---------------------------------------------------------------- state
@@ -39,6 +39,47 @@ try {
     $acl = New-AVDTuneStateSecurity
     $rules = @($acl.GetAccessRules($true, $false, [Security.Principal.SecurityIdentifier]))
     Test-Check 'state ACL: Administrators and SYSTEM only, inheritance off' ($acl.AreAccessRulesProtected -and $rules.Count -eq 2 -and (@($rules | ForEach-Object { $_.IdentityReference.Value } | Sort-Object) -join ',') -eq 'S-1-5-18,S-1-5-32-544' -and -not (@($rules | Where-Object { $_.FileSystemRights -ne 'FullControl' }).Count)) (@($rules | ForEach-Object { $_.IdentityReference.Value }) -join ',')
+
+    # ---------------------------------------------------------------- state folder prepared by someone else (finding 2 b)
+    $sec = Join-Path $tmp 'sec-root'
+    New-Item -ItemType Directory -Path (Join-Path $sec 'WebView2') -Force | Out-Null
+    [IO.File]::WriteAllText((Join-Path $sec 'WebView2\Microsoft.Web.WebView2.Core.dll'), 'MZ planted')
+    $foreignSid = 'S-1-5-21-1000000000-2000000000-3000000000-1001'
+    # fake ACL reader: a table path -> @{ Owner; Protected; Rules }; everything not in the table is trusted
+    $aclTable = @{}
+    $okAcl = { [pscustomobject]@{ Owner = 'S-1-5-32-544'; Protected = $false; Rules = @([pscustomobject]@{ Sid = 'S-1-5-18'; Inherited = $true }) } }
+    $readFake = { param($Path, $IsDirectory) if ($aclTable.ContainsKey($Path)) { $aclTable[$Path] } else { & $okAcl } }.GetNewClosure()
+    Test-Check 'state folder of Administrators/SYSTEM: no problem' (@(Get-AVDTuneStateSecurityProblems -Root $sec -ReadAcl $readFake).Count -eq 0) $null
+    $aclTable[(Join-Path $sec 'WebView2')] = [pscustomobject]@{ Owner = $foreignSid; Protected = $true; Rules = @([pscustomobject]@{ Sid = $foreignSid; Inherited = $false }) }
+    $aclTable[(Join-Path $sec 'WebView2\Microsoft.Web.WebView2.Core.dll')] = [pscustomobject]@{ Owner = 'S-1-5-32-544'; Protected = $false; Rules = @([pscustomobject]@{ Sid = 'S-1-5-32-545'; Inherited = $false }) }
+    $pr = @(Get-AVDTuneStateSecurityProblems -Root $sec -ReadAcl $readFake)
+    Test-Check 'attack: a sub folder owned by a user and a file with an explicit rule for Users are found' ($pr.Count -eq 3 -and ($pr | Where-Object { $_.Path -like '*WebView2' -and $_.Problem -like "owner $foreignSid" }) -and ($pr | Where-Object { $_.Path -like '*Core.dll' -and $_.Problem -like '*S-1-5-32-545*' })) (($pr | ForEach-Object { "$($_.Path)=$($_.Problem)" }) -join '; ')
+    $aclTable[$sec] = [pscustomobject]@{ Owner = 'S-1-5-32-544'; Protected = $false; Rules = @([pscustomobject]@{ Sid = 'S-1-5-32-545'; Inherited = $true }) }
+    Test-Check 'inherited rules of the root count only in the final check (root must be protected, Administrators/SYSTEM only)' (@(Get-AVDTuneStateSecurityProblems -Root $sec -ReadAcl $readFake | Where-Object { $_.Path -eq $sec }).Count -eq 0 -and @(Get-AVDTuneStateSecurityProblems -Root $sec -ReadAcl $readFake -Final | Where-Object { $_.Path -eq $sec }).Count -eq 2) $null
+    $aclTable.Remove($sec)
+    $repairs = New-Object System.Collections.ArrayList
+    $repairFake = { param($Root, $Problems) [void]$repairs.Add(@($Problems).Count); $aclTable.Clear() }.GetNewClosure()
+    $rep = Assert-AVDTuneStateSecurity -Root $sec -ReadAcl $readFake -Repair $repairFake
+    $secLog = Join-Path $sec 'logs\security.log'
+    Test-Check 'found problems are repaired (owner taken, ACLs reset), logged in logs\security.log and kept for the protocol' ($rep.Repaired -and $repairs.Count -eq 1 -and $repairs[0] -eq 3 -and (Test-Path $secLog) -and ([IO.File]::ReadAllText($secLog) -like "*3 problem(s)*owner $foreignSid*owner taken, ACLs reset*") -and (Get-AVDTuneStateSecurityReport).Repaired) (Get-Content $secLog -Raw -ErrorAction SilentlyContinue)
+    $aclTable[(Join-Path $sec 'WebView2')] = [pscustomobject]@{ Owner = $foreignSid; Protected = $false; Rules = @() }
+    $noRepair = { param($Root, $Problems) throw 'access denied' }
+    $e = $null; try { [void](Assert-AVDTuneStateSecurity -Root $sec -ReadAcl $readFake -Repair $noRepair) } catch { $e = $_.Exception.Message }
+    Test-Check 'what cannot be repaired stops the start, and the log says so' ($e -like '*cannot be repaired*AVDTune does not start*' -and ([IO.File]::ReadAllText($secLog) -like '*NOT repaired*access denied*')) $e
+    $aclBefore = (Get-Acl -LiteralPath $sec).Sddl
+    $e = $null; try { [void](Initialize-AVDTuneState -Root $sec -Protect -ReadAcl $readFake -Repair $noRepair) } catch { $e = $_.Exception.Message }
+    Test-Check 'Initialize-AVDTuneState checks before it sets anything: refused start, ACL of the folder untouched' ($e -like '*does not start*' -and (Get-Acl -LiteralPath $sec).Sddl -eq $aclBefore -and -not (Test-Path (Join-Path $sec 'state.json'))) $e
+    # the real reader on this computer: files of a user who is not elevated belong to that user, a link is reported and not followed
+    $target = Join-Path $tmp 'sec-target'; New-Item -ItemType Directory -Path $target -Force | Out-Null; [IO.File]::WriteAllText((Join-Path $target 'outside.txt'), 'x')
+    New-Item -ItemType Junction -Path (Join-Path $sec 'config') -Value $target | Out-Null
+    $real = @(Get-AVDTuneStateSecurityProblems -Root $sec)
+    Test-Check 'real ACL reader: a junction in the state folder is a problem and is not followed' (@($real | Where-Object { $_.Path -like '*\config' -and $_.Problem -like 'link*' }).Count -eq 1 -and @($real | Where-Object { $_.Path -like '*outside.txt' }).Count -eq 0) (($real | ForEach-Object { "$($_.Path)=$($_.Problem)" }) -join '; ')
+    if (-not (Test-AVDTuneElevated)) {
+        Test-Check 'real ACL reader: files owned by a user who is not an administrator are found (this check runs unelevated)' (@($real | Where-Object { $_.Problem -like 'owner S-1-5-21-*' }).Count -ge 2) (($real | ForEach-Object { $_.Problem }) -join '; ')
+        $e = $null; try { [void](Assert-AVDTuneStateSecurity -Root $sec) } catch { $e = $_.Exception.Message }
+        Test-Check 'real repair without elevation: the link is removed as a link (target kept), ownership cannot be taken, the start is refused' ($e -like '*does not start*' -and -not (Test-Path (Join-Path $sec 'config')) -and (Test-Path (Join-Path $target 'outside.txt'))) $e
+    }
+
     Write-AVDTuneFile (Join-Path $tmp 'state.json') '{"Schema":99}'
     Test-Check 'a newer state schema is refused' (Test-Throws { Get-AVDTuneState $tmp }) $null
     Write-AVDTuneFile (Join-Path $tmp 'state.json') ([ordered]@{ Schema = 1; ImageVersion = $null; Versions = @(); LastUpdate = $null; LastBenchmark = $null; UpdateBlock = $null; Sealed = $false; Identity = $null; LastRunId = $null } | ConvertTo-Json)
@@ -186,7 +227,7 @@ try {
     Test-Check 'real adapter: a missing key and a missing service are null' ($null -eq (& $real.RegGet 'HKLM:\SOFTWARE\AVDTune-does-not-exist' 'x') -and $null -eq (& $real.ServiceGet 'AVDTune-no-such-service') -and -not (& $real.RegKeyExists 'HKLM:\SOFTWARE\AVDTune-does-not-exist')) $null
 }
 finally {
-    $env:AVDTUNE_ROOT = $null
+    $env:AVDTUNE_ROOT = $null; $env:AVDTUNE_FAKE = $null
     if (Test-Path $tmp) { Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue }
 }
 if ($script:failed -gt 0) { throw "$script:failed check(s) failed." }
