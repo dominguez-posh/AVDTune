@@ -14,7 +14,7 @@ $checks = @('Check-Shared.ps1', 'Check-AVDTune.ps1', 'Check-UpdateBlock.ps1', 'C
 if ($Smoke) { $checks += 'Invoke-GuiSmoke.ps1' }
 $failed = @()
 foreach ($check in $checks) {
-    $output = & $powershell -NoProfile -STA -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot $check) 2>&1 | Out-String
+    $output = & $powershell -NoProfile -NonInteractive -STA -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot $check) 2>&1 | Out-String
     $pass = ([regex]::Matches($output, '(?m)^PASS ')).Count
     $fail = ([regex]::Matches($output, '(?m)^FAIL ')).Count
     $ok = ($LASTEXITCODE -eq 0 -and $fail -eq 0)
