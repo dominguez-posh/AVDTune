@@ -103,7 +103,7 @@ function Test-AVDTuneTestMode {
           - the variables come from the process environment only: the User and Machine values are empty,
           - the fake script (and the smoke script) is a file below <AppRoot>\Tests (long path, no links from AppRoot down).
         EnvReader: scriptblock (name, scope) for the User/Machine environment, injectable for checks. InstallRoot and ProgramFilesFolder are injectable too.
-        Returns Enabled, Smoke (test mode and AVDTUNE_SMOKE), FakeScript, FakeDir, SmokeScript, Reason.
+        Returns Enabled, Smoke (test mode and AVDTUNE_SMOKE), FakeScript, FakeDir, SmokeScript, Root (AVDTUNE_ROOT, only when enabled), Reason.
         Without any variable it is quiet; a refused request writes a warning (once per reason), is remembered (Get-AVDTuneTestModeRefusal) and the normal start follows.
     #>
     [CmdletBinding()]
@@ -112,7 +112,7 @@ function Test-AVDTuneTestMode {
         [string[]]$ProgramFilesFolder = @([Environment]::GetFolderPath('ProgramFiles'), [Environment]::GetFolderPath('ProgramFilesX86')))
     $fake = [string]$env:AVDTUNE_FAKE; $root = [string]$env:AVDTUNE_ROOT; $smoke = [string]$env:AVDTUNE_SMOKE
     $result = { param($ok, $why, $script, $smokeScript)
-        [pscustomobject]@{ Enabled = $ok; Smoke = [bool]($ok -and $smokeScript); FakeScript = $script; FakeDir = $(if ($script) { Split-Path $script -Parent } else { '' }); SmokeScript = $smokeScript; Reason = $why } }
+        [pscustomobject]@{ Enabled = $ok; Smoke = [bool]($ok -and $smokeScript); FakeScript = $script; FakeDir = $(if ($script) { Split-Path $script -Parent } else { '' }); SmokeScript = $smokeScript; Root = $(if ($ok) { $root } else { '' }); Reason = $why } }
     if (-not $fake -and -not $root -and -not $smoke) { return (& $result $false '' $null $null) }
     $why = ''; $script = $null; $smokeScript = $null
     if (-not $fake -and -not $root) { $why = 'AVDTUNE_SMOKE is ignored without the test mode' }
@@ -160,16 +160,13 @@ function Confirm-AVDTuneAction {
     [bool](& $Dialog $Text $Title)
 }
 
-$script:RootWarned = $false
 function Get-AVDTuneRoot {
     [CmdletBinding()] param()
-    # AVDTUNE_ROOT is a test hook: honoured only together with AVDTUNE_FAKE (fake machine). Alone it is ignored with a warning, so an
-    # environment variable set by someone else cannot move the state (and the WebView2 DLLs) of the elevated tool to a folder he controls.
+    # AVDTUNE_ROOT is a test hook: honoured only inside the test mode (Test-AVDTuneTestMode, the one place that reads it). Otherwise it is ignored (the refusal is
+    # warned there), so an environment variable set by someone else cannot move the state (and the WebView2 DLLs) of the elevated tool to a folder he controls.
     $default = Join-Path ([Environment]::GetFolderPath('CommonApplicationData')) 'AVDTune'
-    if ($env:AVDTUNE_ROOT) {
-        if ((Test-AVDTuneTestMode).Enabled) { return $env:AVDTUNE_ROOT }
-        if (-not $env:AVDTUNE_FAKE -and -not $script:RootWarned) { $script:RootWarned = $true; Write-Warning "AVDTUNE_ROOT is ignored without AVDTUNE_FAKE (test mode only); the state stays in $default." }
-    }
+    $mode = Test-AVDTuneTestMode
+    if ($mode.Enabled -and $mode.Root) { return $mode.Root }
     $default
 }
 

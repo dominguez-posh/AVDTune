@@ -309,13 +309,13 @@ function New-AVDTuneBenchAdapter {
         The measure program (issue #19) is never searched for: it is the file of the release this copy of AVDTune runs from (<install folder>\<version>\Bench\bin),
         and before every start Open-AVDTuneVerifiedBenchExe checks it against the release manifest of that version and holds it open while the process starts.
         A development checkout or a copy outside the install folder cannot run it. -InstallRoot, -StateRoot and -Manifest exist for the checks and only work
-        together with AVDTUNE_FAKE (the test mode).
+        inside the test mode (Test-AVDTuneTestMode).
     #>
     param([string]$AppRoot, [string]$InstallRoot, [string]$StateRoot, $Manifest)
     if (-not $AppRoot) { $AppRoot = Split-Path $PSScriptRoot -Parent }
     if (-not $InstallRoot) { $InstallRoot = Get-AVDTuneInstallRoot }
     if (-not $StateRoot) { $StateRoot = Get-AVDTuneRoot }
-    if (($PSBoundParameters.ContainsKey('AppRoot') -or $PSBoundParameters.ContainsKey('Manifest') -or $PSBoundParameters.ContainsKey('StateRoot') -or $PSBoundParameters.ContainsKey('InstallRoot')) -and -not $env:AVDTUNE_FAKE) { throw 'The measure program is always the one of the release this copy runs from (the parameters are for the checks).' }
+    if (($PSBoundParameters.ContainsKey('AppRoot') -or $PSBoundParameters.ContainsKey('Manifest') -or $PSBoundParameters.ContainsKey('StateRoot') -or $PSBoundParameters.ContainsKey('InstallRoot')) -and -not (Test-AVDTuneTestMode).Enabled) { throw 'The measure program is always the one of the release this copy runs from (the parameters are for the checks).' }
     $engineState = @{ Problem = '' }
     $limits = $script:Limits
     $b = [ordered]@{ Kind = 'Real' }

@@ -496,13 +496,13 @@ function Open-AVDTuneVerifiedBenchExe {
           * the manifest of this version (saved at install time, or -Manifest) has a Bench entry; no entry = no start;
           * the file and every folder up to the install folder are administrators only, no links;
           * size and SHA256 of the held file equal the manifest entry. No match = no start.
-        Throws with a plain reason; there is no fallback to a program found elsewhere. The checks use a temporary install folder only together with AVDTUNE_FAKE
-        (the test mode) and a fake ACL reader (Set-AVDTuneReleaseAclReader).
+        Throws with a plain reason; there is no fallback to a program found elsewhere. The checks use a temporary install folder only inside the test mode
+        (Test-AVDTuneTestMode) and a fake ACL reader (Set-AVDTuneReleaseAclReader).
     #>
     [CmdletBinding()]
     param([Parameter(Mandatory)][string]$AppRoot, [Parameter(Mandatory)][string]$InstallRoot, [Parameter(Mandatory)][string]$StateRoot, $Manifest)
     $real = Test-AVDTuneRealInstallRoot $InstallRoot
-    if (-not $real -and -not $env:AVDTUNE_FAKE) { throw 'AVDTune.Bench.exe only starts from the install folder of AVDTune.' }
+    if (-not $real -and -not (Test-AVDTuneTestMode).Enabled) { throw 'AVDTune.Bench.exe only starts from the install folder of AVDTune.' }
     $info = Get-AVDTuneInstallInfo -AppRoot $AppRoot -InstallRoot $InstallRoot
     if ($info.Mode -ne 'Installed' -or -not $info.Version) {
         throw "AVDTune.Bench.exe only starts from the protected install folder ($($info.InstallRoot)\<version>), and this copy of AVDTune runs from $($info.AppRoot). Install a release; a development checkout or a copy elsewhere cannot run the measure program."

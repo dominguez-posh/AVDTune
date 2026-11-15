@@ -262,9 +262,11 @@ try {
     Remove-Item (Get-AVDTuneBenchmarkJournalPath $tmp) -Force
 
     # ---------------------------------------------------------------- the measure program: manifest entry, protected folder, hash before every start, no gap (issue #19)
-    # A copy of a small system program stands in for AVDTune.Bench.exe (it really starts); the install folder is a temporary one (only together with AVDTUNE_FAKE).
+    # A copy of a small system program stands in for AVDTune.Bench.exe (it really starts); the install folder is a temporary one (only inside the test mode: AVDTUNE_FAKE = a script below Tests plus AVDTUNE_ROOT, Test-AVDTuneTestMode).
     Import-Module (Join-Path $repo 'Modules\AVDTune.Release.psm1') -Force
-    $oldFake = $env:AVDTUNE_FAKE; $env:AVDTUNE_FAKE = 'bench-check'
+    $oldFake = $env:AVDTUNE_FAKE; $oldRoot = $env:AVDTUNE_ROOT
+    $fakeScript = Join-Path $PSScriptRoot 'Fakes\FakeMachine.ps1'
+    $env:AVDTUNE_FAKE = $fakeScript; $env:AVDTUNE_ROOT = $tmp
     try {
         $inst = Join-Path $tmp 'install'; $app = Join-Path $inst '0.5.0'; $exeDir = Join-Path $app 'Bench\bin'; $exe = Join-Path $exeDir 'AVDTune.Bench.exe'
         $stand = Join-Path $tmp 'stand-in.exe'   # a tiny console program that prints JSON like the measure program does
@@ -434,9 +436,11 @@ public static class StandIn { public static int Main(string[] a) {
         $other = Join-Path $tmp 'elsewhere\0.5.0'; New-Item -ItemType Directory -Path (Join-Path $other 'Bench\bin') -Force | Out-Null; Copy-Item -LiteralPath $exe -Destination (Join-Path $other 'Bench\bin\AVDTune.Bench.exe')
         Test-Check 'measure program: a version-named folder outside the install folder is not an install' ((Get-ThrownText { Open-AVDTuneVerifiedBenchExe -AppRoot $other -InstallRoot $inst -StateRoot $tmp -Manifest $okManifest }) -like '*only starts from the protected install folder*') $null
         # the test parameters of the adapter only work in the test mode; the real install folder is the only one otherwise
-        $env:AVDTUNE_FAKE = ''
-        Test-Check 'measure program: another install folder or manifest is refused outside the test mode' ((Get-ThrownText { New-AVDTuneBenchAdapter -InstallRoot $inst }) -like '*always the one of the release*' -and (Get-ThrownText { Open-AVDTuneVerifiedBenchExe -AppRoot $app -InstallRoot $inst -StateRoot $tmp -Manifest $okManifest }) -like '*only starts from the install folder*') $null
-        $env:AVDTUNE_FAKE = 'bench-check'
+        foreach ($case in @(@{ N = 'no variables'; F = ''; R = '' }, @{ N = 'AVDTUNE_FAKE without AVDTUNE_ROOT'; F = $fakeScript; R = '' }, @{ N = 'AVDTUNE_ROOT without AVDTUNE_FAKE'; F = ''; R = $tmp }, @{ N = 'AVDTUNE_FAKE that is no script below Tests'; F = 'bench-check'; R = $tmp })) {
+            $env:AVDTUNE_FAKE = $case.F; $env:AVDTUNE_ROOT = $case.R
+            Test-Check "measure program: another install folder or manifest is refused outside the test mode ($($case.N))" ((Get-ThrownText { New-AVDTuneBenchAdapter -InstallRoot $inst -WarningAction SilentlyContinue }) -like '*always the one of the release*' -and (Get-ThrownText { Open-AVDTuneVerifiedBenchExe -AppRoot $app -InstallRoot $inst -StateRoot $tmp -Manifest $okManifest -WarningAction SilentlyContinue }) -like '*only starts from the install folder*') $null
+        }
+        $env:AVDTUNE_FAKE = $fakeScript; $env:AVDTUNE_ROOT = $tmp
 
         # the folder is not admin-only: a rule for users, a foreign owner, a link above the file
         $aclCase = @{ Mode = 'ok' }
@@ -465,9 +469,12 @@ public static class StandIn { public static int Main(string[] a) {
         }
         finally { Set-AVDTuneReleaseAclReader $null }
         & $mod2 { $script:Hooks.AclReader = $null }
-        Test-Check 'measure program: the checks used a temporary install folder, not Program Files' ($inst -ne (Get-AVDTuneInstallRoot) -and $env:AVDTUNE_FAKE -eq 'bench-check') $null
+        Test-Check 'measure program: the checks used a temporary install folder, not Program Files' ($inst -ne (Get-AVDTuneInstallRoot) -and (Test-AVDTuneTestMode).Enabled) $null
     }
-    finally { $env:AVDTUNE_FAKE = $oldFake; if ($null -eq $oldFake) { Remove-Item Env:\AVDTUNE_FAKE -ErrorAction SilentlyContinue } }
+    finally { $env:AVDTUNE_FAKE = $oldFake; if ($null -eq $oldFake) { Remove-Item Env:\AVDTUNE_FAKE -ErrorAction SilentlyContinue }; $env:AVDTUNE_ROOT = $oldRoot; if ($null -eq $oldRoot) { Remove-Item Env:\AVDTUNE_ROOT -ErrorAction SilentlyContinue } }
+
+    $direct = @(Get-ChildItem -LiteralPath $repo -Recurse -Include *.ps1, *.psm1, *.cs, *.xaml -File | Where-Object { $_.FullName -notlike (Join-Path $repo 'Tests\*') -and $_.FullName -notlike '*\Bench\*in\*' -and $_.FullName -notlike '*\Bench\*\obj\*' } | Select-String -Pattern 'env:AVDTUNE_(FAKE|ROOT|SMOKE)|GetEnvironmentVariable\(.AVDTUNE_(FAKE|ROOT|SMOKE)' | Where-Object { $_.Line -notmatch '^\s*#' -and $_.Line -notmatch '\$fake = \[string\]\$env:AVDTUNE_FAKE' })
+    Test-Check 'no code outside Tests reads AVDTUNE_FAKE/ROOT/SMOKE directly (only Test-AVDTuneTestMode)' ($direct.Count -eq 0) (($direct | ForEach-Object { "$($_.Path):$($_.LineNumber)" }) -join '; ')
 
     Test-Check 'no file of the check run touched the real state folder' ($tmp -ne (Join-Path ([Environment]::GetFolderPath('CommonApplicationData')) 'AVDTune')) $tmp
 }
