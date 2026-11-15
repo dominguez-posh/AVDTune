@@ -26,7 +26,7 @@ Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, Sys
 $script:AppRoot = $PSScriptRoot
 $script:ToolVersion = '0.1.0'
 Import-Module (Join-Path $PSScriptRoot 'Modules\AVDTune.psm1') -Force
-foreach ($part in 'Trust', 'Session', 'Snapshot', 'Directory', 'Start') { Import-Module (Join-Path $PSScriptRoot "Modules\AVDTune.$part.psm1") -Force }
+foreach ($part in 'Trust', 'Session', 'Snapshot', 'Directory', 'Start', 'UpdateBlock', 'Updates') { Import-Module (Join-Path $PSScriptRoot "Modules\AVDTune.$part.psm1") -Force }
 . (Join-Path $PSScriptRoot 'AVDTune-Theme.ps1')
 
 # ---------------------------------------------------------------- test mode, elevation, one instance
@@ -135,7 +135,7 @@ function Confirm-Action([string]$Text, [string]$Title = 'AVDTune') {
 $script:PageTable = @(
     @{ Key = 'Overview'; Title = 'Overview'; Glyph = 0xE80F }
     @{ Key = 'Setup'; Title = 'Setup'; Glyph = 0xE7C3; Phase = 6; Text = 'Guided first setup in a fixed order: language and region for all users, Office, VDI components, optimizations, software and user experience. Each block shows what is done and what is left.' }
-    @{ Key = 'Updates'; Title = 'Updates'; Glyph = 0xE895; Phase = 2; Text = 'One list for everything: Windows (without drivers and previews by default, with an exclude list), Microsoft 365 Apps, Edge, Teams, OneDrive, FSLogix, Defender signatures, and the apps from winget, Chocolatey and the library. Update all or per item, with history. Runs in maintenance mode only.' }
+    @{ Key = 'Updates'; Title = 'Updates'; Glyph = 0xE895; Phase = 2 }
     @{ Key = 'Software'; Title = 'Software'; Glyph = 0xE71D; Phase = 4; Text = 'Packages of the PackTune library and the winget and Chocolatey catalog: install, update and remove, and detection of what is already on the master.' }
     @{ Key = 'Office'; Title = 'Office'; Glyph = 0xE8A5; Phase = 6; Text = 'Office Deployment Tool configuration (channel, 64 bit, languages, excluded apps, shared computer licensing, updates off), preview of configuration.xml, install, update and remove, build info.' }
     @{ Key = 'Optimization'; Title = 'Optimization'; Glyph = 0xE9D9; Phase = 6; Text = 'Optimizations for multi-session hosts: AppX, services, tasks and autologgers, visual effects, power plan, widgets and consumer features off, browser settings, Storage Sense, telemetry, hibernation, defrag. Each step with its reason and source.' }
@@ -143,7 +143,7 @@ $script:PageTable = @(
     @{ Key = 'AppMasking'; Title = 'App Masking'; Glyph = 0xE7B3; Phase = 3; Text = 'FSLogix hiding rules for icons and apps, with groups from the domain or Microsoft Entra ID.' }
     @{ Key = 'VdiComponents'; Title = 'VDI components'; Glyph = 0xE7F4; Phase = 6; Text = 'Defender onboarding for non-persistent VDI, new Teams for VDI, multimedia redirection, RDP Shortpath, time zone redirection and OneDrive per machine.' }
     @{ Key = 'UserExperience'; Title = 'User experience'; Glyph = 0xE771; Phase = 6; Text = 'Wallpaper, watermark, Start and taskbar layout and default apps for new profiles, public desktop shortcuts and web apps with App Masking rules per group.' }
-    @{ Key = 'UpdateBlock'; Title = 'Update block'; Glyph = 0xE72E; Phase = 2; Text = 'Everything that offers or runs updates is hidden and switched off for users. Maintenance mode lifts the block for the administrator only and restores it afterwards.' }
+    @{ Key = 'UpdateBlock'; Title = 'Update block'; Glyph = 0xE72E; Phase = 2 }
     @{ Key = 'Benchmark'; Title = 'Benchmark'; Glyph = 0xE9D2; Phase = 5; Text = 'Measures CPU, memory, disk and GPU per image version and compares versions.' }
     @{ Key = 'Seal'; Title = 'Cleanup and seal'; Glyph = 0xE74D; Phase = 7; Text = 'The last button of a version: a checklist that must be green (no pending restart, update block on, FSLogix test passed, no AVD agent, no join, no tokens), cleanup, a snapshot reminder and sysprep with a typed confirmation.' }
     @{ Key = 'Protocol'; Title = 'Protocol and change log'; Glyph = 0xE8A5 }
@@ -177,9 +177,11 @@ foreach ($page in $script:PageTable) {
 
 function Show-Page([string]$Key) {
     $script:CurrentPage = $Key
-    $isPlaceholder = $Key -notin 'Overview', 'Protocol'
+    $isPlaceholder = $Key -notin 'Overview', 'Protocol', 'Updates', 'UpdateBlock'
     $ui.PageOverview.Visibility = ConvertTo-Vis ($Key -eq 'Overview')
     $ui.PageProtocol.Visibility = ConvertTo-Vis ($Key -eq 'Protocol')
+    $ui.PageUpdates.Visibility = ConvertTo-Vis ($Key -eq 'Updates')
+    $ui.PageUpdateBlock.Visibility = ConvertTo-Vis ($Key -eq 'UpdateBlock')
     $ui.PagePlaceholder.Visibility = ConvertTo-Vis $isPlaceholder
     $ui["Nav$Key"].IsChecked = $true
     Update-ReadOnlyBanner
@@ -191,6 +193,8 @@ function Show-Page([string]$Key) {
     }
     elseif ($Key -eq 'Overview') { Update-OverviewView; Update-StartView }
     elseif ($Key -eq 'Protocol') { Update-ProtocolView }
+    elseif ($Key -eq 'Updates') { Update-UpdatesView }
+    elseif ($Key -eq 'UpdateBlock') { Update-UpdateBlockView }
 }
 
 # ---------------------------------------------------------------- Overview
@@ -260,12 +264,13 @@ function Start-OverviewRefresh {
     $ui.TxtOverviewState.Text = 'Reading the machine ...'
     $ps = [powershell]::Create()
     [void]$ps.AddScript({
-            param($Module, $FakeScript, $Root)
+            param($Module, $FakeScript, $Root, $SharedMachine)
             $ErrorActionPreference = 'Stop'
             Import-Module $Module -Force
-            if ($FakeScript) { . $FakeScript; $m = New-AVDTuneFakeMachine } else { $m = New-AVDTuneMachine }
-            Get-AVDTuneOverview -Machine $m -Root $Root
-        }).AddArgument((Join-Path $script:AppRoot 'Modules\AVDTune.psm1')).AddArgument($(if ($script:TestMode) { $env:AVDTUNE_FAKE } else { '' })).AddArgument($script:StateRoot)
+            Import-Module (Join-Path (Split-Path $Module -Parent) 'AVDTune.UpdateBlock.psm1') -Force
+            if ($FakeScript) { . $FakeScript; $m = $SharedMachine; if (-not $m) { $m = New-AVDTuneFakeMachine } } else { $m = New-AVDTuneMachine }
+            Get-AVDTuneOverview -Machine $m -Root $Root -UpdateBlock (Get-AVDTuneUpdateBlockStatus $m)
+        }).AddArgument((Join-Path $script:AppRoot 'Modules\AVDTune.psm1')).AddArgument($(if ($script:TestMode) { $env:AVDTUNE_FAKE } else { '' })).AddArgument($script:StateRoot).AddArgument($(if ($script:TestMode) { $script:Machine } else { $null }))
     $script:OverviewJob = @{ PS = $ps; Handle = $ps.BeginInvoke() }
 }
 function Complete-OverviewRefresh {
@@ -399,6 +404,7 @@ Add-Click $ui.BtnProtocolCopy {
 }
 
 . (Join-Path $PSScriptRoot 'AVDTune-Start.ps1')
+. (Join-Path $PSScriptRoot 'AVDTune-Updates.ps1')
 
 # ---------------------------------------------------------------- theme switch
 function Update-ThemeButton { $ui.BtnTheme.Content = [string][char]$(if ($script:Settings.Theme -eq 'Dark') { 0xE706 } else { 0xE708 }) }
@@ -448,6 +454,8 @@ Show-Page 'Overview'
 if (-not (Get-AVDTuneEnvironment $script:StateRoot)) { try { Open-Stage 'Environment' } catch { Show-Error $_.Exception.Message } }
 $script:Timer.Start()
 Start-OverviewRefresh
+# A maintenance mode that never ended (closed or crashed in the middle) is reported at once; the repair is on the Update block page
+if (Get-AVDTuneMaintenanceCrash -Root $script:StateRoot) { Show-Toast 'The last maintenance mode did not end properly: the update block may be lifted. Open Update block and repair it.' }
 # Test hook: AVDTUNE_SMOKE names a script that drives the window off-screen and renders every page (only in test mode).
 if ($env:AVDTUNE_SMOKE -and $script:TestMode) { . $env:AVDTUNE_SMOKE }
 $window.Show()
