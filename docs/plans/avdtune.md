@@ -60,6 +60,17 @@ Documentation: the wizard answers and every created or checked resource (resourc
 - Step contract: Id, Section, Title, Why, Risk, Reboot, Source URL, Test -> state, Apply -> Changed/Unchanged/Failed with before and after, optional Undo. Idempotent; nothing runs without a visible selection; dry run first.
 - Shared with PackTune: Theme, sign-in (`Modules/Keevault.psm1`), package store (`PackTune-Store.ps1`), protocol (`PackTune-Protocol.ps1`, new category set), winget/Chocolatey helpers. They live in `Shared/` as copies: `Tools\Sync-FromPackTune.ps1` copies them from a PackTune clone and writes `Shared/SOURCE.json` (PackTune commit, SHA256 per file); `Tests\Check-Shared.ps1` fails when a file in `Shared/` differs from its recorded hash. Changes to shared code are made in PackTune first, then synced.
 
+## 1c. Initial analysis on the first run (user decision 2026-11-15)
+
+The first run ends with one guided "Erstanalyse" after the environment wizard (1b), all sign-ins and connections (M365/Azure, DC when used, FSLogix share and storage account when used) and the snapshot gate (1a), and before AVDTune changes anything:
+1. Readiness and hygiene analysis (section 2a).
+2. Inventory: Windows build/UBR, Office build and channel, installed software with versions, drivers, FSLogix settings, update block state, existing scheduled tasks and leftovers of earlier scripts.
+3. Storage and FSLogix check (section 5a) when FSLogix is used.
+4. Baseline benchmark (section 6), with the share of the environment.
+The result is the document "Ausgangszustand" (version 0 of the change log): stored locally, in the SharePoint list of the environment, and the reference for every later benchmark and diff. It can be repeated by hand (e.g. after a rollback to the snapshot), and the user chooses which run stays the baseline.
+
+While the benchmark engine is not built yet (phase 5), the initial analysis runs without step 4 and says so; the baseline benchmark is then offered once at the next start, marked as "taken after changes" when AVDTune changed something in between.
+
 ## 2a. Readiness analysis: is the master set up correctly, ready for current VM sizes (added 2026-11-15)
 
 A read-only analysis on the Overview ("Bereitschaft"), run at every start and as part of the seal checklist. Each check is green/yellow/red with the reason, the source (Microsoft Learn) and a fix where AVDTune can do it (always as a step with confirmation and change log entry). The list of VM families and what they need is data (`AVDTune/readiness.json`), checked against Microsoft Learn when the analysis is built and kept current with releases, because new sizes come often.
