@@ -528,6 +528,8 @@ function Invoke-AVDTuneUpdateRun {
     [void](Add-AVDTuneRun -Root $Root -Run $run)
     $changed = @($results | Where-Object { $_.Status -eq 'Changed' })
     if ($changed.Count -gt 0) { [void](Set-AVDTuneState -Root $Root -Values @{ LastUpdate = $started.ToString('yyyy-MM-dd HH:mm', [Globalization.CultureInfo]::InvariantCulture) }) }
+    # LastChange for the snapshot gate: an item that changed or failed (a failed install can leave changes behind)
+    if (@($results | Where-Object { $_.Status -in 'Changed', 'Failed' }).Count -gt 0) { [void](Set-AVDTuneState -Root $Root -Values @{ LastChange = (& $Machine.Now).ToString('o') }) }
     if ($state.ImageVersion) {
         foreach ($r in $results) {
             if ($r.Status -notin 'Changed', 'Failed') { continue }
@@ -557,6 +559,8 @@ function Invoke-AVDTuneRepair {
     if ($Progress) { & $Progress "Running $title (this takes a while) ..." }
     $started = & $Machine.Now
     $t = Resolve-AVDTuneTool -U $U -Name $(if ($Kind -eq 'Dism') { 'Dism.exe' } else { 'sfc.exe' }) -PathName $Kind
+    # LastChange for the snapshot gate before the repair starts (DISM and sfc change system files, also when they end with an error)
+    if ($t.Path) { [void](Set-AVDTuneState -Root $Root -Values @{ LastChange = $started.ToString('o') }) }
     $r = if (-not $t.Path) { [pscustomobject]@{ ExitCode = -1; Output = $t.Error } } elseif ($Kind -eq 'Dism') { & $U.Run $t.Path @('/Online', '/Cleanup-Image', '/RestoreHealth') 7200 } else { & $U.Run $t.Path @('/scannow') 7200 }
     $ok = ($r.ExitCode -eq 0)
     $msg = if ($ok) { 'Finished without errors.' } else { "Exit code $($r.ExitCode). $(([string]$r.Output).Trim() -replace '\s+', ' ')" }

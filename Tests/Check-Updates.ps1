@@ -175,6 +175,18 @@ try {
     $kr = Invoke-AVDTuneUpdateRun -Machine $k.M -U $k.U -Root $tmp -Items @($list.Items | Where-Object { $_.Id -eq 'windows:u1' }) -User 'admin1'
     Test-Check 'an exception inside an item is a Failed result, the run goes on and the block is restored' ($kr.Results[-1].Status -eq 'Failed' -and $kr.Results[-1].Code -eq 'Exception' -and (Get-AVDTuneUpdateBlockStatus $k.M).State -eq 'On') $null
 
+    # ---------------------------------------------------------------- LastChange for the snapshot gate (with the block off, the maintenance mode changes nothing)
+    $old = '2000-01-01T00:00:00.0000000Z'
+    $lc = New-Env
+    [void](Set-AVDTuneUpdateBlock -Machine $lc.M -Root $tmp -Mode Off -User 'admin1')
+    [void](Set-AVDTuneState -Root $tmp -Values @{ LastChange = $old })
+    [void](Invoke-AVDTuneUpdateRun -Machine $lc.M -U $lc.U -Root $tmp -Items @([pscustomobject]@{ Id = 'winget:7zip.7zip'; Group = 'Software'; Title = '7-Zip'; Installed = '1'; Kb = ''; Selectable = $true }) -User 'admin1')
+    $lcRun = [string](Get-AVDTuneState $tmp).LastChange
+    [void](Set-AVDTuneState -Root $tmp -Values @{ LastChange = $old })
+    [void](Invoke-AVDTuneRepair -Machine $lc.M -U $lc.U -Root $tmp -Kind Sfc -User 'admin1')
+    $lcRep = [string](Get-AVDTuneState $tmp).LastChange
+    Test-Check 'LastChange in state.json is set by an update run and by a repair (snapshot gate)' ($lcRun -and $lcRun -ne $old -and $lcRep -and $lcRep -ne $old) "$lcRun | $lcRep"
+
     # ---------------------------------------------------------------- trusted tools (security review of #6)
     $ms = 'CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US'; $msCa = 'CN=Microsoft Code Signing PCA 2024, O=Microsoft Corporation, C=US'
     $sig = { param($Subject, $Issuer, $Orig, $Valid = $true) [pscustomobject]@{ Valid = $Valid; Status = $(if ($Valid) { 'Valid' } else { 'HashMismatch' }); Subject = $Subject; Issuer = $Issuer; OriginalFilename = $Orig } }

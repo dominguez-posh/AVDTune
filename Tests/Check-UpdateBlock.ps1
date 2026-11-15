@@ -175,6 +175,21 @@ try {
     $rep2 = Repair-AVDTuneMaintenanceCrash -Machine $o -Root $tmp -User 'admin1'
     Test-Check 'a crash when the block was off before: nothing is switched on that was not on' ($rep2.Repaired -and $rep2.Count -eq 0 -and (Get-AVDTuneUpdateBlockStatus $o).State -eq 'Off') $rep2.Message
 
+    # ---------------------------------------------------------------- LastChange for the snapshot gate: every way that writes to the master sets it
+    $old = '2000-01-01T00:00:00.0000000Z'
+    $mark = { [void](Set-AVDTuneState -Root $tmp -Values @{ LastChange = $old }) }
+    $moved = { $v = [string](Get-AVDTuneState $tmp).LastChange; $v -and $v -ne $old }
+    $lc = New-Master; $lcSeen = [ordered]@{}
+    & $mark; [void](Set-AVDTuneUpdateBlock -Machine $lc -Root $tmp -Mode On -User 'admin1'); $lcSeen['block on'] = & $moved
+    & $mark; [void](Set-AVDTuneUpdateBlock -Machine $lc -Root $tmp -Mode On -User 'admin1'); $lcSeen['block on again (nothing changed) keeps it'] = -not (& $moved)
+    & $mark; $lcCtx = Start-AVDTuneMaintenance -Machine $lc -Root $tmp -User 'admin1'; $lcSeen['maintenance lifts'] = & $moved
+    & $mark; [void](Stop-AVDTuneMaintenance -Machine $lc -Root $tmp -Context $lcCtx); $lcSeen['maintenance restores'] = & $moved
+    [void](Start-AVDTuneMaintenance -Machine $lc -Root $tmp -User 'admin1')   # ... crash ...
+    & $mark; [void](Repair-AVDTuneMaintenanceCrash -Machine $lc -Root $tmp -User 'admin1'); $lcSeen['repair after a crash'] = & $moved
+    & $mark; [void](Set-AVDTuneUpdateBlock -Machine $lc -Root $tmp -Mode Off -User 'admin1'); $lcSeen['block off'] = & $moved
+    $lcBad = @($lcSeen.Keys | Where-Object { -not $lcSeen[$_] })
+    Test-Check 'LastChange in state.json is set by block on/off, maintenance lift/restore and the repair (not when nothing changed)' ($lcBad.Count -eq 0 -and (Get-AVDTuneLastChange -Root $tmp) -gt (Get-Date).AddMinutes(-5)) ($lcBad -join ', ')
+
     # ---------------------------------------------------------------- legacy health (no live status): state only
     [void](Set-AVDTuneState -Root $tmp -Values @{ UpdateBlock = 'On'; Maintenance = $null })
     $hl = @{}; foreach ($x in (Get-AVDTuneHealth (New-Master) (Get-AVDTuneState $tmp))) { $hl[$x.Id] = $x }

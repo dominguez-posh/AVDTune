@@ -178,7 +178,9 @@ function Set-AVDTuneUpdateBlock {
         WhatIf = $false; ImageVersion = $state.ImageVersion; Reboot = $false; Results = @($results)
     }
     [void](Add-AVDTuneRun -Root $Root -Run $run)
-    [void](Set-AVDTuneState -Root $Root -Values @{ UpdateBlock = $status.State })
+    # LastChange (snapshot gate): every switch that changed or tried to change a setting
+    $values = @{ UpdateBlock = $status.State }; if ($changed.Count -gt 0 -or $failed.Count -gt 0) { $values.LastChange = (& $Machine.Now).ToString('o') }
+    [void](Set-AVDTuneState -Root $Root -Values $values)
     if ($state.ImageVersion -and ($changed.Count -gt 0 -or $failed.Count -gt 0)) {
         $text = if ($failed.Count -gt 0) { "Update block $($Mode.ToLower()): $($changed.Count) setting(s) changed, $($failed.Count) failed" } else { "Update block switched $($Mode.ToLower()): $($changed.Count) setting(s) changed" }
         [void](Add-AVDTuneChangeLogEntry -Root $Root -Version $state.ImageVersion -Category 'Update block' -Component 'Update block' -ChangeType Changed -Text $text -User $User -SnapshotId $SnapshotId -RunId $run.Id -Source Step)
@@ -218,7 +220,9 @@ function Start-AVDTuneMaintenance {
         Active = $true; Id = $id; Phase = 'lifting'; Started = (& $Machine.Now).ToString('o'); Ended = $null; User = $User; SnapshotId = $SnapshotId
         BlockBefore = $before; BlockAfter = @(); Result = ''
     }
-    [void](Set-AVDTuneState -Root $Root -Values @{ Maintenance = $record; UpdateBlock = 'Maintenance' })
+    # LastChange (snapshot gate) is written before the first setting is lifted, so a crash in the middle still counts as a change
+    $values = @{ Maintenance = $record; UpdateBlock = 'Maintenance' }; if ($before.Count -gt 0) { $values.LastChange = (& $Machine.Now).ToString('o') }
+    [void](Set-AVDTuneState -Root $Root -Values $values)
     $lift = New-Object System.Collections.ArrayList
     # From here the block may be lifted: an error before the caller's try/finally would leave it lifted, so it is put back here at once
     try {
@@ -229,7 +233,8 @@ function Start-AVDTuneMaintenance {
         }
         $failed = @($lift | Where-Object { $_.Status -eq 'Failed' })
         $record.Phase = if ($failed.Count -gt 0) { 'lift-failed' } else { 'lifted' }
-        [void](Set-AVDTuneState -Root $Root -Values @{ Maintenance = $record })
+        $values = @{ Maintenance = $record }; if ($before.Count -gt 0) { $values.LastChange = (& $Machine.Now).ToString('o') }
+        [void](Set-AVDTuneState -Root $Root -Values $values)
     }
     catch {
         $cause = $_.Exception.Message
@@ -239,7 +244,7 @@ function Start-AVDTuneMaintenance {
         if ($ok) { $record.Active = $false; $record.Phase = 'start-failed'; $record.Result = "Maintenance mode did not start ($cause); block restored." }
         else { $record.Phase = 'restore-failed'; $record.Result = 'Not back in place: ' + ($r.Failed -join ', ') }
         $record.Ended = (& $Machine.Now).ToString('o')
-        try { [void](Set-AVDTuneState -Root $Root -Values @{ Maintenance = $record; UpdateBlock = $(if ($ok) { (Get-AVDTuneUpdateBlockStatus $Machine).State } else { 'Maintenance' }) }) } catch { }
+        try { [void](Set-AVDTuneState -Root $Root -Values @{ Maintenance = $record; UpdateBlock = $(if ($ok) { (Get-AVDTuneUpdateBlockStatus $Machine).State } else { 'Maintenance' }); LastChange = $record.Ended }) } catch { }
         if ($ok) { throw "The maintenance mode did not start: $cause The update block was put back." }
         throw "The maintenance mode did not start: $cause The update block is not fully back ($($r.Failed -join ', ')). Repair it on the Update block page."
     }
@@ -277,7 +282,9 @@ function Stop-AVDTuneMaintenance {
     $record.Ended = (& $Machine.Now).ToString('o')
     if ($ok) { $record.Active = $false; $record.Phase = 'restored'; $record.Result = "Block restored: $($r.Restored) setting(s) set back." }
     else { $record.Phase = 'restore-failed'; $record.Result = 'Not back in place: ' + ($r.Failed -join ', ') }
-    [void](Set-AVDTuneState -Root $Root -Values @{ Maintenance = $record; UpdateBlock = $(if ($ok) { $live.State } else { 'Maintenance' }) })
+    $values = @{ Maintenance = $record; UpdateBlock = $(if ($ok) { $live.State } else { 'Maintenance' }) }
+    if ($r.Restored -gt 0 -or $r.Failed.Count -gt 0) { $values.LastChange = (& $Machine.Now).ToString('o') }   # LastChange for the snapshot gate
+    [void](Set-AVDTuneState -Root $Root -Values $values)
     $state = Get-AVDTuneState $Root
     if ($state.ImageVersion) {
         $text = if ($ok) { "Maintenance mode ended: update block restored ($($r.Restored) setting(s) set back, state $($live.State))" } else { "Maintenance mode ended but the update block is NOT fully back ($($r.Failed.Count) setting(s)): repair it on the Update block page" }
@@ -318,7 +325,9 @@ function Repair-AVDTuneMaintenanceCrash {
     $record.Ended = (& $Machine.Now).ToString('o')
     if ($ok) { $record.Active = $false; $record.Phase = 'repaired'; $record.Result = "Interrupted maintenance mode repaired: $($r.Restored) setting(s) set back." }
     else { $record.Phase = 'repair-failed'; $record.Result = 'Not back in place: ' + ($r.Failed -join ', ') }
-    [void](Set-AVDTuneState -Root $Root -Values @{ Maintenance = $record; UpdateBlock = $(if ($ok) { $live.State } else { 'Maintenance' }) })
+    $values = @{ Maintenance = $record; UpdateBlock = $(if ($ok) { $live.State } else { 'Maintenance' }) }
+    if ($r.Restored -gt 0 -or $r.Failed.Count -gt 0) { $values.LastChange = (& $Machine.Now).ToString('o') }   # LastChange for the snapshot gate
+    [void](Set-AVDTuneState -Root $Root -Values $values)
     $state = Get-AVDTuneState $Root
     $message = "The maintenance mode of $($record.Started) (by $($record.User)) did not end properly: AVDTune was closed or stopped in the middle. " + $(if ($ok) { "The update block was repaired ($($r.Restored) setting(s) set back)." } else { 'The update block could NOT be repaired completely: ' + ($r.Failed -join ', ') })
     if ($state.ImageVersion) { [void](Add-AVDTuneChangeLogEntry -Root $Root -Version $state.ImageVersion -Category 'Update block' -Component 'Maintenance mode' -ChangeType Changed -Text $message -User $User -Source Step) }
