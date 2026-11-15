@@ -357,6 +357,17 @@ Other points:
 - The share path comes from the environment (FSLogix `VHDLocations`). No Ookla binary.
 - AVD-Benchmark repo: becomes the stand-alone version of the same engine (one script for session hosts without AVDTune, e.g. to compare a running host pool with the master), same scores and report.
 
+### 6b. Benchmark only, without setup and sign-in (user request 2026-11-15)
+
+AVDTune can be used purely as a benchmark: for existing systems, and for systems that are to be replaced, as the baseline to compare the new AVD environment with.
+- Start: on the first start the choice "Nur Benchmark" next to "Golden Master einrichten", or `Start-AVDTune.ps1 -Benchmark`. No environment wizard, no M365/Azure or domain sign-in, no snapshot gate (the benchmark changes nothing permanent), no Golden Master pages; only the Benchmark page and its results.
+- Parameters entered by hand: a name for the system (e.g. "Altsystem RDS 2019"), optional notes; for the FSLogix-Score the share: UNC path and the access, either the storage account name and its key (Azure Files) or the current user / a user name and password (any SMB share). Without a share the FSLogix-Score is skipped.
+- The key and password: only in memory for this run, used for one SMB connection to a test folder, the connection is removed at the end, never written to disk, settings, protocol or report; the field says that the account key gives full access to the storage account and that a test folder is used and removed.
+- Works on Windows 11 multi-session, Windows 10/11 and Windows Server with Remote Desktop Services (2016 and newer) and other VDI hosts: categories that cannot run are skipped and named (e.g. no Office installed: application tests for Office skipped; no GPU: GPU-Score "nicht vorhanden"). Scores are only compared when the same categories ran; otherwise the report shows the category values side by side.
+- Test user for the Session category: asked before the run (default yes on a standalone machine, default no and a warning on a server with users signed in or a domain controller, where it is refused); the user activity simulation is optional as everywhere.
+- Results: local report (HTML, PDF) and a result file (JSON, no secrets) for export. In a Golden Master environment the result file can be imported as "Vergleichssystem", then it appears in the comparison of every benchmark, in the change log and in the SharePoint list of the environment.
+- Same engine, same version and reference as in the full tool and the AVD-Benchmark stand-alone script, so results are comparable.
+
 ## 7. State, protocol, change log
 
 - On the master: `C:\ProgramData\AVDTune\` (ACL Administrators/SYSTEM): `state.json` (current), `runs\` (one record per run, append only), `changelog.json`, `benchmark\`, `config\` (Office XML, redirections.xml, watermark), `logs\`. No secrets, no tokens.
