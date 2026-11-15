@@ -1,9 +1,7 @@
-# Sign-in with an account stored in Keevault (the user's password manager), through Keevault's MCP interface.
-# Keevault comes to the front, the user picks the Microsoft account and Keevault hands over user name, password and
-# the current one-time code (tool request_microsoft_login). An embedded browser (WebView2) runs the normal Microsoft
-# sign-in and fills these in step by step; the user can type or choose another method at any time.
-# The authorization code is redeemed here (public client with PKCE, the tool's own app registration).
-# Same technique as in MSIX Sandbox Studio; the token goes to the IntuneWin32App module with Set-PackTuneToken.
+# The Microsoft sign-in of PackTune in an embedded browser (WebView2): authorization code with PKCE (public client,
+# loopback redirect), token redemption, the WebView2 SDK (pinned version, checked on every load), the shared and the
+# temporary sign-in profiles. Needs no Keevault: Modules\Keevault.psm1 builds on it (it fills this window from Keevault),
+# and other tools (AVDTune) use it alone. The token goes to the IntuneWin32App module with Set-PackTuneToken.
 
 $script:SignInRedirect = 'http://localhost'
 $script:SignInHosts = @('login.microsoftonline.com', 'login.microsoft.com', 'login.live.com')
@@ -17,162 +15,121 @@ function Set-PackTuneSignInLog {
 }
 function Write-SignInLog([string]$Text, [string]$Level = 'Info') { & $script:Log $Text $Level }
 
-# ---------------------------------------------------------------- Keevault MCP client (JSON-RPC over stdio)
-function Find-KeevaultMcp {
-    <# Where Keevault and its MCP host script are, and whether it is installed, MCP is switched on and the app runs. #>
-    $running = Get-Process Keevault -ErrorAction SilentlyContinue | Where-Object Path | Select-Object -First 1
-    $exe = if ($running) { $running.Path } else { Join-Path $env:LOCALAPPDATA 'Programs\Keevault\Keevault.exe' }
-    $script = Join-Path $env:APPDATA 'KeyVault PwSafe\mcp\keevault-mcp.cjs'
-    [pscustomobject]@{
-        Exe        = $exe
-        Script     = $script
-        Installed  = (Test-Path $exe)
-        McpEnabled = (Test-Path $script)
-        Running    = [bool]$running
-    }
-}
+$script:WriteRightsMask = 0x2 -bor 0x4 -bor 0x10 -bor 0x40 -bor 0x100 -bor 0x10000 -bor 0x40000 -bor 0x80000 -bor 0x10000000 -bor 0x40000000
 
-function Connect-KeevaultMcp {
-    <# Starts Keevault's MCP host (Keevault.exe as Node) and runs the MCP handshake. $OnWait runs while waiting. #>
-    param([scriptblock]$OnWait)
-    $kv = Find-KeevaultMcp
-    if (-not $kv.Installed) { throw 'Keevault is not installed on this computer.' }
-    if (-not $kv.McpEnabled) { throw 'AI agents (MCP) are switched off in Keevault: Keevault > Settings > AI agents (MCP) > switch on and save.' }
-    if (-not $kv.Running) { throw 'Keevault is not running. Start and unlock Keevault, then sign in again.' }
-
-    $psi = New-Object System.Diagnostics.ProcessStartInfo
-    $psi.FileName = $kv.Exe
-    $psi.Arguments = '"{0}"' -f $kv.Script
-    $psi.UseShellExecute = $false
-    $psi.CreateNoWindow = $true
-    $psi.RedirectStandardInput = $true
-    $psi.RedirectStandardOutput = $true
-    $psi.RedirectStandardError = $true
-    $psi.StandardOutputEncoding = New-Object System.Text.UTF8Encoding $false
-    $psi.EnvironmentVariables['ELECTRON_RUN_AS_NODE'] = '1'
-    $process = [System.Diagnostics.Process]::Start($psi)
-    [void]$process.StandardError.ReadToEndAsync()   # drained so the host never blocks on a full pipe
-
-    $client = [pscustomobject]@{ Process = $process; NextId = 0; Pending = $null }
-    try {
-        [void](Invoke-KeevaultMcpRequest -Client $client -Method 'initialize' -TimeoutSeconds 20 -OnWait $OnWait -Params @{
-            protocolVersion = '2025-06-18'
-            capabilities    = @{}
-            clientInfo      = @{ name = 'PackTune'; version = '2.1.0' }
-        })
-        Send-KeevaultMcpMessage -Client $client -Message @{ jsonrpc = '2.0'; method = 'notifications/initialized' }
-    }
-    catch { Close-KeevaultMcp $client; throw }
-    $client
-}
-
-function Send-KeevaultMcpMessage {
-    param([Parameter(Mandatory)]$Client, [Parameter(Mandatory)][hashtable]$Message)
-    # UTF-8 without BOM, one JSON object per line (.NET Framework has no StandardInputEncoding)
-    $bytes = (New-Object System.Text.UTF8Encoding $false).GetBytes(($Message | ConvertTo-Json -Depth 10 -Compress) + "`n")
-    $stream = $Client.Process.StandardInput.BaseStream
-    $stream.Write($bytes, 0, $bytes.Length)
-    $stream.Flush()
-}
-
-function Invoke-KeevaultMcpRequest {
-    param(
-        [Parameter(Mandatory)]$Client,
-        [Parameter(Mandatory)][string]$Method,
-        [hashtable]$Params = @{},
-        [int]$TimeoutSeconds = 300,
-        [scriptblock]$OnWait
-    )
-    $Client.NextId++
-    $id = $Client.NextId
-    Send-KeevaultMcpMessage -Client $Client -Message @{ jsonrpc = '2.0'; id = $id; method = $Method; params = $Params }
-    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
-    while ($true) {
-        if (-not $Client.Pending) { $Client.Pending = $Client.Process.StandardOutput.ReadLineAsync() }
-        while (-not $Client.Pending.Wait(50)) {
-            if ($OnWait) { & $OnWait }
-            if ($Client.Process.HasExited) { throw 'The connection to Keevault ended unexpectedly.' }
-            if ((Get-Date) -gt $deadline) { throw "Keevault did not answer within $TimeoutSeconds seconds." }
+function Get-PackTuneWriteRisk {
+    <#
+    The principals other than this user, administrators, SYSTEM and TrustedInstaller that may change the file or one of its
+    folders up to (and including) $Root (write, append, delete, change permissions or owner). Empty = trusted.
+    #>
+    param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][string]$Root)
+    $me = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+    $allowed = @($me, 'S-1-5-18', 'S-1-5-32-544', 'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464')
+    $rootFull = [IO.Path]::GetFullPath($Root).TrimEnd('\')
+    $risk = New-Object System.Collections.Generic.List[string]
+    $item = [IO.Path]::GetFullPath($Path)
+    while ($item) {
+        if (-not (Test-Path -LiteralPath $item)) { $risk.Add("$item is missing"); break }
+        $acl = Get-Acl -LiteralPath $item
+        $owner = try { $acl.GetOwner([Security.Principal.SecurityIdentifier]).Value } catch { '' }
+        if ($owner -notin $allowed) { $risk.Add("$item is owned by $owner") }
+        foreach ($ace in $acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier])) {
+            if ($ace.AccessControlType -ne 'Allow') { continue }
+            if ($ace.PropagationFlags -band [Security.AccessControl.PropagationFlags]::InheritOnly) { continue }
+            if (([int64]$ace.FileSystemRights -band $script:WriteRightsMask) -and $ace.IdentityReference.Value -notin $allowed) { $risk.Add("$($ace.IdentityReference.Value) may change $item") }
         }
-        $line = $Client.Pending.Result
-        $Client.Pending = $null
-        if ($null -eq $line) { throw 'The connection to Keevault ended unexpectedly.' }
-        if (-not $line.Trim()) { continue }
-        $msg = $line | ConvertFrom-Json
-        if ($msg.id -ne $id) { continue }   # notifications or other replies
-        if ($msg.error) { throw "Keevault: $($msg.error.message)" }
-        return $msg.result
+        if ($item.TrimEnd('\') -ieq $rootFull) { break }
+        $parent = Split-Path $item -Parent
+        if (-not $parent -or $parent -eq $item) { break }
+        $item = $parent
     }
-}
-
-function Invoke-KeevaultMcpTool {
-    <# Calls a Keevault tool and returns its result object; a tool error (e.g. declined) becomes an exception. #>
-    param(
-        [Parameter(Mandatory)]$Client,
-        [Parameter(Mandatory)][string]$Name,
-        [hashtable]$Arguments = @{},
-        [int]$TimeoutSeconds = 300,
-        [scriptblock]$OnWait
-    )
-    $r = Invoke-KeevaultMcpRequest -Client $Client -Method 'tools/call' -Params @{ name = $Name; arguments = $Arguments } -TimeoutSeconds $TimeoutSeconds -OnWait $OnWait
-    $text = @($r.content | Where-Object { $_.type -eq 'text' } | ForEach-Object { $_.text }) -join "`n"
-    if ($r.isError) { throw "Keevault: $text" }
-    if ($r.structuredContent) { return $r.structuredContent }
-    $text | ConvertFrom-Json
-}
-
-function Close-KeevaultMcp {
-    param($Client)
-    if (-not $Client -or -not $Client.Process) { return }
-    try { $Client.Process.StandardInput.Close() } catch { }
-    if (-not $Client.Process.WaitForExit(2000)) { try { $Client.Process.Kill() } catch { } }
-    $Client.Process.Dispose()
+    @($risk)
 }
 
 # ---------------------------------------------------------------- embedded browser (WebView2)
-function Get-PackTuneWebView2 {
-    <#
-    Loads the WebView2 SDK (Core + WPF) for the embedded sign-in window. Downloaded once from NuGet into
-    $CacheFolder; the DLLs must carry a valid Microsoft signature. Needs the WebView2 runtime (part of Windows 11,
-    otherwise installed with Edge).
-    #>
+function Test-PackTuneMicrosoftSigned([string]$Path) {
+    # Valid Authenticode signature whose signer is Microsoft Corporation (exact organization, not a look-alike)
+    if (-not $Path -or -not (Test-Path -LiteralPath $Path)) { return $false }
+    $sig = Get-AuthenticodeSignature -FilePath $Path
+    $sig.Status -eq 'Valid' -and [string]$sig.SignerCertificate.Subject -match '(^|,\s*)O=Microsoft Corporation(\s*,|$)'
+}
+
+# The WebView2 SDK is pinned: this NuGet version and these SHA256 hashes (package and the three files used), no "latest"
+# lookup. Changing the version is a deliberate code change: new version, new hashes (nupkg hash cross-checked against the
+# SHA512 packageHash of the NuGet catalog), Tests\Check-SignIn.ps1.
+$script:WebView2SdkVersion = '1.0.4314.35'   # Microsoft.Web.WebView2, published 2026-10-23
+$script:WebView2NupkgSha256 = '90778DEB1B77E36292828B4B5833C9255C27533F40E0DDD55891AE718944EDC4'
+$script:WebView2DllSha256 = [ordered]@{
+    'Microsoft.Web.WebView2.Core.dll' = 'ACDD517B951829F763D1255F32DF1E6A936CB8623A7EBFF6B8B24172DEDE6BD6'
+    'Microsoft.Web.WebView2.Wpf.dll'  = 'BAAFA0A595C2CEFB3BE8F18288C3DB76F52E3966C8B99957D5E56CAF1B137BC1'
+    'WebView2Loader.dll'              = 'D3FCE90BDEECB08596E377DEA6A316354DD8949E32FF09B89D51BE00C14E21B6'
+}
+$script:WebView2Download = $null   # tests: scriptblock (Uri, OutFile) instead of the download
+
+function Test-PackTuneWebView2Sdk {
+    <# Why the cached WebView2 SDK must not be loaded, or $null: Microsoft signature, the pinned hashes, permissions. #>
     param([Parameter(Mandatory)][string]$CacheFolder)
-    $core = Join-Path $CacheFolder 'Microsoft.Web.WebView2.Core.dll'
-    $wpf = Join-Path $CacheFolder 'Microsoft.Web.WebView2.Wpf.dll'
-    $loader = Join-Path $CacheFolder 'WebView2Loader.dll'
-    if (-not ((Test-Path $core) -and (Test-Path $wpf) -and (Test-Path $loader))) {
-        [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
-        $index = Invoke-RestMethod 'https://api.nuget.org/v3-flatcontainer/microsoft.web.webview2/index.json' -TimeoutSec 20
-        $version = @($index.versions | Where-Object { $_ -notmatch '-' })[-1]
-        Write-SignInLog "Downloading the WebView2 SDK $version for the embedded sign-in ..."
-        $nupkg = Join-Path ([IO.Path]::GetTempPath()) "webview2-$version.zip"
-        Invoke-WebRequest -Uri "https://api.nuget.org/v3-flatcontainer/microsoft.web.webview2/$version/microsoft.web.webview2.$version.nupkg" -OutFile $nupkg -UseBasicParsing -TimeoutSec 120
+    foreach ($name in $script:WebView2DllSha256.Keys) {
+        $f = Join-Path $CacheFolder $name
+        if (-not (Test-PackTuneMicrosoftSigned $f)) { return "$name is missing or not signed by Microsoft" }
+        if ((Get-FileHash -LiteralPath $f -Algorithm SHA256).Hash -ne $script:WebView2DllSha256[$name]) { return "$name is not the pinned file of version $($script:WebView2SdkVersion)" }
+    }
+    $risk = @(Get-PackTuneWriteRisk -Path (Join-Path $CacheFolder 'Microsoft.Web.WebView2.Core.dll') -Root $CacheFolder)
+    if ($risk.Count) { return "the folder can be changed by others: $($risk[0])" }
+    $null
+}
+
+function Install-PackTuneWebView2Sdk {
+    <# Downloads the pinned WebView2 SDK into $CacheFolder: package hash first, then signature and hash of every file. #>
+    param([Parameter(Mandatory)][string]$CacheFolder)
+    $version = $script:WebView2SdkVersion
+    Write-SignInLog "Downloading the WebView2 SDK $version for the embedded sign-in ..."
+    $nupkg = Join-Path ([IO.Path]::GetTempPath()) ("webview2-$version-" + [guid]::NewGuid().ToString('N') + '.zip')
+    $uri = "https://api.nuget.org/v3-flatcontainer/microsoft.web.webview2/$version/microsoft.web.webview2.$version.nupkg"
+    try {
+        if ($script:WebView2Download) { & $script:WebView2Download $uri $nupkg }
+        else {
+            [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+            Invoke-WebRequest -Uri $uri -OutFile $nupkg -UseBasicParsing -TimeoutSec 120
+        }
+        $got = (Get-FileHash -LiteralPath $nupkg -Algorithm SHA256).Hash
+        if ($got -ne $script:WebView2NupkgSha256) { throw "The downloaded WebView2 SDK $version is not the pinned package (SHA256 $got); nothing was installed." }
         Add-Type -AssemblyName System.IO.Compression.FileSystem
         if (Test-Path $CacheFolder) { Remove-Item $CacheFolder -Recurse -Force }
         New-Item -ItemType Directory -Path $CacheFolder -Force | Out-Null
+        $wanted = @{
+            'lib/net462/Microsoft.Web.WebView2.Core.dll' = 'Microsoft.Web.WebView2.Core.dll'
+            'lib/net462/Microsoft.Web.WebView2.Wpf.dll'  = 'Microsoft.Web.WebView2.Wpf.dll'
+            'runtimes/win-x64/native/WebView2Loader.dll' = 'WebView2Loader.dll'
+        }
         $zip = [IO.Compression.ZipFile]::OpenRead($nupkg)
-        try {
-            $wanted = @{
-                'lib/net462/Microsoft.Web.WebView2.Core.dll' = $core
-                'lib/net462/Microsoft.Web.WebView2.Wpf.dll'  = $wpf
-                'runtimes/win-x64/native/WebView2Loader.dll' = $loader
-            }
-            foreach ($e in $zip.Entries) {
-                if ($wanted.ContainsKey($e.FullName)) { [IO.Compression.ZipFileExtensions]::ExtractToFile($e, $wanted[$e.FullName], $true) }
-            }
-        }
-        finally { $zip.Dispose(); Remove-Item $nupkg -Force -ErrorAction SilentlyContinue }
-        foreach ($f in $core, $wpf, $loader) {
-            $sig = if (Test-Path $f) { Get-AuthenticodeSignature -FilePath $f }
-            if (-not $sig -or $sig.Status -ne 'Valid' -or $sig.SignerCertificate.Subject -notmatch 'O=Microsoft Corporation') {
-                Remove-Item $CacheFolder -Recurse -Force -ErrorAction SilentlyContinue
-                throw "The WebView2 SDK file $(Split-Path $f -Leaf) is missing or not signed by Microsoft."
-            }
-        }
+        try { foreach ($e in $zip.Entries) { if ($wanted.ContainsKey($e.FullName)) { [IO.Compression.ZipFileExtensions]::ExtractToFile($e, (Join-Path $CacheFolder $wanted[$e.FullName]), $true) } } }
+        finally { $zip.Dispose() }
     }
+    finally { Remove-Item -LiteralPath $nupkg -Force -ErrorAction SilentlyContinue }
+    $problem = Test-PackTuneWebView2Sdk -CacheFolder $CacheFolder
+    if ($problem) { Remove-Item $CacheFolder -Recurse -Force -ErrorAction SilentlyContinue; throw "The WebView2 SDK $version was not installed: $problem." }
+    ([ordered]@{ Version = $version } | ConvertTo-Json) | Set-Content -LiteralPath (Join-Path $CacheFolder 'webview2-sdk.json') -Encoding UTF8
+}
+
+function Get-PackTuneWebView2 {
+    <#
+    Loads the WebView2 SDK (Core + WPF) for the embedded sign-in window: the pinned version, downloaded once from NuGet
+    into $CacheFolder and checked on every load (Microsoft signature, pinned hashes, permissions). A cache of another
+    version is replaced; a cache of this version that fails its check is removed and the call fails (fail closed; the next
+    sign-in downloads it again). Needs the WebView2 runtime (part of Windows 11, otherwise installed with Edge).
+    #>
+    param([Parameter(Mandatory)][string]$CacheFolder)
     if (-not ('Microsoft.Web.WebView2.Wpf.WebView2' -as [type])) {
-        Add-Type -Path $core
-        Add-Type -Path $wpf
+        $marker = try { Get-Content -LiteralPath (Join-Path $CacheFolder 'webview2-sdk.json') -Raw | ConvertFrom-Json } catch { $null }
+        if ([string]$marker.Version -ne $script:WebView2SdkVersion) { Install-PackTuneWebView2Sdk -CacheFolder $CacheFolder }
+        $problem = Test-PackTuneWebView2Sdk -CacheFolder $CacheFolder
+        if ($problem) {
+            Remove-Item $CacheFolder -Recurse -Force -ErrorAction SilentlyContinue
+            throw "The WebView2 SDK in $CacheFolder failed its check ($problem) and was removed. Sign in again to download it fresh from NuGet."
+        }
+        Add-Type -Path (Join-Path $CacheFolder 'Microsoft.Web.WebView2.Core.dll')
+        Add-Type -Path (Join-Path $CacheFolder 'Microsoft.Web.WebView2.Wpf.dll')
         [Microsoft.Web.WebView2.Core.CoreWebView2Environment]::SetLoaderDllFolderPath($CacheFolder)
     }
     try { [void][Microsoft.Web.WebView2.Core.CoreWebView2Environment]::GetAvailableBrowserVersionString() }
@@ -344,6 +301,31 @@ function Get-PackTuneSessionFolder {
 }
 
 $script:SignInEnvironments = @{}
+
+function Remove-PackTuneTempProfile {
+    <# Deletes a temporary sign-in profile (cookies) once its WebView2 browser process has ended; retries while files are locked. #>
+    param([Parameter(Mandatory)][string]$Folder, [int]$BrowserPid, [int]$WaitSeconds = 10, [int]$Tries = 20, [int]$DelayMs = 250)
+    if ($BrowserPid) {
+        try { $p = Get-Process -Id $BrowserPid -ErrorAction Stop; [void]$p.WaitForExit($WaitSeconds * 1000) } catch { }
+    }
+    for ($i = 0; $i -lt $Tries; $i++) {
+        if (-not (Test-Path -LiteralPath $Folder)) { return $true }
+        try { Remove-Item -LiteralPath $Folder -Recurse -Force -ErrorAction Stop; return $true } catch { Start-Sleep -Milliseconds $DelayMs }
+    }
+    Write-SignInLog "The temporary sign-in profile $Folder could not be deleted yet; it is removed at the next start." 'Warning'
+    $false
+}
+
+function Clear-PackTuneSignInLeftovers {
+    <# Temporary sign-in profiles of earlier runs (%TEMP%\PackTuneSignIn-*) that are older than a sign-in can take. #>
+    param([int]$OlderThanMinutes = 30)
+    $cut = (Get-Date).AddMinutes(-$OlderThanMinutes)
+    foreach ($d in @(Get-ChildItem -LiteralPath ([IO.Path]::GetTempPath()) -Directory -Filter 'PackTuneSignIn-*' -ErrorAction SilentlyContinue | Where-Object { $_.LastWriteTime -lt $cut })) {
+        try { Remove-Item -LiteralPath $d.FullName -Recurse -Force -ErrorAction Stop } catch { }
+    }
+}
+# Leftovers of earlier runs go at the start (best effort: a profile still in use stays)
+try { Clear-PackTuneSignInLeftovers } catch { }
 function Get-PackTuneEnvironment {
     <# ONE CoreWebView2Environment per profile folder, created once and used by every sign-in window and the keep-alive window
        (all of them need the same options: none; the passkey shim is a script, not an environment option). Waits with the dispatcher
@@ -508,6 +490,7 @@ function Invoke-PackTuneBrowserSignIn {
     $wv.Add_CoreWebView2InitializationCompleted({
         param($s, $e)
         if (-not $e.IsSuccess) { $ctx.Error = "The embedded browser could not start: $($e.InitializationException.Message)"; $win.Close(); return }
+        try { $ctx.BrowserPid = $s.CoreWebView2.BrowserProcessId } catch { }
         $s.CoreWebView2.Settings.AreDevToolsEnabled = $false
         $s.CoreWebView2.Settings.IsStatusBarEnabled = $false
         if ($Passkey) { [void]$s.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync($script:PasskeyShimScript) }
@@ -613,8 +596,8 @@ function Invoke-PackTuneBrowserSignIn {
     finally {
         $watch.Stop()
         $wv.Dispose()
-        if (-not $persistent) { Start-Sleep -Milliseconds 300 }
-        if (-not $persistent) { Remove-Item $userData -Recurse -Force -ErrorAction SilentlyContinue }
+        # The temporary profile holds the session cookies: deleted after its browser process has ended, with retries
+        if (-not $persistent) { [void]$script:SignInEnvironments.Remove($userData); [void](Remove-PackTuneTempProfile -Folder $userData -BrowserPid $ctx.BrowserPid) }
     }
 
     if ($ctx.Error) { throw $ctx.Error }
@@ -631,91 +614,7 @@ function Invoke-PackTuneBrowserSignIn {
     }
 }
 
-# ---------------------------------------------------------------- Keevault sign-in
-function Connect-PackTuneWithKeevault {
-    <#
-    Signs in to Microsoft Graph with an account from Keevault and returns the token response. Keevault asks the
-    user to approve and pick the account (only accounts released for AI agents); the embedded sign-in fills in
-    user name, password and one-time code. A fresh one-time code is requested from Keevault when the first one
-    has expired. The caller hands the token to the IntuneWin32App module (Set-PackTuneToken).
-    #>
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory)][string]$TenantID,
-        [Parameter(Mandatory)][string]$ClientID,
-        [string]$UserDataFolder,
-        [ValidateSet('default', 'consent')][string]$Prompt = 'default',
-        [Parameter(Mandatory)][string]$CacheFolder,
-        [string[]]$Scopes,
-        [System.Windows.Window]$Owner,
-        [scriptblock]$OnWait,
-        # Gets the chosen user name and returns @{ TenantID; ClientID } to sign in with (an account of another
-        # tenant needs that tenant's app registration), or throws to stop
-        [scriptblock]$OnAccount
-    )
-    $client = Connect-KeevaultMcp -OnWait $OnWait
-    try {
-        $request = @{ purpose = "PackTune: sign in to Microsoft Intune (Graph), tenant $TenantID" }
-        # Keevault lists the accounts of this tenant first (older versions show only those)
-        if ($TenantID -match '\.' -and $TenantID -notmatch '^[0-9a-f-]{36}$') { $request.tenant = $TenantID }
-        Write-SignInLog 'Keevault: choose the Microsoft account in Keevault ...'
-        $login = Invoke-KeevaultMcpTool -Client $client -Name 'request_microsoft_login' -Arguments $request -OnWait $OnWait
-        Write-SignInLog "Keevault: signing in as $($login.username) ($($login.title))."
-        if ($OnAccount) {
-            $target = & $OnAccount ([string]$login.username)
-            if ($target.TenantID) { $TenantID = $target.TenantID }
-            if ($target.ClientID) { $ClientID = $target.ClientID }
-        }
-        $creds = @{
-            Username = [string]$login.username
-            Password = [string]$login.password
-            Otp      = [string]$login.totp
-            OtpUntil = if ($login.totp) { (Get-Date).AddSeconds([int]$login.totpValidForSeconds - 3) } else { [datetime]::MinValue }
-            Used     = $false
-        }
-        $fill = {
-            param($step)
-            switch ($step) {
-                'username' { $creds.Username }
-                'password' { $creds.Password }
-                'otp' {
-                    if (-not $creds.Otp) { return $null }
-                    if ($creds.Used -or (Get-Date) -gt $creds.OtpUntil) {
-                        try { $creds.Otp = [string](Invoke-KeevaultMcpTool -Client $client -Name 'get_totp' -Arguments @{ vaultId = $login.vaultId; entryId = $login.entryId } -TimeoutSeconds 120 -OnWait $OnWait).code }
-                        catch { Write-SignInLog "Keevault: no new one-time code ($($_.Exception.Message))." 'Warning'; return $null }
-                    }
-                    $creds.Used = $true
-                    $creds.Otp
-                }
-            }
-        }
-        # Entry with a passkey (or without password): Keevault signs the passkey request, the user confirms in Keevault
-        $passkey = $null
-        if ($login.passkey -or -not $login.password) {
-            $passkey = {
-                param($origin, $challenge, $rpId, $allow)
-                Write-SignInLog 'Keevault: confirm the passkey sign-in in Keevault ...'
-                $a = @{ vaultId = $login.vaultId; entryId = $login.entryId; origin = $origin; challenge = $challenge }
-                if ($rpId) { $a.rpId = $rpId.ToLower() }
-                $r = Invoke-KeevaultMcpTool -Client $client -Name 'sign_in_with_passkey' -Arguments $a -TimeoutSeconds 180 -OnWait $OnWait
-                Write-SignInLog 'Keevault: passkey signed.'
-                $r.credential
-            }
-        }
-        $hint = if ($passkey) { "Keevault signs in $($login.username) with the passkey; confirm it in Keevault. You can type yourself or choose another sign-in method at any time." }
-        else { "Keevault fills in the account $($login.username). You can type yourself or choose another sign-in method (e.g. a passkey) at any time." }
-        $token = Invoke-PackTuneBrowserSignIn -TenantID $TenantID -ClientID $ClientID -CacheFolder $CacheFolder -UserDataFolder $UserDataFolder -Prompt $Prompt -Scopes $Scopes -LoginHint $login.username `
-            -Fill $fill -HasOtp:([bool]$login.totp) -Passkey $passkey -Hint $hint -Owner $Owner -Title 'Sign in to Microsoft Intune with Keevault'
-    }
-    finally {
-        if ($creds) { $creds.Password = $null; $creds.Otp = $null }
-        Close-KeevaultMcp $client
-    }
-    # Where the sign-in went (another tenant when the account belongs to one)
-    $token | Add-Member -NotePropertyName SignInTenantID -NotePropertyValue $TenantID -Force
-    $token | Add-Member -NotePropertyName SignInClientID -NotePropertyValue $ClientID -Force
-    $token
-}
 
-Export-ModuleMember -Function Set-PackTuneSignInLog, Find-KeevaultMcp, Connect-KeevaultMcp, Invoke-KeevaultMcpRequest, Invoke-KeevaultMcpTool, Close-KeevaultMcp,
-    Get-PackTuneWebView2, Get-PackTuneEnvironment, Set-PackTuneSignInMethod, Get-PackTuneCookieSummary, Get-PackTuneSessionFolder, Start-PackTuneSessionHold, Close-PackTuneSessionHold, Clear-PackTuneSession, Get-PackTuneAuthorizeUrl, Request-PackTuneToken, Invoke-PackTuneBrowserSignIn, Connect-PackTuneWithKeevault
+Export-ModuleMember -Function Set-PackTuneSignInLog, Write-SignInLog, Get-PackTuneWriteRisk, Get-PackTuneWebView2, Get-PackTuneEnvironment, Set-PackTuneSignInMethod,
+    Get-PackTuneCookieSummary, Get-PackTuneSessionFolder, Start-PackTuneSessionHold, Close-PackTuneSessionHold, Clear-PackTuneSession, Get-PackTuneAuthorizeUrl,
+    Request-PackTuneToken, Invoke-PackTuneBrowserSignIn

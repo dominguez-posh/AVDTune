@@ -5,7 +5,7 @@
       Sites   Microsoft Graph, Sites.Selected (the SharePoint site of the environment / package store)
       Arm     Azure Resource Manager (snapshot of the OS disk, VM size and region), delegated user_impersonation
 
-    The interactive sign-in is the normal Microsoft sign-in of the shared module (Shared\Modules\Keevault.psm1: Invoke-PackTuneBrowserSignIn,
+    The interactive sign-in is the normal Microsoft sign-in of the shared module (Shared\Modules\PackTune.SignIn.psm1: Invoke-PackTuneBrowserSignIn,
     embedded sign-in window, authorization code with PKCE; the administrator signs in himself). Keevault is not used (user decision
     2026-11-15): no Keevault function is called and no password is filled in. The sign-in returns one refresh token; every audience gets
     its own access token from it (Request-PackTuneToken, grant refresh_token).
@@ -267,7 +267,7 @@ function New-AVDTuneAuthAdapter {
         cache folder; afterwards Register-AVDTuneWebView2Cache records the checked files. Not used by the checks (they use the fake).
     #>
     param([object]$Owner, [Parameter(Mandatory)][string]$CacheFolder, [string]$TrustFile, [scriptblock]$Log)
-    $shared = Join-Path (Split-Path $PSScriptRoot -Parent) 'Shared\Modules\Keevault.psm1'
+    $shared = Join-Path (Split-Path $PSScriptRoot -Parent) 'Shared\Modules\PackTune.SignIn.psm1'
     Import-Module $shared -Force -Function Invoke-PackTuneBrowserSignIn, Request-PackTuneToken, Set-PackTuneSignInLog
     if ($Log) { Set-PackTuneSignInLog -Sink $Log }
     if (-not $TrustFile) { $TrustFile = Join-Path (Split-Path $CacheFolder -Parent) 'config\webview2-trust.json' }

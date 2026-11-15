@@ -25,7 +25,7 @@ $target = Join-Path $repo 'Shared'
 # Relative path in PackTune = relative path in Shared\
 $files = @(
     'UI/Theme.xaml'
-    'Modules/Keevault.psm1'
+    'Modules/PackTune.SignIn.psm1'
     'PackTune-Store.ps1'
     'PackTune-Protocol.ps1'
 )
