@@ -324,7 +324,7 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
             $script:CloseWhenDone = $false   # the smoke goes on
             $sessionEnd = [pscustomobject]@{ Cancel = $false }
             Invoke-SessionEnding $sessionEnd
-            Test-Smoke 'log off or shut down during an update operation is held back, Windows shows the reason' ($sessionEnd.Cancel -and (Get-ShutdownBlockReason) -like 'AVDTune is running an update operation*') (Get-ShutdownBlockReason)
+            Test-Smoke 'log off or shut down during an update operation is held back, Windows shows the reason' ($sessionEnd.Cancel -and (Get-ShutdownBlockReason) -like 'AVDTune runs an operation*') (Get-ShutdownBlockReason)
             return $false
         }
         if ($script:UpdJob) { return $false }
@@ -366,6 +366,14 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
             Test-Smoke 'Benchmark page: no result yet, both start buttons there, no placeholder' ($ui.PageBenchmark.Visibility -eq 'Visible' -and $ui.PagePlaceholder.Visibility -eq 'Collapsed' -and $ui.TxtBenchScore.Text -like 'No benchmark yet*' -and $ui.BtnBenchFull.IsEnabled -and $ui.BtnBenchQuick.IsEnabled) $ui.TxtBenchScore.Text
             $ui.BtnBenchQuick.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
             Test-Smoke 'quick run: asks first, runs in the background, buttons locked meanwhile' ($script:ConfirmAsked -like '*quick benchmark*' -and $script:BenchJob -and -not $ui.BtnBenchFull.IsEnabled) $script:ConfirmAsked
+            $window.Close()
+            Test-Smoke 'closing during a benchmark is refused with a hint' ($window.IsVisible -and $script:BenchJob -and $script:CloseWhenDone -and $script:LastToast -like '*benchmark is still running*') $script:LastToast
+            $script:CloseWhenDone = $false
+            $sessionEnd = [pscustomobject]@{ Cancel = $false }
+            Invoke-SessionEnding $sessionEnd
+            Test-Smoke 'log off or shut down during a benchmark is held back, Windows shows the general reason' ($sessionEnd.Cancel -and (Get-ShutdownBlockReason) -like 'AVDTune runs an operation*') (Get-ShutdownBlockReason)
+            $blocked = $null; try { Start-UpdJob 'Scan' $null } catch { $blocked = $_.Exception.Message }
+            Test-Smoke 'an update operation cannot start while the benchmark runs' ($blocked -like '*benchmark is running*') $blocked
             return $false
         }
         if ($script:BenchJob) { return $false }

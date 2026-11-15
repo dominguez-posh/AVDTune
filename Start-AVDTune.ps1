@@ -455,11 +455,11 @@ Add-Click $ui.BtnClose { $window.Close() }
 $script:CloseWhenDone = $false
 $window.Add_Closing({
     param($src, $e)
-    if (-not $script:UpdJob) { return }
+    if (-not $script:UpdJob -and -not $script:BenchJob) { return }
     $e.Cancel = $true
     $script:CloseWhenDone = $true
-    $what = if ($script:UpdJob.Kind -eq 'Scan') { 'The update search is still running' } else { 'An update operation is still running' }
-    Show-Toast "$what. AVDTune closes by itself when it is done (the update block is restored first)."
+    $what = if ($script:BenchJob) { 'The benchmark is still running' } elseif ($script:UpdJob.Kind -eq 'Scan') { 'The update search is still running' } else { 'An update operation is still running' }
+    Show-Toast "$what. AVDTune closes by itself when it is done (what was paused or lifted is put back first)."
 })
 
 # Log off or shut down during an update operation would end it the same way: Windows is asked to wait (SessionEnding is cancelled) and shows
@@ -471,7 +471,7 @@ if (-not ('AVDTune.ShutdownBlock' -as [type])) {
 [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern bool ShutdownBlockReasonQuery(IntPtr hWnd, System.Text.StringBuilder buffer, ref uint size);
 '@
 }
-$script:ShutdownReason = 'AVDTune is running an update operation. Wait until it is done: the update block for users is restored at the end.'
+$script:ShutdownReason = 'AVDTune runs an operation (update or benchmark). Wait until it is done: what was paused or lifted (update block, Windows Update, indexer) is put back at the end.'
 function Get-WindowHandle { (New-Object System.Windows.Interop.WindowInteropHelper $window).Handle }
 function Set-ShutdownBlock([bool]$On) {
     try {
@@ -488,9 +488,9 @@ function Get-ShutdownBlockReason {
     if ($h -ne [IntPtr]::Zero -and [AVDTune.ShutdownBlock]::ShutdownBlockReasonQuery($h, $sb, [ref]$size)) { $sb.ToString() } else { '' }
 }
 function Invoke-SessionEnding($EventArgs) {
-    if (-not $script:UpdJob) { return }
+    if (-not $script:UpdJob -and -not $script:BenchJob) { return }
     $EventArgs.Cancel = $true
-    Show-Toast 'Log off or shut down was held back: an update operation is still running. Try again when it is done.'
+    Show-Toast 'Log off or shut down was held back: an operation (update or benchmark) is still running. Try again when it is done.'
 }
 $script:SessionEndingHandler = [System.Windows.SessionEndingCancelEventHandler]{ param($src, $e) Invoke-SessionEnding $e }
 [System.Windows.Application]::Current.add_SessionEnding($script:SessionEndingHandler)

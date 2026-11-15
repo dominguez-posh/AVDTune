@@ -16,6 +16,7 @@ function Set-BenchBusy([bool]$Busy) {
 
 function Start-BenchJob([string]$Mode, [string]$Kind) {
     if ($script:BenchJob) { throw 'A benchmark is already running.' }
+    if ($script:UpdJob) { throw 'An update operation is running. Wait until it is done.' }
     $sync = [hashtable]::Synchronized(@{ Text = ''; Percent = 0 })
     $ps = [powershell]::Create()
     [void]$ps.AddScript({
