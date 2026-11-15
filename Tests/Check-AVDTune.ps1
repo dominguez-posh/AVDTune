@@ -23,7 +23,10 @@ try {
     $env:AVDTUNE_ROOT = $null
     $realRoot = Get-AVDTuneRoot
     Test-Check 'default root is ProgramData\AVDTune and counts as the real one' ($realRoot -like '*\AVDTune' -and (Test-AVDTuneDefaultRoot $realRoot) -and -not (Test-AVDTuneDefaultRoot $tmp)) $realRoot
-    $env:AVDTUNE_ROOT = $tmp; $env:AVDTUNE_FAKE = Join-Path $PSScriptRoot 'Fakes\FakeMachine.ps1'
+    $env:AVDTUNE_ROOT = $tmp
+    $rootAlone = Get-AVDTuneRoot -WarningVariable rootWarn -WarningAction SilentlyContinue
+    Test-Check 'attack: AVDTUNE_ROOT without AVDTUNE_FAKE is ignored with a warning (state stays in ProgramData)' ($rootAlone -eq $realRoot -and (@($rootWarn) -join ' ') -like '*ignored without AVDTUNE_FAKE*') "$rootAlone / $(@($rootWarn) -join ' ')"
+    $env:AVDTUNE_FAKE = Join-Path $PSScriptRoot 'Fakes\FakeMachine.ps1'
     Test-Check 'AVDTUNE_ROOT overrides the root' ((Get-AVDTuneRoot) -eq $tmp) $null
 
     # ---------------------------------------------------------------- state

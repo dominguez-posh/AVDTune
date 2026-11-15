@@ -9,7 +9,7 @@
     State lives in C:\ProgramData\AVDTune (Modules\AVDTune.psm1). One instance at a time (mutex Global\AVDTune).
     Test hooks (all only honoured together, so they cannot be used to run the real tool unelevated):
       AVDTUNE_FAKE   script that defines New-AVDTuneFakeMachine (Tests\Fakes\FakeMachine.ps1): no real machine access
-      AVDTUNE_ROOT   state folder other than ProgramData
+      AVDTUNE_ROOT   state folder other than ProgramData (ignored with a warning without AVDTUNE_FAKE)
       AVDTUNE_SMOKE  script that drives the window off-screen (Tests\GuiSmokeDriver.ps1)
 .PARAMETER HideConsole
     Hides the console window of this process.

@@ -34,9 +34,17 @@ function Test-AVDTuneElevated {
     (New-Object Security.Principal.WindowsPrincipal $identity).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 }
 
+$script:RootWarned = $false
 function Get-AVDTuneRoot {
-    if ($env:AVDTUNE_ROOT) { return $env:AVDTUNE_ROOT }
-    Join-Path ([Environment]::GetFolderPath('CommonApplicationData')) 'AVDTune'
+    [CmdletBinding()] param()
+    # AVDTUNE_ROOT is a test hook: honoured only together with AVDTUNE_FAKE (fake machine). Alone it is ignored with a warning, so an
+    # environment variable set by someone else cannot move the state (and the WebView2 DLLs) of the elevated tool to a folder he controls.
+    $default = Join-Path ([Environment]::GetFolderPath('CommonApplicationData')) 'AVDTune'
+    if ($env:AVDTUNE_ROOT) {
+        if ($env:AVDTUNE_FAKE) { return $env:AVDTUNE_ROOT }
+        if (-not $script:RootWarned) { $script:RootWarned = $true; Write-Warning "AVDTUNE_ROOT is ignored without AVDTUNE_FAKE (test mode only); the state stays in $default." }
+    }
+    $default
 }
 
 function Test-AVDTuneDefaultRoot([string]$Root) {
