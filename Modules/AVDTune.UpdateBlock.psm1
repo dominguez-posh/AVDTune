@@ -220,14 +220,29 @@ function Start-AVDTuneMaintenance {
     }
     [void](Set-AVDTuneState -Root $Root -Values @{ Maintenance = $record; UpdateBlock = 'Maintenance' })
     $lift = New-Object System.Collections.ArrayList
-    $catalog = @(Get-AVDTuneUpdateBlockCatalog)
-    foreach ($entry in $catalog) {
-        if ($entry.Id -notin $before) { continue }
-        [void]$lift.Add((Invoke-AVDTuneStep -Step $entry.Step -Machine $Machine -Mode Undo))
+    # From here the block may be lifted: an error before the caller's try/finally would leave it lifted, so it is put back here at once
+    try {
+        $catalog = @(Get-AVDTuneUpdateBlockCatalog)
+        foreach ($entry in $catalog) {
+            if ($entry.Id -notin $before) { continue }
+            [void]$lift.Add((Invoke-AVDTuneStep -Step $entry.Step -Machine $Machine -Mode Undo))
+        }
+        $failed = @($lift | Where-Object { $_.Status -eq 'Failed' })
+        $record.Phase = if ($failed.Count -gt 0) { 'lift-failed' } else { 'lifted' }
+        [void](Set-AVDTuneState -Root $Root -Values @{ Maintenance = $record })
     }
-    $failed = @($lift | Where-Object { $_.Status -eq 'Failed' })
-    $record.Phase = if ($failed.Count -gt 0) { 'lift-failed' } else { 'lifted' }
-    [void](Set-AVDTuneState -Root $Root -Values @{ Maintenance = $record })
+    catch {
+        $cause = $_.Exception.Message
+        $r = Restore-AVDTuneBlockSettings -Machine $Machine -Ids $before
+        $ok = ($r.Failed.Count -eq 0)
+        # close the record when the block is back; when that write fails too the record stays Active and the next start offers the repair
+        if ($ok) { $record.Active = $false; $record.Phase = 'start-failed'; $record.Result = "Maintenance mode did not start ($cause); block restored." }
+        else { $record.Phase = 'restore-failed'; $record.Result = 'Not back in place: ' + ($r.Failed -join ', ') }
+        $record.Ended = (& $Machine.Now).ToString('o')
+        try { [void](Set-AVDTuneState -Root $Root -Values @{ Maintenance = $record; UpdateBlock = $(if ($ok) { (Get-AVDTuneUpdateBlockStatus $Machine).State } else { 'Maintenance' }) }) } catch { }
+        if ($ok) { throw "The maintenance mode did not start: $cause The update block was put back." }
+        throw "The maintenance mode did not start: $cause The update block is not fully back ($($r.Failed -join ', ')). Repair it on the Update block page."
+    }
     [pscustomobject]@{ Id = $id; BlockBefore = $before; Lift = @($lift); LiftFailed = $failed.Count; User = $User; SnapshotId = $SnapshotId }
 }
 

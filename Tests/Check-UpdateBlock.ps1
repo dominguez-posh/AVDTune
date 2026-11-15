@@ -139,6 +139,19 @@ try {
     $fixed = Repair-AVDTuneMaintenanceCrash -Machine $bad -Root $tmp -User 'admin1'
     Test-Check 'repair after the cause is gone: block On again, record closed' ($fixed.Repaired -and $fixed.State -eq 'On' -and -not (Get-AVDTuneMaintenanceCrash -Root $tmp)) $fixed.Message
 
+    # an error after the block is lifted but before the try/finally of Invoke-AVDTuneMaintenance (the state write after lifting fails):
+    # the block is put back at once, the script never runs
+    $gap = New-Master
+    [void](Set-AVDTuneUpdateBlock -Machine $gap -Root $tmp -Mode On -User 'admin1')
+    $ubMod = Get-Module AVDTune.UpdateBlock
+    # a stand-in for Set-AVDTuneState inside the module (it passes through once the switch is off again)
+    & $ubMod { $script:CheckFailLiftedWrite = $true; function script:Set-AVDTuneState { param([string]$Root, [hashtable]$Values) if ($script:CheckFailLiftedWrite -and $Values.ContainsKey('Maintenance') -and $Values['Maintenance'] -and $Values['Maintenance'].Phase -eq 'lifted') { throw 'disk full' }; AVDTune\Set-AVDTuneState -Root $Root -Values $Values } }
+    $ran = $false
+    try { $gapMsg = Get-ThrownText { Invoke-AVDTuneMaintenance -Machine $gap -Root $tmp -User 'admin1' -Script { param($c) $script:ran = $true } } }
+    finally { & $ubMod { $script:CheckFailLiftedWrite = $false } }
+    $gapState = Get-AVDTuneState $tmp
+    Test-Check 'an error right after lifting: the block is back at once, record closed (start-failed), the script did not run' ($gapMsg -like '*did not start: disk full*put back*' -and (Get-AVDTuneUpdateBlockStatus $gap).State -eq 'On' -and -not (Get-AVDTuneMaintenanceCrash -Root $tmp) -and $gapState.Maintenance.Phase -eq 'start-failed' -and $gapState.UpdateBlock -eq 'On' -and -not $ran) "$gapMsg | $($gapState.Maintenance.Phase) | $((Get-AVDTuneUpdateBlockStatus $gap).State)"
+
     # ---------------------------------------------------------------- crash in the middle (process gone: no finally ran)
     $c = New-Master
     [void](Set-AVDTuneUpdateBlock -Machine $c -Root $tmp -Mode On -User 'admin1')
