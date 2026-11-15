@@ -103,7 +103,7 @@ function New-AVDTuneFakeMachine {
     $m.TpmPresent = { $store.Tpm }.GetNewClosure()
     $m.KnownFolder = {
         param($Name)
-        switch ($Name) { 'ProgramFiles' { 'X:\Fake\Program Files' } 'CommonAppData' { 'X:\Fake\ProgramData' } default { throw "Unknown folder '$Name'." } }
+        switch ($Name) { 'ProgramFiles' { 'X:\Fake\Program Files' } 'CommonAppData' { 'X:\Fake\ProgramData' } 'System' { 'X:\Fake\Windows\System32' } default { throw "Unknown folder '$Name'." } }
     }.GetNewClosure()
     $m.FileText = { param($Path) $k = ([string]$Path).ToLowerInvariant(); if ($store.Files.ContainsKey($k)) { $store.Files[$k].Text } else { $null } }.GetNewClosure()
     $m.FileWrite = {
@@ -111,8 +111,11 @@ function New-AVDTuneFakeMachine {
         $folder = [IO.Path]::GetDirectoryName([string]$Path).ToLowerInvariant()
         $k = ([string]$Path).ToLowerInvariant()
         foreach ($bad in @($store.FailWrites)) { if ($bad -and $k -like "*$($bad.ToLowerInvariant())*") { throw "fake: write refused for $Path" } }
-        if ($Access -eq 'UsersRead' -and $store.Acl.ContainsKey($folder) -and @($store.Acl[$folder].Problems).Count -gt 0) { throw "The folder $folder is not safe ($(@($store.Acl[$folder].Problems) -join '; ')). Nothing was written." }
-        $store.Folders[$folder] = $true; $store.Files[$k] = [pscustomobject]@{ Text = [string]$Text; Access = $Access }
+        $check = switch ($Access) { 'Admin' { @([IO.Path]::GetDirectoryName($folder), $folder, $k) } 'UsersRead' { @($folder, $k) } default { @() } }
+        foreach ($c in $check) { if ($c -and $store.Acl.ContainsKey($c) -and @($store.Acl[$c].Problems).Count -gt 0) { throw "$c is not safe ($(@($store.Acl[$c].Problems) -join '; ')). Nothing was written." } }
+        if ($Access -eq 'AdminNew' -and $store.Files.ContainsKey($k)) { throw "$Path exists already. It is not overwritten." }
+        $p = $folder; while ($p) { $store.Folders[$p] = $true; $p = [IO.Path]::GetDirectoryName($p) }
+        $store.Files[$k] = [pscustomobject]@{ Text = [string]$Text; Access = $Access }
         [void]$store.Log.Add("FileWrite $Path ($Access)")
     }.GetNewClosure()
     $m.FileRemove = { param($Path) $k = ([string]$Path).ToLowerInvariant(); if ($store.Files.ContainsKey($k)) { $store.Files.Remove($k); [void]$store.Log.Add("FileRemove $Path") } }.GetNewClosure()
@@ -125,7 +128,7 @@ function New-AVDTuneFakeMachine {
     $m.AclReport = {
         param($Path)
         $k = ([string]$Path).ToLowerInvariant().TrimEnd('\')
-        $exists = $store.Files.ContainsKey($k) -or $store.Folders.ContainsKey($k)
+        $exists = $store.Files.ContainsKey($k) -or $store.Folders.ContainsKey($k) -or $store.Acl.ContainsKey($k)
         if (-not $exists) { return [pscustomobject]@{ Exists = $false; Link = $false; Owner = ''; Protected = $false; Rules = @(); Problems = @() } }
         $seed = $store.Acl[$k]
         [pscustomobject]@{ Exists = $true; Link = $false; Owner = 'S-1-5-32-544'; Protected = $true; Rules = $(if ($seed -and @($seed.Problems).Count -gt 0) { @([pscustomobject]@{ Sid = 'S-1-5-32-545'; Write = $true; Inherited = $false }) } else { @() }); Problems = $(if ($seed) { @($seed.Problems) } else { @() }) }

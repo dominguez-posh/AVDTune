@@ -79,7 +79,7 @@ function Read-AVDTuneAclReport {
     if (-not $dir.Exists -and -not $file.Exists) { return [pscustomobject]@{ Exists = $false; Link = $false; Owner = ''; Protected = $false; Rules = @() } }
     $item = if ($dir.Exists) { $dir } else { $file }
     $acl = $item.GetAccessControl()
-    $writeMask = 0x2 -bor 0x4 -bor 0x10 -bor 0x40 -bor 0x100 -bor 0x10000 -bor 0x40000 -bor 0x80000   # WriteData, AppendData, WriteEA, DeleteChild, WriteAttributes, Delete, ChangePermissions, TakeOwnership
+    $writeMask = 0x2 -bor 0x4 -bor 0x10 -bor 0x40 -bor 0x100 -bor 0x10000 -bor 0x40000 -bor 0x80000 -bor 0x40000000 -bor 0x10000000   # WriteData, AppendData, WriteEA, DeleteChild, WriteAttributes, Delete, ChangePermissions, TakeOwnership, GENERIC_WRITE, GENERIC_ALL
     [pscustomobject]@{
         Exists = $true; Link = (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)
         Owner = [string]$acl.GetOwner([Security.Principal.SecurityIdentifier]).Value; Protected = [bool]$acl.AreAccessRulesProtected
@@ -91,12 +91,13 @@ function Read-AVDTuneAclReport {
 
 function Get-AVDTuneAclProblems {
     # Why a path is not safe for something that users read or run: a link, an owner other than Administrators/SYSTEM/TrustedInstaller, write access for anyone else. Empty = fine.
-    param($Report)
+    param($Report, [string[]]$ExtraTrusted = @())
     $p = New-Object System.Collections.ArrayList
     if (-not $Report -or -not $Report.Exists) { return @() }
+    $trusted = @($script:TrustedWriterSids) + @($ExtraTrusted)
     if ($Report.Link) { [void]$p.Add('is a link') }
-    if ($Report.Owner -and $Report.Owner -notin $script:TrustedWriterSids) { [void]$p.Add("owner is $($Report.Owner)") }
-    $other = @($Report.Rules | Where-Object { $_.Write -and $_.Sid -notin $script:TrustedWriterSids } | ForEach-Object { $_.Sid } | Sort-Object -Unique)
+    if ($Report.Owner -and $Report.Owner -notin $trusted) { [void]$p.Add("owner is $($Report.Owner)") }
+    $other = @($Report.Rules | Where-Object { $_.Write -and $_.Sid -notin $trusted } | ForEach-Object { $_.Sid } | Sort-Object -Unique)
     if ($other.Count -gt 0) { [void]$p.Add("write access for $($other -join ', ')") }
     @($p)
 }
@@ -113,24 +114,54 @@ function New-AVDTuneUsersReadSecurity {
     $security
 }
 
+function New-AVDTuneFileSecurity {
+    # A file that everybody may read and run and only Administrators/SYSTEM may change; protected (no inheritance), owner Administrators when elevated
+    $security = New-Object System.Security.AccessControl.FileSecurity
+    $security.SetAccessRuleProtection($true, $false)
+    if (Test-AVDTuneElevated) { $security.SetOwner((New-Object System.Security.Principal.SecurityIdentifier 'S-1-5-32-544')) }
+    foreach ($sid in 'S-1-5-32-544', 'S-1-5-18') {
+        $security.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule((New-Object System.Security.Principal.SecurityIdentifier $sid), 'FullControl', 'Allow')))
+    }
+    $security.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule((New-Object System.Security.Principal.SecurityIdentifier 'S-1-5-32-545'), 'ReadAndExecute', 'Allow')))
+    $security
+}
+
 function Write-AVDTuneAccessFile {
     <#
-        The real FileWrite of the machine adapter. Access 'Admin': a missing folder is created with the ACL it inherits (Program Files: users read,
-        administrators write). Access 'UsersRead': a missing folder is created in one step with New-AVDTuneUsersReadSecurity; a folder that is already
-        there must pass Get-AVDTuneAclProblems (nobody else prepared it), otherwise nothing is written.
+        The real FileWrite of the machine adapter. The file never keeps an ACL that was there before (File.Replace would): it is created new
+        (CreateNew, temp name) with the explicit protected ACL of New-AVDTuneFileSecurity, an existing file is deleted and the new one moved
+        into place, and the result is checked again with Get-AVDTuneAclProblems (a file that fails is removed again and the call throws).
+          Admin      folder created with the ACL it inherits (Program Files); its parent folder, the folder and an existing target must pass the check first
+          UsersRead  folder created in one step with New-AVDTuneUsersReadSecurity; an existing folder and target must pass the check first
+          AdminNew   only a file that is not there yet (restore of the old launcher in ProgramData: the folder is shared, so only the new file is checked)
+        -ExtraTrusted is for the checks (a SID that may own the result when the test is not elevated).
     #>
-    param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][string]$Text, [ValidateSet('Admin', 'UsersRead')][string]$Access = 'Admin')
+    param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][string]$Text, [ValidateSet('Admin', 'UsersRead', 'AdminNew')][string]$Access = 'Admin', [string[]]$ExtraTrusted = @())
     $folder = Split-Path $Path -Parent
     if (-not (Test-Path -LiteralPath $folder)) {
         if ($Access -eq 'UsersRead') { (New-Object IO.DirectoryInfo $folder).Create((New-AVDTuneUsersReadSecurity)) } else { [void](New-Item -ItemType Directory -Path $folder -Force) }
     }
-    if ($Access -eq 'UsersRead') {
-        $problems = @(Get-AVDTuneAclProblems (Read-AVDTuneAclReport $folder))
-        if ($problems.Count -gt 0) { throw "The folder $folder is not safe ($($problems -join '; ')). Nothing was written. Check it as administrator." }
+    $check = switch ($Access) { 'Admin' { @((Split-Path $folder -Parent), $folder, $Path) } 'UsersRead' { @($folder, $Path) } default { @() } }
+    foreach ($c in $check) {
+        $problems = @(Get-AVDTuneAclProblems (Read-AVDTuneAclReport $c) -ExtraTrusted $ExtraTrusted)
+        if ($problems.Count -gt 0) { throw "$c is not safe ($($problems -join '; ')). Nothing was written. Check it as administrator." }
     }
-    Write-AVDTuneFile $Path $Text
+    if ($Access -eq 'AdminNew' -and (Test-Path -LiteralPath $Path)) { throw "$Path exists already. It is not overwritten." }
+    $temp = "$Path.$([guid]::NewGuid().ToString('N').Substring(0, 8)).tmp"
+    $bytes = (New-Object Text.UTF8Encoding $false).GetBytes($Text)
+    try {
+        $stream = New-Object IO.FileStream($temp, [IO.FileMode]::CreateNew, [Security.AccessControl.FileSystemRights]'Write, ReadPermissions', [IO.FileShare]::None, 4096, [IO.FileOptions]::None, (New-AVDTuneFileSecurity))
+        try { $stream.Write($bytes, 0, $bytes.Length) } finally { $stream.Dispose() }
+        if ($Access -eq 'AdminNew') { [IO.File]::Move($temp, $Path) }
+        else { if (Test-Path -LiteralPath $Path) { [IO.File]::Delete($Path) }; [IO.File]::Move($temp, $Path) }
+    }
+    finally { if (Test-Path -LiteralPath $temp) { Remove-Item -LiteralPath $temp -Force -ErrorAction SilentlyContinue } }
+    $after = @(Get-AVDTuneAclProblems (Read-AVDTuneAclReport $Path) -ExtraTrusted $ExtraTrusted)
+    if ($after.Count -gt 0) {
+        try { [IO.File]::Delete($Path) } catch { }
+        throw "$Path got an unsafe ACL ($($after -join '; ')) and was removed again."
+    }
 }
-
 function Get-AVDTuneTaskInfoFromXml {
     # What matters of a scheduled task definition: first action, principal (group or user, as SID), logon trigger, enabled
     param([Parameter(Mandatory)][string]$Xml)
@@ -268,6 +299,7 @@ function New-AVDTuneMachine {
         switch ($Name) {
             'ProgramFiles' { [Environment]::GetFolderPath('ProgramFiles') }
             'CommonAppData' { [Environment]::GetFolderPath('CommonApplicationData') }
+            'System' { [Environment]::GetFolderPath('System') }
             default { throw "Unknown folder '$Name'." }
         }
     }
@@ -1063,4 +1095,4 @@ Export-ModuleMember -Function Get-AVDTuneProp, Test-AVDTuneElevated, Get-AVDTune
     Add-AVDTuneChangeLogEntry, Get-AVDTuneChangeLog, Get-AVDTuneChangeLogVersions, ConvertTo-AVDTuneChangeLogDocument, Export-AVDTuneChangeLog,
     Get-AVDTuneWindowsInfo, Get-AVDTuneOfficeInfo, Get-AVDTuneSourceImage, Get-AVDTuneHealth, Get-AVDTuneOverview, Write-AVDTuneFile, Read-AVDTuneJson,
     Open-AVDTuneWriteGate, Close-AVDTuneWriteGate, Get-AVDTuneWriteGate, Test-AVDTuneWriteAllowed, Remove-AVDTuneControlCharacters, ConvertTo-AVDTuneTestResult,
-    Read-AVDTuneAclReport, Get-AVDTuneAclProblems, New-AVDTuneUsersReadSecurity, Write-AVDTuneAccessFile, Get-AVDTuneTaskInfoFromXml
+    Read-AVDTuneAclReport, Get-AVDTuneAclProblems, New-AVDTuneUsersReadSecurity, New-AVDTuneFileSecurity, Write-AVDTuneAccessFile, Get-AVDTuneTaskInfoFromXml

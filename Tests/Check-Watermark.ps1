@@ -58,7 +58,7 @@ try {
             @('pattern', @{ Pattern = '(' }), @('empty text', @{ Text = '  ' }), @('text over 60', @{ Text = ('x' * 61) }), @('text with a line break', @{ Text = "a`r`nb" }),
             @('colour name', @{ Color = 'red' }), @('colour without #', @{ Color = 'FF0000' }), @('opacity 9', @{ Opacity = 9 }), @('opacity 101', @{ Opacity = 101 }), @('opacity text', @{ Opacity = 'high' }),
             @('font 7', @{ FontSize = 7 }), @('font 97', @{ FontSize = 97 }), @('corner', @{ Corner = 'Middle' }), @('margin -1', @{ Margin = -1 }), @('margin 501', @{ Margin = 501 }),
-            @('console mode', @{ ConsoleMode = 'Visible' }), @('QR scale 11', @{ Microsoft = @{ QrScale = 11 } }), @('QR opacity 99', @{ Microsoft = @{ Opacity = 99 } }), @('QR width 99', @{ Microsoft = @{ WidthFactor = 99 } }), @('QR height 1001', @{ Microsoft = @{ HeightFactor = 1001 } })
+            @('console mode', @{ ConsoleMode = 'Visible' }), @('Microsoft switch as text', @{ Microsoft = @{ Enabled = 'false' } }), @('Microsoft switch as number', @{ Microsoft = @{ Enabled = 1 } }), @('QR scale 11', @{ Microsoft = @{ QrScale = 11 } }), @('QR opacity 99', @{ Microsoft = @{ Opacity = 99 } }), @('QR width 99', @{ Microsoft = @{ WidthFactor = 99 } }), @('QR height 1001', @{ Microsoft = @{ HeightFactor = 1001 } })
         )) {
         $r = ConvertTo-AVDTuneWatermarkSettings $case[1]
         Test-Check "settings: $($case[0]) is refused" (-not $r.Valid -and $r.Errors.Count -ge 1) ($r.Errors -join '; ')
@@ -100,8 +100,8 @@ try {
     Test-Check 'task xml: powershell.exe -WindowStyle Hidden -NoProfile -ExecutionPolicy Bypass -File <program folder script>' ($info.Execute -like '*\powershell.exe' -and $info.Arguments -like '-WindowStyle Hidden -NoProfile *-ExecutionPolicy Bypass -File "X:\Fake\Program Files\AVDTune\Watermark\Show-AVDTuneWatermark.ps1"') $info.Arguments
     Test-Check 'task xml: least privilege, no time limit, one instance' ($xml -like '*<RunLevel>LeastPrivilege</RunLevel>*' -and $xml -like '*<ExecutionTimeLimit>PT0S</ExecutionTimeLimit>*' -and $xml -like '*<MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>*') $null
     $head = Get-AVDTuneTaskInfoFromXml (New-AVDTuneWatermarkTaskXml -Paths $paths -ConsoleMode Headless)
-    Test-Check 'task xml: console mode Headless puts conhost --headless in front' ($head.Execute -like '*\conhost.exe' -and $head.Arguments -like '--headless powershell.exe -WindowStyle Hidden *') $head.Arguments
-    $odd = [pscustomobject]@{ Script = 'C:\A & B\<x>.ps1' }
+    Test-Check 'task xml: console mode Headless puts conhost --headless (full path) in front of the quoted full path of powershell.exe' ($head.Execute -eq 'X:\Fake\Windows\System32\conhost.exe' -and $head.Arguments -like '--headless "X:\Fake\Windows\System32\WindowsPowerShell\v1.0\powershell.exe" -WindowStyle Hidden *') $head.Arguments
+    $odd = [pscustomobject]@{ Script = 'C:\A & B\<x>.ps1'; PowerShell = 'C:\ps.exe'; Conhost = 'C:\conhost.exe' }
     $oddXml = New-AVDTuneWatermarkTaskXml -Paths $odd
     Test-Check 'task xml: special characters in a path are escaped (still well-formed)' ((Get-AVDTuneTaskInfoFromXml $oddXml).Arguments -like '*A & B\<x>.ps1*') $null
     Test-Check 'task info: a group given by name is translated to its SID' ((Get-AVDTuneTaskInfoFromXml ($legacyXml.Replace('S-1-5-32-545', 'BUILTIN\Users'))).GroupSid -eq 'S-1-5-32-545') $null
@@ -152,7 +152,7 @@ try {
     $st = Get-AVDTuneWatermarkStatus -Machine $m -Root $tmp
     Test-Check 'console mode Headless: the task is reported as another command until On is run' (($st.Items | Where-Object Id -eq 'userexperience.watermark-task').State -like '*other command*') (($st.Items | Where-Object Id -eq 'userexperience.watermark-task').State)
     [void](Set-AVDTuneWatermark -Machine $m -Root $tmp -Mode On -User 'admin1' -SnapshotId 'snap-1')
-    Test-Check 'console mode Headless: On re-registers the task with conhost --headless' ((& $m.TaskDetail '\' 'AVDTune Watermark').Execute -like '*conhost.exe' -and (Get-AVDTuneWatermarkStatus -Machine $m -Root $tmp).State -eq 'Installed') $null
+    Test-Check 'console mode Headless: On re-registers the task with conhost --headless' ((& $m.TaskDetail '\' 'AVDTune Watermark').Execute -eq 'X:\Fake\Windows\System32\conhost.exe' -and (Get-AVDTuneWatermarkStatus -Machine $m -Root $tmp).State -eq 'Installed') $null
     [void](Save-AVDTuneWatermarkSettings -Root $tmp -Settings @{ Pattern = '^avd-pilot-'; Text = 'PILOT'; Color = '#1565C0'; Opacity = 70; FontSize = 24; Corner = 'TopRight'; Margin = 8 })
     [void](Set-AVDTuneWatermark -Machine $m -Root $tmp -Mode On -User 'admin1' -SnapshotId 'snap-1')
 
@@ -176,7 +176,7 @@ try {
         Acl = @{ 'x:\fake\program files\avdtune\watermark' = @{ Problems = @('write access for S-1-5-32-545') } }
     }
     $st3 = Get-AVDTuneWatermarkStatus -Machine $m3 -Root $tmp
-    Test-Check 'a program folder with write access for others is reported as not safe' (($st3.Items | Where-Object Id -eq 'userexperience.watermark-program').State -like 'folder is not safe*') $null
+    Test-Check 'a program folder with write access for others is reported as not safe' (($st3.Items | Where-Object Id -eq 'userexperience.watermark-program').State -like 'not safe*') $null
 
     # ---------------------------------------------------------------- failed write
     $m4 = New-AVDTuneFakeMachine
@@ -226,17 +226,96 @@ try {
     Open-AVDTuneWriteGate -SnapshotId 'snap-1' -ConfirmedBy 'admin1'
     $rm = Set-AVDTuneWatermark -Machine $old -Root $tmp -Mode LegacyRemove -User 'admin1' -SnapshotId 'snap-1'
     Test-Check 'old overlay: removed (task and VBS), other tasks stay' ($rm.Changed -eq 1 -and $null -eq (& $old.TaskDetail '\' 'PilotOverlay') -and $null -eq (& $old.FileText 'X:\Fake\ProgramData\PilotOverlayLauncher.vbs') -and $null -ne (& $old.TaskDetail '\' 'SomethingElse')) $null
-    $bk = Read-AVDTuneJson (Join-Path $tmp 'config\watermark-legacy.json')
+    $bk = Read-AVDTuneJson @(Get-ChildItem (Join-Path $tmp 'config') -Filter 'watermark-legacy-*.json')[-1].FullName
     Test-Check 'old overlay: backup of the task definition and the launcher in the state folder' ($bk.Task.Xml -like '*PilotOverlayLauncher.vbs*' -and $bk.Vbs.Text -eq 'WScript.Echo "old"') $null
     $log = @(Get-AVDTuneChangeLog -Root $tmp | Where-Object { $_.Component -eq 'Watermark (old overlay)' })
     Test-Check 'old overlay: change log entry Removed' ($log.Count -eq 1 -and $log[0].ChangeType -eq 'Removed') $null
     $back = Set-AVDTuneWatermark -Machine $old -Root $tmp -Mode LegacyRestore -User 'admin1' -SnapshotId 'snap-1'
     Test-Check 'old overlay: restore puts the task and the launcher back' ($back.Changed -eq 1 -and (& $old.TaskDetail '\' 'PilotOverlay').Arguments -like '*PilotOverlayLauncher.vbs*' -and (& $old.FileText 'X:\Fake\ProgramData\PilotOverlayLauncher.vbs') -eq 'WScript.Echo "old"') $null
     $none = New-AVDTuneFakeMachine -Seed @{ Tasks = @(@{ Path = '\'; Name = 'PilotOverlay'; Enabled = $true; Xml = $legacyXml }) }
-    Remove-Item (Join-Path $tmp 'config\watermark-legacy.json') -Force
+    Get-ChildItem (Join-Path $tmp 'config') -Filter 'watermark-legacy-*.json' | Remove-Item -Force
     $r = Get-StepResult (Set-AVDTuneWatermark -Machine $none -Root $tmp -Mode LegacyRestore -User 'admin1' -SnapshotId 'snap-1') 'userexperience.watermark-legacy'
     Test-Check 'old overlay: restore without a backup does nothing (the old task is simply there)' ($r.Status -eq 'Unchanged') $r.Status
 
+    # ---------------------------------------------------------------- Finn M1: unsafe program folders and files, task only when ready
+    Open-AVDTuneWriteGate -SnapshotId 'snap-1' -ConfirmedBy 'admin1'
+    $ua = New-AVDTuneFakeMachine -Seed @{ Acl = @{ 'x:\fake\program files\avdtune' = @{ Problems = @('write access for S-1-5-32-545') } } }
+    $r = Set-AVDTuneWatermark -Machine $ua -Root $tmp -Mode On -User 'admin1' -SnapshotId 'snap-1'
+    Test-Check 'C:\Program Files\AVDTune with write access for users: nothing is written there, the program step fails with the reason' ((Get-StepResult $r 'userexperience.watermark-program').Status -eq 'Failed' -and (Get-StepResult $r 'userexperience.watermark-program').Message -like '*not safe*' -and -not (@($ua.Log | Where-Object { $_ -like 'FileWrite*Program Files*' }).Count)) ((Get-StepResult $r 'userexperience.watermark-program').Message)
+    Test-Check 'program step failed: the task is not registered (Skipped with the reason)' ((Get-StepResult $r 'userexperience.watermark-task').Status -eq 'Skipped' -and -not (@($ua.Log | Where-Object { $_ -like 'TaskRegisterXml*' }).Count) -and $null -eq (& $ua.TaskDetail '\' 'AVDTune Watermark')) $null
+    $uf = New-AVDTuneFakeMachine -Seed @{
+        Files = @{ 'X:\Fake\Program Files\AVDTune\Watermark\Show-AVDTuneWatermark.ps1' = 'old' }
+        Acl = @{ 'x:\fake\program files\avdtune\watermark\show-avdtunewatermark.ps1' = @{ Problems = @('write access for S-1-5-32-545') } }
+    }
+    $r = Set-AVDTuneWatermark -Machine $uf -Root $tmp -Mode On -User 'admin1' -SnapshotId 'snap-1'
+    Test-Check 'an existing script file that users can write to is not overwritten and the task stays away' ((Get-StepResult $r 'userexperience.watermark-program').Status -eq 'Failed' -and $uf.FileText.Invoke('X:\Fake\Program Files\AVDTune\Watermark\Show-AVDTuneWatermark.ps1') -eq 'old' -and (Get-StepResult $r 'userexperience.watermark-task').Status -eq 'Skipped') $null
+    $us = New-AVDTuneFakeMachine -Seed @{ Acl = @{ 'x:\fake\programdata\avdtune-public' = @{ Problems = @('write access for S-1-5-32-545') } } }
+    $r = Set-AVDTuneWatermark -Machine $us -Root $tmp -Mode On -User 'admin1' -SnapshotId 'snap-1'
+    Test-Check 'settings copy failed (unsafe folder): the task is not registered either' ((Get-StepResult $r 'userexperience.watermark-settings').Status -eq 'Failed' -and (Get-StepResult $r 'userexperience.watermark-task').Status -eq 'Skipped' -and -not (@($us.Log | Where-Object { $_ -like 'TaskRegisterXml*' }).Count)) $null
+    $st = Get-AVDTuneWatermarkStatus -Machine $ua -Root $tmp
+    Test-Check 'the status names the unsafe AVDTune folder' ((($st.Items | Where-Object Id -eq 'userexperience.watermark-program').State) -like '*Program Files\AVDTune: write access for S-1-5-32-545*') (($st.Items | Where-Object Id -eq 'userexperience.watermark-program').State)
+    $dryTask = Set-AVDTuneWatermark -Machine (New-AVDTuneFakeMachine) -Root $tmp -Mode On -WhatIf
+    Test-Check 'dry run still lists the task as it would change' ((Get-StepResult $dryTask 'userexperience.watermark-task').Status -eq 'WhatIf') $null
+
+    # ---------------------------------------------------------------- Finn M1/N1/N2: the real writer in a temp folder (explicit protected ACL, no File.Replace, checks first)
+    $me = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+    $wdir = Join-Path $tmp 'wacl\prog'; [void](New-Item -ItemType Directory -Path $wdir -Force)
+    $wfile = Join-Path $wdir 'a.ps1'
+    $sidsOf = { param($p) @((Read-AVDTuneAclReport $p).Rules | ForEach-Object { $_.Sid } | Sort-Object -Unique) -join ',' }
+    [IO.File]::WriteAllText($wfile, 'old')   # inherits the ACL of the temp folder, like an existing file with an older ACL
+    Write-AVDTuneAccessFile -Path $wfile -Text 'v1' -Access Admin -ExtraTrusted @($me)
+    $rep = Read-AVDTuneAclReport $wfile
+    Test-Check 'real writer: an existing file is replaced by one with the explicit protected ACL (Administrators, SYSTEM full, Users read only)' ([IO.File]::ReadAllText($wfile) -eq 'v1' -and $rep.Protected -and (& $sidsOf $wfile) -eq 'S-1-5-18,S-1-5-32-544,S-1-5-32-545' -and -not (@($rep.Rules | Where-Object { $_.Sid -eq 'S-1-5-32-545' -and $_.Write }).Count)) (& $sidsOf $wfile)
+    $fsec = New-AVDTuneFileSecurity
+    Test-Check 'real writer: the security object has no inheritance and no write for users' ($fsec.AreAccessRulesProtected -and -not (@($fsec.GetAccessRules($true, $false, [Security.Principal.SecurityIdentifier]) | Where-Object { $_.IdentityReference.Value -eq 'S-1-5-32-545' -and (([int]$_.FileSystemRights) -band 0x40000006) }).Count)) $null
+    $fi = New-Object IO.FileInfo $wfile
+    $acl = $fi.GetAccessControl()
+    $acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule((New-Object Security.Principal.SecurityIdentifier 'S-1-5-32-545'), 'Modify', 'Allow')))
+    $fi.SetAccessControl($acl)
+    $why = $null; try { Write-AVDTuneAccessFile -Path $wfile -Text 'v2' -Access Admin -ExtraTrusted @($me) } catch { $why = $_.Exception.Message }
+    Test-Check 'real writer: a file that users can write to is not touched (checked before the write)' ($why -like '*not safe*write access for S-1-5-32-545*' -and [IO.File]::ReadAllText($wfile) -eq 'v1') $why
+    $acl = $fi.GetAccessControl(); foreach ($r in @($acl.GetAccessRules($true, $false, [Security.Principal.SecurityIdentifier]) | Where-Object { $_.IdentityReference.Value -eq 'S-1-5-32-545' })) { [void]$acl.RemoveAccessRule($r) }
+    $acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule((New-Object Security.Principal.SecurityIdentifier 'S-1-5-32-545'), 'ReadAndExecute', 'Allow')))
+    $fi.SetAccessControl($acl)
+    $pfile = Join-Path $wdir 'post.ps1'
+    $why = $null; try { Write-AVDTuneAccessFile -Path $pfile -Text 'v1' -Access AdminNew } catch { $why = $_.Exception.Message }
+    Test-Check 'real writer: the result is checked afterwards (without a trusted owner it is removed again and the call throws)' ($why -like '*unsafe ACL*owner is*' -and -not (Test-Path $pfile)) $why
+    $nfile = Join-Path $wdir 'launcher.vbs'
+    Write-AVDTuneAccessFile -Path $nfile -Text 'x' -Access AdminNew -ExtraTrusted @($me)
+    $why = $null; try { Write-AVDTuneAccessFile -Path $nfile -Text 'y' -Access AdminNew -ExtraTrusted @($me) } catch { $why = $_.Exception.Message }
+    Test-Check 'real writer: AdminNew creates the file and never replaces an existing one' ($why -like '*exists already*' -and [IO.File]::ReadAllText($nfile) -eq 'x') $why
+    $fn = & (Get-Module AVDTune) { (Get-Item function:Write-AVDTuneAccessFile).ScriptBlock.ToString() }
+    Test-Check 'real writer: does not use File.Replace (it keeps the old ACL)' ($fn -notmatch 'File\]::Replace' -and $fn -match 'CreateNew') $null
+    $mapped = & (Get-Module AVDTune) { (Get-Item function:Read-AVDTuneAclReport).ScriptBlock.ToString() }
+    Test-Check 'ACL report counts GENERIC_WRITE (0x40000000) and GENERIC_ALL (0x10000000) as write' ($mapped -like '*0x40000000*' -and $mapped -like '*0x10000000*') $null
+
+    # ---------------------------------------------------------------- Finn N1/N4: old overlay restore, versioned backups
+    $o2 = New-AVDTuneFakeMachine -Seed @{
+        Tasks = @(@{ Path = '\'; Name = 'PilotOverlay'; Enabled = $true; Xml = $legacyXml })
+        Files = @{ 'X:\Fake\ProgramData\PilotOverlayLauncher.vbs' = 'first' }
+    }
+    Set-AVDTuneWatermark -Machine $o2 -Root $tmp -Mode LegacyRemove -User 'admin1' -SnapshotId 'snap-1' | Out-Null
+    $b1 = @(Get-ChildItem (Join-Path $tmp 'config') -Filter 'watermark-legacy-*.json')
+    $first = [IO.File]::ReadAllText($b1[0].FullName)
+    Set-AVDTuneWatermark -Machine $o2 -Root $tmp -Mode LegacyRestore -User 'admin1' -SnapshotId 'snap-1' | Out-Null
+    & $o2.FileWrite 'X:\Fake\ProgramData\PilotOverlayLauncher.vbs' 'second' 'Admin'
+    Set-AVDTuneWatermark -Machine $o2 -Root $tmp -Mode LegacyRemove -User 'admin1' -SnapshotId 'snap-1' | Out-Null
+    $b2 = @(Get-ChildItem (Join-Path $tmp 'config') -Filter 'watermark-legacy-*.json')
+    Test-Check 'a second removal makes a second backup file, the first one is not overwritten' ($b2.Count -eq $b1.Count + 1 -and [IO.File]::ReadAllText($b1[0].FullName) -eq $first) "$($b1.Count) -> $($b2.Count)"
+    # tamper with the newest backup: another path, another task name
+    $newest = @($b2 | Sort-Object Name)[-1]
+    $j = Read-AVDTuneJson $newest.FullName
+    $j.Vbs.Path = 'X:\Fake\Elsewhere\evil.vbs'; $j.Task.Name = 'EvilTask'
+    [IO.File]::WriteAllText($newest.FullName, ($j | ConvertTo-Json -Depth 5))
+    Set-AVDTuneWatermark -Machine $o2 -Root $tmp -Mode LegacyRestore -User 'admin1' -SnapshotId 'snap-1' | Out-Null
+    Test-Check 'restore: the newest backup is used, only the fixed launcher path and the task name PilotOverlay (paths and names in the file are ignored), created as new' ((& $o2.FileText 'X:\Fake\ProgramData\PilotOverlayLauncher.vbs') -eq 'second' -and $null -eq (& $o2.FileText 'X:\Fake\Elsewhere\evil.vbs') -and $null -ne (& $o2.TaskDetail '\' 'PilotOverlay') -and $null -eq (& $o2.TaskDetail '\' 'EvilTask') -and (@($o2.Log | Where-Object { $_ -like '*PilotOverlayLauncher.vbs (AdminNew)' }).Count -eq 2)) ($o2.Log -join '|')
+    # a launcher that is there again is not replaced
+    $o3 = New-AVDTuneFakeMachine -Seed @{ Tasks = @(@{ Path = '\'; Name = 'PilotOverlay'; Enabled = $true; Xml = $legacyXml }); Files = @{ 'X:\Fake\ProgramData\PilotOverlayLauncher.vbs' = 'orig' } }
+    Set-AVDTuneWatermark -Machine $o3 -Root $tmp -Mode LegacyRemove -User 'admin1' -SnapshotId 'snap-1' | Out-Null
+    & $o3.FileWrite 'X:\Fake\ProgramData\PilotOverlayLauncher.vbs' 'someone else' 'Admin'
+    $legStep = (Get-AVDTuneWatermarkCatalog -Settings (Get-AVDTuneWatermarkSettings -Root $tmp).Settings -SourceRoot $sourceRoot -Root $tmp | Where-Object Id -eq 'userexperience.watermark-legacy').Step
+    $why = $null; try { & $legStep.Undo $o3 } catch { $why = $_.Exception.Message }
+    Test-Check 'restore: a launcher that is there again is never replaced (the restore throws, the file stays)' ($why -like '*exists already*' -and (& $o3.FileText 'X:\Fake\ProgramData\PilotOverlayLauncher.vbs') -eq 'someone else' -and $null -eq (& $o3.TaskDetail '\' 'PilotOverlay')) $why
     # ---------------------------------------------------------------- real helpers (read only)
     $folder = Join-Path $tmp 'acl'; [void](New-Item -ItemType Directory -Path $folder)
     $rep = Read-AVDTuneAclReport $folder

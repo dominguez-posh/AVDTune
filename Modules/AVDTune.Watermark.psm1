@@ -35,6 +35,7 @@ function Get-AVDTuneWatermarkPaths {
     $dir = Join-Path (Join-Path $pf 'AVDTune') 'Watermark'
     $pub = Join-Path $pd 'AVDTune-Public'
     [pscustomobject]@{
+        AppDir = (Join-Path $pf 'AVDTune'); PowerShell = (Join-Path (& $Machine.KnownFolder 'System') 'WindowsPowerShell\v1.0\powershell.exe'); Conhost = (Join-Path (& $Machine.KnownFolder 'System') 'conhost.exe')
         ProgramDir = $dir; Script = (Join-Path $dir 'Show-AVDTuneWatermark.ps1'); Core = (Join-Path $dir 'AVDTune-WatermarkCore.ps1')
         PublicDir = $pub; PublicJson = (Join-Path $pub 'watermark.json'); LegacyVbs = (Join-Path $pd $script:LegacyVbs)
     }
@@ -68,6 +69,16 @@ function ConvertTo-WmCompactJson($Object) { ($Object | ConvertTo-Json -Depth 5 -
 
 #endregion
 
+function Get-AVDTuneWatermarkAclProblems {
+    # What is not safe about the places the overlay runs from: C:\Program Files\AVDTune, the program folder and both script files (as far as they exist). Empty = fine.
+    param([Parameter(Mandatory)]$Machine, [Parameter(Mandatory)]$Paths)
+    $out = New-Object System.Collections.ArrayList
+    foreach ($p in $Paths.AppDir, $Paths.ProgramDir, $Paths.Script, $Paths.Core) {
+        foreach ($x in @(Get-AVDTuneAclProblems (& $Machine.AclReport $p))) { [void]$out.Add("${p}: $x") }
+    }
+    @($out)
+}
+
 #region task definition
 
 function Get-AVDTuneWatermarkTaskAction {
@@ -75,10 +86,9 @@ function Get-AVDTuneWatermarkTaskAction {
     # Headless: conhost.exe --headless in front (no window at all, but undocumented, see the notes on the page).
     param([Parameter(Mandatory)]$Paths, [ValidateSet('Hidden', 'Headless')][string]$ConsoleMode = 'Hidden')
     $ps = '-WindowStyle Hidden -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' + $Paths.Script + '"'
-    if ($ConsoleMode -eq 'Headless') { return [pscustomobject]@{ Execute = '%SystemRoot%\System32\conhost.exe'; Arguments = "--headless powershell.exe $ps" } }
-    [pscustomobject]@{ Execute = '%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe'; Arguments = $ps }
+    if ($ConsoleMode -eq 'Headless') { return [pscustomobject]@{ Execute = $Paths.Conhost; Arguments = '--headless "' + $Paths.PowerShell + '" ' + $ps } }
+    [pscustomobject]@{ Execute = $Paths.PowerShell; Arguments = $ps }
 }
-
 function New-AVDTuneWatermarkTaskXml {
     <#
         The task definition: at logon of any user, principal the group BUILTIN\Users by SID (no name, so it works in every language), least
@@ -155,7 +165,7 @@ function Get-AVDTuneWatermarkCatalog {
         Each entry: Id, Group, Step, Applies (scriptblock or $null).
     #>
     param([Parameter(Mandatory)]$Settings, [Parameter(Mandatory)][string]$SourceRoot, [string]$Root = (Get-AVDTuneRoot), [switch]$ForRemoval)
-    $loose = [bool]$ForRemoval; $backupPath = Join-Path $Root 'config\watermark-legacy.json'
+    $loose = [bool]$ForRemoval; $backupDir = Join-Path $Root 'config'
     $taskName = $script:TaskName; $usersSid = $script:UsersSid; $msKey = $script:MsKey; $legacyTask = $script:LegacyTask; $legacyVbs = $script:LegacyVbs
     $srcScript = [IO.File]::ReadAllText((Join-Path $SourceRoot 'Show-AVDTuneWatermark.ps1'))
     $srcCore = [IO.File]::ReadAllText((Join-Path $SourceRoot 'AVDTune-WatermarkCore.ps1'))
@@ -170,14 +180,22 @@ function Get-AVDTuneWatermarkCatalog {
         param($m)
         $p = Get-AVDTuneWatermarkPaths $m
         $s = & $m.FileText $p.Script; $c = & $m.FileText $p.Core
-        if ($null -eq $s -and $null -eq $c) { return @{ Compliant = $false; State = 'not installed' } }
-        $problems = @(Get-AVDTuneAclProblems (& $m.AclReport $p.ProgramDir))
-        if ($problems.Count -gt 0) { return @{ Compliant = $false; State = "folder is not safe: $($problems -join '; ')" } }
+        if ($null -eq $s -and $null -eq $c -and $loose) { return @{ Compliant = $false; State = 'not installed' } }
         if ($loose) { return @{ Compliant = $true; State = 'installed' } }
+        $problems = @(Get-AVDTuneWatermarkAclProblems $m $p)
+        if ($problems.Count -gt 0) { return @{ Compliant = $false; State = "not safe: $($problems -join '; ')" } }
+        if ($null -eq $s -and $null -eq $c) { return @{ Compliant = $false; State = 'not installed' } }
         $same = ($s -ceq $srcScript -and $c -ceq $srcCore)
         @{ Compliant = $same; State = $(if ($same) { 'installed' } elseif ($null -eq $s -or $null -eq $c) { 'incomplete' } else { 'differs from this AVDTune version' }) }
     }.GetNewClosure()
-    $apply = { param($m) $p = Get-AVDTuneWatermarkPaths $m; & $m.FileWrite $p.Core $srcCore 'Admin'; & $m.FileWrite $p.Script $srcScript 'Admin' }.GetNewClosure()
+    $apply = {
+        param($m)
+        $p = Get-AVDTuneWatermarkPaths $m
+        # nothing is written into a folder or over a file that others can change (or that someone else owns)
+        $problems = @(Get-AVDTuneWatermarkAclProblems $m $p)
+        if ($problems.Count -gt 0) { throw "The program folder is not safe, nothing was written: $($problems -join '; ')" }
+        & $m.FileWrite $p.Core $srcCore 'Admin'; & $m.FileWrite $p.Script $srcScript 'Admin'
+    }.GetNewClosure()
     $undo = { param($m) $p = Get-AVDTuneWatermarkPaths $m; & $m.FileRemove $p.Script; & $m.FileRemove $p.Core; & $m.DirRemoveEmpty $p.ProgramDir }
     $step = New-AVDTuneStep -Id 'userexperience.watermark-program' -Section UserExperience -Title 'Watermark: program files in C:\Program Files\AVDTune\Watermark' -Why 'The overlay script runs in every user session, so it must sit where users cannot change it: the program folder (administrators write, users read and run). The folder must not carry write access for anyone else; if it does, the step reports it and writes nothing it cannot protect.' -Risk Low -SourceUrl $learnTask -Test $test -Apply $apply -Undo $undo
     [void]$items.Add([pscustomobject]@{ Id = $step.Id; Group = 'Overlay'; Step = $step; Applies = $null })
@@ -216,7 +234,13 @@ function Get-AVDTuneWatermarkCatalog {
         if (-not $t.Enabled) { $why += 'disabled' }
         @{ Compliant = ($why.Count -eq 0); State = $(if ($why.Count -eq 0) { "at logon, group Users, $mode" } else { $why -join ', ' }) }
     }.GetNewClosure()
-    $apply = { param($m) $p = Get-AVDTuneWatermarkPaths $m; & $m.TaskRegisterXml '\' $taskName (New-AVDTuneWatermarkTaskXml -Paths $p -ConsoleMode $mode) }.GetNewClosure()
+    $apply = {
+        param($m)
+        $p = Get-AVDTuneWatermarkPaths $m
+        if ($null -eq (& $m.FileText $p.Script) -or $null -eq (& $m.FileText $p.PublicJson)) { throw 'The program files and the settings copy are not in place: the task is not registered.' }
+        if (@(Get-AVDTuneWatermarkAclProblems $m $p).Count -gt 0) { throw 'The program folder is not safe: the task is not registered.' }
+        & $m.TaskRegisterXml '\' $taskName (New-AVDTuneWatermarkTaskXml -Paths $p -ConsoleMode $mode)
+    }.GetNewClosure()
     $undo = { param($m) & $m.TaskRemove '\' $taskName }.GetNewClosure()
     $step = New-AVDTuneStep -Id 'userexperience.watermark-task' -Section UserExperience -Title 'Watermark: scheduled task "AVDTune Watermark" at logon for the group Users' -Why 'Starts the overlay in every session at logon (no VBS). Principal is the group BUILTIN\Users by SID S-1-5-32-545 with least privilege, so each user gets the label in his own session. A console window of powershell.exe can flash for a moment at logon (the window exists before -WindowStyle Hidden is read); the optional console mode Headless avoids it. Not verified on a multi-session host yet.' -Risk Low -SourceUrl $learnTask -Test $test -Apply $apply -Undo $undo
     [void]$items.Add([pscustomobject]@{ Id = $step.Id; Group = 'Overlay'; Step = $step; Applies = $null })
@@ -253,17 +277,25 @@ function Get-AVDTuneWatermarkCatalog {
         $backup = [ordered]@{ Schema = 1; At = (& $m.Now).ToString('o'); Task = $null; Vbs = $null }
         if ($l.Task) { $backup.Task = [ordered]@{ Name = $legacyTask; Xml = [string]$l.Task.Xml } }
         if ($l.Vbs) { $backup.Vbs = [ordered]@{ Path = $l.VbsPath; Text = [string](& $m.FileText $l.VbsPath) } }
-        Write-AVDTuneFile ($backupPath) ($backup | ConvertTo-Json -Depth 5)
+        # every removal gets its own backup file: an earlier one is never overwritten
+        $stamp = (& $m.Now).ToString('yyyyMMdd-HHmmss-fff', [Globalization.CultureInfo]::InvariantCulture)
+        $backupPath = Join-Path $backupDir "watermark-legacy-$stamp-$([guid]::NewGuid().ToString('N').Substring(0, 4)).json"
+        Write-AVDTuneFile $backupPath ($backup | ConvertTo-Json -Depth 5)
         if ($l.Task) { & $m.TaskRemove '\' $legacyTask }
         if ($l.Vbs) { & $m.FileRemove $l.VbsPath }
     }.GetNewClosure()
     $undo = {
         param($m)
-        $b = Read-AVDTuneJson ($backupPath)
+        $newest = @(Get-ChildItem -LiteralPath $backupDir -Filter 'watermark-legacy-*.json' -File -ErrorAction SilentlyContinue | Sort-Object Name)[-1]
+        $b = if ($newest) { Read-AVDTuneJson $newest.FullName } else { $null }
         if (-not $b) { throw 'There is no backup of the old overlay to restore.' }
         $task = Get-AVDTuneProp $b 'Task'; $vbs = Get-AVDTuneProp $b 'Vbs'
-        if ($vbs) { & $m.FileWrite $vbs.Path ([string]$vbs.Text) 'Admin' }
-        if ($task -and $task.Xml) { & $m.TaskRegisterXml '\' $task.Name ([string]$task.Xml) }
+        # only the fixed place and only new: the path and the name in the backup file are not used, an existing file or task is never replaced
+        if ($vbs) { & $m.FileWrite (Get-AVDTuneWatermarkPaths $m).LegacyVbs ([string]$vbs.Text) 'AdminNew' }
+        if ($task -and $task.Xml) {
+            if (& $m.TaskDetail '\' $legacyTask) { throw "The task $legacyTask exists already. It is not replaced." }
+            & $m.TaskRegisterXml '\' $legacyTask ([string]$task.Xml)
+        }
     }.GetNewClosure()
     $step = New-AVDTuneStep -Id 'userexperience.watermark-legacy' -Section UserExperience -Title 'Old overlay: remove the task "PilotOverlay" and PilotOverlayLauncher.vbs' -Why 'The old customer overlay uses a VBS launcher (VBScript is being phased out by Microsoft), a global mutex (only the first user of a host got the label) and only the primary screen. The new one replaces it. A backup of the task definition and the launcher is kept in AVDTune''s state folder, so this can be undone. Overlays that are running right now are not stopped; they end when the user signs out.' -Risk Medium -SourceUrl 'https://learn.microsoft.com/en-us/windows/win32/taskschd/task-scheduler-start-page' -Test $test -Apply $apply -Undo $undo
     [void]$items.Add([pscustomobject]@{ Id = $step.Id; Group = 'Old overlay'; Step = $step; Applies = $null })
@@ -338,6 +370,14 @@ function Set-AVDTuneWatermark {
         if ($p.Id -eq 'userexperience.watermark-microsoft' -and $p.Mode -eq 'Undo' -and $Mode -eq 'On') {
             if ($null -eq (& $Machine.RegGet $script:MsKey 'fEnableWatermarking')) { continue }
         }
+        # the task is only registered when the program files and the settings copy are in place (compliant after this run)
+        if ($p.Id -eq 'userexperience.watermark-task' -and $p.Mode -eq 'Apply') {
+            $notReady = @($results | Where-Object { $_.Id -in 'userexperience.watermark-program', 'userexperience.watermark-settings' -and $_.Status -notin 'Changed', 'Unchanged', 'WhatIf' })
+            if ($notReady.Count -gt 0) {
+                [void]$results.Add([pscustomobject]@{ Id = $step.Id; Section = $step.Section; Title = $step.Title; Mode = 'Apply'; Status = 'Skipped'; Before = $null; After = $null; Message = 'The program files or the settings copy are not in place: the task is not registered.'; Reboot = $false; WhatIf = [bool]$WhatIf; At = $null })
+                continue
+            }
+        }
         [void]$results.Add((Invoke-AVDTuneStep -Step $step -Machine $Machine -Mode $p.Mode -WhatIf:$WhatIf))
     }
     $changed = @($results | Where-Object { $_.Status -in 'Changed', 'Reverted' })
@@ -367,5 +407,5 @@ function Set-AVDTuneWatermark {
 #endregion
 
 Export-ModuleMember -Function Get-AVDTuneWatermarkPaths, Get-AVDTuneWatermarkSettings, Save-AVDTuneWatermarkSettings, Get-AVDTuneWatermarkTaskAction, New-AVDTuneWatermarkTaskXml,
-    Get-AVDTuneWatermarkLegacy, Get-AVDTuneWatermarkCatalog, Get-AVDTuneWatermarkStatus, Set-AVDTuneWatermark,
+    Get-AVDTuneWatermarkLegacy, Get-AVDTuneWatermarkAclProblems, Get-AVDTuneWatermarkCatalog, Get-AVDTuneWatermarkStatus, Set-AVDTuneWatermark,
     Get-AVDTuneWatermarkDefaults, Test-AVDTuneWatermarkPattern, Test-AVDTuneWatermarkName, ConvertTo-AVDTuneWatermarkSettings, Get-AVDTuneWatermarkPublicSettings, Get-AVDTuneWatermarkPlacement, ConvertTo-WmRgb

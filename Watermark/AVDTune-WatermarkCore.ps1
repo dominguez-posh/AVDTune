@@ -72,7 +72,9 @@ function ConvertTo-AVDTuneWatermarkSettings {
     $mode = [string](& $pick 'ConsoleMode' $d.ConsoleMode)
     if ($mode -notin $script:WmConsoleModes) { [void]$errors.Add("The console mode must be one of: $($script:WmConsoleModes -join ', ')."); $mode = $d.ConsoleMode }
     $ms = & $pick 'Microsoft' $null
-    $msEnabled = [bool](Get-WmProp $ms 'Enabled')
+    $enabledRaw = Get-WmProp $ms 'Enabled'
+    $msEnabled = $false
+    if ($null -ne $enabledRaw) { if ($enabledRaw -is [bool]) { $msEnabled = $enabledRaw } else { [void]$errors.Add('The Microsoft watermark switch must be true or false.') } }
     $msPick = { param($name, $default) $v = Get-WmProp $ms $name; if ($null -eq $v) { $default } else { $v } }
     $settings = [pscustomobject][ordered]@{
         Schema = 1; Pattern = $pattern; Text = $text.Trim(); Color = $color.ToUpperInvariant()
