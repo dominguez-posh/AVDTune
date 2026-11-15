@@ -350,7 +350,7 @@ function Invoke-AVDTuneReadiness {
         else { Add-Row 'hy.lcu-age' $hy 'green' $text -Found "$age days" }
     }
     Invoke-Check 'hy.avd-agent' $hy {
-        $svc = @('RDAgentBootLoader', 'RDAgent' | Where-Object { & $Machine.ServiceGet $_ })
+        $svc = @('RDAgentBootLoader' | Where-Object { & $Machine.ServiceGet $_ })
         $key = [bool](& $Machine.RegKeyExists 'HKLM:\SOFTWARE\Microsoft\RDInfraAgent')
         if ($svc.Count -gt 0 -or $key) { Add-Row 'hy.avd-agent' $hy 'red' 'The AVD agent or boot loader is installed. It must not be on the master: the host pool installs it on the session hosts (a master that joined a host pool breaks the new session hosts).' 'Uninstall the Remote Desktop Services Infrastructure Agent and the boot loader (Apps).' -Found ($svc -join ', ') }
         else { Add-Row 'hy.avd-agent' $hy 'green' 'The AVD agent and boot loader are not installed.' }

@@ -208,6 +208,9 @@ try {
     # ---------------------------------------------------------------- hygiene
     $r = Invoke-Readiness (New-Master @{ Services = @(@{ Name = 'WindowsAzureGuestAgent' }, @{ Name = 'RDAgentBootLoader' }) ; Keys = @('HKLM:\SOFTWARE\Microsoft\RDInfraAgent') } -Reg @{ 'HKLM:\SOFTWARE\Microsoft\RDInfraAgent|RegistrationToken' = 'eyJexample' }) (New-Arm)
     Test-Check 'AVD agent, boot loader and a registration token: red each' ((Get-Row $r 'hy.avd-agent').Status -eq 'red' -and (Get-Row $r 'hy.reg-token').Status -eq 'red') $null
+    # A fresh Marketplace image has the Azure VM Agent, whose service is called 'RdAgent': that is not the AVD agent (seen on the test VM)
+    $r = Invoke-Readiness (New-Master @{ Services = @(@{ Name = 'WindowsAzureGuestAgent' }, @{ Name = 'RdAgent' }) }) (New-Arm)
+    Test-Check 'Azure VM Agent service RdAgent alone is not the AVD agent: green' ((Get-Row $r 'hy.avd-agent').Status -eq 'green') (Get-Row $r 'hy.avd-agent').Reason
     Test-Check 'the token itself is never part of the result' ((($r | ConvertTo-Json -Depth 8) -notlike '*eyJexample*')) $null
     $r = Invoke-Readiness (New-Master @{ Native = @{ 'dsregcmd.exe /status' = @{ ExitCode = 0; Output = "    AzureAdJoined : YES`r`n    DomainJoined : YES" }; 'manage-bde.exe -status C:' = @{ ExitCode = 0; Output = "Protection Status:    Protection Off" } } }) (New-Arm)
     Test-Check 'joined to a domain and Entra ID: red, both named' ((Get-Row $r 'hy.join').Status -eq 'red' -and (Get-Row $r 'hy.join').Reason -like '*Microsoft Entra ID and a domain*') (Get-Row $r 'hy.join').Reason
