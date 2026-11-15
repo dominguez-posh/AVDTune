@@ -34,13 +34,21 @@ $script:StateRoot = Get-AVDTuneRoot
 # Test mode needs the fake machine AND a state folder that is not the real one: nothing real can be touched
 $script:TestMode = [bool]($env:AVDTUNE_FAKE -and $env:AVDTUNE_ROOT -and -not (Test-AVDTuneDefaultRoot $script:StateRoot))
 function Stop-WithMessage([string]$Text) {
+    # In test mode never a dialog: it would appear on the developer's desktop and block an unattended run
+    if ($script:TestMode) { [Console]::Error.WriteLine("AVDTune: $Text"); exit 1 }
     [void][System.Windows.MessageBox]::Show($Text, 'AVDTune', 'OK', 'Error')
     exit 1
 }
 if (-not $script:TestMode -and -not (Test-AVDTuneElevated)) {
     Stop-WithMessage "AVDTune changes the Golden Master and must run as administrator.`nStart it again with 'Run as administrator'."
 }
-$mutexName = if ($script:TestMode) { 'Global\AVDTune-Test' } else { 'Global\AVDTune' }
+# Test runs of several checkouts can run at the same time: one test mutex per test state folder
+$mutexName = if ($script:TestMode) {
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try { $h = -join ($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes(([string]$script:StateRoot).ToLowerInvariant())) | Select-Object -First 8 | ForEach-Object { $_.ToString('x2') }) } finally { $sha.Dispose() }
+    "Global\AVDTune-Test-$h"
+} else { 'Global\AVDTune' }
+$script:MutexName = $mutexName
 $script:Mutex = New-Object System.Threading.Mutex($false, $mutexName)
 $script:MutexOwned = $false
 try { $script:MutexOwned = $script:Mutex.WaitOne(0) } catch [System.Threading.AbandonedMutexException] { $script:MutexOwned = $true }

@@ -52,7 +52,7 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         Test-Smoke 'title bar chip shows image name and no version yet' ($ui.TxtChipName.Text -eq 'GM-TEST01' -and $ui.TxtChipVersion.Text -eq 'no image version') "$($ui.TxtChipName.Text) / $($ui.TxtChipVersion.Text)"
         Test-Smoke 'identity card lists image, source image, Windows build, Office' ($ui.PanelIdentity.Children.Count -ge 8 -and (Find-Text $ui.PanelIdentity 'microsoftwindowsdesktop:office-365:win11-25h2-avd-m365:latest') -and (Find-Text $ui.PanelIdentity 'Windows 11 Enterprise multi-session 25H2, build 26100.4652') -and (Find-Text $ui.PanelIdentity '16.0.19231.20138, Monthly Enterprise Channel, x64')) $ui.PanelIdentity.Children.Count
         Test-Smoke 'health card shows the 5 checks' ($ui.PanelHealth.Children.Count -eq 5) $ui.PanelHealth.Children.Count
-        Test-Smoke 'second instance is refused (mutex held, checked from another thread)' (-not (Start-Job -ScriptBlock { $m = New-Object System.Threading.Mutex($false, 'Global\AVDTune-Test'); $got = $m.WaitOne(0); if ($got) { $m.ReleaseMutex() }; $got } | Wait-Job | Receive-Job)) $null
+        Test-Smoke 'second instance is refused (mutex held, checked from another thread)' (-not (Start-Job -ArgumentList $script:MutexName -ScriptBlock { param($Name) $m = New-Object System.Threading.Mutex($false, $Name); $got = $m.WaitOne(0); if ($got) { $m.ReleaseMutex() }; $got } | Wait-Job | Receive-Job)) $null
         Save-SmokeShot '01-overview-light'
         $true } }
     @{ Name = 'dirty machine'; Do = {
