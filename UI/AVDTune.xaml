@@ -299,6 +299,71 @@
                             </ScrollViewer>
                         </Grid>
 
+                        <!-- ============ Office ============ -->
+                        <Grid x:Name="PageOffice" Visibility="Collapsed">
+                            <ScrollViewer Style="{DynamicResource PageScroll}">
+                                <StackPanel Margin="40,32,40,28" MaxWidth="1000" HorizontalAlignment="Left">
+                                    <Grid>
+                                        <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                                        <StackPanel>
+                                            <TextBlock Text="Office" Style="{DynamicResource PageTitle}"/>
+                                            <TextBlock Style="{DynamicResource Subtitle}" Text="Install or reconfigure Microsoft 365 Apps with the Office Deployment Tool for a multi-user host: shared computer activation on, automatic updates off. The tool comes from Microsoft only and is checked before it runs. Everything that changes the master is behind the snapshot gate."/>
+                                        </StackPanel>
+                                        <Button x:Name="BtnOffTest" Grid.Column="1" Style="{DynamicResource PrimaryButton}" Content="Test" VerticalAlignment="Center" Margin="24,0,0,0" AutomationProperties.Name="Test the state of Office against the configuration"/>
+                                    </Grid>
+                                    <TextBlock x:Name="TxtOffState" Style="{DynamicResource Hint}" Margin="0,12,0,0" TextWrapping="Wrap"/>
+
+                                    <Border Style="{DynamicResource CardBox}" Margin="0,16,0,0" Background="{DynamicResource Card}" Padding="20,16">
+                                        <StackPanel>
+                                            <TextBlock Text="State of this master" Style="{DynamicResource CardTitle}"/>
+                                            <StackPanel x:Name="PanelOffRows" Margin="0,8,0,0"/>
+                                        </StackPanel>
+                                    </Border>
+
+                                    <Border Style="{DynamicResource CardBox}" Margin="0,16,0,0" Background="{DynamicResource Card}" Padding="20,16">
+                                        <StackPanel>
+                                            <TextBlock Text="Configuration" Style="{DynamicResource CardTitle}"/>
+                                            <TextBlock Style="{DynamicResource Hint}" Margin="0,4,0,0" TextWrapping="Wrap" Text="Shared computer activation (SharedComputerLicensing = 1) and Updates Enabled = FALSE are fixed: Windows multi-session needs both. Preset: the sample of the Microsoft AVD article."/>
+                                            <Grid Margin="0,10,0,0">
+                                                <Grid.ColumnDefinitions><ColumnDefinition Width="160"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                                                <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+                                                <TextBlock Text="Channel" VerticalAlignment="Center" Margin="0,4"/>
+                                                <ComboBox x:Name="CmbOffChannel" Grid.Column="1" Margin="0,4" AutomationProperties.Name="Update channel"/>
+                                                <TextBlock Grid.Row="1" Text="32 or 64 bit" VerticalAlignment="Center" Margin="0,4"/>
+                                                <ComboBox x:Name="CmbOffEdition" Grid.Row="1" Grid.Column="1" Margin="0,4" AutomationProperties.Name="32 or 64 bit"/>
+                                                <TextBlock Grid.Row="2" Text="Product" VerticalAlignment="Center" Margin="0,4"/>
+                                                <ComboBox x:Name="CmbOffProduct" Grid.Row="2" Grid.Column="1" Margin="0,4" AutomationProperties.Name="Product"/>
+                                                <TextBlock Grid.Row="3" Text="Languages" VerticalAlignment="Center" Margin="0,4"/>
+                                                <TextBox x:Name="TxtOffLanguages" Grid.Row="3" Grid.Column="1" Padding="6,4" Margin="0,4" ToolTip="Language IDs like de-DE, separated by comma; MatchOS = the language of Windows" AutomationProperties.Name="Languages"/>
+                                                <TextBlock Grid.Row="4" Text="Excluded apps" VerticalAlignment="Top" Margin="0,8"/>
+                                                <WrapPanel x:Name="PanelOffExclude" Grid.Row="4" Grid.Column="1" Margin="0,4"/>
+                                            </Grid>
+                                            <CheckBox x:Name="ChkOffMsi" Content="Remove older Office versions installed with Windows Installer (RemoveMSI)" Margin="0,8,0,0"/>
+                                            <TextBlock Text="configuration.xml (preview, this is what the ODT gets)" Style="{DynamicResource Hint}" Margin="0,12,0,4"/>
+                                            <TextBox x:Name="TxtOffPreview" IsReadOnly="True" FontFamily="Consolas" Padding="8" TextWrapping="NoWrap" HorizontalScrollBarVisibility="Auto" MinHeight="120" AutomationProperties.Name="Preview of configuration.xml"/>
+                                            <StackPanel Orientation="Horizontal" Margin="0,12,0,0">
+                                                <Button x:Name="BtnOffSave" Content="Save settings" Margin="0,0,8,0" AutomationProperties.Name="Save the configuration"/>
+                                                <Button x:Name="BtnOffInstall" Style="{DynamicResource PrimaryButton}" Content="Install or reconfigure" Margin="0,0,8,0" AutomationProperties.Name="Install or reconfigure Microsoft 365 Apps"/>
+                                                <Button x:Name="BtnOffUndo" Content="Undo last change" Margin="0,0,8,0" AutomationProperties.Name="Undo the Office change"/>
+                                                <Button x:Name="BtnOffRemove" Content="Remove Office" AutomationProperties.Name="Remove Microsoft 365 Apps"/>
+                                            </StackPanel>
+                                        </StackPanel>
+                                    </Border>
+
+                                    <Border Style="{DynamicResource CardBox}" Margin="0,16,0,0" Background="{DynamicResource Card}" Padding="20,16">
+                                        <StackPanel>
+                                            <TextBlock Text="Update notifications for users" Style="{DynamicResource CardTitle}"/>
+                                            <TextBlock Style="{DynamicResource Hint}" Margin="0,4,0,0" TextWrapping="Wrap" Text="Hides the Office update notifications and the update button for all users (two machine policies of the AVD article). Press Test to see the state; Apply asks first."/>
+                                            <StackPanel Orientation="Horizontal" Margin="0,12,0,0">
+                                                <Button x:Name="BtnOffPolicies" Content="Set update policies" Margin="0,0,8,0" AutomationProperties.Name="Hide Office update notifications for users"/>
+                                                <Button x:Name="BtnOffPoliciesUndo" Content="Undo policies" AutomationProperties.Name="Put the Office policy values back"/>
+                                            </StackPanel>
+                                        </StackPanel>
+                                    </Border>
+                                </StackPanel>
+                            </ScrollViewer>
+                        </Grid>
+
                         <!-- ============ FSLogix ============ -->
                         <Grid x:Name="PageFSLogix" Visibility="Collapsed">
                             <ScrollViewer Style="{DynamicResource PageScroll}">

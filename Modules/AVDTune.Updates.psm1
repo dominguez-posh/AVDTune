@@ -188,7 +188,7 @@ function Invoke-AVDTuneLocked {
 # Every native tool AVDTune starts elevated: who must have signed it and the original file name it must carry (VersionInfo; '.mui' is ignored).
 $script:ToolTrust = @{
     'winget.exe' = 'Microsoft'; 'teamsbootstrapper.exe' = 'Microsoft'; 'OfficeC2RClient.exe' = 'Microsoft'; 'MicrosoftEdgeUpdate.exe' = 'Microsoft'
-    'Dism.exe' = 'Microsoft'; 'sfc.exe' = 'Microsoft'; 'choco.exe' = 'Chocolatey'; 'FSLogixAppsSetup.exe' = 'Microsoft'; 'frx.exe' = 'Microsoft'
+    'Dism.exe' = 'Microsoft'; 'sfc.exe' = 'Microsoft'; 'setup.exe' = 'Microsoft'; 'officedeploymenttool.exe' = 'Microsoft'; 'choco.exe' = 'Chocolatey'; 'FSLogixAppsSetup.exe' = 'Microsoft'; 'frx.exe' = 'Microsoft'
 }
 
 function Get-AVDTuneDnPart([string]$Dn, [string]$Key) {
@@ -218,7 +218,7 @@ function Test-AVDTuneToolTrust {
         Windows production CA. Chocolatey: subject O and CN exactly Chocolatey Software, Inc, issued by a DigiCert code signing CA.
         Returns @{ Ok; Reason }.
     #>
-    param($Signature, [Parameter(Mandatory)][string]$Name)
+    param($Signature, [Parameter(Mandatory)][string]$Name, [string]$OriginalFilenamePattern)
     $leaf = Split-Path $Name -Leaf
     $publisher = $null
     foreach ($k in $script:ToolTrust.Keys) { if ($k -eq $leaf) { $publisher = $script:ToolTrust[$k] } }
@@ -232,7 +232,9 @@ function Test-AVDTuneToolTrust {
     }
     if (-not $ok) { return @{ Ok = $false; Reason = "$leaf is not signed by $publisher (signer '$($Signature.Subject)', issuer '$(Get-AVDTuneProp $Signature 'Issuer')')" } }
     $orig = ([string](Get-AVDTuneProp $Signature 'OriginalFilename')) -replace '(?i)\.mui$', ''
-    if ($orig -ne $leaf) { return @{ Ok = $false; Reason = "$leaf carries the original file name '$orig'" } }
+    # a self-extracting package carries a version in its file name: the caller gives a pattern (anchored, case-insensitive) instead of the exact name
+    if ($OriginalFilenamePattern) { if ($orig -notmatch $OriginalFilenamePattern) { return @{ Ok = $false; Reason = "$leaf carries the original file name '$orig'" } } }
+    elseif ($orig -ne $leaf) { return @{ Ok = $false; Reason = "$leaf carries the original file name '$orig'" } }
     @{ Ok = $true; Reason = '' }
 }
 
