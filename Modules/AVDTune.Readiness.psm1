@@ -639,6 +639,14 @@ function Invoke-AVDTuneReadiness {
         else { Add-Row 'hy.leftovers' $hy 'green' 'No leftovers of earlier scripts found (scheduled tasks, VBS starters, driver export folders).' }
     }
 
+    Invoke-Check 'hy.public-shortcut' $hy {
+        # AVDTune puts its shortcut only on the desktop of the signed-in admin; one on the Public Desktop would be in the image for every user
+        $folder = [string]$Data.Hygiene.PublicDesktopFolder
+        $links = @(& $Machine.DirList $folder ([string]$Data.Hygiene.PublicDesktopFilter))
+        if ($links.Count -gt 0) { Add-Row 'hy.public-shortcut' $hy 'yellow' ('AVDTune shortcut on the Public Desktop (every user of the image gets it): ' + (($links | ForEach-Object { Join-Path $folder $_ }) -join '; ') + '.') 'Delete it from the Public Desktop; AVDTune only puts its shortcut on the desktop of the signed-in administrator (Integrity and updates card).' -Found ($links -join '; ') }
+        else { Add-Row 'hy.public-shortcut' $hy 'green' 'No AVDTune shortcut on the Public Desktop.' }
+    }
+
     # ---- families (needs the flags of the checks above)
     Invoke-Check 'hw.families' $hw {
         $fams = @(Get-AVDTuneReadinessFamilies -Data $Data -OsArch $osArch -StornvmeProblem $flags.Stornvme -Gen1 $flags.Gen1 -ManaMissing $flags.ManaMissing -DriveDUse $flags.DriveD)

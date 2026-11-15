@@ -254,6 +254,7 @@ function Update-EnvironmentPreview {
 }
 function Save-EnvironmentForm {
     $a = Get-EnvironmentFormAnswers
+    $firstRun = -not (Get-AVDTuneEnvironment $script:StateRoot)
     $forget = [bool]($script:Form.ForgetTenant -and $script:Form.ForgetTenant.IsChecked)
     $result = Save-AVDTuneEnvironment -Root $script:StateRoot -Answers $a -User ([string]$env:USERNAME) -ForgetTenant:$forget
     if ($forget -and $script:StartContext.Session) { Disconnect-AVDTuneSession $script:StartContext.Session }   # a session of the old tenant does not stay
@@ -263,6 +264,8 @@ function Save-EnvironmentForm {
     Close-Stage
     Update-StartView
     if ($script:CurrentPage -eq 'Protocol') { Update-ProtocolView }
+    # First run: the small question about the desktop shortcut (installed copy only; otherwise the hint to install first)
+    if ($firstRun -and -not (Show-ShortcutQuestion) -and (Get-AVDTuneShortcutOffer -Root $script:StateRoot -Mode (Get-ShortcutMode)) -eq 'Install') { Show-Toast 'The answers are saved. A desktop shortcut can be created once AVDTune is installed (Integrity and updates).' }
 }
 
 # ---------------------------------------------------------------- 2. sign-in

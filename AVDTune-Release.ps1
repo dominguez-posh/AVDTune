@@ -215,3 +215,64 @@ Add-Click $ui.BtnRelSkip {
     Show-Toast 'AVDTune continues without the integrity check. It is in the protocol.'
     Update-ReleaseView
 }
+# ---------------------------------------------------------------- desktop shortcut (issue #15)
+# Logic in Modules\AVDTune.Shortcut.psm1. Only the desktop of the signed-in account, never the Public Desktop; only for the installed copy.
+# Test mode: a desktop folder inside the test state and a mode the smoke driver can set ($script:ShortcutTestMode), never the real desktop.
+$script:ShortcutTestMode = ''
+function Get-ShortcutDesktop { if ($script:TestMode) { $d = Join-Path $script:StateRoot 'desktop-test'; if (-not (Test-Path $d)) { New-Item -ItemType Directory -Path $d -Force | Out-Null }; $d } else { Get-AVDTuneUserDesktop } }
+function Get-ShortcutMode { if ($script:TestMode -and $script:ShortcutTestMode) { $script:ShortcutTestMode } else { [string]$script:Rel.Info.Mode } }
+function Update-ShortcutRow {
+    $installed = (Get-ShortcutMode) -eq 'Installed'
+    $link = $null; try { $link = Get-AVDTuneDesktopShortcut -Folder (Get-ShortcutDesktop) -InstallRoot $script:RelInstallRoot } catch { }
+    $ui.BtnRelShortcut.Content = $(if ($link) { 'Remove desktop shortcut' } else { 'Create desktop shortcut' })
+    $ui.BtnRelShortcut.IsEnabled = ($installed -or [bool]$link)
+    $ui.TxtRelShortcut.Text = if (-not $installed -and -not $link) { 'Desktop shortcut: install AVDTune first (it points to the installed copy in the install folder).' }
+    elseif ($link -and -not $link.Matches) { "Desktop shortcut on your desktop, but it does not point to $($script:RelInstallRoot) as administrator; create it again." }
+    elseif ($link) { 'Desktop shortcut on your desktop (only yours, runs as administrator).' }
+    else { 'No desktop shortcut. It goes on your desktop only, never on the Public Desktop.' }
+}
+function New-ShortcutNow {
+    $link = New-AVDTuneDesktopShortcut -InstallRoot $script:RelInstallRoot -Folder (Get-ShortcutDesktop)
+    Add-RelProtocol 'Desktop shortcut created' "$($link.Path) -> $($link.Target) $($link.Arguments) (run as administrator)"
+    Show-Toast 'The shortcut is on your desktop.'
+}
+function Show-ShortcutQuestion {
+    # The small question of the first start, in the card below the stages. Returns $true when it was shown.
+    $offer = Get-AVDTuneShortcutOffer -Root $script:StateRoot -Mode (Get-ShortcutMode)
+    if ($offer -ne 'Ask') { return $false }
+    Update-ShortcutRow
+    Close-Stage
+    $script:OpenStage = 'Shortcut'
+    Reset-StageButtons
+    $ui.BoxStage.Visibility = 'Visible'
+    $ui.TxtStageMessage.Text = ''
+    $ui.TxtStageTitle.Text = 'Desktop shortcut'
+    $ui.TxtStageIntro.Text = 'Create a shortcut to AVDTune on your desktop? It goes on your desktop only (this Windows account), never on the Public Desktop, so it does not end up in the image for every user. AVDTune asks once; the Integrity and updates card can create or remove it later.'
+    $spec = Get-AVDTuneShortcutSpec $script:RelInstallRoot
+    [void]$ui.PanelStageBody.Children.Add((New-InfoRow 'Starts' "$($spec.Target) $($spec.Arguments)"))
+    [void]$ui.PanelStageBody.Children.Add((New-InfoRow 'Folder' $spec.WorkingDirectory))
+    [void]$ui.PanelStageBody.Children.Add((New-InfoRow 'Runs' 'as administrator (Windows asks for confirmation)'))
+    [void]$ui.PanelStageBody.Children.Add((New-InfoRow 'Desktop' (Get-ShortcutDesktop)))
+    $ui.BtnStageAction.Content = 'Create the shortcut'
+    $ui.BtnStageAction2.Content = 'No, thanks'; $ui.BtnStageAction2.Visibility = 'Visible'
+    $script:StageAction = {
+        try { New-ShortcutNow; Set-AVDTuneShortcutAnswer -Root $script:StateRoot -Answer Yes; Close-Stage; Update-ShortcutRow }
+        catch { Set-StageMessage $_.Exception.Message 'error' }
+    }
+    $script:StageAction2 = { Set-AVDTuneShortcutAnswer -Root $script:StateRoot -Answer No; Add-RelProtocol 'Desktop shortcut' 'Not wanted (asked once).'; Close-Stage; Update-ShortcutRow }
+    $window.UpdateLayout(); $ui.BoxStage.BringIntoView()
+    $true
+}
+Add-Click $ui.BtnRelShortcut {
+    $link = Get-AVDTuneDesktopShortcut -Folder (Get-ShortcutDesktop)
+    if ($link) {
+        [void](Remove-AVDTuneDesktopShortcut -Folder (Get-ShortcutDesktop))
+        Add-RelProtocol 'Desktop shortcut removed' $link.Path
+        Show-Toast 'The shortcut is removed from your desktop.'
+    }
+    elseif ((Get-ShortcutMode) -eq 'Installed') { New-ShortcutNow; Set-AVDTuneShortcutAnswer -Root $script:StateRoot -Answer Yes }
+    Update-ShortcutRow
+}
+Update-ShortcutRow
+# A later start of the installed copy asks once, when the first-run questions are answered already (the first run asks after them)
+if ((Get-AVDTuneEnvironment $script:StateRoot) -and -not $script:OpenStage) { [void](Show-ShortcutQuestion) }
