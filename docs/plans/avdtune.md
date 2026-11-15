@@ -17,8 +17,40 @@ Not in scope: customer specific software and shortcuts (they come as packages fr
 Nothing changes the master before these three steps are done; the Overview shows them as a short start sequence.
 
 1. **Microsoft 365 / Azure sign-in.** One sign-in with three token audiences: Microsoft Graph (SharePoint site of the environment, read of Intune app notes for the package trust anchor), Azure Resource Manager (snapshot of the OS disk, VM size and region for the benchmark), and the PackTune package store (Sites.Selected). The app registration needs `user_impersonation` on Azure Service Management in addition to PackTune's permissions; the setup assistant adds it. Tokens live in memory only and are removed and checked before seal.
-2. **Domain.** The master is not domain joined (it must not be, because of sysprep), so the user enters the IP (or name) of a domain controller and a domain account with the rights to create groups in an OU. AVDTune reads everything else itself from the DC: RootDSE (domain DNS name, NetBIOS name, naming contexts, functional level), the OU tree, existing groups and their SIDs, the site, optionally the DNS servers. Connection: LDAPS 636 first; fallback LDAP 389 only with Negotiate signing and sealing; never a simple bind in clear text. The certificate of the DC is shown on first contact (thumbprint) and pinned per environment. The password stays in a SecureString in memory, never on disk, never in the protocol.
+2. **Domain** (only for the identity models with a domain controller, section 1b; with Entra only this step is skipped and groups come from Entra ID through Graph). The master is not domain joined (it must not be, because of sysprep), so the user enters the IP (or name) of a domain controller and a domain account with the rights to create groups in an OU. AVDTune reads everything else itself from the DC: RootDSE (domain DNS name, NetBIOS name, naming contexts, functional level), the OU tree, existing groups and their SIDs, the site, optionally the DNS servers. Connection: LDAPS 636 first; fallback LDAP 389 only with Negotiate signing and sealing; never a simple bind in clear text. The certificate of the DC is shown on first contact (thumbprint) and pinned per environment. The password stays in a SecureString in memory, never on disk, never in the protocol.
 3. **Snapshot gate.** AVDTune finds its own VM through the Azure Instance Metadata Service (subscription, resource group, VM, OS disk) and offers "Create snapshot now" (incremental snapshot of the OS disk, name `<vm>-avdtune-<image version>-<yyyyMMdd-HHmm>`, tags with image version and user). It then checks that a snapshot of the OS disk from today exists, and the user confirms by typing their full name: "Ich bestaetige, dass vor diesem Lauf ein Snapshot des Golden Masters erstellt wurde und ein Rollback moeglich ist." Name, time, snapshot resource ID and whether AVDTune made it go into the protocol and the change log. Without the confirmation every page is read only. Rollback hint on the Overview: how to create a disk from the snapshot and swap the OS disk.
+
+## 1b. First run: environment wizard and automatic FSLogix setup (added 2026-11-15)
+
+On the first start (no `environment.json` yet) a wizard asks how the AVD environment is planned. The answers decide which pages, checks and steps exist; they can be changed later (with a change log entry).
+
+| Question | Choices |
+|---|---|
+| Join of the session hosts | Entra ID only (no hybrid join) / Microsoft Entra hybrid join / AD DS join only |
+| Domain controller | none / AD DS in Azure (VM) / AD DS on premises over VPN or ExpressRoute / Microsoft Entra Domain Services |
+| Identities of the users | cloud only / synchronized (Entra Connect / Cloud Sync) |
+| Profiles | FSLogix profile container on Azure Files / on another SMB share (e.g. Azure NetApp Files, file server) / no FSLogix |
+| Azure Files authentication | follows from the answers: AD DS (with DC), Microsoft Entra Kerberos (hybrid or cloud-only identities), Entra Domain Services |
+| Network | private endpoint (recommended) / public endpoint with firewall; VNet and subnet of the session hosts; private DNS zone `privatelink.file.core.windows.net` in Azure or on the own DNS servers |
+
+What follows from the identity model:
+- **Entra ID only**: no DC step; groups for App Masking and the FSLogix include/exclude lists are Entra groups created through Graph (`Group.ReadWrite.All` only during that action), referenced by their SID (`S-1-12-1-...`); Azure Files with Microsoft Entra Kerberos; session hosts need `CloudKerberosTicketRetrievalEnabled=1` and `LoadCredKeyFromProfile=1` (set in the image); the Entra app of the storage account needs admin consent and must be excluded from Conditional Access policies that require MFA (AVDTune checks both). Support for cloud-only identities in Azure Files and for Entra group SIDs in FSLogix App Masking is verified against Microsoft Learn in phase 0 of this part and shown on the page with its status; if a combination is not supported, the wizard says so instead of building it.
+- **Hybrid / AD DS**: DC step of section 1a; groups in the chosen OU; Azure Files with AD DS (or Entra Kerberos for hybrid identities, choice in the wizard).
+- **Without FSLogix**: the FSLogix pages are hidden, the seal checklist drops the FSLogix test.
+
+Automatic FSLogix setup (first setup, every step shown as a plan with the Azure resources and their settings before anything is created, then done one by one with a result per step):
+1. **Storage account**: use an existing one (check) or create one: kind FileStorage, Premium (SSD) with LRS or ZRS (the wizard explains the choice), secure transfer, TLS 1.2, no public blob access, public network access off when a private endpoint is used, SMB settings (SMB 3.1.1, AES-256 Kerberos, AES-256-GCM channel encryption). An existing Standard account gets a yellow "not recommended for FSLogix profiles" with the reason (latency, IOPS).
+2. **Share**: name, provisioned size, quota and expected IOPS/throughput shown (size per user x users), the profile folder layout.
+3. **Private endpoint**: in the chosen subnet, private DNS zone `privatelink.file.core.windows.net` with a VNet link (or the record for own DNS servers is shown to be created there). Check from the master: the name resolves to the private IP, TCP 445 reachable, public endpoint refused.
+4. **Identity of the storage account**: AD DS: computer account in the chosen OU over LDAP, the account's Kerberos key from ARM set as its password, SPN set, `activeDirectoryProperties` set on the storage account (the same steps as Microsoft's AzFilesHybrid module, done without that module; checked against it in the build). Entra Kerberos: enable on the storage account, domain information for hybrid identities, admin consent for the storage account app, Conditional Access exclusion checked and explained (not changed automatically).
+5. **Share permissions**: default share-level permission or role assignments (Storage File Data SMB Share Contributor for the user group, Elevated Contributor for the admin group).
+6. **NTFS ACLs**: Microsoft's FSLogix recommendation set on the root by OAuth over REST (Privileged Contributor), shown as a diff first.
+7. **FSLogix on the master**: install, profile settings with `VHDLocations` pointing to the new share, `redirections.xml`, Defender exclusions, Entra Kerberos registry values where needed.
+8. **Test**: the full FSLogix and storage check of section 5a.
+
+Required rights are checked before the plan is shown (Contributor on the resource group, Network Contributor on the subnet and the DNS zone, User Access Administrator or Role Based Access Control Administrator for the role assignments, Application Administrator for the consent of Entra Kerberos, OU rights in AD) and missing ones are named with the reason.
+
+Documentation: the wizard answers and every created or checked resource (resource IDs, SKU, endpoint IP, DNS record, auth type, roles, ACL as SDDL, FSLogix settings) form the environment document "Umgebung" in the change log, as HTML/Markdown export and in the SharePoint list of the environment. `environment.json` on the master holds the answers and resource IDs, never secrets.
 
 ## 2. Shape
 
@@ -158,9 +190,9 @@ Elevated tool on a machine that becomes the image of all users: runs from a prot
 
 | Phase | Content |
 |---|---|
-| 1 | Shell in PackTune look, elevation, engine, state, protocol and change log, Overview; start sequence: M365/Azure sign-in, DC connection and discovery, snapshot gate with name confirmation |
+| 1 | Shell in PackTune look, elevation, engine, state, protocol and change log, Overview; first-run question of the identity model (stored, used by the start sequence); start sequence: M365/Azure sign-in, DC connection and discovery when a DC is used, snapshot gate with name confirmation |
 | 2 | Updates page (Windows, Office, Edge/Teams/OneDrive/FSLogix/Defender, software) and update block with maintenance mode |
-| 3 | FSLogix setup and function test; App Masking with groups in the domain; SharePoint change log list |
+| 3 | Environment wizard (identity model), FSLogix setup and function test, automatic storage setup (Premium account, share, private endpoint, identity, permissions), storage check; App Masking with groups in AD or Entra; SharePoint change log list; environment document |
 | 4 | Software from the library and catalog |
 | 5 | Benchmark: design for approval, then new engine incl. GPU, comparison per version, AVD-Benchmark repo stand-alone |
 | 6 | Setup: Office, language, VDI components, optimizations, user experience, watermark |
