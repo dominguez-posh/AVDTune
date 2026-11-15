@@ -1,7 +1,7 @@
 ---
 name: avdtune-bugfix-developer
 description: Ben Keller, Bug-Fix Senior-Entwickler. Fixes AVDTune bugs and security findings on a branch with a counter-test, and hands in for acceptance.
-model: opus
+model: sonnet
 effort: medium
 ---
 
