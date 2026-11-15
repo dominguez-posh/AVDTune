@@ -619,6 +619,7 @@ function Compare-AVDTuneFSLogixAcl {
 
 function New-AVDTuneFsRow {
     param([string]$Id, [int]$Step, [string]$Title, [ValidateSet('green', 'yellow', 'red', 'info')][string]$Status, [string]$Reason, [string]$Fix = '', [string]$Source = "$script:Learn/reference-configuration-settings", [bool]$Verified = $true, [string]$Note = '')
+    if (-not $Verified -and -not $Note) { $Note = 'Not stated on Microsoft Learn: the check is AVDTune''s own (the source is the nearest Learn page).' }
     [pscustomobject]@{ Id = $Id; Step = $Step; Title = $Title; Status = $Status; Reason = $Reason; Fix = $Fix; Source = $Source; Verified = $Verified; Note = $Note }
 }
 
@@ -930,6 +931,48 @@ function New-AVDTuneFSLogixAdapter {
         @{ Steps = @($steps) }
     }
     $a.ShareAcl = { param($Unc) try { (Get-Acl -LiteralPath $Unc -ErrorAction Stop).Sddl } catch { $null } }
+    $a.KeyMapAdd = {
+        # Maps the share with the storage account key (fallback, confirmed by the administrator for one run): WNetAddConnection2, so the key is never on a command line
+        param($Unc, $User, $Key)
+        if (-not ('AVDTune.Mpr' -as [type])) { Add-Type -Namespace AVDTune -Name Mpr -MemberDefinition @"
+[StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)] public class NETRESOURCE { public int dwScope; public int dwType; public int dwDisplayType; public int dwUsage; public string lpLocalName; public string lpRemoteName; public string lpComment; public string lpProvider; }
+[DllImport("mpr.dll", CharSet = CharSet.Unicode)] public static extern int WNetAddConnection2(NETRESOURCE r, string password, string user, int flags);
+[DllImport("mpr.dll", CharSet = CharSet.Unicode)] public static extern int WNetCancelConnection2(string name, int flags, bool force);
+"@ }
+        $nr = New-Object AVDTune.Mpr+NETRESOURCE; $nr.dwType = 1; $nr.lpRemoteName = $Unc
+        $rc = [AVDTune.Mpr]::WNetAddConnection2($nr, $Key, $User, 0)
+        if ($rc -ne 0) { throw "WNetAddConnection2 returned $rc" }
+    }
+    $a.KeyMapRemove = { param($Unc) if ('AVDTune.Mpr' -as [type]) { [void][AVDTune.Mpr]::WNetCancelConnection2($Unc, 0, $true) } }
+    $a.ShareTestAsUser = {
+        # The access test as a domain user: LogonUser with new credentials (network only, like runas /netonly), then the folder test as that identity. The password
+        # stays a SecureString until the call and is zeroed. Written from the API documentation: to be tried on the test VM.
+        param($Unc, $User, [System.Security.SecureString]$Password, $Dc)
+        if (-not ('AVDTune.Logon' -as [type])) { Add-Type -Namespace AVDTune -Name Logon -MemberDefinition @"
+[DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)] public static extern bool LogonUser(string user, string domain, IntPtr password, int logonType, int provider, out IntPtr token);
+[DllImport("kernel32.dll", SetLastError = true)] public static extern bool CloseHandle(IntPtr handle);
+"@ }
+        $domain = ''; $name = $User
+        if ($User -match '^([^\]+)\(.+)$') { $domain = $Matches[1]; $name = $Matches[2] } elseif ($User -match '^(.+)@(.+)$') { $name = $Matches[1]; $domain = $Matches[2] }
+        $bstr = [Runtime.InteropServices.Marshal]::SecureStringToGlobalAllocUnicode($Password); $token = [IntPtr]::Zero
+        try { $ok = [AVDTune.Logon]::LogonUser($name, $domain, $bstr, 9, 3, [ref]$token); $err = [Runtime.InteropServices.Marshal]::GetLastWin32Error() }
+        finally { [Runtime.InteropServices.Marshal]::ZeroFreeGlobalAllocUnicode($bstr) }
+        if (-not $ok) { return @{ LogonFailed = $true; Error = "Windows error $err"; Steps = @() } }
+        try {
+            $steps = New-Object System.Collections.ArrayList
+            $dir = Join-Path $Unc ('avdtune-test-' + [guid]::NewGuid().ToString('N').Substring(0, 12)); $file = Join-Path $dir 'test.txt'
+            $id = New-Object Security.Principal.WindowsIdentity($token)
+            [Security.Principal.WindowsIdentity]::RunImpersonated($id.AccessToken, [Action]{
+                    $try = { param($n, $b) try { & $b; [void]$steps.Add(@{ Name = $n; Ok = $true; Error = '' }); $true } catch { [void]$steps.Add(@{ Name = $n; Ok = $false; Error = $_.Exception.Message }); $false } }
+                    if (& $try 'create folder' { [void][IO.Directory]::CreateDirectory($dir) }) {
+                        if (& $try 'write file' { [IO.File]::WriteAllText($file, 'avdtune') }) { [void](& $try 'read file' { if ([IO.File]::ReadAllText($file) -ne 'avdtune') { throw 'the content differs' } }); [void](& $try 'delete file' { [IO.File]::Delete($file) }) }
+                        [void](& $try 'delete folder' { [IO.Directory]::Delete($dir) })
+                    }
+                }.GetNewClosure())
+            @{ LogonFailed = $false; Error = ''; Steps = @($steps) }
+        }
+        finally { [void][AVDTune.Logon]::CloseHandle($token) }
+    }
     $a.KerberosTickets = { try { @((& (Join-Path (Get-AVDTuneSystemFolder System) 'klist.exe') 2>$null) | Where-Object { $_ -match 'cifs/' }) } catch { @() } }
     $a.DefenderGet = { try { $p = Get-MpPreference -ErrorAction Stop; @{ Paths = @($p.ExclusionPath | Where-Object { $_ -and $_ -notmatch 'Administrators' }); Processes = @($p.ExclusionProcess | Where-Object { $_ -and $_ -notmatch 'Administrators' }) } } catch { $null } }
     $a.DefenderAdd = { param($Kind, $Value) if ($Kind -eq 'Process') { Add-MpPreference -ExclusionProcess $Value -ErrorAction Stop } else { Add-MpPreference -ExclusionPath $Value -ErrorAction Stop } }
@@ -953,5 +996,5 @@ Export-ModuleMember -Function Get-AVDTuneFSLogixSettingCatalog, Test-AVDTuneFSLo
     Get-AVDTuneFSLogixGroupChoices, Set-AVDTuneFSLogixGroupMember, Get-AVDTuneRedirectionTemplate, Test-AVDTuneRedirectionPath, New-AVDTuneRedirectionsXml,
     Test-AVDTuneRedirectionsXml, Get-AVDTuneRedirectionsTarget, Save-AVDTuneRedirections, Undo-AVDTuneRedirections, Get-AVDTuneFSLogixDefenderList,
     Get-AVDTuneFSLogixDefenderState, Set-AVDTuneFSLogixDefender, Undo-AVDTuneFSLogixDefender, Get-AVDTuneFSLogixLatest, Invoke-AVDTuneFSLogixInstall,
-    ConvertFrom-AVDTuneSddl, New-AVDTuneFSLogixRecommendedSddl, Compare-AVDTuneFSLogixAcl, Get-AVDTuneFSLogixLocations, Invoke-AVDTuneFSLogixTest,
+    ConvertFrom-AVDTuneSddl, New-AVDTuneFSLogixRecommendedSddl, Compare-AVDTuneFSLogixAcl, Get-AVDTuneFSLogixLocations, Format-AVDTuneAce, Invoke-AVDTuneFSLogixTest,
     Invoke-AVDTuneFSLogixVhdxTest, Save-AVDTuneFSLogixTestRun, Get-AVDTuneFSLogixTestRecord, New-AVDTuneFSLogixAdapter

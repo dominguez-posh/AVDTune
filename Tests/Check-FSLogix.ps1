@@ -217,7 +217,7 @@ try {
     $t0 = Invoke-AVDTuneFSLogixTest -Machine $mt -F $f0 -RunWriteTests -UsersSids @($sddlUsers) -AdminsSids @($sddlAdmins)
     $nonGreen = @($t0.Rows | Where-Object { $_.Status -notin 'green', 'info' })
     Test-Check 'all green: version, services, drivers, registry, DNS, 445, SMB, write test, ACL, VHDX, redirections, Defender, admins' ($t0.Overall -eq 'green' -and $t0.Passed -and $nonGreen.Count -eq 0) (($nonGreen | ForEach-Object { "$($_.Id)=$($_.Status): $($_.Reason)" }) -join ' | ')
-    Test-Check 'every row has a source and says whether Learn states it (Verified)' (-not (@($t0.Rows | Where-Object { $_.Source -notmatch '^https://learn\.microsoft\.com/' -or ($_.Verified -isnot [bool]) }).Count)) $null
+    Test-Check 'every row has a source and says whether Learn states it (Verified)' (-not (@($t0.Rows | Where-Object { $_.Source -notmatch '^https://learn\.microsoft\.com/' -or ($_.Verified -isnot [bool]) -or (-not $_.Verified -and -not $_.Note) }).Count)) $null
     Test-Check 'the test steps 1 to 7 appear; step 7 (a real sign-in) is info, never green' ((@($t0.Rows | ForEach-Object Step | Sort-Object -Unique) -join ',') -eq '1,2,3,4,5,6,7' -and (Get-Row $t0 'fs.logon').Status -eq 'info') $null
     Test-Check 'the write tests ran on the share (folder test and frx create/attach/detach)' (@($f0.Log | Where-Object { $_ -like 'ShareWriteTest*' }).Count -eq 1 -and @($mt.Log | Where-Object { $_ -like '*frx.exe create-vhd *' }).Count -eq 1 -and @($mt.Log | Where-Object { $_ -like '*frx.exe end-edit-profile -cookie 4876 *' }).Count -eq 1) $null
     $ro = Invoke-AVDTuneFSLogixTest -Machine (New-Master) -F (& $goodF)

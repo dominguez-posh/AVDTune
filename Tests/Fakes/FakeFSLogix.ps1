@@ -11,7 +11,7 @@ function New-AVDTuneFakeFSLogix {
         Latest = @{ Ok = $true; Url = 'https://download.microsoft.com/download/00000000-0000-0000-0000-000000000000/FSLogix_26.08.zip'; Error = '' }
         DownloadFails = $false; ExpandFails = $false; NoInstaller = $false; Protected = $true; InstallerVersion = '3.26.826.17182'; Signatures = @{}; Files = @{}; FailWrite = @()
         Dns = @{}; Tcp = @{}; Probe = @{}; WriteFail = ''; Acl = @{}; Tickets = @(); Defender = @{ Paths = @(); Processes = @() }
-        Groups = @{ 'FSLogix Profile Include List' = @('S-1-1-0'); 'FSLogix Profile Exclude List' = @() }; FrxMissing = $false
+        Groups = @{ 'FSLogix Profile Include List' = @('S-1-1-0'); 'FSLogix Profile Exclude List' = @() }; FrxMissing = $false; KeyMapFails = $false; Mapped = $false; KeySeen = $null; AsUser = $null
         Log = (New-Object System.Collections.ArrayList); Folders = @()
     }
     foreach ($e in $Seed.GetEnumerator()) { $s[$e.Key] = $e.Value }
@@ -44,6 +44,14 @@ function New-AVDTuneFakeFSLogix {
         @{ Steps = @('create folder', 'write file', 'read file', 'delete file', 'delete folder' | ForEach-Object { @{ Name = $_; Ok = ($_ -ne $s.WriteFail); Error = $(if ($_ -eq $s.WriteFail) { 'Access is denied' } else { '' }) } }) }
     }.GetNewClosure()
     $a.ShareAcl = { param($Unc) if ($s.Acl.ContainsKey($Unc)) { $s.Acl[$Unc] } else { $null } }.GetNewClosure()
+    $a.KeyMapAdd = { param($Unc, $User, $Key) [void]$s.Log.Add("KeyMapAdd $Unc as $User"); if ($s.KeyMapFails) { throw 'fake: system error 1326, logon failure' }; $s.Mapped = $true; $s.KeySeen = $Key }.GetNewClosure()
+    $a.KeyMapRemove = { param($Unc) [void]$s.Log.Add("KeyMapRemove $Unc"); $s.Mapped = $false }.GetNewClosure()
+    $a.ShareTestAsUser = {
+        param($Unc, $User, $Password, $Dc)
+        [void]$s.Log.Add("ShareTestAsUser $Unc as $User via $Dc")
+        if ($s.AsUser) { return $s.AsUser }
+        @{ LogonFailed = $false; Error = ''; Steps = @('create folder', 'write file', 'read file', 'delete file', 'delete folder' | ForEach-Object { @{ Name = $_; Ok = $true; Error = '' } }) }
+    }.GetNewClosure()
     $a.KerberosTickets = { @($s.Tickets) }.GetNewClosure()
     $a.DefenderGet = { $s.Defender }.GetNewClosure()
     $a.DefenderAdd = { param($Kind, $Value) [void]$s.Log.Add("DefenderAdd $Kind $Value"); if ($Kind -eq 'Process') { $s.Defender.Processes = @($s.Defender.Processes) + $Value } else { $s.Defender.Paths = @($s.Defender.Paths) + $Value } }.GetNewClosure()
