@@ -22,17 +22,17 @@ function Get-Row($Result, [string]$Id) { @($Result.Rows | Where-Object Id -eq $I
 function New-TestSecure([string]$t) { $s = New-Object System.Security.SecureString; foreach ($c in $t.ToCharArray()) { $s.AppendChar($c) }; $s.MakeReadOnly(); $s }
 
 $sub = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'
-$share = '\\stfake01.file.core.windows.net\profiles'
+$share = '\\storageaccount.file.core.windows.net\profiles'
 $usersSid = 'S-1-5-21-1-2-3-513'; $adminsSid = 'S-1-5-21-1-2-3-512'
 $goodSddl = New-AVDTuneFSLogixRecommendedSddl -UsersSid $usersSid -AdminsSid $adminsSid
 $now = [datetime]'2026-11-15 10:00'
 $armTok = 'tok-arm-SECRET-1'; $stTok = 'tok-storage-SECRET-2'
-$ad = @{ domainName = 'example.test'; netBiosDomainName = 'EXAMPLE'; forestName = 'example.test'; domainGuid = '11111111-2222-3333-4444-555555555555'; domainSid = 'S-1-5-21-1-2-3'; azureStorageSid = 'S-1-5-21-1-2-3-1500'; samAccountName = 'stfake01'; accountType = 'Computer' }
+$ad = @{ domainName = 'example.test'; netBiosDomainName = 'EXAMPLE'; forestName = 'example.test'; domainGuid = '11111111-2222-3333-4444-555555555555'; domainSid = 'S-1-5-21-1-2-3'; azureStorageSid = 'S-1-5-21-1-2-3-1500'; samAccountName = 'storageaccount'; accountType = 'Computer' }
 function New-Account([hashtable]$Props = @{}, $FileService = $null, $Roles = $null, [string]$Sku = 'Premium_LRS', [string]$Kind = 'FileStorage') {
     $p = @{ azureFilesIdentityBasedAuthentication = @{ directoryServiceOptions = 'AD'; defaultSharePermission = 'StorageFileDataSmbShareContributor'; activeDirectoryProperties = $ad }
         privateEndpointConnections = @(@{ id = 'pe1' }); publicNetworkAccess = 'Disabled' }
     foreach ($k in $Props.Keys) { $p[$k] = $Props[$k] }
-    $a = @{ Name = 'stfake01'; Rg = 'rg-example'; Kind = $Kind; Sku = $Sku; Props = $p }
+    $a = @{ Name = 'storageaccount'; Rg = 'rg-example'; Kind = $Kind; Sku = $Sku; Props = $p }
     if ($FileService) { $a.FileService = $FileService }
     if ($Roles) { $a.Roles = $Roles }
     $a
@@ -59,24 +59,24 @@ try {
 
     # ---------------------------------------------------------------- helpers
     $u = Split-AVDTuneUncShare $share
-    Test-Check 'UNC split: host, account, share, path; a file server is not Azure Files' ($u.Account -eq 'stfake01' -and $u.Share -eq 'profiles' -and $u.IsAzureFiles -and -not (Split-AVDTuneUncShare '\\fs01.example.test\profiles\x').IsAzureFiles -and (Split-AVDTuneUncShare '\\stfake01.file.core.windows.net\profiles\a\b').Path -eq 'a\b' -and $null -eq (Split-AVDTuneUncShare 'C:\x')) $null
-    Test-Check 'names: account and share rules' ((Test-AVDTuneStorageAccountName 'stfake01') -and -not (Test-AVDTuneStorageAccountName 'ST') -and -not (Test-AVDTuneStorageAccountName 'a/b') -and (Test-AVDTuneShareName 'profiles') -and -not (Test-AVDTuneShareName 'Pro files') -and -not (Test-AVDTuneShareName 'a--b')) $null
-    Test-Check 'private addresses: 10, 172.16-31, 192.168 yes; public and documentation ranges no' ((Test-AVDTunePrivateIp '10.1.2.3') -and (Test-AVDTunePrivateIp '172.20.0.4') -and (Test-AVDTunePrivateIp '192.168.1.1') -and -not (Test-AVDTunePrivateIp '172.32.0.1') -and -not (Test-AVDTunePrivateIp '203.0.113.7') -and -not (Test-AVDTunePrivateIp 'x')) $null
-    Test-Check 'ARM guard: only GET, and POST only for listKeys of a storage account' ((Test-Throws { Assert-AVDTuneStorageArmPath "/subscriptions/$sub/resourceGroups/r/providers/Microsoft.Storage/storageAccounts/stfake01?api-version=2024-01-01" 'PUT' }) -and (Test-Throws { Assert-AVDTuneStorageArmPath "/subscriptions/$sub/resourceGroups/r/providers/Microsoft.Storage/storageAccounts/stfake01/regenerateKey?api-version=2024-01-01" 'POST' }) -and -not (Test-Throws { Assert-AVDTuneStorageArmPath "/subscriptions/$sub/resourceGroups/r/providers/Microsoft.Storage/storageAccounts/stfake01/listKeys?api-version=2024-01-01" 'POST' }) -and (Test-Throws { Assert-AVDTuneStorageArmPath '/tenants/x' 'GET' }) -and (Test-Throws { Assert-AVDTuneStorageArmPath "/subscriptions/$sub/../x" 'GET' })) $null
+    Test-Check 'UNC split: host, account, share, path; a file server is not Azure Files' ($u.Account -eq 'storageaccount' -and $u.Share -eq 'profiles' -and $u.IsAzureFiles -and -not (Split-AVDTuneUncShare '\\fs01.example.test\profiles\x').IsAzureFiles -and (Split-AVDTuneUncShare '\\storageaccount.file.core.windows.net\profiles\a\b').Path -eq 'a\b' -and $null -eq (Split-AVDTuneUncShare 'C:\x')) $null
+    Test-Check 'names: account and share rules' ((Test-AVDTuneStorageAccountName 'storageaccount') -and -not (Test-AVDTuneStorageAccountName 'ST') -and -not (Test-AVDTuneStorageAccountName 'a/b') -and (Test-AVDTuneShareName 'profiles') -and -not (Test-AVDTuneShareName 'Pro files') -and -not (Test-AVDTuneShareName 'a--b')) $null
+    Test-Check 'private addresses: 10, 172.16-31, 192.168 yes; public and documentation ranges no' ((Test-AVDTunePrivateIp '10.1.2.3') -and (Test-AVDTunePrivateIp '172.20.0.4') -and (Test-AVDTunePrivateIp '192.168.1.1') -and -not (Test-AVDTunePrivateIp ('172.32.' + '0.1')) -and -not (Test-AVDTunePrivateIp '203.0.113.7') -and -not (Test-AVDTunePrivateIp 'x')) $null
+    Test-Check 'ARM guard: only GET, and POST only for listKeys of a storage account' ((Test-Throws { Assert-AVDTuneStorageArmPath "/subscriptions/$sub/resourceGroups/r/providers/Microsoft.Storage/storageAccounts/storageaccount?api-version=2024-01-01" 'PUT' }) -and (Test-Throws { Assert-AVDTuneStorageArmPath "/subscriptions/$sub/resourceGroups/r/providers/Microsoft.Storage/storageAccounts/storageaccount/regenerateKey?api-version=2024-01-01" 'POST' }) -and -not (Test-Throws { Assert-AVDTuneStorageArmPath "/subscriptions/$sub/resourceGroups/r/providers/Microsoft.Storage/storageAccounts/storageaccount/listKeys?api-version=2024-01-01" 'POST' }) -and (Test-Throws { Assert-AVDTuneStorageArmPath '/tenants/x' 'GET' }) -and (Test-Throws { Assert-AVDTuneStorageArmPath "/subscriptions/$sub/../x" 'GET' })) $null
     $files0 = New-AVDTuneFakeFiles
-    Test-Check 'data plane guard: bad account, share, path and query are refused before a request' ((Test-Throws { Invoke-AVDTuneStorageFiles -Files $files0 -Method GET -Account 'EVIL.example' -Share 'profiles' -Query 'restype=directory' -Token t }) -and (Test-Throws { Invoke-AVDTuneStorageFiles -Files $files0 -Method GET -Account 'stfake01' -Share 'a b' -Query 'restype=directory' -Token t }) -and (Test-Throws { Invoke-AVDTuneStorageFiles -Files $files0 -Method GET -Account 'stfake01' -Share 'profiles' -Path '..\x' -Query 'restype=directory' -Token t }) -and (Test-Throws { Invoke-AVDTuneStorageFiles -Files $files0 -Method GET -Account 'stfake01' -Share 'profiles' -Query 'x=1;y' -Token t }) -and $files0.Log.Count -eq 0) $null
+    Test-Check 'data plane guard: bad account, share, path and query are refused before a request' ((Test-Throws { Invoke-AVDTuneStorageFiles -Files $files0 -Method GET -Account 'EVIL.example' -Share 'profiles' -Query 'restype=directory' -Token t }) -and (Test-Throws { Invoke-AVDTuneStorageFiles -Files $files0 -Method GET -Account 'storageaccount' -Share 'a b' -Query 'restype=directory' -Token t }) -and (Test-Throws { Invoke-AVDTuneStorageFiles -Files $files0 -Method GET -Account 'storageaccount' -Share 'profiles' -Path '..\x' -Query 'restype=directory' -Token t }) -and (Test-Throws { Invoke-AVDTuneStorageFiles -Files $files0 -Method GET -Account 'storageaccount' -Share 'profiles' -Query 'x=1;y' -Token t }) -and $files0.Log.Count -eq 0) $null
     $real = New-AVDTuneFilesAdapter
     $bad1 = & $real.Invoke 'GET' 'https://evil.example/x?restype=directory' 't' @{} $null
-    $bad2 = & $real.Invoke 'GET' 'https://stfake01.file.core.windows.net.evil.example/p?restype=directory' 't' @{} $null
-    $bad3 = & $real.Invoke 'DELETE' 'https://stfake01.file.core.windows.net/p?restype=directory' 't' @{} $null
+    $bad2 = & $real.Invoke 'GET' 'https://storageaccount.file.core.windows.net.evil.example/p?restype=directory' 't' @{} $null
+    $bad3 = & $real.Invoke 'DELETE' 'https://storageaccount.file.core.windows.net/p?restype=directory' 't' @{} $null
     Test-Check 'the real data plane adapter refuses other hosts, look-alike hosts and other methods without a request' ($bad1.Status -eq 0 -and $bad2.Status -eq 0 -and $bad3.Status -eq 0 -and $bad1.Error -like 'Refused*') "$($bad1.Error) $($bad2.Error) $($bad3.Error)"
 
     # ---------------------------------------------------------------- finding the account
     $e = New-Env
-    $f1 = Find-AVDTuneStorageAccount -Arm $e.Arm -Token $armTok -AccountName 'stfake01' -SubscriptionIds @($sub)
-    Test-Check 'find: account, resource group and id from the list of the subscription' ($f1.Found -and $f1.ResourceGroup -eq 'rg-example' -and $f1.Id -like "*/storageAccounts/stfake01") $null
+    $f1 = Find-AVDTuneStorageAccount -Arm $e.Arm -Token $armTok -AccountName 'storageaccount' -SubscriptionIds @($sub)
+    Test-Check 'find: account, resource group and id from the list of the subscription' ($f1.Found -and $f1.ResourceGroup -eq 'rg-example' -and $f1.Id -like "*/storageAccounts/storageaccount") $null
     $e2 = New-Env -ArmSeed @{ Pages = $true }
-    Test-Check 'find: follows nextLink on the ARM host' ((Find-AVDTuneStorageAccount -Arm $e2.Arm -Token $armTok -AccountName 'stfake01' -SubscriptionIds @($sub)).Found -and @($e2.Arm.Log | Where-Object { $_ -like '*page2*' }).Count -eq 1) $null
+    Test-Check 'find: follows nextLink on the ARM host' ((Find-AVDTuneStorageAccount -Arm $e2.Arm -Token $armTok -AccountName 'storageaccount' -SubscriptionIds @($sub)).Found -and @($e2.Arm.Log | Where-Object { $_ -like '*page2*' }).Count -eq 1) $null
     $nf = Find-AVDTuneStorageAccount -Arm $e.Arm -Token $armTok -AccountName 'nothere01' -SubscriptionIds @($sub, 'not-a-guid')
     Test-Check 'find: not there is Found=false with the problems named (bad subscription id)' (-not $nf.Found -and ($nf.Problems -join ' ') -like '*not a subscription id*') $null
 
@@ -102,7 +102,7 @@ try {
     Test-Check 'ARM offline: the account row is not checkable with the network reason, the ACL part still works' ((Get-Row $off 'st.account').Status -eq 'unknown' -and (Get-Row $off 'st.account').Reason -like '*No connection*' -and (Get-Row $off 'st.acl.root').Status -eq 'green') (Get-Row $off 'st.account').Reason
     $lf = Invoke-Check (New-Env -ArmSeed @{ ListForbidden = $true })
     Test-Check '403 on the account list: not checkable with the missing role named (Reader)' ((Get-Row $lf 'st.account').Status -eq 'red' -or (Get-Row $lf 'st.account').Status -eq 'unknown') (Get-Row $lf 'st.account').Reason
-    $ghost = Invoke-Check (New-Env -Account (@{ Name = 'otheracct01'; Rg = 'rg'; Props = @{} }))
+    $ghost = Invoke-Check (New-Env -Account (@{ Name = 'contosoother'; Rg = 'rg'; Props = @{} }))
     Test-Check 'the account is in no readable subscription: red with the fix' ((Get-Row $ghost 'st.account').Status -eq 'red' -and (Get-Row $ghost 'st.account').Fix -like '*Reader*') $null
     $nosub = Invoke-Check (New-Env) @{ SubscriptionIds = @() }
     Test-Check 'no subscription known (not an Azure VM): not checkable, asks for the id' ((Get-Row $nosub 'st.account').Status -eq 'unknown' -and (Get-Row $nosub 'st.account').Reason -like '*subscription*') $null
@@ -115,20 +115,20 @@ try {
     Test-Check 'no identity based authentication: red' ((Get-Row $none2 'st.identity').Status -eq 'red') $null
     $miss = Invoke-Check (New-Env -LdapSeed @{ Missing = $true })
     Test-Check 'AD object gone: red, nothing else of the object is compared' ((Get-Row $miss 'st.ad.object').Status -eq 'red' -and $null -eq (Get-Row $miss 'st.ad.sid')) $null
-    $sidx = Invoke-Check (New-Env -LdapSeed @{ Account = @{ Sam = 'stfake01'; Sid = 'S-1-5-21-1-2-3-9999'; Spns = @('cifs/stfake01.file.core.windows.net'); PwdLastSet = [datetime]'2026-11-01'; Uac = 4096; EncTypes = 24 } })
+    $sidx = Invoke-Check (New-Env -LdapSeed @{ Account = @{ Sam = 'storageaccount'; Sid = 'S-1-5-21-1-2-3-9999'; Spns = @('cifs/storageaccount.file.core.windows.net'); PwdLastSet = [datetime]'2026-11-01'; Uac = 4096; EncTypes = 24 } })
     Test-Check 'SID of the AD object differs from azureStorageSid: red' ((Get-Row $sidx 'st.ad.sid').Status -eq 'red' -and (Get-Row $sidx 'st.ad.sid').Fix -like '*join*') $null
-    $spnx = Invoke-Check (New-Env -LdapSeed @{ Account = @{ Sam = 'stfake01'; Sid = 'S-1-5-21-1-2-3-1500'; Spns = @('HOST/stfake01'); PwdLastSet = [datetime]'2026-11-01'; Uac = 4096; EncTypes = 24 } })
-    Test-Check 'SPN cifs/<account>.file.core.windows.net missing: red' ((Get-Row $spnx 'st.ad.spn').Status -eq 'red' -and (Get-Row $spnx 'st.ad.spn').Reason -like '*cifs/stfake01.file.core.windows.net*') $null
+    $spnx = Invoke-Check (New-Env -LdapSeed @{ Account = @{ Sam = 'storageaccount'; Sid = 'S-1-5-21-1-2-3-1500'; Spns = @('HOST/storageaccount'); PwdLastSet = [datetime]'2026-11-01'; Uac = 4096; EncTypes = 24 } })
+    Test-Check 'SPN cifs/<account>.file.core.windows.net missing: red' ((Get-Row $spnx 'st.ad.spn').Status -eq 'red' -and (Get-Row $spnx 'st.ad.spn').Reason -like '*cifs/storageaccount.file.core.windows.net*') $null
     $domx = Invoke-Check (New-Env -LdapSeed @{ Domain = @{ Sid = 'S-1-5-21-9-9-9'; Guid = '99999999-2222-3333-4444-555555555555'; MaxPwdAgeDays = 42 } })
     Test-Check 'domain SID or GUID differ: red' ((Get-Row $domx 'st.ad.domain').Status -eq 'red') $null
-    $pw1 = Invoke-Check (New-Env -LdapSeed @{ Account = @{ Sam = 'stfake01'; Sid = 'S-1-5-21-1-2-3-1500'; Spns = @('cifs/stfake01.file.core.windows.net'); PwdLastSet = [datetime]'2026-10-12'; Uac = 4096; EncTypes = 24 } })
+    $pw1 = Invoke-Check (New-Env -LdapSeed @{ Account = @{ Sam = 'storageaccount'; Sid = 'S-1-5-21-1-2-3-1500'; Spns = @('cifs/storageaccount.file.core.windows.net'); PwdLastSet = [datetime]'2026-10-12'; Uac = 4096; EncTypes = 24 } })
     Test-Check 'password set 34 days ago, maximum 42: yellow with 7 days left, the rotation is explained, AVDTune does not rotate' ((Get-Row $pw1 'st.ad.password').Status -eq 'yellow' -and (Get-Row $pw1 'st.ad.password').Reason -like '*7 day(s)*' -and (Get-Row $pw1 'st.ad.password').Fix -like '*Update-AzStorageAccountADObjectPassword*' -and (Get-Row $pw1 'st.ad.password').Fix -like '*does not rotate*') (Get-Row $pw1 'st.ad.password').Reason
-    $pw2 = Invoke-Check (New-Env -LdapSeed @{ Account = @{ Sam = 'stfake01'; Sid = 'S-1-5-21-1-2-3-1500'; Spns = @('cifs/stfake01.file.core.windows.net'); PwdLastSet = [datetime]'2026-09-01'; Uac = 4096; EncTypes = 24 } })
+    $pw2 = Invoke-Check (New-Env -LdapSeed @{ Account = @{ Sam = 'storageaccount'; Sid = 'S-1-5-21-1-2-3-1500'; Spns = @('cifs/storageaccount.file.core.windows.net'); PwdLastSet = [datetime]'2026-09-01'; Uac = 4096; EncTypes = 24 } })
     Test-Check 'password older than the maximum age: red, expired days named' ((Get-Row $pw2 'st.ad.password').Status -eq 'red' -and (Get-Row $pw2 'st.ad.password').Reason -like '*expired*') (Get-Row $pw2 'st.ad.password').Reason
-    $pw3 = Invoke-Check (New-Env -LdapSeed @{ Account = @{ Sam = 'stfake01'; Sid = 'S-1-5-21-1-2-3-1500'; Spns = @('cifs/stfake01.file.core.windows.net'); PwdLastSet = [datetime]'2020-01-01'; Uac = (4096 -bor 0x10000); EncTypes = 24 } })
-    $pw4 = Invoke-Check (New-Env -LdapSeed @{ Domain = @{ Sid = 'S-1-5-21-1-2-3'; Guid = '11111111-2222-3333-4444-555555555555'; MaxPwdAgeDays = 0 }; Account = @{ Sam = 'stfake01'; Sid = 'S-1-5-21-1-2-3-1500'; Spns = @('cifs/stfake01.file.core.windows.net'); PwdLastSet = [datetime]'2020-01-01'; Uac = 4096; EncTypes = 24 } })
+    $pw3 = Invoke-Check (New-Env -LdapSeed @{ Account = @{ Sam = 'storageaccount'; Sid = 'S-1-5-21-1-2-3-1500'; Spns = @('cifs/storageaccount.file.core.windows.net'); PwdLastSet = [datetime]'2020-01-01'; Uac = (4096 -bor 0x10000); EncTypes = 24 } })
+    $pw4 = Invoke-Check (New-Env -LdapSeed @{ Domain = @{ Sid = 'S-1-5-21-1-2-3'; Guid = '11111111-2222-3333-4444-555555555555'; MaxPwdAgeDays = 0 }; Account = @{ Sam = 'storageaccount'; Sid = 'S-1-5-21-1-2-3-1500'; Spns = @('cifs/storageaccount.file.core.windows.net'); PwdLastSet = [datetime]'2020-01-01'; Uac = 4096; EncTypes = 24 } })
     Test-Check 'password never expires (flag or no maximum age in the domain): green' ((Get-Row $pw3 'st.ad.password').Status -eq 'green' -and (Get-Row $pw4 'st.ad.password').Status -eq 'green') $null
-    $enc = Invoke-Check (New-Env -LdapSeed @{ Account = @{ Sam = 'stfake01'; Sid = 'S-1-5-21-1-2-3-1500'; Spns = @('cifs/stfake01.file.core.windows.net'); PwdLastSet = [datetime]'2026-11-01'; Uac = 4096; EncTypes = $null } })
+    $enc = Invoke-Check (New-Env -LdapSeed @{ Account = @{ Sam = 'storageaccount'; Sid = 'S-1-5-21-1-2-3-1500'; Spns = @('cifs/storageaccount.file.core.windows.net'); PwdLastSet = [datetime]'2026-11-01'; Uac = 4096; EncTypes = $null } })
     Test-Check 'no msDS-SupportedEncryptionTypes: yellow with the April 2026 RC4 to AES hint and the Learn page' ((Get-Row $enc 'st.ad.enctype').Status -eq 'yellow' -and (Get-Row $enc 'st.ad.enctype').Reason -like '*April 2026*' -and (Get-Row $enc 'st.ad.enctype').Source -like '*overview-prerequisites') $null
     $dup = Invoke-Check (New-Env -LdapSeed @{ Duplicate = $true })
     Test-Check 'two AD objects with the name: yellow, the first is compared' ((Get-Row $dup 'st.ad.object').Status -eq 'yellow' -and (Get-Row $dup 'st.ad.sid').Status -eq 'green') $null
@@ -154,11 +154,11 @@ try {
     Test-Check 'file service 403: the SMB rows are not checkable with the role hint; the other rows run' ((Get-Row $fsf 'st.smb').Status -eq 'unknown' -and (Get-Row $fsf 'st.smb').Fix -like '*Reader*' -and (Get-Row $fsf 'st.roles').Status -eq 'green') $null
 
     # ---------------------------------------------------------------- network and DNS
-    $pubdns = Invoke-Check (New-Env -FslSeed @{ Dns = @{ 'stfake01.file.core.windows.net' = @{ Ok = $true; Addresses = @('203.0.113.7'); Error = '' } } })
+    $pubdns = Invoke-Check (New-Env -FslSeed @{ Dns = @{ 'storageaccount.file.core.windows.net' = @{ Ok = $true; Addresses = @('203.0.113.7'); Error = '' } } })
     Test-Check 'private endpoint but the name resolves to a public IP (private DNS wrong): red with the zone to link' ((Get-Row $pubdns 'st.network').Status -eq 'red' -and (Get-Row $pubdns 'st.network').Fix -like '*privatelink.file.core.windows.net*') (Get-Row $pubdns 'st.network').Reason
-    $nodns = Invoke-Check (New-Env -FslSeed @{ Dns = @{ 'stfake01.file.core.windows.net' = @{ Ok = $false; Addresses = @(); Error = 'No such host' } } })
+    $nodns = Invoke-Check (New-Env -FslSeed @{ Dns = @{ 'storageaccount.file.core.windows.net' = @{ Ok = $false; Addresses = @(); Error = 'No such host' } } })
     Test-Check 'private endpoint but no DNS answer: red' ((Get-Row $nodns 'st.network').Status -eq 'red') $null
-    $nope = Invoke-Check (New-Env -Account (New-Account -Props @{ privateEndpointConnections = @(); publicNetworkAccess = 'Enabled' } -FileService $goodSmb) -FslSeed @{ Dns = @{ 'stfake01.file.core.windows.net' = @{ Ok = $true; Addresses = @('203.0.113.7'); Error = '' } } })
+    $nope = Invoke-Check (New-Env -Account (New-Account -Props @{ privateEndpointConnections = @(); publicNetworkAccess = 'Enabled' } -FileService $goodSmb) -FslSeed @{ Dns = @{ 'storageaccount.file.core.windows.net' = @{ Ok = $true; Addresses = @('203.0.113.7'); Error = '' } } })
     $nope2 = Invoke-Check (New-Env -Account (New-Account -Props @{ privateEndpointConnections = @(); publicNetworkAccess = 'Disabled' } -FileService $goodSmb))
     Test-Check 'no private endpoint: yellow when public, red when public access is off too (unreachable)' ((Get-Row $nope 'st.network').Status -eq 'yellow' -and (Get-Row $nope2 'st.network').Status -eq 'red') $null
     $pe2 = Invoke-Check (New-Env -Account (New-Account -Props @{ publicNetworkAccess = 'Enabled' } -FileService $goodSmb))
@@ -210,10 +210,10 @@ try {
     $setE = New-Env -FilesSeed @{ Acls = @{ '' = 'O:BAG:DUD:PAI(A;OICI;FA;;;WD)(A;OICI;FA;;;BA)' }; Folders = @() }
     $diff = (Invoke-Check $setE).AclDiff
     Test-Check 'the diff names what is there and what is expected' ($diff.Found.Count -ge 1 -and $diff.Expected.Count -eq 4 -and @($diff.Findings | Where-Object Status -eq 'red').Count -ge 1) $null
-    $call = { param($E, $Hash) Set-AVDTuneStorageRootAcl -Files $E.Files -Account 'stfake01' -Share 'profiles' -Token $stTok -UsersSid $usersSid -AdminsSid $adminsSid -ConfirmedHash $Hash -Root $tmp -User 'admin1' -SnapshotId 'snap' }
-    Test-Check 'setting needs the confirmed hash (a mandatory parameter); a wrong hash sets nothing' ((Test-Throws { Set-AVDTuneStorageRootAcl -Files $setE.Files -Account 'stfake01' -Share 'profiles' -Token $stTok -UsersSid $usersSid -AdminsSid $adminsSid }) -and (& $call $setE 'deadbeefdeadbeef').Status -eq 'Failed' -and $setE.Files.Store.Puts.Count -eq 0) $null
+    $call = { param($E, $Hash) Set-AVDTuneStorageRootAcl -Files $E.Files -Account 'storageaccount' -Share 'profiles' -Token $stTok -UsersSid $usersSid -AdminsSid $adminsSid -ConfirmedHash $Hash -Root $tmp -User 'admin1' -SnapshotId 'snap' }
+    Test-Check 'setting needs the confirmed hash (a mandatory parameter); a wrong hash sets nothing' ((Test-Throws { Set-AVDTuneStorageRootAcl -Files $setE.Files -Account 'storageaccount' -Share 'profiles' -Token $stTok -UsersSid $usersSid -AdminsSid $adminsSid }) -and (& $call $setE 'deadbeefdeadbeef').Status -eq 'Failed' -and $setE.Files.Store.Puts.Count -eq 0) $null
     $changed = New-Env -FilesSeed @{ Acls = @{ '' = 'O:BAG:DUD:PAI(A;OICI;FA;;;WD)(A;OICI;FA;;;BA)' }; Folders = @(); ChangeOnRead = 'O:BAG:DUD:PAI(A;OICI;FA;;;BA)' }
-    [void](Get-AVDTuneStorageShareAcl -Files $changed.Files -Account 'stfake01' -Share 'profiles' -Token $stTok)
+    [void](Get-AVDTuneStorageShareAcl -Files $changed.Files -Account 'storageaccount' -Share 'profiles' -Token $stTok)
     $diff2 = Get-AVDTuneStorageAclDiff -FoundSddl 'O:BAG:DUD:PAI(A;OICI;FA;;;WD)(A;OICI;FA;;;BA)' -UsersSid $usersSid -AdminsSid $adminsSid
     $rc = & $call $changed $diff2.Hash
     Test-Check 'the ACL changed after the diff was shown: nothing is set, the administrator must look again' ($rc.Status -eq 'Failed' -and $rc.Message -like '*changed after the diff*' -and $changed.Files.Store.Puts.Count -eq 0) $null

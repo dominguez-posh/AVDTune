@@ -45,7 +45,7 @@ function Test-AVDTuneStorageAccountName([string]$Name) { $Name -cmatch '^[a-z0-9
 function Test-AVDTuneShareName([string]$Name) { $Name -cmatch '^[a-z0-9]([a-z0-9]|-(?!-)){1,61}[a-z0-9]$' }
 
 function Split-AVDTuneUncShare {
-    <# '\\acct.file.core.windows.net\share\folder' -> @{ Host; Account; Share; Path; IsAzureFiles }; $null when it is not a UNC path #>
+    <# '\\account.file.core.windows.net\share\folder' -> @{ Host; Account; Share; Path; IsAzureFiles }; $null when it is not a UNC path #>
     param([string]$Unc)
     if ($Unc -notmatch '^\\\\([^\\]+)\\([^\\]+)(?:\\(.*))?$') { return $null }
     $h = $Matches[1].ToLowerInvariant(); $share = $Matches[2]; $path = if ($Matches.Count -gt 3) { [string]$Matches[3] } else { '' }

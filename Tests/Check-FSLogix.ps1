@@ -22,7 +22,7 @@ function Test-Throws([scriptblock]$Block) { try { & $Block | Out-Null; $false } 
 function Get-ThrownText([scriptblock]$Block) { try { & $Block | Out-Null; $null } catch { $_.Exception.Message } }
 
 $pk = 'HKLM:\SOFTWARE\FSLogix\Profiles'
-$share = '\\stfake01.file.core.windows.net\profiles'
+$share = '\\storageaccount.file.core.windows.net\profiles'
 $fltmc = (Join-Path (Get-AVDTuneSystemFolder System) 'fltmc.exe') + ' filters'
 $good = @{
     "$pk|Enabled" = 1; "$pk|VHDLocations" = @($share); "$pk|VolumeType" = 'vhdx'; "$pk|SizeInMBs" = 30000; "$pk|DeleteLocalProfileWhenVHDShouldApply" = 1
@@ -80,7 +80,7 @@ try {
     Test-Check 'LastChange of the FSLogix side names the user and the plan' ($lc.User -eq 'admin1' -and $lc.Plan -like 'FSLogix*') $null
     $again = Set-AVDTuneFSLogixSettings -Machine $m -Root $tmp -Values @{ LockedRetryCount = 3 } -User 'admin1' -SnapshotId 'snap-check'
     Test-Check 'idempotent: the same value again is Unchanged (and keeps the earlier undo)' ($again.Results[0].Status -eq 'Unchanged') $null
-    $mv = Set-AVDTuneFSLogixSettings -Machine $m -Root $tmp -Values @{ VHDLocations = @($share, '\\stfake02.file.core.windows.net\profiles') } -User 'admin1' -SnapshotId 'snap-check'
+    $mv = Set-AVDTuneFSLogixSettings -Machine $m -Root $tmp -Values @{ VHDLocations = @($share, '\\contosostorage.file.core.windows.net\profiles') } -User 'admin1' -SnapshotId 'snap-check'
     Test-Check 'multi-string VHDLocations is written as a list' ((@(& $m.RegGet $pk 'VHDLocations')).Count -eq 2 -and $mv.Results[0].Status -eq 'Changed') $null
     $und = Undo-AVDTuneFSLogixSettings -Machine $m -Root $tmp -User 'admin1' -SnapshotId 'snap-check'
     Test-Check 'undo: the value before the last change is back (VHDLocations: one entry)' ((@(& $m.RegGet $pk 'VHDLocations')).Count -eq 1 -and @($und.Results | Where-Object Status -eq 'Failed').Count -eq 0) $null
@@ -249,11 +249,11 @@ try {
     Test-Check 'a misspelled value name is a yellow typo hint' ((Get-Row $tty 'fs.registry').Status -eq 'yellow' -and (Get-Row $tty 'fs.registry').Reason -like '*LockedRetyCount*') (Get-Row $tty 'fs.registry').Reason
     $tc = Invoke-AVDTuneFSLogixTest -Machine (New-Master -Reg @{ "$pk|CCDLocations" = 'type=smb' }) -F (& $goodF)
     Test-Check 'Cloud Cache together with VHDLocations: red conflict' ((Get-Row $tc 'fs.conflict').Status -eq 'red') $null
-    $tdns = Invoke-AVDTuneFSLogixTest -Machine (New-Master) -F (New-AVDTuneFakeFSLogix -Seed @{ Dns = @{ 'stfake01.file.core.windows.net' = @{ Ok = $false; Addresses = @(); Error = 'No such host is known' } } })
+    $tdns = Invoke-AVDTuneFSLogixTest -Machine (New-Master) -F (New-AVDTuneFakeFSLogix -Seed @{ Dns = @{ 'storageaccount.file.core.windows.net' = @{ Ok = $false; Addresses = @(); Error = 'No such host is known' } } })
     Test-Check 'DNS does not resolve (private zone missing): red with the private DNS fix, port and SMB are info (not tested)' ((Get-Row $tdns 'fs.loc1.dns').Status -eq 'red' -and (Get-Row $tdns 'fs.loc1.dns').Fix -like '*privatelink*' -and (Get-Row $tdns 'fs.loc1.tcp').Status -eq 'info' -and (Get-Row $tdns 'fs.loc1.smb').Status -eq 'info') $null
-    $tpub = Invoke-AVDTuneFSLogixTest -Machine (New-Master) -F (New-AVDTuneFakeFSLogix -Seed @{ Dns = @{ 'stfake01.file.core.windows.net' = @{ Ok = $true; Addresses = @('203.0.113.7'); Error = '' } } })
+    $tpub = Invoke-AVDTuneFSLogixTest -Machine (New-Master) -F (New-AVDTuneFakeFSLogix -Seed @{ Dns = @{ 'storageaccount.file.core.windows.net' = @{ Ok = $true; Addresses = @('203.0.113.7'); Error = '' } } })
     Test-Check 'DNS answers (the reading of the IP is shown to the administrator, who decides whether it is the private one)' ((Get-Row $tpub 'fs.loc1.dns').Reason -like '*203.0.113.7*') $null
-    $t445 = Invoke-AVDTuneFSLogixTest -Machine (New-Master) -F (New-AVDTuneFakeFSLogix -Seed @{ Tcp = @{ 'stfake01.file.core.windows.net' = $false } })
+    $t445 = Invoke-AVDTuneFSLogixTest -Machine (New-Master) -F (New-AVDTuneFakeFSLogix -Seed @{ Tcp = @{ 'storageaccount.file.core.windows.net' = $false } })
     Test-Check 'port 445 blocked: red with the firewall hint' ((Get-Row $t445 'fs.loc1.tcp').Status -eq 'red' -and (Get-Row $t445 'fs.loc1.tcp').Fix -like '*445*') $null
     $tden = Invoke-AVDTuneFSLogixTest -Machine (New-Master) -F (New-AVDTuneFakeFSLogix -Seed @{ Probe = @{ $share = 'Denied' } }) -RunWriteTests
     Test-Check 'the share refuses the master (not joined): yellow, expected, write tests not run and say why' ((Get-Row $tden 'fs.loc1.smb').Status -eq 'yellow' -and (Get-Row $tden 'fs.loc1.rw').Status -eq 'yellow' -and (Get-Row $tden 'fs.loc1.vhdx').Status -eq 'yellow' -and $tden.Overall -eq 'yellow') $null

@@ -1,6 +1,6 @@
 # Fakes for the storage check (Modules\AVDTune.Storage.psm1): Azure Resource Manager routes of Microsoft.Storage and role assignments (New-AVDTuneFakeStorageArm), the file
 # share data plane (New-AVDTuneFakeFiles) and an LDAP adapter that answers the storage account's AD object and the domain (New-AVDTuneFakeStorageLdap). In memory, no network,
-# no tenant. Every call is in .Log (method and URL, never a token or a key). All names are made up (stfake01, example.test, contoso).
+# no tenant. Every call is in .Log (method and URL, never a token or a key). All names are made up (storageaccount, example.test, contoso).
 
 $script:StSub = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'
 function ConvertTo-StJson($Object) { $Object | ConvertTo-Json -Depth 12 | ConvertFrom-Json }
@@ -102,7 +102,7 @@ function New-AVDTuneFakeFiles {
 function New-AVDTuneFakeStorageLdap {
     param([hashtable]$Seed = @{})
     $sidBytes = { param($t) $b = New-Object byte[] 28; (New-Object Security.Principal.SecurityIdentifier $t).GetBinaryForm($b, 0); , $b }
-    $s = @{ Account = @{ Sam = 'stfake01'; Sid = 'S-1-5-21-1-2-3-1500'; Spns = @('cifs/stfake01.file.core.windows.net'); PwdLastSet = [datetime]'2026-11-01'; Uac = 4096; EncTypes = 24 }
+    $s = @{ Account = @{ Sam = 'storageaccount'; Sid = 'S-1-5-21-1-2-3-1500'; Spns = @('cifs/storageaccount.file.core.windows.net'); PwdLastSet = [datetime]'2026-11-01'; Uac = 4096; EncTypes = 24 }
         Domain = @{ Sid = 'S-1-5-21-1-2-3'; Guid = '11111111-2222-3333-4444-555555555555'; MaxPwdAgeDays = 42 }; Missing = $false; Fail = $false; Duplicate = $false; Log = (New-Object System.Collections.ArrayList) }
     foreach ($e in $Seed.GetEnumerator()) { $s[$e.Key] = $e.Value }
     $a = [ordered]@{ Kind = 'Fake'; Store = $s; Log = $s.Log }
