@@ -300,6 +300,7 @@ function Invoke-SignIn {
     Show-Toast "Signed in as $($info.Account)."
     Close-Stage
     Update-StartView
+    Start-ReadyJob 'Start' ''   # the Azure checks of the readiness analysis can read now
 }
 function Invoke-SignOut {
     if ($script:StartContext.Session) { Disconnect-AVDTuneSession $script:StartContext.Session }

@@ -139,6 +139,36 @@
                                             <StackPanel x:Name="PanelHealth" Margin="0,6,0,0"/>
                                         </StackPanel>
                                     </Border>
+                                    <Border x:Name="BoxReady" Style="{DynamicResource CardBox}" Margin="0,16,0,0" Background="{DynamicResource Card}" Padding="20,16">
+                                        <StackPanel>
+                                            <Grid>
+                                                <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                                                <StackPanel Orientation="Horizontal">
+                                                    <TextBlock Text="Readiness" Style="{DynamicResource CardTitle}" VerticalAlignment="Center"/>
+                                                    <Border x:Name="PillReady" Style="{DynamicResource Pill}" Padding="10,2" Margin="12,0,0,0" VerticalAlignment="Center"><TextBlock x:Name="TxtReadyPill" FontSize="12" FontWeight="SemiBold"/></Border>
+                                                </StackPanel>
+                                                <Button x:Name="BtnReadyRun" Grid.Column="1" Style="{DynamicResource PrimaryButton}" Content="Run analysis" AutomationProperties.Name="Run the readiness analysis"/>
+                                            </Grid>
+                                            <TextBlock x:Name="TxtReadyIntro" Style="{DynamicResource Hint}" Margin="0,4,0,0" TextWrapping="Wrap" Text="Is this master ready for the current VM sizes (v6/v7) and clean enough to become an image? Read only; every finding has its reason, its Microsoft Learn source and a fix hint."/>
+                                            <TextBlock x:Name="TxtReadySummary" Margin="0,10,0,0" TextWrapping="Wrap"/>
+                                            <TextBlock x:Name="TxtReadyGate" Margin="0,4,0,0" TextWrapping="Wrap"/>
+                                            <StackPanel x:Name="PanelReadyRows" Margin="0,8,0,0"/>
+                                            <TextBlock x:Name="TxtReadyFamilies" Style="{DynamicResource Hint}" Margin="0,10,0,0" TextWrapping="Wrap"/>
+                                            <StackPanel x:Name="PanelReadyAck" Visibility="Collapsed" Margin="0,14,0,0">
+                                                <TextBlock x:Name="TxtReadyAckHint" TextWrapping="Wrap" Margin="0,0,0,6"/>
+                                                <StackPanel Orientation="Horizontal">
+                                                    <TextBox x:Name="TxtReadyAck" Width="520" Margin="0,0,8,0" Padding="8,6" AutomationProperties.Name="Names of the open items to confirm"/>
+                                                    <Button x:Name="BtnReadyAck" Content="Confirm" AutomationProperties.Name="Confirm the open items by name"/>
+                                                </StackPanel>
+                                            </StackPanel>
+                                            <StackPanel Orientation="Horizontal" Margin="0,14,0,0">
+                                                <TextBlock Text="Image definition" VerticalAlignment="Center" Margin="0,0,10,0"/>
+                                                <TextBox x:Name="TxtReadyGallery" Width="520" Margin="0,0,8,0" Padding="8,6" AutomationProperties.Name="Resource ID of the Azure Compute Gallery image definition"/>
+                                                <Button x:Name="BtnReadyGallery" Content="Save" AutomationProperties.Name="Save the image definition"/>
+                                            </StackPanel>
+                                            <TextBlock Style="{DynamicResource Hint}" Margin="0,4,0,0" TextWrapping="Wrap" Text="Resource ID of the gallery image definition the image is captured into (optional; read with the sign-in, read only). Without it, the VM's own gallery image is used when it has one."/>
+                                        </StackPanel>
+                                    </Border>
                                 </StackPanel>
                             </ScrollViewer>
                         </Grid>
