@@ -329,7 +329,8 @@ function New-AVDTuneArmAdapter {
         try {
             $text = (New-Object IO.StreamReader($response.GetResponseStream())).ReadToEnd()
             $parsed = $null; if ($text.Trim()) { try { $parsed = $text | ConvertFrom-Json } catch { } }
-            [pscustomobject]@{ Status = [int]$response.StatusCode; Body = $parsed; Error = '' }
+            $hs = @{}; foreach ($k in $response.Headers.AllKeys) { $hs[[string]$k] = [string]$response.Headers[$k] }   # Azure-AsyncOperation, Location, Retry-After of asynchronous operations (environment wizard)
+            [pscustomobject]@{ Status = [int]$response.StatusCode; Body = $parsed; Error = ''; Headers = $hs }
         }
         finally { $response.Close() }
     }
