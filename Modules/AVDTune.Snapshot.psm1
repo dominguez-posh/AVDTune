@@ -149,13 +149,13 @@ function ConvertTo-AVDTuneSnapshotInfo {
     $state = [string](Get-AVDTuneProp $p 'provisioningState')
     $byTool = ([string](Get-AVDTuneProp $tags 'CreatedWith') -eq 'AVDTune')
     $id = [string](Get-AVDTuneProp $Item 'id')
-    $fit = if ($state -ne 'Succeeded') { [pscustomobject]@{ Valid = $false; Reason = "Not finished (state $(if ($state) { $state } else { 'unknown' }))." } } else { Test-AVDTuneSnapshotInWindow -Created $created -Id $id -Window $Window }
+    $fit = if ($state -ne 'Succeeded') { [pscustomobject]@{ Valid = $false; Kind = ''; Reason = "Not finished (state $(if ($state) { $state } else { 'unknown' }))." } } else { Test-AVDTuneSnapshotInWindow -Created $created -Id $id -Window $Window }
     [pscustomobject]@{
         Name = [string](Get-AVDTuneProp $Item 'name'); Id = [string](Get-AVDTuneProp $Item 'id'); Created = $created; State = $state
         Incremental = [bool](Get-AVDTuneProp $p 'incremental'); ByAVDTune = $byTool
         ImageVersion = [string](Get-AVDTuneProp $tags 'ImageVersion'); CreatedBy = [string](Get-AVDTuneProp $tags 'CreatedBy')
         Finished = ($state -eq 'Succeeded')
-        Valid = [bool]$fit.Valid; Reason = [string]$fit.Reason
+        Valid = [bool]$fit.Valid; Reason = [string]$fit.Reason; Kind = [string]$fit.Kind
     }
 }
 
@@ -258,13 +258,13 @@ function Get-AVDTuneGateStatus {
     $chosen = $valid | Select-Object -First 1
     $lower = if ($Window) { $Window.Lower } else { $null }
     $reconnect = [bool]($Window -and $Window.FirstChange)
-    $since = if ($reconnect) { "from the start of this version: made before the first change of this version ($(([datetime]$Window.FirstChange).ToString('yyyy-MM-dd HH:mm')))$(if ($lower) { " and at least $($script:ClockBufferMinutes) minutes after the last change of the previous version ($(([datetime]$lower).ToString('yyyy-MM-dd HH:mm')))" }); a rollback goes back to the start of the version" }
+    $since = if ($reconnect) { "from the start of this version: made before the first change of this version ($(([datetime]$Window.FirstChange).ToString('yyyy-MM-dd HH:mm')))$(if ($lower) { " and at least $($script:ClockBufferMinutes) minutes after the last change of the previous version ($(([datetime]$lower).ToString('yyyy-MM-dd HH:mm')))" }); or from the current state (made at least $($script:ClockBufferMinutes) minutes after the last change, so it loses nothing); a rollback goes back to the start of the version or to the current state" }
     elseif ($lower) { "made at least $($script:ClockBufferMinutes) minutes after the last change by AVDTune ($(([datetime]$lower).ToString('yyyy-MM-dd HH:mm')); the margin covers a clock of this VM that runs behind Azure)" }
     else { 'that is finished (AVDTune has not changed this master yet)' }
     $mode = if ($reconnect) { 'Reconnect' } else { 'VersionStart' }
     if ($Confirmed) { return [pscustomobject]@{ Status = 'Confirmed'; Mode = $mode; Detail = 'The snapshot is confirmed; the pages can change the master.'; Chosen = $chosen; Snapshots = $list } }
     if ($chosen) { return [pscustomobject]@{ Status = 'SnapshotReady'; Mode = $mode; Detail = "A snapshot $since exists: $($chosen.Name). Confirm it to unlock the pages."; Chosen = $chosen; Snapshots = $list } }
-    [pscustomobject]@{ Status = 'NoValidSnapshot'; Mode = $mode; Detail = "No snapshot of the OS disk $since.$(if ($reconnect) { ' Choose another one, or ask for a restore of the version start; a snapshot made now would be after the first change.' } else { ' Create one now.' })"; Chosen = $null; Snapshots = $list }
+    [pscustomobject]@{ Status = 'NoValidSnapshot'; Mode = $mode; Detail = "No snapshot of the OS disk $since.$(if ($reconnect) { ' Choose another one or create one now (it is the current state).' } else { ' Create one now.' })"; Chosen = $null; Snapshots = $list }
 }
 
 function Confirm-AVDTuneSnapshotGate {
@@ -285,7 +285,7 @@ function Confirm-AVDTuneSnapshotGate {
     $window = Get-AVDTuneSnapshotWindow -Root $Root
     $fit = Test-AVDTuneSnapshotInWindow -Created $Snapshot.Created -Id ([string]$Snapshot.Id) -Window $window
     if (-not $fit.Valid) {
-        throw "The snapshot $($Snapshot.Name) ($(([datetime]$Snapshot.Created).ToString('yyyy-MM-dd HH:mm'))) does not count: $($fit.Reason)$(if ($window.FirstChange) { ' Choose another snapshot.' } else { ' Create a new snapshot.' })"
+        throw "The snapshot $($Snapshot.Name) ($(([datetime]$Snapshot.Created).ToString('yyyy-MM-dd HH:mm'))) does not count: $($fit.Reason)' Choose another snapshot or create a new one.'"
     }
     $check = Test-AVDTuneConfirmationName -Typed $TypedName
     if (-not $check.Ok) { throw $check.Message }
@@ -296,13 +296,13 @@ function Confirm-AVDTuneSnapshotGate {
     $record = [pscustomobject][ordered]@{
         SnapshotName = $Snapshot.Name; SnapshotId = $Snapshot.Id; SnapshotCreated = ([datetime]$Snapshot.Created).ToString('o'); CreatedByAVDTune = [bool]$Snapshot.ByAVDTune
         ConfirmedBy = $name; SignedInAccount = $ms; WindowsAccount = $win; ConfirmedAt = $now.ToString('o'); ImageVersion = $ImageVersion
-        LastChange = $(if ($last) { $last.ToString('o') } else { $null }); Mode = $window.Mode
+        LastChange = $(if ($last) { $last.ToString('o') } else { $null }); Mode = $window.Mode; SnapshotKind = $fit.Kind
         FirstChange = $(if ($window.FirstChange) { ([datetime]$window.FirstChange).ToString('o') } else { $null })
         PreviousVersionLastChange = $(if ($window.Lower) { ([datetime]$window.Lower).ToString('o') } else { $null }); Text = $script:ConfirmationText
     }
     [void](Set-AVDTuneState -Root $Root -Values @{ SnapshotGate = $record })
     $made = if ($Snapshot.ByAVDTune) { 'yes' } else { 'no' }
-    $text = "Snapshot $($Snapshot.Name) confirmed by $name (Microsoft account $ms, Windows account $win) at $($now.ToString('yyyy-MM-dd HH:mm')); created $(([datetime]$Snapshot.Created).ToString('yyyy-MM-dd HH:mm')); created by AVDTune: $made; $(if ($window.Mode -eq 'Reconnect') { "reconnect in version $ImageVersion (first change $(([datetime]$window.FirstChange).ToString('yyyy-MM-dd HH:mm'))): rollback goes back to the start of the version" } else { "start of version $ImageVersion" })"
+    $text = "Snapshot $($Snapshot.Name) confirmed by $name (Microsoft account $ms, Windows account $win) at $($now.ToString('yyyy-MM-dd HH:mm')); created $(([datetime]$Snapshot.Created).ToString('yyyy-MM-dd HH:mm')); created by AVDTune: $made; $(if ($window.Mode -eq 'Reconnect') { "reconnect in version $ImageVersion (first change $(([datetime]$window.FirstChange).ToString('yyyy-MM-dd HH:mm'))): $(if ($fit.Kind -eq 'CurrentState') { 'snapshot of the current state after the last change, rollback goes back to this current state' } else { 'rollback goes back to the start of the version' })" } else { "start of version $ImageVersion" })"
     [void](Add-AVDTuneChangeLogEntry -Root $Root -Version $ImageVersion -Category 'Snapshot' -Component 'OS disk' -ChangeType $(if ($Snapshot.ByAVDTune) { 'Added' } else { 'Note' }) -Text $text -User $name -SnapshotId $Snapshot.Id -Source Step -At $now)
     Open-AVDTuneWriteGate -SnapshotId $Snapshot.Id -ConfirmedBy $name
     $record

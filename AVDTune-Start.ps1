@@ -150,7 +150,7 @@ function Update-RollbackCard {
     $show = (Test-AVDTuneWriteAllowed) -and $gate -and $gate.Value
     $ui.BoxRollback.Visibility = ConvertTo-Vis ([bool]$show)
     if ($show) {
-        $ui.TxtRollback.Text = "If a run goes wrong, go back to the snapshot $($gate.Value.SnapshotName): create a managed disk from it (Azure portal: the snapshot > Create disk; or az disk create --source), stop (deallocate) this VM, swap the OS disk (VM > Disks > Swap OS disk) and start it again. The rollback goes back to the start of the version (the state of the snapshot): everything done in this version since then is gone, so note what was done in the protocol first."
+        $ui.TxtRollback.Text = "If a run goes wrong, go back to the snapshot $($gate.Value.SnapshotName): create a managed disk from it (Azure portal: the snapshot > Create disk; or az disk create --source), stop (deallocate) this VM, swap the OS disk (VM > Disks > Swap OS disk) and start it again. The rollback goes back to the state of the snapshot: the start of the version (everything done in this version since then is gone) or, for a snapshot of the current state, to that state, so note what was done in the protocol first."
     }
 }
 
@@ -491,7 +491,7 @@ function Invoke-DomainConnect {
 # ---------------------------------------------------------------- 4. snapshot gate
 function Build-SnapshotForm {
     $ui.TxtStageTitle.Text = '4. Snapshot gate'
-    $ui.TxtStageIntro.Text = 'One snapshot per image version: before AVDTune changes the master there must be a finished snapshot of its OS disk from after the last change of the previous version and before the first change of this one. A rollback goes back to the start of the version. Create one here (incremental, named by the pattern of this environment) or choose an existing one, then confirm it with your first and last name. When AVDTune already changed the master in this version, choose a snapshot from the start of the version; snapshots that do not count are grey with the reason. Until then every page is read only.'
+    $ui.TxtStageIntro.Text = 'One snapshot per image version: before AVDTune changes the master there must be a finished snapshot of its OS disk from after the last change of the previous version and before the first change of this one. A snapshot made after the last change (the current state) counts too, so Create snapshot now is always usable; a rollback goes back to the start of the version or to that current state. Create one here (incremental, named by the pattern of this environment) or choose an existing one, then confirm it with your first and last name. When AVDTune already changed the master in this version, choose a snapshot from the start of the version or one made after the last change; snapshots that do not count are grey with the reason. Until then every page is read only.'
     $f = $script:Form
     $f.Info = New-Object System.Windows.Controls.StackPanel
     [void]$ui.PanelStageBody.Children.Add($f.Info)
@@ -529,7 +529,7 @@ function Update-SnapshotForm {
     $f.NamePattern = [string](Get-AVDTuneEnvironmentAnswers $e).SnapshotNamePattern
     foreach ($row in @(@('VM', $vm.VmName), @('Resource group', $vm.ResourceGroup), @('OS disk', $vm.OsDiskName), @('Image version', $(if ($f.ImageVersion) { $f.ImageVersion } else { 'none yet: Create snapshot starts the first one' })),
             @('Last change by AVDTune', $(if ($f.LastChange) { $f.LastChange.ToString('yyyy-MM-dd HH:mm') } else { 'none yet: every finished snapshot counts' })),
-            @('First change in this version', $(if ($f.Window.FirstChange) { "$($f.Window.FirstChange.ToString('yyyy-MM-dd HH:mm')): choose a snapshot from the start of the version (rollback goes back to the start of the version)" } else { 'none yet: this is the start of the version' })), @('Name pattern', $f.NamePattern))) {
+            @('First change in this version', $(if ($f.Window.FirstChange) { "$($f.Window.FirstChange.ToString('yyyy-MM-dd HH:mm')): choose a snapshot from the start of the version (before it) or one made after the last change (the current state)" } else { 'none yet: this is the start of the version' })), @('Name pattern', $f.NamePattern))) {
         [void]$f.Info.Children.Add((New-InfoRow $row[0] ([string]$row[1])))
     }
     try {
@@ -552,7 +552,7 @@ function Update-SnapshotForm {
         $item = New-Object System.Windows.Controls.ComboBoxItem
         $when = if ($s.Created) { $s.Created.ToString('yyyy-MM-dd HH:mm') } else { 'time unknown' }
         $text = "$($s.Name)  ($when, $($s.State), $(if ($s.ByAVDTune) { 'made by AVDTune' } else { 'made by someone else' }))"
-        if (-not $s.Valid) { $text += " - does not count: $($s.Reason)" }
+        if ($s.Valid) { $text += $(if ($s.Kind -eq 'CurrentState') { ' - current state (after the last change)' } else { ' - start of the version' }) } else { $text += " - does not count: $($s.Reason)" }
         $tb = New-Text $text $null; $tb.MaxWidth = 700
         $item.Content = $tb; $item.Tag = $s; $item.IsEnabled = [bool]$s.Valid
         if (-not $s.Valid) { Set-Brush $tb ([System.Windows.Controls.TextBlock]::ForegroundProperty) 'MutedText'; $item.ToolTip = $s.Reason }

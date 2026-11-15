@@ -860,19 +860,28 @@ function Get-AVDTuneSnapshotWindow {
 }
 
 function Test-AVDTuneSnapshotInWindow {
-    # Valid + Reason ('' when valid) for a finished snapshot (Created from Azure, Id) against Get-AVDTuneSnapshotWindow
+    <#
+        Valid + Reason ('' when valid) + Kind for a finished snapshot (Created from Azure, Id) against Get-AVDTuneSnapshotWindow. Valid is
+        (a) the start of the version (after the last change of the previous version, before the first change of this one; Kind VersionStart) or
+        (b) the current state (after the last change plus the clock margin: it loses nothing; Kind CurrentState). After a further change a (b)
+        snapshot is invalid again. Snapshots between the changes of the version (an intermediate state) are invalid.
+    #>
     param($Created, [string]$Id, $Window)
     $margin = $script:SnapshotClockBufferMinutes
-    if (-not $Created) { return [pscustomobject]@{ Valid = $false; Reason = 'Azure gave no creation time.' } }
-    if (-not $Window) { return [pscustomobject]@{ Valid = $true; Reason = '' } }
+    $no = { param($why) [pscustomobject]@{ Valid = $false; Reason = $why; Kind = '' } }
+    if (-not $Created) { return (& $no 'Azure gave no creation time.') }
+    if (-not $Window) { return [pscustomobject]@{ Valid = $true; Reason = ''; Kind = 'VersionStart' } }
     $c = ([datetime]$Created).ToUniversalTime()
     if ($Window.Lower -and $c -le ([datetime]$Window.Lower).ToUniversalTime().AddMinutes($margin)) {
-        return [pscustomobject]@{ Valid = $false; Reason = "Older than the last change before this version ($(([datetime]$Window.Lower).ToString('yyyy-MM-dd HH:mm'))) plus $margin minutes for clock differences between this VM and Azure: a rollback to it would lose that change." }
+        return (& $no "Older than the last change before this version ($(([datetime]$Window.Lower).ToString('yyyy-MM-dd HH:mm'))) plus $margin minutes for clock differences between this VM and Azure: a rollback to it would lose that change.")
     }
-    if ($Window.FirstChange -and -not ($Id -and $Window.FirstChangeSnapshotId -and $Id -ieq $Window.FirstChangeSnapshotId) -and $c -ge ([datetime]$Window.FirstChange).ToUniversalTime().AddMinutes(-$margin)) {
-        return [pscustomobject]@{ Valid = $false; Reason = "Made after the first change of this version ($(([datetime]$Window.FirstChange).ToString('yyyy-MM-dd HH:mm')); or less than $margin minutes before it): a rollback to it would not return to the start of the version." }
-    }
-    [pscustomobject]@{ Valid = $true; Reason = '' }
+    if (-not $Window.FirstChange) { return [pscustomobject]@{ Valid = $true; Reason = ''; Kind = 'VersionStart' } }
+    $first = ([datetime]$Window.FirstChange).ToUniversalTime()
+    if ($Id -and $Window.FirstChangeSnapshotId -and $Id -ieq $Window.FirstChangeSnapshotId) { return [pscustomobject]@{ Valid = $true; Reason = ''; Kind = 'VersionStart' } }
+    if ($c -lt $first.AddMinutes(-$margin)) { return [pscustomobject]@{ Valid = $true; Reason = ''; Kind = 'VersionStart' } }
+    if ($Window.LastChange -and $c -gt ([datetime]$Window.LastChange).ToUniversalTime().AddMinutes($margin)) { return [pscustomobject]@{ Valid = $true; Reason = ''; Kind = 'CurrentState' } }
+    if ($c -lt $first) { return (& $no "Made less than $margin minutes before the first change of this version ($(([datetime]$Window.FirstChange).ToString('yyyy-MM-dd HH:mm'))): a VM clock that runs ahead of Azure could put it after the change.") }
+    & $no "Between the changes of this version (first change $(([datetime]$Window.FirstChange).ToString('yyyy-MM-dd HH:mm'))$(if ($Window.LastChange) { ", last change $(([datetime]$Window.LastChange).ToString('yyyy-MM-dd HH:mm'))" })): a rollback to it would lose changes. Valid are snapshots from the start of the version (before the first change) or made after the last change."
 }
 
 function Get-AVDTuneRun {

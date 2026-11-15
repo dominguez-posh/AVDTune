@@ -417,7 +417,7 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         $combo = $script:Form.SnapList
         $items = @($combo.ItemsSource)
         $byName = @{}; foreach ($i in $items) { $byName[$i.Tag.Name] = $i }
-        Test-Smoke 'reconnect: all snapshots are listed, the ones that do not count are grey (disabled) with the reason, the newest valid one is preselected' ($items.Count -ge 4 -and $byName['gm-v-start-2'].IsEnabled -and $byName['gm-v-start-1'].IsEnabled -and -not $byName['gm-v-before-start'].IsEnabled -and -not $byName['gm-v-after-change'].IsEnabled -and $combo.SelectedItem.Tag.Name -eq 'gm-v-start-2' -and $byName['gm-v-after-change'].ToolTip -like '*first change of this version*' -and $ui.BtnStageAction.IsEnabled) $ui.TxtStageMessage.Text
+        Test-Smoke 'reconnect: all snapshots are listed, the ones that do not count are grey (disabled) with the reason, the newest valid one (a version-start or a current-state snapshot, the line says which) is preselected' ($items.Count -ge 4 -and $byName['gm-v-start-2'].IsEnabled -and $byName['gm-v-start-1'].IsEnabled -and -not $byName['gm-v-before-start'].IsEnabled -and -not $byName['gm-v-after-change'].IsEnabled -and $combo.SelectedItem -eq (@($items | Where-Object IsEnabled)[0]) -and $combo.SelectedItem.Tag.Valid -and $byName['gm-v-after-change'].ToolTip -like '*Between the changes of this version*' -and $ui.BtnStageAction.IsEnabled) $ui.TxtStageMessage.Text
         Test-Smoke 'reconnect: the text says the rollback goes back to the start of the version' ($ui.TxtStageIntro.Text -like '*rollback goes back to the start of the version*' -and $ui.TxtStageMessage.Text -like '*rollback goes back to the start of the version*') $ui.TxtStageMessage.Text
         Save-SmokeShot '20b-start-snapshot-choice'
         $script:Form.NameBox.Text = 'Alex Example'
@@ -428,7 +428,7 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         $ui.BtnStageAction.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
         $window.UpdateLayout()
         $state = Get-AVDTuneState $script:StateRoot
-        Test-Smoke 'reconnect: the chosen snapshot is confirmed for the session; state.json and the change log carry it, the rollback hint names the version start' ((Test-AVDTuneWriteAllowed) -and $state.SnapshotGate.SnapshotName -eq 'gm-v-start-2' -and $state.SnapshotGate.Mode -eq 'Reconnect' -and $ui.TxtRollback.Text -like '*back to the start of the version*' -and @(Get-AVDTuneChangeLog -Root $script:StateRoot | Where-Object { $_.Category -eq 'Snapshot' -and $_.Text -like '*gm-v-start-2*reconnect*' }).Count -eq 1) ($state.SnapshotGate | ConvertTo-Json -Compress)
+        Test-Smoke 'reconnect: the chosen snapshot is confirmed for the session; state.json and the change log carry it, the rollback hint names the version start' ((Test-AVDTuneWriteAllowed) -and $state.SnapshotGate.SnapshotName -eq 'gm-v-start-2' -and $state.SnapshotGate.Mode -eq 'Reconnect' -and $ui.TxtRollback.Text -like '*the start of the version*' -and @(Get-AVDTuneChangeLog -Root $script:StateRoot | Where-Object { $_.Category -eq 'Snapshot' -and $_.Text -like '*gm-v-start-2*reconnect*' }).Count -eq 1) ($state.SnapshotGate | ConvertTo-Json -Compress)
         $true } }
     @{ Name = 'updates page'; Do = {
         # the page is read only until the gate is open (it is open here: the start sequence ran). Search runs in a background runspace with the fake adapter.
