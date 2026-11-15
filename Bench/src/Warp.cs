@@ -12,13 +12,13 @@ internal static unsafe class Warp
     [DllImport("d2d1.dll")] private static extern int D2D1CreateFactory(int type, Guid* iid, IntPtr options, IntPtr* factory);
     [DllImport("dwrite.dll")] private static extern int DWriteCreateFactory(int type, Guid* iid, IntPtr* factory);
 
-    private static IntPtr Slot(IntPtr obj, int index) => (*(IntPtr**)obj)[index];
+    internal static IntPtr Slot(IntPtr obj, int index) => (*(IntPtr**)obj)[index];
     public static void Release(IntPtr obj) { if (obj != IntPtr.Zero) ((delegate* unmanaged[Stdcall]<IntPtr, uint>)Slot(obj, 2))(obj); }
-    private static int QueryInterface(IntPtr obj, Guid iid, out IntPtr result)
+    internal static int QueryInterface(IntPtr obj, Guid iid, out IntPtr result)
     {
         IntPtr r; int hr = ((delegate* unmanaged[Stdcall]<IntPtr, Guid*, IntPtr*, int>)Slot(obj, 0))(obj, &iid, &r); result = r; return hr;
     }
-    private static void Check(int hr, string what) { if (hr < 0) throw new InvalidOperationException($"{what} failed (0x{hr:X8})."); }
+    internal static void Check(int hr, string what) { if (hr < 0) throw new InvalidOperationException($"{what} failed (0x{hr:X8})."); }
 
     [StructLayout(LayoutKind.Sequential)]
     private struct Tex2DDesc { public uint Width, Height, MipLevels, ArraySize, Format, SampleCount, SampleQuality, Usage, BindFlags, CpuAccessFlags, MiscFlags; }
@@ -29,17 +29,17 @@ internal static unsafe class Warp
     [StructLayout(LayoutKind.Sequential)]
     private struct Box { public uint Left, Top, Front, Right, Bottom, Back; }
 
-    private sealed class Device : IDisposable
+    internal sealed class Device : IDisposable
     {
         public IntPtr Dev, Ctx, Target, Staging;
         public int Width, Height;
-        public static Device Create(int width, int height, uint format, uint bind)
+        public static Device Create(int width, int height, uint format, uint bind, IntPtr adapter = default)
         {
             var d = new Device { Width = width, Height = height };
             uint* levels = stackalloc uint[2]; levels[0] = 0xB100; levels[1] = 0xB000;   // 11_1, 11_0
             IntPtr dev, ctx; uint got;
-            // driver type 5 = WARP; flag 0x20 = BGRA support (needed by Direct2D)
-            Check(D3D11CreateDevice(IntPtr.Zero, 5, IntPtr.Zero, 0x20, levels, 2, 7, &dev, &got, &ctx), "D3D11CreateDevice(WARP)");
+            // driver type 5 = WARP; with an adapter (the GPU, Gpu.cs) driver type 0 = unknown; flag 0x20 = BGRA support (needed by Direct2D)
+            Check(D3D11CreateDevice(adapter, adapter == IntPtr.Zero ? 5 : 0, IntPtr.Zero, 0x20, levels, 2, 7, &dev, &got, &ctx), adapter == IntPtr.Zero ? "D3D11CreateDevice(WARP)" : "D3D11CreateDevice(GPU)");
             d.Dev = dev; d.Ctx = ctx;
             var desc = new Tex2DDesc { Width = (uint)width, Height = (uint)height, MipLevels = 1, ArraySize = 1, Format = format, SampleCount = 1, Usage = 0, BindFlags = bind };
             IntPtr tex;
@@ -97,7 +97,7 @@ float4 main(O i) : SV_Target
     return float4(col + spec * 0.2, 1);
 }";
 
-    private static IntPtr Compile(string source, string target)
+    internal static IntPtr Compile(string source, string target)
     {
         IntPtr src = Marshal.StringToHGlobalAnsi(source), entry = Marshal.StringToHGlobalAnsi("main"), tgt = Marshal.StringToHGlobalAnsi(target);
         try
@@ -121,9 +121,9 @@ float4 main(O i) : SV_Target
     }
 
     /// <summary>Direct3D 11 on WARP: fixed scene of about 2 million instanced triangles with per-pixel lighting and a procedural texture, 1280x720 off screen. Frames per second.</summary>
-    public static (double Fps, int Frames, string Note) Render3D(double seconds, int instances = 1_000_000)
+    public static (double Fps, int Frames, string Note) Render3D(double seconds, int instances = 1_000_000, int width = 1280, int height = 720, IntPtr adapter = default)
     {
-        using var d = Device.Create(1280, 720, 28 /*R8G8B8A8_UNORM*/, 0x20 /*RENDER_TARGET*/);
+        using var d = Device.Create(width, height, 28 /*R8G8B8A8_UNORM*/, 0x20 /*RENDER_TARGET*/, adapter);
         IntPtr vsBlob = Compile(SceneVs, "vs_5_0"), psBlob = Compile(ScenePs, "ps_5_0");
         IntPtr rtv = IntPtr.Zero, vs = IntPtr.Zero, ps = IntPtr.Zero, vsNew = IntPtr.Zero, psNew = IntPtr.Zero, rtvNew = IntPtr.Zero;
         try
@@ -136,7 +136,7 @@ float4 main(O i) : SV_Target
             Check(((delegate* unmanaged[Stdcall]<IntPtr, IntPtr, nuint, IntPtr, IntPtr*, int>)Slot(dev, 15))(dev, psp, psn, IntPtr.Zero, &psNew), "CreatePixelShader"); ps = psNew;
             void Frame()
             {
-                var vp = new Viewport { W = 1280, H = 720, MaxDepth = 1 };
+                var vp = new Viewport { W = width, H = height, MaxDepth = 1 };
                 float* clear = stackalloc float[4]; clear[0] = 0.05f; clear[1] = 0.05f; clear[2] = 0.08f; clear[3] = 1f;
                 IntPtr rt = rtv;
                 ((delegate* unmanaged[Stdcall]<IntPtr, uint, IntPtr*, IntPtr, void>)Slot(ctx, 33))(ctx, 1, &rt, IntPtr.Zero);

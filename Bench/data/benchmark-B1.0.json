@@ -2,13 +2,37 @@
   "benchmarkVersion": "B1.0",
   "reference": "references-B1.0",
   "categories": {
-    "apps":    { "title": "Applications",   "weight": 30, "prefixes": ["host.app."],  "built": false },
+    "apps":    { "title": "Applications",   "weight": 30, "prefixes": ["host.app."],  "built": true },
     "cpu":     { "title": "CPU",            "weight": 25, "prefixes": ["host.cpu."],  "built": true },
     "osdisk":  { "title": "OS disk",        "weight": 20, "prefixes": ["host.disk."], "built": true },
     "memory":  { "title": "Memory",         "weight": 10, "prefixes": ["host.mem."],  "built": true },
     "display": { "title": "Remote display", "weight": 10, "prefixes": ["host.disp."], "built": true },
     "network": { "title": "Network",        "weight": 5,  "prefixes": ["host.net."],  "built": true }
   },
+  "fslogixCategories": {
+    "latency":    { "title": "Latency",           "weight": 35, "prefixes": ["fsl.rr.", "fsl.rw.", "fsl.openclose", "fsl.rtt"] },
+    "throughput": { "title": "Throughput",        "weight": 20, "prefixes": ["fsl.mix.", "fsl.seq."] },
+    "metadata":   { "title": "Metadata",          "weight": 15, "prefixes": ["fsl.meta."] },
+    "container":  { "title": "Profile container", "weight": 30, "prefixes": ["fsl.vhd."] }
+  },
+  "gpuCategories": {
+    "render":  { "title": "3D rendering", "weight": 35, "prefixes": ["gpu.d3d11."] },
+    "encode":  { "title": "Video encode", "weight": 30, "prefixes": ["gpu.enc."] },
+    "decode":  { "title": "Video decode", "weight": 15, "prefixes": ["gpu.dec."] },
+    "compute": { "title": "Compute",      "weight": 20, "prefixes": ["gpu.cs."] }
+  },
+  "fslogix": {
+    "fileSizeGiB": 2,
+    "tests": [
+      { "key": "rr.qd1",   "args": "-b4K -r -o1 -t1 -w0 -d{d} -W3 -C2 -Sh -L -Z1M -Rxml",   "measures": [ { "id": "fsl.rr.qd1.p50", "metric": "readLatencyP50", "unit": "ms", "better": "lower" }, { "id": "fsl.rr.qd1.p99", "metric": "readLatencyP99", "unit": "ms", "better": "lower" } ] },
+      { "key": "rw.qd1",   "args": "-b4K -r -o1 -t1 -w100 -d{d} -W3 -C2 -Sh -L -Z1M -Rxml", "measures": [ { "id": "fsl.rw.qd1.p50", "metric": "writeLatencyP50", "unit": "ms", "better": "lower" }, { "id": "fsl.rw.qd1.p99", "metric": "writeLatencyP99", "unit": "ms", "better": "lower" } ] },
+      { "key": "mix.qd32", "args": "-b4K -r -o8 -t4 -w30 -d{d} -W3 -C2 -Sh -L -Z1M -Rxml",  "measures": [ { "id": "fsl.mix.qd32", "metric": "iops", "unit": "IOPS", "better": "higher" } ] },
+      { "key": "seq.read", "args": "-b1M -si -o8 -t1 -w0 -d{d} -W3 -C2 -Sh -Rxml",          "measures": [ { "id": "fsl.seq.read", "metric": "readMiBps", "unit": "MiB/s", "better": "higher" } ] },
+      { "key": "seq.write", "args": "-b1M -si -o8 -t1 -w100 -d{d} -W3 -C2 -Sh -Z1M -Rxml",  "measures": [ { "id": "fsl.seq.write", "metric": "writeMiBps", "unit": "MiB/s", "better": "higher" } ] }
+    ],
+    "vhd": { "sizeGiB": 2, "writeMB": 200, "writeMBQuick": 50, "parallel": 5 }
+  },
+  "capacity": { "maxMinutes": 30, "thresholdPercent": 50 },
   "run": { "runs": 3, "unstableCvPercent": 10, "deltaThresholdPercent": 10, "preconditions": { "minUptimeMinutes": 5, "maxCpuPercent": 10, "idleSecondsFull": 60, "idleSecondsQuick": 10, "minFreeGiB": 10, "updateWaitMinutes": 10 } },
   "diskspd": {
     "version": "2.3",

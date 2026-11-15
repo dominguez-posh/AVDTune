@@ -31,6 +31,17 @@ public sealed class Options
     public bool Quiet;
     /// <summary>Work folder for the file measure (an existing folder; the program creates and removes its own sub folder).</summary>
     public string? Dir;
+    /// <summary>Programs of the application starts: key (word, excel, edge, explorer, powershell) to the full path AVDTune checked (Authenticode) and holds open. Validated by Apps.ValidateExe.</summary>
+    public Dictionary<string, string> AppPaths = new(StringComparer.Ordinal);
+    public bool NoCold, NoSpeedometer, Encode;
+    /// <summary>Folder of the local Speedometer copy (below the release of AVDTune).</summary>
+    public string? Site;
+    public int SpeedIterations = 2;
+    /// <summary>Storage host of the FSLogix share (TCP 445 round trip).</summary>
+    public string? HostName;
+    public int? MaxUsers;
+    public int UserIndex = 1;
+    public double CpuSecPerMin, WorkingSetMB = 64, IoOpsPerMin, IoMBPerMin, LoadSeconds = 120;
 
     public static Options Parse(string[] args)
     {
@@ -47,6 +58,28 @@ public sealed class Options
                 case "--sustained": o.Sustained = true; break;
                 case "--quiet": o.Quiet = true; break;
                 case "--dir": o.Dir = Next(); break;
+                case "--app":
+                    {
+                        var kv = Next(); int eq = kv.IndexOf('=');
+                        if (eq <= 0 || !Apps.Keys.Contains(kv.Substring(0, eq))) throw new ArgumentException("--app needs key=path with a known key.");
+                        o.AppPaths[kv.Substring(0, eq)] = kv.Substring(eq + 1); break;
+                    }
+                case "--no-cold": o.NoCold = true; break;
+                case "--no-speedometer": o.NoSpeedometer = true; break;
+                case "--site": o.Site = Next(); break;
+                case "--speed-iterations": o.SpeedIterations = int.Parse(Next(), System.Globalization.CultureInfo.InvariantCulture); break;
+                case "--host":
+                    o.HostName = Next();
+                    if (!System.Text.RegularExpressions.Regex.IsMatch(o.HostName, "^[A-Za-z0-9][A-Za-z0-9.-]{0,252}$", System.Text.RegularExpressions.RegexOptions.None, TimeSpan.FromSeconds(1))) throw new ArgumentException("--host is not a host name.");
+                    break;
+                case "--max-users": o.MaxUsers = int.Parse(Next(), System.Globalization.CultureInfo.InvariantCulture); break;
+                case "--user": o.UserIndex = int.Parse(Next(), System.Globalization.CultureInfo.InvariantCulture); break;
+                case "--cpu-sec-per-min": o.CpuSecPerMin = double.Parse(Next(), System.Globalization.CultureInfo.InvariantCulture); break;
+                case "--ws-mb": o.WorkingSetMB = double.Parse(Next(), System.Globalization.CultureInfo.InvariantCulture); break;
+                case "--io-ops-per-min": o.IoOpsPerMin = double.Parse(Next(), System.Globalization.CultureInfo.InvariantCulture); break;
+                case "--io-mb-per-min": o.IoMBPerMin = double.Parse(Next(), System.Globalization.CultureInfo.InvariantCulture); break;
+                case "--encode": o.Encode = Next() == "1"; break;
+                case "--load-seconds": o.LoadSeconds = double.Parse(Next(), System.Globalization.CultureInfo.InvariantCulture); break;
                 default:
                     if (a.StartsWith("--")) throw new ArgumentException($"Unknown option {a}.");
                     if (o.Command != "") throw new ArgumentException($"Unexpected argument {a}.");
@@ -56,6 +89,10 @@ public sealed class Options
         if (o.Scale <= 0 || o.Scale > 10) throw new ArgumentException("--scale must be above 0 and at most 10.");
         if (o.DataScale <= 0 || o.DataScale > 4) throw new ArgumentException("--data-scale must be above 0 and at most 4.");
         if (o.Threads < 1 || o.Threads > 1024) throw new ArgumentException("--threads must be 1 to 1024.");
+        if (o.SpeedIterations < 1 || o.SpeedIterations > 10) throw new ArgumentException("--speed-iterations must be 1 to 10.");
+        if (o.MaxUsers is < 1 or > 512) throw new ArgumentException("--max-users must be 1 to 512.");
+        if (o.UserIndex < 1 || o.UserIndex > 512) throw new ArgumentException("--user must be 1 to 512.");
+        if (o.LoadSeconds < 1 || o.LoadSeconds > 7200 || o.CpuSecPerMin < 0 || o.CpuSecPerMin > 6000 || o.WorkingSetMB < 1 || o.WorkingSetMB > 4096 || o.IoOpsPerMin < 0 || o.IoOpsPerMin > 600000 || o.IoMBPerMin < 0) throw new ArgumentException("a load value is out of range.");
         return o;
     }
 
@@ -181,6 +218,28 @@ public static class Json
         return Encoding.UTF8.GetString(ms.ToArray());
     }
 
+    private static void WriteItem(Utf8JsonWriter w, object? v)
+    {
+        switch (v)
+        {
+            case null: w.WriteNullValue(); break;
+            case string s: w.WriteStringValue(s); break;
+            case bool b: w.WriteBooleanValue(b); break;
+            case int i: w.WriteNumberValue(i); break;
+            case long l: w.WriteNumberValue(l); break;
+            case double d: if (double.IsFinite(d)) w.WriteNumberValue(d); else w.WriteNullValue(); break;
+            case System.Collections.Generic.IDictionary<string, object?> dict:
+                w.WriteStartObject();
+                foreach (var kv in dict) WriteValue(w, kv.Key, kv.Value);
+                w.WriteEndObject(); break;
+            case System.Collections.IEnumerable list:
+                w.WriteStartArray();
+                foreach (var item in list) WriteItem(w, item);
+                w.WriteEndArray(); break;
+            default: w.WriteStringValue(Convert.ToString(v, System.Globalization.CultureInfo.InvariantCulture)); break;
+        }
+    }
+
     private static void WriteValue(Utf8JsonWriter w, string name, object? v)
     {
         switch (v)
@@ -191,6 +250,14 @@ public static class Json
             case int i: w.WriteNumber(name, i); break;
             case long l: w.WriteNumber(name, l); break;
             case double d: if (double.IsFinite(d)) w.WriteNumber(name, d); else w.WriteNull(name); break;
+            case System.Collections.Generic.IDictionary<string, object?> dict:
+                w.WriteStartObject(name);
+                foreach (var kv in dict) WriteValue(w, kv.Key, kv.Value);
+                w.WriteEndObject(); break;
+            case System.Collections.IEnumerable list:
+                w.WriteStartArray(name);
+                foreach (var item in list) WriteItem(w, item);
+                w.WriteEndArray(); break;
             default: w.WriteString(name, Convert.ToString(v, System.Globalization.CultureInfo.InvariantCulture)); break;
         }
     }

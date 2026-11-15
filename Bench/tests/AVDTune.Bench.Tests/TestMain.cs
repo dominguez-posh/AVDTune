@@ -25,6 +25,7 @@ public static class TestMain
         Clips(print);
         Files();
         OptionsAndJson();
+        _failed += Round2.Run();
         Console.WriteLine(_failed == 0 ? "ALL OK" : $"{_failed} FAILED");
         return _failed == 0 ? 0 : 1;
     }
