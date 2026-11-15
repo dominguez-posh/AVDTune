@@ -1,0 +1,64 @@
+# Release of AVDTune (issue #4, docs/plans/avdtune.md section 9a): on a tag v*, run the checks, build ZIP and manifest.json, publish them as release assets.
+# Tag v0.2.0 = stable, v0.2.0-ea.1 = early access (marked as pre-release). The tag must match the file VERSION and the commit must be on main.
+# Only the built-in GITHUB_TOKEN is used (no secrets, no third-party actions): the actions are pinned to a commit, the release is made with the gh CLI of the runner.
+name: release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: windows-2022
+    timeout-minutes: 30
+    steps:
+      - name: Keep line endings as committed (the ZIP is byte-identical to the checkout on every machine)
+        shell: powershell
+        run: git config --global core.autocrlf false
+
+      # actions/checkout v4.2.2
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: The commit is on main
+        shell: powershell
+        run: |
+          git fetch --no-tags origin main:refs/remotes/origin/main
+          git merge-base --is-ancestor HEAD origin/main
+          if ($LASTEXITCODE -ne 0) { throw 'The tagged commit is not on main. Releases are made from main only.' }
+
+      - name: Checks (Windows PowerShell 5.1, without the GUI smoke test; includes Check-PublicContent)
+        shell: powershell
+        run: |
+          $PSVersionTable.PSVersion
+          .\Tests\Check-All.ps1
+
+      - name: Build ZIP and manifest.json
+        shell: powershell
+        run: |
+          .\Tools\New-AVDTuneRelease.ps1 -OutDir dist -ExpectTag "${{ github.ref_name }}"
+          Get-ChildItem dist | Format-Table Name, Length
+
+      - name: Publish the release assets
+        shell: powershell
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          $version = "${{ github.ref_name }}".Substring(1)
+          $notes = (Get-Content dist\manifest.json -Raw | ConvertFrom-Json).Notes
+          Set-Content -LiteralPath dist\notes.txt -Value $notes -Encoding UTF8
+          $flags = @()
+          if ($version.Contains('-')) { $flags += '--prerelease' }
+          gh release create "${{ github.ref_name }}" "dist\AVDTune-$version.zip" "dist\manifest.json" --title "AVDTune $version" --notes-file dist\notes.txt @flags
+          if ($LASTEXITCODE -ne 0) { throw 'gh release create failed.' }
