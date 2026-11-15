@@ -624,6 +624,14 @@ try {
     $rn = Join-Path $tmp 'issue27-never'; [void](Initialize-AVDTuneState -Root $rn); [void](Start-AVDTuneImageVersion -Root $rn -Date ([datetime]'2026-11-01') -User 'admin1')
     Test-Check 'no change anywhere: no lower bound (proof that nothing ever changed)' (-not (Get-AVDTuneSnapshotWindow -Root $rn).Lower) $null
 
+    # a first change is recorded, VersionBaseline is empty, but the run records know an earlier change: the lower bound is that change
+    $rl = Join-Path $tmp 'issue27-lowerevidence'; [void](Initialize-AVDTuneState -Root $rl); [void](Start-AVDTuneImageVersion -Root $rl -Date ([datetime]'2026-11-01') -User 'admin1')
+    [void](Add-AVDTuneRun -Root $rl -Run ([pscustomobject]@{ Id = 'earlier-run'; Plan = 'x'; Started = $T0.AddMinutes(-5).ToString('o'); Ended = $T0.ToString('o'); WhatIf = $false; Results = @([pscustomobject]@{ Id = 'a'; Mode = 'Apply'; Status = 'Changed' }) }))
+    [void](Set-AVDTuneState -Root $rl -Values @{ VersionBaseline = $null; FirstChange = $F.ToString('o'); LastChange = $F.AddHours(1).ToString('o') })
+    $wL = Get-AVDTuneSnapshotWindow -Root $rl
+    $armL = New-AVDTuneFakeArm -Seed @{ Snapshots = @(@{ Name = 'l-before-earlier-run'; Created = $T0.AddHours(-1) }; @{ Name = 'l-after-earlier-run'; Created = $T0.AddHours(1) }) }
+    $listL = @(Get-AVDTuneOsDiskSnapshots -Arm $armL -Token $armToken -Vm $vm -Window $wL)
+    Test-Check 'counter-test: the lower bound is not only the baseline: an earlier change in the run records lifts it (a snapshot from before it is invalid)' ($wL.Lower -eq $T0 -and (@($listL | Where-Object Valid | ForEach-Object Name) -join ',') -eq 'l-after-earlier-run') (($listL | ForEach-Object { "$($_.Name)=$($_.Valid)" }) -join ',')
     # 3: the exception for the snapshot confirmed at the first change needs the same ID AND creation time, and obeys the lower bound
     $re = Join-Path $tmp 'issue27-reuse'; [void](Initialize-AVDTuneState -Root $re); [void](Start-AVDTuneImageVersion -Root $re -Date ([datetime]'2026-11-01') -User 'admin1')
     $idX = '/subscriptions/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee/resourceGroups/rg-example/providers/Microsoft.Compute/snapshots/snap-reused'
