@@ -34,7 +34,7 @@ On the first start (no `environment.json` yet) a wizard asks how the AVD environ
 | Network | private endpoint (recommended) / public endpoint with firewall; VNet and subnet of the session hosts; private DNS zone `privatelink.file.core.windows.net` in Azure or on the own DNS servers |
 
 What follows from the identity model:
-- **Entra ID only**: no DC step; groups for App Masking and the FSLogix include/exclude lists are Entra groups created through Graph (`Group.ReadWrite.All` only during that action), referenced by their SID (`S-1-12-1-...`); Azure Files with Microsoft Entra Kerberos; session hosts need `CloudKerberosTicketRetrievalEnabled=1` and `LoadCredKeyFromProfile=1` (set in the image); the Entra app of the storage account needs admin consent and must be excluded from Conditional Access policies that require MFA (AVDTune checks both). Support for cloud-only identities in Azure Files and for Entra group SIDs in FSLogix App Masking is verified against Microsoft Learn in phase 0 of this part and shown on the page with its status; if a combination is not supported, the wizard says so instead of building it.
+- **Entra ID only**: no DC step; groups for App Masking and the FSLogix include/exclude lists are Entra groups created through Graph (`Group.ReadWrite.All` only during that action), referenced by their SID (`S-1-12-1-...`); Azure Files with Microsoft Entra Kerberos; session hosts need `CloudKerberosTicketRetrievalEnabled=1` and `LoadCredKeyFromProfile=1` (set in the image); the Entra app of the storage account needs admin consent and must be excluded from Conditional Access policies that require MFA (AVDTune checks both). Support for cloud-only identities in Azure Files is verified against Microsoft Learn in phase 0 of this part and shown on the page with its status. **FSLogix App Masking does not support Entra ID cloud-only users and groups in assignments** (Microsoft Learn, tutorial-application-rule-sets; groups must be synced from AD and the host needs line of sight to a DC to resolve SIDs). So with Entra only, App Masking by group is not offered: the Public Desktop page (5c) can only show an entry for everyone or hide it for everyone (and the user is told why); with hybrid identities, groups synced from AD work.
 - **Hybrid / AD DS**: DC step of section 1a; groups in the chosen OU; Azure Files with AD DS (or Entra Kerberos for hybrid identities, choice in the wizard).
 - **Without FSLogix**: the FSLogix pages are hidden, the seal checklist drops the FSLogix test.
 
@@ -101,9 +101,9 @@ Result: stored with every run, in the change log of the version and in the Share
 | Updates | one list for everything: Windows (WUA COM API, drivers and previews off by default, KB exclude list), Microsoft 365 Apps (ODT `/configure` or `OfficeC2RClient /update`), Edge, Teams (`teamsbootstrapper`), OneDrive, FSLogix, Defender signatures, winget/Chocolatey apps and library packages. "Update all", per item, history. Runs in maintenance mode only |
 | Software | packages of the PackTune library (SharePoint) plus winget/Chocolatey catalog: install, update, remove; detection of what is on the master |
 | Office | ODT configuration form (channel, 64 bit, languages, excluded apps, `SharedComputerLicensing=1`, `Updates Enabled=FALSE`), preview of `configuration.xml`, install/update/remove, build info. ODT downloaded from Microsoft, Authenticode checked |
-| Optimization | VDOT data re-implemented with attribution (AppX, services, tasks, autologgers), visual effects and transparency off for all users, power plan, widgets/news/consumer features/Copilot off, Edge/Chrome (no hardware acceleration, sleeping tabs, no background run), Storage Sense off, telemetry Required, hibernation off, scheduled defrag off, Xbox/gaming removed |
+| Optimization | selectable list (section 5d): WDOT data re-implemented with attribution (AppX, services, tasks, autologgers), Defender VDI preset, visual effects and transparency off for all users, power plan, widgets/news/consumer features/Copilot off, Edge/Chrome (no hardware acceleration, sleeping tabs, no background run), Storage Sense off, telemetry Required, hibernation off, scheduled defrag off, Xbox/gaming removed |
 | FSLogix | setup, settings, `redirections.xml`, function test (section 5a) |
-| App Masking | FSLogix hiding rules for icons and apps, groups in the domain (section 5b) |
+| App Masking | FSLogix hiding rules for icons and apps, groups in the domain (section 5b); Public Desktop list with hiding wizard and comfort shortcuts (section 5c) |
 | VDI components | Defender onboarding for non-persistent VDI (package from the library), new Teams for VDI (`teamsbootstrapper -p`, `IsWVDEnvironment`, SlimCore plugin / WebRTC redirector per Microsoft Learn), MMR, RDP Shortpath, time zone redirection, OneDrive per machine |
 | User experience | wallpaper (replace `img0.jpg` with ownership handling), watermark (section 5), Start/taskbar layout and default apps for new profiles, public desktop shortcuts and web apps (PWA) with FSLogix App Masking rules per group |
 | Update block for users | everything that offers or runs updates is hidden and off for users (section 4) |
@@ -159,7 +159,7 @@ Every general step of the real change log and where it is in AVDTune. Customer s
 | Visual effects, transparency, power plan | Optimization |
 | Defender onboarding for non-persistent VDI (local scripts, rollout through Hydra) | VDI components: onboarding package from the library, check that it must not run on the master itself |
 | Benchmark before and after optimization | Benchmark (section 6, baseline and before every seal) |
-| VDOT | Optimization (data re-implemented) |
+| VDOT | Optimization list from WDOT, the successor (data re-implemented, 5d) |
 | Defender exclusions | FSLogix (section 5a) |
 | Browser hardware acceleration, sleeping tabs | Optimization |
 | Widgets, news, Start ads, Bing search | Optimization |
@@ -269,8 +269,42 @@ Roles the admin needs: Reader on the storage account, Storage File Data Privileg
 - New rule set from: a shortcut on the public desktop, a Start menu entry, an installed app (uninstall key) or a web app (PWA) shortcut. AVDTune writes the rule file (hide rules for the `.lnk`, optional folders and registry) and the assignment file.
 - Groups: for each rule set the user chooses an OU once (OU tree from the DC); AVDTune creates the group `<prefix>-App-<name>` there if missing (naming pattern in the settings, description "AVDTune App Masking: <name>"), reads its SID and writes the assignment by SID: everyone hidden, members of the group shown. Existing groups can be chosen instead.
 - Membership is not managed in AVDTune (that stays in AD), but the page shows the member count and links the group.
-- Changes are applied with `frxcontext`/the FSLogix Apps service reload and verified (rule compiled, assignment readable). Each change goes into the change log (rule, group, OU, SID).
+- The FSLogix Apps service uses new rule files right away (no reload command is documented); AVDTune verifies after writing that both files parse and the assignment is readable. Each change goes into the change log (rule, group, OU, SID).
 - Migration: the rules made today with the FSLogix Rule Editor are read and shown; unknown parts of a rule are kept as they are.
+- File formats (from Microsoft Learn and Microsoft's `FSLogix.Powershell.Rules` module, reference files written by the Rule Editor): `.fxr` and `.fxa` UTF-16 LE with BOM, CRLF. `.fxr`: line 1 `1`, `##` comments, a rule line per hidden file or folder with flags (0x02 file, 0x01 folder, 0x20 persistent, 0x200 hiding). `.fxa`: line 1 `1<TAB>0`, then one line per assignment (`<code><TAB><SID or name><TAB><DN><TAB><display name><TAB>0<TAB>0`, code bits 0x01 apply, 0x02 do not apply, 0x04 user, 0x10 group, 0x20 network, 0x40 computer, 0x80 OU); rows apply top to bottom, later rows win. "Visible only for admins and released groups" = Everyone (`S-1-1-0`) applies, then Administrators (`S-1-5-32-544`) and each released group do not apply.
+- Verified in a spike on a test VM before the build (not verified live yet): whether a domain group may be given by SID in the `.fxa` or must be `DOMAIN\Group`; whether "Administrators do not apply" also holds for an admin with a UAC-filtered token.
+- Reference for reading only: an unchecked draft in the PackTune repo (local branch `feature/desktop-masking`, `PackTune-Desktop.ps1`, `docs/plans/desktop-masking.md`) made before the work moved here.
+
+## 5c. Public Desktop: list, hiding wizard, comfort shortcuts (user request 2026-11-15, handed over from the PackTune session)
+
+- **List** of every file on `C:\Users\Public\Desktop` (shortcuts and other files) with target, icon and its state: covered by a hiding rule (visible for whom: everyone / administrators + released groups / named groups) or **not covered** (warning, counter on the page and on the Overview). New entries appear after every software installation (the recorded installation already compares the public desktop, 3e) and on every start.
+- **Wizard "Sichtbarkeit einrichten"**: select entries (uncovered ones preselected), choose visibility "Alle" or "Administratoren + freigegebene AD-Gruppen" (a default group list in the settings, override per entry), groups created in the chosen OU if missing (5b), preview of the rule lines, apply, change log entry. With Entra only: only "Alle" or "fuer alle ausgeblendet", with the reason (5b).
+- **Comfort shortcuts** for all users on the Public Desktop with a proper icon (from Windows' own icon libraries, or an `.ico` shipped with AVDTune): "Abmelden" first (`shutdown.exe /l`, no confirmation dialog, icon from `shell32.dll`); extendable list: "Passwort aendern" (Ctrl+Alt+End equivalent through the Windows security screen), Company Portal when installed, "Restart" only on single-session hosts (never on multi-session). Each comfort shortcut is a normal entry of the list (visible for everyone by default, can be restricted).
+
+## 5d. Optimization list (handed over from the PackTune session, user decision 2026-11-15: WDOT replaces VDOT)
+
+A selectable list (checkbox, explanation, risk, before/after, source link), with presets "AVD multi-session (empfohlen)", "Konservativ", "Alles"; nothing is applied without selection; each item is a step with Test/Apply/Undo where reversible.
+
+Sources:
+- **Windows Desktop Optimization Tool (WDOT)**, `The-Virtual-Desktop-Team/Windows-Desktop-Optimization-Tool` (successor of VDOT; checked 2026-11-15: repository licence MIT, copyright 2025 The Virtual Desktop Team; the repo also ships `EULA.txt`, Microsoft's sample-code terms: use and modify allowed, copyright notice required, "not intended to be used in a production environment", indemnity clause). Use: its configuration data (names of AppX packages, services, scheduled tasks, autologgers, registry values per Windows version) re-implemented as our own step data with attribution, both texts in `NOTICE`, no script code copied, no runtime dependency. Names of Windows services and tasks are facts; the selection and the explanations are ours. VDOT stays a reference only.
+- Microsoft Learn pages per item (link in the step).
+- The user's own earlier Golden Master scripts (visual effects and transparency for all profiles and the default profile, power plan, widgets/news/consumer features/web search off, Edge/Chrome sleeping tabs and efficiency mode, Defender exclusions and scan settings, Start layout), re-implemented generically. Findings in them that the list corrects, with the reason shown:
+  - Windows Search service disabled: on multi-session it breaks Outlook search and Start search; the list keeps search on (per-user index is the multi-session default) and offers "disable" only with that warning.
+  - Edge/Chrome `HardwareAccelerationModeEnabled` is set to 1 (on), while the change log says hardware acceleration was turned off: the list asks explicitly (off on VMs without GPU, on with GPU) and shows the current value.
+  - Defender: scheduled scan, scan on idle and catch-up scans disabled: weakens protection against Microsoft's VDI guidance; replaced by the Defender VDI preset below.
+  - Start layout through `StartLayoutFile` (XML): not supported for the Start menu on Windows 11 (only the taskbar); Start pins go through `ConfigureStartPins` (JSON) or the default profile.
+- Risk notes from WDOT/VDOT itself, each on its item: removed AppX payloads cannot be re-provisioned without a reset or re-image; disabling the Store install service can block app updates; possible Windows Update errors; Sysprep ordering issue with OneDrive; Settings crashes related to CDPSvc; some policies break Office licensing or certificate revocation checks.
+
+Defender for non-persistent VDI (preset, Microsoft Learn `deployment-vdi-microsoft-defender-antivirus`, page date 2026-08-20):
+- Shared security intelligence location for VDI clients (`SharedSignaturesPath`; a management machine unpacks `mpam-fe.exe /x` into a GUID folder under `wdav-update` once a day, never more often than every 4 hours; share Everyone Read, NTFS Authenticated Users Read): AVDTune sets the path on the image and checks that the share is readable; the update job itself runs outside the master (documented).
+- PUA block; local admin merge of lists off; exclusions visible to local admins on; randomize scheduled scans on; headless UI and notifications suppressed; cloud protection Advanced MAPS, extended cloud check 20 s, level High; CPU limit 50%; daily quick scan 12:00; scan after security intelligence update on (off only while building the image); update interval 8 hours; default actions quarantine; tamper protection on.
+- Run the scheduled task "Windows Defender Cache Maintenance" before seal (seal checklist).
+
+FSLogix antivirus exclusions (Microsoft Learn `overview-prerequisites`, page date 2026-03-09): processes `frxsvc.exe`, `frxccds.exe`; drivers `frxdrv.sys`, `frxdrvvt.sys`, `frxccd.sys`; folders `C:\Program Files\FSLogix\Apps\`, `C:\ProgramData\FSLogix\`, `C:\Users\%username%\AppData\Local\FSLogix\`, Cloud Cache `%ProgramData%\FSLogix\Cache\*` and `\Proxy\*`; `%TEMP%\*\*.VHD(X)`, `%WINDIR%\TEMP\*\*.VHD(X)`; the share `\\<share>\*\*.VHD(X)` plus `.lock`, `.meta`, `.metadata`; registry `HKLM\SOFTWARE\FSLogix\`, `HKLM\SOFTWARE\Policies\FSLogix\`. Part of 5a and of this list.
+
+Kerberos RC4 to AES (same Learn page): the April 2026 Windows Server update changes the default Kerberos encryption from RC4 to AES-SHA1; profile shares that are not upgraded may lose access. Part of the storage check in 5a (supported encryption types of the storage account's AD object and of the SMB settings).
+
+Still to research for the list (feature developer, with sources, before the Optimization page is built): new Teams VDI and multimedia redirection details, FSLogix profile settings beyond 5a, Edge/OneDrive per machine, SMB client and network settings, Storage Sense, power, time zone redirection, RDP Shortpath, GPU policies, Start and search, logon speed (Run keys, Active Setup, AppX on first logon).
 
 ## 6. Benchmark (complete rework, own design step)
 
@@ -401,10 +435,10 @@ Elevated tool on a machine that becomes the image of all users: runs from a prot
 |---|---|
 | 1 | Shell in PackTune look, elevation, engine, state, protocol and change log, Overview (incl. source image); first-run question of the identity model (stored, used by the start sequence); start sequence: M365/Azure sign-in, DC connection and discovery when a DC is used, snapshot gate with name confirmation |
 | 2 | Updates page (Windows, Office, Edge/Teams/OneDrive/FSLogix/Defender, software) and update block with maintenance mode |
-| 3 | Environment wizard (identity model), FSLogix setup and function test, automatic storage setup (Premium account, share, private endpoint, identity, permissions), storage check; App Masking with groups in AD or Entra; SharePoint change log list; environment document |
+| 3 | Environment wizard (identity model), FSLogix setup and function test, automatic storage setup (Premium account, share, private endpoint, identity, permissions), storage check; App Masking with groups in AD (Entra only: everyone or nobody), Public Desktop list, hiding wizard and comfort shortcuts (5c); SharePoint change log list; environment document |
 | 4 | Software from the library and catalog, custom software wizard with recording, list and documentation in SharePoint, web apps (PWA) with icon (spike first), printer drivers from a print server (also in maintenance), shortcuts, fonts, own steps |
 | 5 | Benchmark: design for approval, then new engine incl. GPU, comparison per version, AVD-Benchmark repo stand-alone |
-| 6 | Setup: Office, language, VDI components, optimizations, user experience, watermark |
+| 6 | Setup: Office, language, VDI components, selectable optimization list from WDOT and research with Defender VDI preset (5d), user experience, watermark |
 | 7 | Cleanup & seal (last button, checklist), export, docs and demo |
 
 Security reviews: phase 1 (sign-in, domain credentials, LDAP, snapshot rights), 2 (update block), 3 (group creation in AD, share permissions), 7 (seal, token removal).
