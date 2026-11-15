@@ -9,7 +9,7 @@
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path $PSScriptRoot -Parent
 Import-Module (Join-Path $repo 'Modules\AVDTune.psm1') -Force
-foreach ($m in 'Session', 'Snapshot', 'Directory', 'Start') { Import-Module (Join-Path $repo "Modules\AVDTune.$m.psm1") -Force }
+foreach ($m in 'Trust', 'Session', 'Snapshot', 'Directory', 'Start') { Import-Module (Join-Path $repo "Modules\AVDTune.$m.psm1") -Force }
 . (Join-Path $PSScriptRoot 'Fakes\FakeMachine.ps1')
 . (Join-Path $PSScriptRoot 'Fakes\FakeServices.ps1')
 
@@ -22,8 +22,10 @@ $secretPassword = 'Zq9-Check-Password-Not-Real'
 $tmp = Join-Path ([IO.Path]::GetTempPath()) ('avdtune-start-' + [guid]::NewGuid().ToString('N'))
 try {
     $env:AVDTUNE_ROOT = $tmp
+    $env:AVDTUNE_FAKE = Join-Path $PSScriptRoot 'Fakes\FakeMachine.ps1'
     [void](Initialize-AVDTuneState -Root $tmp)
     Close-AVDTuneWriteGate
+    $signTemp = Join-Path $tmp 'signin-temp'; New-Item -ItemType Directory -Path $signTemp -Force | Out-Null
 
     # ---------------------------------------------------------------- first-run questions
     $a = Get-AVDTuneEnvironmentDefaults
@@ -71,12 +73,38 @@ try {
 
     # ---------------------------------------------------------------- sign-in session
     $auth = New-AVDTuneFakeAuth
-    $session = New-AVDTuneSession -Auth $auth
+    $session = New-AVDTuneSession -TempRoot $signTemp -Auth $auth
     $info = Connect-AVDTuneSession -Session $session -TenantId $tenant -ClientId $clientId
-    Test-Check 'sign-in: connected, account known, three audiences with their own scopes' ($info.Connected -and $info.Account -like 'admin.example@*' -and $info.Audiences.Count -eq 3 -and ($info.Audiences | Where-Object Audience -eq 'Sites').Scopes -join ',' -eq 'Sites.Selected' -and ($info.Audiences | Where-Object Audience -eq 'Arm').Scopes -join ',' -eq 'user_impersonation') ($info | ConvertTo-Json -Compress -Depth 4)
+    Test-Check 'sign-in: connected, account known, three audiences; Sites and ARM tokens carry their permission' ($info.Connected -and $info.Account -like 'admin.example@*' -and $info.Audiences.Count -eq 3 -and ($info.Audiences | Where-Object Audience -eq 'Sites').Scopes -contains 'Sites.Selected' -and ($info.Audiences | Where-Object Audience -eq 'Arm').Scopes -join ',' -eq 'user_impersonation') ($info | ConvertTo-Json -Compress -Depth 4)
     Test-Check 'one interactive sign-in only; the other tokens come from the refresh token' (@($auth.Log | Where-Object { $_ -like 'SignIn*' }).Count -eq 1 -and @($auth.Log | Where-Object { $_ -like 'Refresh*hasRefreshToken=True' }).Count -eq 3) ($auth.Log -join ' | ')
     $graphScopes = ($info.Audiences | Where-Object Audience -eq 'Graph').Scopes
-    Test-Check 'the Graph token cannot reach a site and the Sites token cannot read groups' ($graphScopes -notcontains 'Sites.Selected' -and ($info.Audiences | Where-Object Audience -eq 'Sites').Scopes -notcontains 'Group.Read.All') ($graphScopes -join ',')
+    # v2 tokens carry every consented scope of their resource: the two Graph tokens are not separated by scope (finding 5), only Graph and ARM are
+    Test-Check 'honest separation: both Graph tokens carry all Graph permissions, the ARM token none of them' ((@($graphScopes | Sort-Object) -join ',') -eq (@(($info.Audiences | Where-Object Audience -eq 'Sites').Scopes | Sort-Object) -join ',') -and $graphScopes -contains 'Sites.Selected' -and @(($info.Audiences | Where-Object Audience -eq 'Arm').Scopes | Where-Object { $_ -in $graphScopes }).Count -eq 0) ($graphScopes -join ',')
+    Test-Check 'the consented AVDTune permissions alone give no warning' (@($info.Warnings).Count -eq 0) (@($info.Warnings) -join ' | ')
+    $authExtra = New-AVDTuneFakeAuth -Seed @{ ExtraScopes = @{ 'https://graph.microsoft.com' = @('Mail.ReadWrite') } }
+    $sx = New-AVDTuneSession -TempRoot $signTemp -Auth $authExtra
+    $ix = Connect-AVDTuneSession -Session $sx -TenantId $tenant -ClientId $clientId
+    Test-Check 'a token with a permission AVDTune does not ask for: kept, but a warning names it (for the protocol)' ($ix.Connected -and @($ix.Warnings).Count -eq 2 -and (@($ix.Warnings) -join ' ') -like '*Graph token*Mail.ReadWrite*' -and (@($ix.Warnings) -join ' ') -like '*Sites token*Mail.ReadWrite*' -and (@($ix.Warnings) -join ' ') -notlike '*Arm token*') (@($ix.Warnings) -join ' | ')
+    Disconnect-AVDTuneSession $sx
+    Test-Check 'disconnect clears the warnings too' (@($sx.Warnings).Count -eq 0) $null
+    # temporary profiles of the sign-in window (finding 6)
+    $authLeft = New-AVDTuneFakeAuth -Seed @{ LeaveProfileIn = $signTemp }
+    $sl = New-AVDTuneSession -TempRoot $signTemp -Auth $authLeft
+    [void](Connect-AVDTuneSession -Session $sl -TenantId $tenant -ClientId $clientId)
+    Test-Check 'the profile the sign-in window left in TEMP is deleted right after the sign-in' (@(Get-AVDTuneSignInLeftovers -TempRoot $signTemp).Count -eq 0 -and @($authLeft.Log | Where-Object { $_ -like 'SignIn*' }).Count -eq 1) (@(Get-ChildItem $signTemp -Name) -join ',')
+    $planted = Join-Path $signTemp ('PackTuneSignIn-' + [guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $planted -Force | Out-Null
+    $lockedFile = Join-Path $planted 'Cookies'; [IO.File]::WriteAllText($lockedFile, 'x')
+    $lock = [IO.File]::Open($lockedFile, 'Open', 'Read', 'None')
+    Disconnect-AVDTuneSession $sl
+    Test-Check 'a profile that is still locked stays and Test-AVDTuneSessionClear says so (final check before seal)' ((Test-Path $planted) -and -not (Test-AVDTuneSessionClear $sl)) $null
+    $releaser = [powershell]::Create(); [void]$releaser.AddScript({ param($h) Start-Sleep -Milliseconds 700; $h.Dispose() }).AddArgument($lock); $rh = $releaser.BeginInvoke()
+    $left = @(Remove-AVDTuneSignInLeftovers -TempRoot $signTemp -Tries 20 -DelayMilliseconds 200)
+    [void]$releaser.EndInvoke($rh); $releaser.Dispose()
+    Test-Check 'the removal retries until the browser lets go of the profile; then the session counts as clear' ($left.Count -eq 0 -and -not (Test-Path $planted) -and (Test-AVDTuneSessionClear $sl)) ($left -join ',')
+    $other = Join-Path $signTemp 'PackTuneSignIn-not-a-guid'; New-Item -ItemType Directory -Path $other -Force | Out-Null
+    Test-Check 'only profile folders of the sign-in window (PackTuneSignIn-<32 hex>) are touched' ((@(Remove-AVDTuneSignInLeftovers -TempRoot $signTemp).Count -eq 0) -and (Test-Path $other)) $null
+    Remove-Item $other -Force
     $armToken = Get-AVDTuneAccessToken -Session $session -Audience Arm
     Test-Check 'the ARM token has the Azure audience; tokens are SecureStrings in the session' ((Get-AVDTuneTokenClaims $armToken).aud -eq 'https://management.azure.com' -and $session.Tokens.Arm.Access -is [System.Security.SecureString] -and $session.Refresh -is [System.Security.SecureString]) $null
     Test-Check 'the session info and the fake log hold no token' (($info | ConvertTo-Json -Depth 5) -notmatch 'eyJ|fake-refresh|fakesignature' -and ($auth.Log -join ' ') -notmatch 'eyJ|fake-refresh-\d') $null
@@ -87,18 +115,18 @@ try {
     Disconnect-AVDTuneSession $session
     Test-Check 'disconnect removes every token and the check proves it' ((Test-AVDTuneSessionClear $session) -and ($null -ne (Get-ThrownText { Get-AVDTuneAccessToken -Session $session -Audience Arm }))) $null
     # ---------------------------------------------------------------- sign-in error paths
-    $s2 = New-AVDTuneSession -Auth (New-AVDTuneFakeAuth -Seed @{ Offline = $true })
+    $s2 = New-AVDTuneSession -TempRoot $signTemp -Auth (New-AVDTuneFakeAuth -Seed @{ Offline = $true })
     $e = Get-ThrownText { Connect-AVDTuneSession -Session $s2 -TenantId $tenant -ClientId $clientId }
     Test-Check 'sign-in without network: readable text, session stays empty' ($e -like 'No connection to Microsoft sign-in*' -and (Test-AVDTuneSessionClear $s2)) $e
-    $s3 = New-AVDTuneSession -Auth (New-AVDTuneFakeAuth -Seed @{ ConsentMissing = @('Arm') })
+    $s3 = New-AVDTuneSession -TempRoot $signTemp -Auth (New-AVDTuneFakeAuth -Seed @{ ConsentMissing = @('Arm') })
     $e = Get-ThrownText { Connect-AVDTuneSession -Session $s3 -TenantId $tenant -ClientId $clientId }
     Test-Check 'missing consent for Azure Service Management: names the audience and the scope, no tokens kept' ($e -like '*no consent*audience Arm*user_impersonation*' -and (Test-AVDTuneSessionClear $s3)) $e
-    $s4 = New-AVDTuneSession -Auth (New-AVDTuneFakeAuth -Seed @{ WrongTenant = $true })
+    $s4 = New-AVDTuneSession -TempRoot $signTemp -Auth (New-AVDTuneFakeAuth -Seed @{ WrongTenant = $true })
     $e = Get-ThrownText { Connect-AVDTuneSession -Session $s4 -TenantId $tenant -ClientId $clientId }
     Test-Check 'a token of another tenant is refused and nothing is kept' ($e -like '*another tenant*' -and (Test-AVDTuneSessionClear $s4)) $e
-    $s5 = New-AVDTuneSession -Auth (New-AVDTuneFakeAuth -Seed @{ Cancel = $true })
+    $s5 = New-AVDTuneSession -TempRoot $signTemp -Auth (New-AVDTuneFakeAuth -Seed @{ Cancel = $true })
     Test-Check 'cancelled sign-in' ((Get-ThrownText { Connect-AVDTuneSession -Session $s5 -TenantId $tenant -ClientId $clientId }) -like 'Sign-in cancelled*') $null
-    $s6 = New-AVDTuneSession -Auth (New-AVDTuneFakeAuth -Seed @{ NoRefreshToken = $true })
+    $s6 = New-AVDTuneSession -TempRoot $signTemp -Auth (New-AVDTuneFakeAuth -Seed @{ NoRefreshToken = $true })
     Test-Check 'no refresh token (offline_access missing) is an error' ($null -ne (Get-ThrownText { Connect-AVDTuneSession -Session $s6 -TenantId $tenant -ClientId $clientId })) $null
     Test-Check 'the setup app of Microsoft and a non-GUID client are refused before any sign-in' ((Get-ThrownText { Connect-AVDTuneSession -Session $s5 -TenantId $tenant -ClientId '14d82eec-204b-4c2f-b7e8-296a70dab67e' }) -like '*setup app*' -and (Get-ThrownText { Connect-AVDTuneSession -Session $s5 -TenantId $tenant -ClientId 'x' }) -like '*GUID*') $null
 
@@ -273,7 +301,7 @@ try {
     $ctx2 = New-AVDTuneStartContext
     $st = Get-AVDTuneStartStages -Context $ctx2 -Root $tmp
     Test-Check 'with a DC: questions done, sign-in pending, domain and snapshot locked' (($st | ForEach-Object Status) -join ',' -eq 'Done,Pending,Locked,Locked') (($st | ForEach-Object Status) -join ',')
-    $s7 = New-AVDTuneSession -Auth (New-AVDTuneFakeAuth); [void](Connect-AVDTuneSession -Session $s7 -TenantId $tenant -ClientId $clientId); $ctx2.Session = $s7
+    $s7 = New-AVDTuneSession -TempRoot $signTemp -Auth (New-AVDTuneFakeAuth); [void](Connect-AVDTuneSession -Session $s7 -TenantId $tenant -ClientId $clientId); $ctx2.Session = $s7
     $st = Get-AVDTuneStartStages -Context $ctx2 -Root $tmp
     Test-Check 'after the sign-in the domain stage is pending' (($st | ForEach-Object Status) -join ',' -eq 'Done,Done,Pending,Locked') (($st | ForEach-Object Status) -join ',')
     $ctx2.Directory = $info; $ctx2.DirectorySecurity = 'LDAPS 636, certificate pinned'
@@ -305,6 +333,57 @@ try {
     Test-Check 'real LDAP probe: a closed port is a readable failure, not an exception' (-not (& $realLdap.Probe '127.0.0.1' 1).Ok) $null
     Test-Check 'real LDAP adapter refuses an option set that is not allowed before any connection' ($null -ne (Get-ThrownText { & $realLdap.Open ([pscustomobject]@{ Server = '127.0.0.1'; Port = 389; Ssl = $false; Signing = $false; Sealing = $false; AuthType = 'Negotiate'; PinnedSha256 = '' }) 'EXAMPLE' (New-Secret 'x') })) $null
 
+    # ---------------------------------------------------------------- WebView2 DLLs (finding 2): checked before every load
+    $wv = Join-Path $tmp 'WebView2'; $trustFile = Join-Path $tmp 'config\webview2-trust.json'
+    $names = 'Microsoft.Web.WebView2.Core.dll', 'Microsoft.Web.WebView2.Wpf.dll', 'WebView2Loader.dll'
+    $msFile = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'   # signed by Microsoft (catalog), stands in for the SDK files
+    Test-Check 'signature check: a Microsoft-signed file passes (signer, chain to a Microsoft root)' ((Test-AVDTuneMicrosoftSignature -Path $msFile).Ok) (Test-AVDTuneMicrosoftSignature -Path $msFile).Reason
+    Test-Check 'no cache folder: nothing to check, the shared code downloads and checks' ((Assert-AVDTuneWebView2Cache -Folder $wv -TrustFile $trustFile).Status -eq 'Empty') $null
+    New-Item -ItemType Directory -Path $wv -Force | Out-Null
+    foreach ($n in $names) { [IO.File]::WriteAllText((Join-Path $wv $n), 'MZ planted by a user without admin rights') }
+    $r = Assert-AVDTuneWebView2Cache -Folder $wv -TrustFile $trustFile
+    Test-Check 'attack: DLLs planted before the first start without a valid signature are deleted before anything loads them' ($r.Status -eq 'Reset' -and -not (Test-Path $wv)) ($r | ConvertTo-Json -Compress)
+    New-Item -ItemType Directory -Path $wv -Force | Out-Null
+    foreach ($n in $names) { Copy-Item $msFile (Join-Path $wv $n) }
+    $r = Assert-AVDTuneWebView2Cache -Folder $wv -TrustFile $trustFile
+    Test-Check 'even Microsoft-signed files without AVDTune''s trust record are not loaded (could be an old, weak version)' ($r.Status -eq 'Reset' -and -not (Test-Path $wv) -and ($r.Problems -join ' ') -like '*trust record*') ($r.Problems -join '; ')
+    New-Item -ItemType Directory -Path $wv -Force | Out-Null
+    foreach ($n in $names) { Copy-Item $msFile (Join-Path $wv $n) }
+    $reg = Register-AVDTuneWebView2Cache -Folder $wv -TrustFile $trustFile
+    $tr = Read-AVDTuneJson $trustFile
+    Test-Check 'after a download that passes the check the trust record holds SHA-256, file version and signer per file' ($reg.Status -eq 'Registered' -and @($tr.Files).Count -eq 3 -and $tr.Files[0].Sha256 -match '^[0-9A-F]{64}$' -and $tr.Files[0].Version -and $tr.Files[0].Signer -like '*Microsoft Corporation*') ($reg | ConvertTo-Json -Compress)
+    Test-Check 'the next sign-in loads the trusted files' ((Assert-AVDTuneWebView2Cache -Folder $wv -TrustFile $trustFile).Status -eq 'Trusted') $null
+    Copy-Item (Join-Path $env:SystemRoot 'System32\cmd.exe') (Join-Path $wv 'WebView2Loader.dll') -Force
+    $r = Assert-AVDTuneWebView2Cache -Folder $wv -TrustFile $trustFile
+    Test-Check 'a swapped file (even one signed by Microsoft) differs from the trust record: folder deleted' ($r.Status -eq 'Reset' -and ($r.Problems -join ' ') -like '*WebView2Loader.dll*SHA-256*' -and -not (Test-Path $wv)) ($r.Problems -join '; ')
+    New-Item -ItemType Directory -Path $wv -Force | Out-Null
+    foreach ($n in $names) { Copy-Item $msFile (Join-Path $wv $n) }
+    [IO.File]::WriteAllText((Join-Path $wv 'version.dll'), 'MZ side loaded')
+    $r = Assert-AVDTuneWebView2Cache -Folder $wv -TrustFile $trustFile
+    Test-Check 'an extra DLL next to the trusted ones (side loading) is refused: folder deleted' ($r.Status -eq 'Reset' -and ($r.Problems -join ' ') -like '*unexpected file version.dll*' -and -not (Test-Path $wv)) ($r.Problems -join '; ')
+    New-Item -ItemType Directory -Path $wv -Force | Out-Null
+    foreach ($n in $names) { [IO.File]::WriteAllText((Join-Path $wv $n), 'MZ unsigned') }
+    $reg = Register-AVDTuneWebView2Cache -Folder $wv -TrustFile $trustFile
+    Test-Check 'files that fail the check after a download are deleted and the trust record is removed' ($reg.Status -eq 'Reset' -and -not (Test-Path $wv) -and -not (Test-Path $trustFile)) ($reg | ConvertTo-Json -Compress)
+    $target = Join-Path $tmp 'junction-target'; New-Item -ItemType Directory -Path $target -Force | Out-Null; [IO.File]::WriteAllText((Join-Path $target 'keep.txt'), 'x')
+    New-Item -ItemType Junction -Path $wv -Value $target | Out-Null
+    $r = Assert-AVDTuneWebView2Cache -Folder $wv -TrustFile $trustFile
+    Test-Check 'a cache folder that is a link is removed as a link; the target is not touched' ($r.Status -eq 'Reset' -and -not (Test-Path $wv) -and (Test-Path (Join-Path $target 'keep.txt'))) ($r.Problems -join '; ')
+    New-Item -ItemType Directory -Path $wv -Force | Out-Null
+    foreach ($n in $names) { [IO.File]::WriteAllText((Join-Path $wv $n), 'MZ planted') }
+    $hold = [IO.File]::Open((Join-Path $wv $names[0]), 'Open', 'Read', 'None')
+    try { $e = Get-ThrownText { Assert-AVDTuneWebView2Cache -Folder $wv -TrustFile $trustFile } } finally { $hold.Dispose() }
+    Test-Check 'untrusted files that cannot be deleted stop the sign-in (nothing is loaded)' ($e -like '*not trusted*sign-in is stopped*') $e
+    Remove-Item $wv -Recurse -Force
+
+    # ---------------------------------------------------------------- no Keevault (user decision 2026-11-15): normal Microsoft sign-in only
+    $kvPattern = '(?i)\b(Find|Connect|Close|Send|Invoke)-Kee' + 'vaultMcp\w*|Connect-PackTuneWith' + 'Keevault|request_' + 'microsoft_login|get_' + 'totp|sign_in_with_' + 'passkey'
+    $own = @(Get-ChildItem $repo -Recurse -File -Include '*.ps1', '*.psm1', '*.xaml' | Where-Object { $_.FullName -notlike (Join-Path $repo 'Shared\*') -and $_.FullName -notlike '*\.git\*' })
+    $kvHits = @($own | Where-Object { [IO.File]::ReadAllText($_.FullName) -match $kvPattern } | ForEach-Object { $_.FullName.Substring($repo.Length + 1) })
+    Test-Check 'no AVDTune code outside Shared\ calls a Keevault function' ($own.Count -gt 10 -and $kvHits.Count -eq 0) ($kvHits -join ', ')
+    $sessCode = [IO.File]::ReadAllText((Join-Path $repo 'Modules\AVDTune.Session.psm1'))
+    Test-Check 'the sign-in imports only the normal sign-in functions of the shared module and fills in nothing' ($sessCode -match 'Import-Module \$shared -Force -Function Invoke-PackTuneBrowserSignIn, Request-PackTuneToken, Set-PackTuneSignInLog\r?\n' -and $sessCode -match 'Invoke-PackTuneBrowserSignIn -TenantID' -and $sessCode -notmatch '(?i)-Fill\b|-Passkey\b|-HasOtp\b') $null
+
     # ---------------------------------------------------------------- nothing secret on disk, source rules
     $allText = (Get-ChildItem $tmp -Recurse -File | ForEach-Object { [IO.File]::ReadAllText($_.FullName) }) -join "`n"
     Test-Check 'no password, token or refresh token in any file of the state folder' ($allText -notmatch [regex]::Escape($secretPassword) -and $allText -notmatch 'eyJ[A-Za-z0-9_-]{10,}' -and $allText -notmatch 'fake-refresh' -and $allText -notmatch 'fake-arm-token') $null
@@ -322,7 +401,7 @@ try {
 }
 catch { $script:failed++; "FAIL check aborted: $($_.Exception.Message) @ $($_.InvocationInfo.ScriptLineNumber)" }
 finally {
-    $env:AVDTUNE_ROOT = $null
+    $env:AVDTUNE_ROOT = $null; $env:AVDTUNE_FAKE = $null
     Close-AVDTuneWriteGate
     if (Test-Path $tmp) { Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue }
 }

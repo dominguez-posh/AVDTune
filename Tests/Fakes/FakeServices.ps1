@@ -14,17 +14,22 @@ function ConvertTo-FakeJson($Object) { $Object | ConvertTo-Json -Depth 10 | Conv
 function New-FakeJwt([hashtable]$Claims) { (ConvertTo-FakeBase64Url '{"alg":"none"}') + '.' + (ConvertTo-FakeBase64Url ($Claims | ConvertTo-Json -Compress)) + '.fakesignature' }
 
 # ------------------------------------------------------------------ sign-in
-# Switches in .Store: Offline, Cancel, ConsentMissing (array of audiences: 'Arm', 'Sites', 'Graph'), WrongTenant, ExpiresIn (seconds), NoRefreshToken
+# Switches in .Store: Offline, Cancel, ConsentMissing (array of audiences: 'Arm', 'Sites', 'Graph'), WrongTenant, ExpiresIn (seconds), NoRefreshToken,
+# Consented (resource -> consented scopes, all of them go into every token of that resource), ExtraScopes (resource -> scopes beyond AVDTune's)
 function New-AVDTuneFakeAuth {
     param([hashtable]$Seed = @{})
     $store = @{ Offline = $false; Cancel = $false; ConsentMissing = @(); WrongTenant = $false; ExpiresIn = 3600; NoRefreshToken = $false
-        Upn = 'admin.example@contoso.example'; Name = 'Alex Example'; Tenant = $script:FakeTenant; Log = (New-Object System.Collections.ArrayList); Counter = 0 }
+        Upn = 'admin.example@contoso.example'; Name = 'Alex Example'; Tenant = $script:FakeTenant; Log = (New-Object System.Collections.ArrayList); Counter = 0
+        Consented = @{ 'https://graph.microsoft.com' = @('Group.Read.All', 'DeviceManagementApps.Read.All', 'Sites.Selected'); 'https://management.azure.com' = @('user_impersonation') }
+        ExtraScopes = @{} }
     foreach ($k in $Seed.Keys) { $store[$k] = $Seed[$k] }
     $make = {
         param($Scopes)
         $urls = @($Scopes)
         $resource = ($urls[0] -replace '^(https://[^/]+)/.*$', '$1')
-        $names = @($urls | ForEach-Object { $_ -replace '^https://[^/]+/', '' })
+        # Like Microsoft's v2 endpoint: a token carries every consented scope of its resource, not only the ones asked for
+        $names = @(@($store.Consented[$resource]) + @($store.ExtraScopes[$resource]) | Where-Object { $_ } | Select-Object -Unique)
+        if ($names.Count -eq 0) { $names = @($urls | ForEach-Object { $_ -replace '^https://[^/]+/', '' }) }
         $audience = if ($resource -eq 'https://graph.microsoft.com') { 'https://graph.microsoft.com' } else { $resource }
         $store.Counter++
         $claims = @{ aud = $audience; tid = $(if ($store.WrongTenant) { '99999999-0000-0000-0000-000000000000' } else { $store.Tenant }); upn = $store.Upn; name = $store.Name; oid = 'oid-fake'; scp = ($names -join ' '); n = $store.Counter }
@@ -34,6 +39,12 @@ function New-AVDTuneFakeAuth {
     $a.SignIn = {
         param($TenantId, $ClientId, $Scopes)
         [void]$store.Log.Add("SignIn tenant=$TenantId scopes=$(@($Scopes) -join ',')")
+        # LeaveProfileIn: like the shared sign-in window, leaves a temporary profile folder behind (a cookie file in it)
+        if ($store.ContainsKey('LeaveProfileIn') -and $store.LeaveProfileIn) {
+            $profileDir = Join-Path $store.LeaveProfileIn ('PackTuneSignIn-' + [guid]::NewGuid().ToString('N'))
+            New-Item -ItemType Directory -Path (Join-Path $profileDir 'EBWebView\Default') -Force | Out-Null
+            [IO.File]::WriteAllText((Join-Path $profileDir 'EBWebView\Default\Cookies'), 'fake cookie store')
+        }
         if ($store.Offline) { throw 'The remote name could not be resolved: login.microsoftonline.com' }
         if ($store.Cancel) { throw 'Sign-in cancelled.' }
         & $make $Scopes

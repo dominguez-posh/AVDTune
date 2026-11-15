@@ -16,8 +16,11 @@ $script:PendingSnapshot = $null
 # ---------------------------------------------------------------- services
 function Get-StartAuth {
     if ($script:TestMode) { return $script:Services.Auth }
-    New-AVDTuneAuthAdapter -Owner $window -CacheFolder (Join-Path $script:StateRoot 'WebView2') -Log { param($Text, $Level) }
+    New-AVDTuneAuthAdapter -Owner $window -CacheFolder (Join-Path $script:StateRoot 'WebView2') -TrustFile (Get-AVDTuneWebView2TrustFile $script:StateRoot) -Log {
+        param($Text, $Level) if ($Level -eq 'Warning') { Add-StartProtocol 'Warning: sign-in window' $Text } }
 }
+# Where the sign-in window leaves its temporary profiles: the temp folder of this user (a folder of the test state in test mode)
+function Get-StartTempRoot { if ($script:TestMode) { Join-Path $script:StateRoot 'signin-temp' } else { [IO.Path]::GetTempPath() } }
 function Get-StartArm { if ($script:TestMode) { $script:Services.Arm } else { if (-not $script:RealArm) { $script:RealArm = New-AVDTuneArmAdapter }; $script:RealArm } }
 function Get-StartLdap { if ($script:TestMode) { $script:Services.Ldap } else { New-AVDTuneLdapAdapter } }
 
@@ -252,7 +255,7 @@ function Save-EnvironmentForm {
 # ---------------------------------------------------------------- 2. sign-in
 function Build-SignInForm {
     $ui.TxtStageTitle.Text = '2. Microsoft 365 and Azure sign-in'
-    $ui.TxtStageIntro.Text = 'One sign-in with the account from Keevault. AVDTune gets three tokens from it, each with only its own permission. They live in memory only and are removed on closing, and before seal.'
+    $ui.TxtStageIntro.Text = 'One normal Microsoft sign-in in an embedded window: you sign in yourself. AVDTune gets three tokens from it, one for Microsoft Graph, one for the SharePoint site and one for Azure Resource Manager. Microsoft puts every consented permission of a resource into its token, so both Graph tokens carry all Graph permissions listed here; extra permissions are reported as a warning. The tokens live in memory only and are removed on closing, on sign out and before seal.'
     $session = $script:StartContext.Session
     foreach ($key in (Get-AVDTuneAudience).Keys) {
         $a = (Get-AVDTuneAudience)[$key]
@@ -278,9 +281,9 @@ function Build-SignInForm {
 function Invoke-SignIn {
     $e = Get-AVDTuneEnvironment $script:StateRoot
     if (-not $e) { throw 'Answer the first-run questions first.' }
-    $session = New-AVDTuneSession -Auth (Get-StartAuth)
+    $session = New-AVDTuneSession -Auth (Get-StartAuth) -TempRoot (Get-StartTempRoot)
     try {
-        $info = Invoke-Busy 'The sign-in window is open: sign in with the account from Keevault ...' { Connect-AVDTuneSession -Session $session -TenantId ([string]$e.SignIn.TenantId) -ClientId ([string]$e.SignIn.ClientId) }
+        $info = Invoke-Busy 'The sign-in window is open: sign in with the account that manages this master ...' { Connect-AVDTuneSession -Session $session -TenantId ([string]$e.SignIn.TenantId) -ClientId ([string]$e.SignIn.ClientId) }
     }
     catch {
         $script:StartContext.Failures['SignIn'] = $_.Exception.Message
@@ -293,13 +296,15 @@ function Invoke-SignIn {
     $script:StartContext.Session = $session
     $script:StartContext.Failures.Remove('SignIn')
     Add-StartProtocol 'Microsoft 365 and Azure sign-in' ("Signed in as $($info.Account): " + (($info.Audiences | ForEach-Object { "$($_.Audience) ($($_.Scopes -join ', '))" }) -join '; '))
+    foreach ($w in @($info.Warnings)) { Add-StartProtocol 'Warning: sign-in token with extra permissions' $w }
     Show-Toast "Signed in as $($info.Account)."
     Close-Stage
     Update-StartView
 }
 function Invoke-SignOut {
     if ($script:StartContext.Session) { Disconnect-AVDTuneSession $script:StartContext.Session }
-    Add-StartProtocol 'Tokens removed' 'Sign-in tokens removed from memory'
+    $left = @(Get-AVDTuneSignInLeftovers -TempRoot (Get-StartTempRoot))
+    Add-StartProtocol 'Tokens removed' ('Sign-in tokens removed from memory' + $(if ($left.Count -gt 0) { "; $($left.Count) profile folder(s) of the sign-in window could not be deleted yet" } else { '; profiles of the sign-in window deleted' })) $(if ($left.Count -gt 0) { 'failed' } else { 'ok' })
     Show-Toast 'The tokens are removed from memory.'
     Close-Stage
     Update-StartView

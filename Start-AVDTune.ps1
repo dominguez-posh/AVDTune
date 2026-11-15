@@ -26,7 +26,7 @@ Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, Sys
 $script:AppRoot = $PSScriptRoot
 $script:ToolVersion = '0.1.0'
 Import-Module (Join-Path $PSScriptRoot 'Modules\AVDTune.psm1') -Force
-foreach ($part in 'Session', 'Snapshot', 'Directory', 'Start') { Import-Module (Join-Path $PSScriptRoot "Modules\AVDTune.$part.psm1") -Force }
+foreach ($part in 'Trust', 'Session', 'Snapshot', 'Directory', 'Start') { Import-Module (Join-Path $PSScriptRoot "Modules\AVDTune.$part.psm1") -Force }
 . (Join-Path $PSScriptRoot 'AVDTune-Theme.ps1')
 
 # ---------------------------------------------------------------- test mode, elevation, one instance

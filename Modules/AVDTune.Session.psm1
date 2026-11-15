@@ -2,14 +2,18 @@
     AVDTune sign-in session: one Microsoft sign-in, three token audiences, tokens in memory only.
 
       Graph   Microsoft Graph, read only (Entra groups, Intune app notes for the package trust anchor)
-      Sites   Microsoft Graph, Sites.Selected only (the SharePoint site of the environment / package store)
+      Sites   Microsoft Graph, Sites.Selected (the SharePoint site of the environment / package store)
       Arm     Azure Resource Manager (snapshot of the OS disk, VM size and region), delegated user_impersonation
 
-    The interactive sign-in is done by the shared module (Shared\Modules\Keevault.psm1: Connect-PackTuneWithKeevault, embedded sign-in
-    with the account from Keevault, authorization code with PKCE). It returns one refresh token; every audience gets its own access
-    token from it with exactly the scopes it needs (Request-PackTuneToken, grant refresh_token), so the Sites token cannot read groups
-    and the Graph token cannot reach a site. Nothing here is written to disk: access and refresh tokens are SecureStrings in this
-    process, Disconnect-AVDTuneSession removes them and Test-AVDTuneSessionClear proves it (called before seal).
+    The interactive sign-in is the normal Microsoft sign-in of the shared module (Shared\Modules\Keevault.psm1: Invoke-PackTuneBrowserSignIn,
+    embedded sign-in window, authorization code with PKCE; the administrator signs in himself). Keevault is not used (user decision
+    2026-11-15): no Keevault function is called and no password is filled in. The sign-in returns one refresh token; every audience gets
+    its own access token from it (Request-PackTuneToken, grant refresh_token).
+    Limit: Microsoft's v2 tokens carry ALL consented scopes of their resource, so the Graph and the Sites token both carry Group.Read.All,
+    DeviceManagementApps.Read.All and Sites.Selected; the separation is by resource (Graph versus Azure Resource Manager), not by scope.
+    A token with a scope beyond what AVDTune asks for on its resource is kept but named in Warnings (session info, protocol).
+    Nothing here is written to disk: access and refresh tokens are SecureStrings in this process. Disconnect-AVDTuneSession removes them
+    and the temporary profiles of the sign-in window (PackTuneSignIn-* in %TEMP%); Test-AVDTuneSessionClear proves both (before seal).
 
     The identity provider is an adapter ($Auth): SignIn and Refresh script blocks. New-AVDTuneAuthAdapter is the real one,
     Tests\Fakes\FakeServices.ps1 has the fake. Without changes to the shared module (nothing here edits Shared\).
@@ -17,6 +21,7 @@
 
 Set-StrictMode -Version 2.0
 Import-Module (Join-Path $PSScriptRoot 'AVDTune.psm1')
+Import-Module (Join-Path $PSScriptRoot 'AVDTune.Trust.psm1')
 
 $script:GraphResource = 'https://graph.microsoft.com'
 $script:ArmResource = 'https://management.azure.com'
@@ -34,6 +39,12 @@ function Get-AVDTuneAudience { $script:Audiences }
 function Get-AVDTuneAudienceScopeUrls([string]$Audience) {
     $a = $script:Audiences[$Audience]
     @($a.Scopes | ForEach-Object { "$($a.Resource)/$_" })
+}
+
+function Get-AVDTuneExpectedScopes([string]$Audience) {
+    # What a v2 token of this audience may carry: every scope AVDTune asks for on the same resource (a token holds all consented scopes of its resource)
+    $resource = $script:Audiences[$Audience].Resource
+    @($script:Audiences.Values | Where-Object { $_.Resource -eq $resource } | ForEach-Object { $_.Scopes } | Sort-Object -Unique)
 }
 
 #region secure strings, claims
@@ -87,8 +98,9 @@ function ConvertTo-AVDTuneAuthError {
 
 function New-AVDTuneSession {
     # Empty session; Connect-AVDTuneSession fills it
-    param([Parameter(Mandatory)]$Auth)
-    [pscustomobject]@{ Auth = $Auth; TenantId = ''; ClientId = ''; Account = ''; Name = ''; Tokens = @{}; Refresh = $null; Connected = $false }
+    # TempRoot: where the sign-in window leaves its temporary profiles (the temp folder of this user; a test folder in the checks)
+    param([Parameter(Mandatory)]$Auth, [string]$TempRoot = [IO.Path]::GetTempPath())
+    [pscustomobject]@{ Auth = $Auth; TempRoot = $TempRoot; TenantId = ''; ClientId = ''; Account = ''; Name = ''; Tokens = @{}; Refresh = $null; Connected = $false; Warnings = @() }
 }
 
 function Set-AVDTuneSessionToken($Session, [string]$Audience, $Response) {
@@ -108,7 +120,8 @@ function Set-AVDTuneSessionToken($Session, [string]$Audience, $Response) {
 }
 
 function Assert-AVDTuneTokenClaims {
-    # What a token must say before it is kept: right audience, the scopes of its purpose, the expected tenant
+    # What a token must say before it is kept: right audience, the scopes of its purpose, the expected tenant. Returns the scopes beyond
+    # what AVDTune asks for on this resource (kept, because Microsoft adds every consented scope, but reported as a warning).
     param($Claims, [string]$Audience, [string]$TenantId)
     $a = $script:Audiences[$Audience]
     $aud = [string](Get-AVDTuneProp $Claims 'aud')
@@ -117,6 +130,12 @@ function Assert-AVDTuneTokenClaims {
     $have = @(([string](Get-AVDTuneProp $Claims 'scp')) -split ' ' | Where-Object { $_ })
     foreach ($need in $a.Scopes) { if ($need -notin $have) { throw "The token for $Audience lacks the permission $need (granted: $($have -join ', '))." } }
     if ($TenantId -match '^[0-9a-fA-F-]{36}$' -and [string](Get-AVDTuneProp $Claims 'tid') -ne $TenantId) { throw 'The account signed in to another tenant than the one of the environment.' }
+    $expected = @(Get-AVDTuneExpectedScopes $Audience)
+    @($have | Where-Object { $_ -notin $expected })
+}
+
+function Get-AVDTuneScopeWarning([string]$Audience, [string[]]$Extra) {
+    "The $Audience token carries permissions AVDTune does not ask for: $($Extra -join ', '). Check the API permissions of the app registration."
 }
 
 function Connect-AVDTuneSession {
@@ -136,7 +155,8 @@ function Connect-AVDTuneSession {
         $current = 'sign-in'
         # One interactive sign-in for all Graph scopes of both Graph audiences; the answer is only used for its refresh token
         $scopes = @((Get-AVDTuneAudienceScopeUrls 'Graph') + (Get-AVDTuneAudienceScopeUrls 'Sites'))
-        $first = & $Session.Auth.SignIn $TenantId $ClientId $scopes
+        try { $first = & $Session.Auth.SignIn $TenantId $ClientId $scopes }
+        finally { [void](Remove-AVDTuneSignInLeftovers -TempRoot $Session.TempRoot) }
         $firstAccess = [string](Get-AVDTuneProp $first 'access_token')
         if (-not $firstAccess -or -not [string](Get-AVDTuneProp $first 'refresh_token')) { throw 'The sign-in returned no refresh token (offline_access missing).' }
         $claims = Get-AVDTuneTokenClaims $firstAccess
@@ -144,13 +164,16 @@ function Connect-AVDTuneSession {
         $Session.Name = [string](Get-AVDTuneProp $claims 'name')
         $Session.Refresh = ConvertTo-AVDTuneSecure ([string]$first.refresh_token)
         $first = $null
+        $warnings = New-Object System.Collections.ArrayList
         foreach ($audience in $script:Audiences.Keys) {
             $current = $audience
             $urls = @(Get-AVDTuneAudienceScopeUrls $audience)
             $response = & $Session.Auth.Refresh $TenantId $ClientId (ConvertFrom-AVDTuneSecure $Session.Refresh) $urls
             $c = Set-AVDTuneSessionToken $Session $audience $response
-            Assert-AVDTuneTokenClaims -Claims $c -Audience $audience -TenantId $TenantId
+            $extra = @(Assert-AVDTuneTokenClaims -Claims $c -Audience $audience -TenantId $TenantId)
+            if ($extra.Count -gt 0) { [void]$warnings.Add((Get-AVDTuneScopeWarning $audience $extra)) }
         }
+        $Session.Warnings = @($warnings)
         $Session.Connected = $true
         Get-AVDTuneSessionInfo $Session
     }
@@ -171,7 +194,9 @@ function Get-AVDTuneAccessToken {
         try {
             $urls = @(Get-AVDTuneAudienceScopeUrls $Audience)
             $response = & $Session.Auth.Refresh $Session.TenantId $Session.ClientId (ConvertFrom-AVDTuneSecure $Session.Refresh) $urls
-            [void](Set-AVDTuneSessionToken $Session $Audience $response)
+            $c = Set-AVDTuneSessionToken $Session $Audience $response
+            $extra = @(Assert-AVDTuneTokenClaims -Claims $c -Audience $Audience -TenantId $Session.TenantId)
+            if ($extra.Count -gt 0) { $Session.Warnings = @(@($Session.Warnings) + (Get-AVDTuneScopeWarning $Audience $extra) | Select-Object -Unique) }
         }
         catch { throw (ConvertTo-AVDTuneAuthError -Message $_.Exception.Message -Audience $Audience) }
         $t = $Session.Tokens[$Audience]
@@ -183,7 +208,7 @@ function Get-AVDTuneSessionInfo {
     # What may be shown and logged: account, tenant, audiences with scopes and expiry. Never a token.
     param([Parameter(Mandatory)]$Session)
     [pscustomobject]@{
-        Connected = [bool]$Session.Connected; Account = $Session.Account; Name = $Session.Name; TenantId = $Session.TenantId
+        Connected = [bool]$Session.Connected; Account = $Session.Account; Name = $Session.Name; TenantId = $Session.TenantId; Warnings = @($Session.Warnings)
         Audiences = @($script:Audiences.Keys | Where-Object { $Session.Tokens[$_] } | ForEach-Object {
                 $t = $Session.Tokens[$_]
                 [pscustomobject]@{ Audience = $_; Purpose = $script:Audiences[$_].Purpose; Scopes = @($t.Scopes); ExpiresOn = $t.ExpiresOn.ToString('o') }
@@ -192,18 +217,42 @@ function Get-AVDTuneSessionInfo {
 }
 
 function Disconnect-AVDTuneSession {
-    # Removes every token from memory (SecureStrings disposed, tables emptied)
+    # Removes every token from memory (SecureStrings disposed, tables emptied) and the temporary profiles of the sign-in window
     param([Parameter(Mandatory)]$Session)
     foreach ($key in @($Session.Tokens.Keys)) { $t = $Session.Tokens[$key]; if ($t -and $t.Access) { $t.Access.Dispose() } }
     $Session.Tokens.Clear()
     if ($Session.Refresh) { $Session.Refresh.Dispose() }
-    $Session.Refresh = $null; $Session.Connected = $false; $Session.Account = ''; $Session.Name = ''
+    $Session.Refresh = $null; $Session.Connected = $false; $Session.Account = ''; $Session.Name = ''; $Session.Warnings = @()
+    [void](Remove-AVDTuneSignInLeftovers -TempRoot $Session.TempRoot)
 }
 
 function Test-AVDTuneSessionClear {
-    # True when no token is held (checked before seal)
+    # True when no token is held and no profile of the sign-in window is left (checked before seal / "Abschliessen")
     param([Parameter(Mandatory)]$Session)
-    ($Session.Tokens.Count -eq 0) -and ($null -eq $Session.Refresh) -and (-not $Session.Connected)
+    ($Session.Tokens.Count -eq 0) -and ($null -eq $Session.Refresh) -and (-not $Session.Connected) -and (@(Get-AVDTuneSignInLeftovers -TempRoot $Session.TempRoot).Count -eq 0)
+}
+
+#endregion
+
+#region profiles of the sign-in window
+
+function Get-AVDTuneSignInLeftovers {
+    # The temporary WebView2 profiles of the shared sign-in window (PackTuneSignIn-<guid>) in a temp folder; they hold Microsoft cookies
+    param([string]$TempRoot = [IO.Path]::GetTempPath())
+    if (-not $TempRoot -or -not (Test-Path -LiteralPath $TempRoot)) { return @() }
+    @(Get-ChildItem -LiteralPath $TempRoot -Directory -Force -Filter 'PackTuneSignIn-*' -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '^PackTuneSignIn-[0-9a-f]{32}$' } | ForEach-Object { $_.FullName })
+}
+
+function Remove-AVDTuneSignInLeftovers {
+    <# Deletes those profiles with retries (the browser process may hold files for a moment). Returns the folders that are still there. #>
+    param([string]$TempRoot = [IO.Path]::GetTempPath(), [int]$Tries = 10, [int]$DelayMilliseconds = 300)
+    for ($i = 0; $i -lt $Tries; $i++) {
+        $left = @(Get-AVDTuneSignInLeftovers -TempRoot $TempRoot)
+        if ($left.Count -eq 0) { return @() }
+        foreach ($folder in $left) { try { Remove-AVDTuneFolderNoFollow $folder } catch { } }
+        if (@(Get-AVDTuneSignInLeftovers -TempRoot $TempRoot).Count -gt 0 -and $DelayMilliseconds -gt 0) { Start-Sleep -Milliseconds $DelayMilliseconds }
+    }
+    @(Get-AVDTuneSignInLeftovers -TempRoot $TempRoot)
 }
 
 #endregion
@@ -212,18 +261,33 @@ function Test-AVDTuneSessionClear {
 
 function New-AVDTuneAuthAdapter {
     <#
-        The real identity provider: Keevault sign-in of the shared module and the refresh-token exchange of its Request-PackTuneToken.
-        Needs the window that owns the sign-in dialog. Not used by the checks (they use the fake).
+        The real identity provider: the normal Microsoft sign-in of the shared module (Invoke-PackTuneBrowserSignIn: embedded window, the
+        administrator signs in himself; no Keevault, nothing filled in) and its refresh-token exchange (Request-PackTuneToken). Only these
+        shared functions (and the log sink) are imported. Before the window loads the WebView2 DLLs, Assert-AVDTuneWebView2Cache checks the
+        cache folder; afterwards Register-AVDTuneWebView2Cache records the checked files. Not used by the checks (they use the fake).
     #>
-    param([object]$Owner, [Parameter(Mandatory)][string]$CacheFolder, [scriptblock]$Log)
+    param([object]$Owner, [Parameter(Mandatory)][string]$CacheFolder, [string]$TrustFile, [scriptblock]$Log)
     $shared = Join-Path (Split-Path $PSScriptRoot -Parent) 'Shared\Modules\Keevault.psm1'
-    Import-Module $shared -Force
+    Import-Module $shared -Force -Function Invoke-PackTuneBrowserSignIn, Request-PackTuneToken, Set-PackTuneSignInLog
     if ($Log) { Set-PackTuneSignInLog -Sink $Log }
+    if (-not $TrustFile) { $TrustFile = Join-Path (Split-Path $CacheFolder -Parent) 'config\webview2-trust.json' }
+    $script:RealSignIn = @{ Owner = $Owner; CacheFolder = $CacheFolder; TrustFile = $TrustFile; Log = $Log }
     $adapter = [ordered]@{ Kind = 'Real' }
+    # No closures: the blocks run in this module and see the imported shared functions and $script:RealSignIn
     $adapter.SignIn = {
         param($TenantId, $ClientId, $Scopes)
-        Connect-PackTuneWithKeevault -TenantID $TenantId -ClientID $ClientId -CacheFolder $CacheFolder -Scopes $Scopes -Owner $Owner
-    }.GetNewClosure()
+        $c = $script:RealSignIn
+        $check = Assert-AVDTuneWebView2Cache -Folder $c.CacheFolder -TrustFile $c.TrustFile
+        if ($check.Status -eq 'Reset' -and $c.Log) { & $c.Log ('The WebView2 files were not trusted and are loaded again: ' + ($check.Problems -join '; ')) 'Warning' }
+        try {
+            Invoke-PackTuneBrowserSignIn -TenantID $TenantId -ClientID $ClientId -CacheFolder $c.CacheFolder -Scopes $Scopes -Owner $c.Owner -Prompt select_account `
+                -Title 'Sign in to Microsoft 365 and Azure (AVDTune)' -Hint 'Sign in with the account that manages this Golden Master. AVDTune keeps the tokens in memory only.'
+        }
+        finally {
+            $reg = Register-AVDTuneWebView2Cache -Folder $c.CacheFolder -TrustFile $c.TrustFile
+            if ($reg.Status -eq 'Reset' -and $c.Log) { & $c.Log ('The WebView2 files failed the check after the sign-in and were deleted: ' + ($reg.Problems -join '; ')) 'Warning' }
+        }
+    }
     $adapter.Refresh = {
         param($TenantId, $ClientId, $RefreshToken, $Scopes)
         Request-PackTuneToken -TenantID $TenantId -ClientID $ClientId -Scopes $Scopes -Body @{ grant_type = 'refresh_token'; refresh_token = $RefreshToken }
@@ -233,5 +297,5 @@ function New-AVDTuneAuthAdapter {
 
 #endregion
 
-Export-ModuleMember -Function Get-AVDTuneAudience, Get-AVDTuneAudienceScopeUrls, ConvertTo-AVDTuneSecure, ConvertFrom-AVDTuneSecure, Get-AVDTuneTokenClaims, ConvertTo-AVDTuneAuthError,
+Export-ModuleMember -Function Get-AVDTuneAudience, Get-AVDTuneAudienceScopeUrls, Get-AVDTuneExpectedScopes, Get-AVDTuneSignInLeftovers, Remove-AVDTuneSignInLeftovers, ConvertTo-AVDTuneSecure, ConvertFrom-AVDTuneSecure, Get-AVDTuneTokenClaims, ConvertTo-AVDTuneAuthError,
     New-AVDTuneSession, Connect-AVDTuneSession, Get-AVDTuneAccessToken, Get-AVDTuneSessionInfo, Disconnect-AVDTuneSession, Test-AVDTuneSessionClear, New-AVDTuneAuthAdapter
