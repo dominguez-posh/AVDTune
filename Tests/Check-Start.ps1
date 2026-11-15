@@ -97,7 +97,7 @@ try {
     $lockedFile = Join-Path $planted 'Cookies'; [IO.File]::WriteAllText($lockedFile, 'x')
     $lock = [IO.File]::Open($lockedFile, 'Open', 'Read', 'None')
     Disconnect-AVDTuneSession $sl
-    Test-Check 'a profile that is still locked stays and Test-AVDTuneSessionClear says so (final check before seal)' ((Test-Path $planted) -and -not (Test-AVDTuneSessionClear $sl)) $null
+    Test-Check 'a profile that is still locked stays and Test-AVDTuneSessionClear says so (final check before Finish)' ((Test-Path $planted) -and -not (Test-AVDTuneSessionClear $sl)) $null
     $releaser = [powershell]::Create(); [void]$releaser.AddScript({ param($h) Start-Sleep -Milliseconds 700; $h.Dispose() }).AddArgument($lock); $rh = $releaser.BeginInvoke()
     $left = @(Remove-AVDTuneSignInLeftovers -TempRoot $signTemp -Tries 20 -DelayMilliseconds 200)
     [void]$releaser.EndInvoke($rh); $releaser.Dispose()

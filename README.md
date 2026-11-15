@@ -1,8 +1,8 @@
 # AVDTune
 
-Golden Master management for Azure Virtual Desktop: setup, updates, update block for users, optimization, benchmark, watermark, seal, protocol and change log. Runs locally on the Golden Master. Same look as PackTune.
+Golden Master management for Azure Virtual Desktop: setup, updates, update block for users, optimization, benchmark, watermark, cleanup and finish, protocol and change log. Runs locally on the Golden Master. Same look as PackTune.
 
-Status: phase 1 (shell, engine, state, protocol and change log, Overview, start sequence). See docs/plans/avdtune.md.
+Status: phases 1 and 2 (shell, engine, state, protocol and change log, Overview, start sequence, updates and update block) and the readiness analysis. See docs/plans/avdtune.md.
 
 ## Layout
 

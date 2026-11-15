@@ -361,7 +361,7 @@ $ui.CmbProtocolLanguage.Add_SelectionChanged({
         Save-UiSettings
         if ($script:CurrentPage -eq 'Protocol') { Update-ProtocolView }
     })
-$ui.CmbNoteCategory.ItemsSource = @('Windows', 'Office', 'Software', 'Optimization', 'FSLogix', 'VDI', 'User experience', 'Update block', 'Benchmark', 'Seal', 'Other')
+$ui.CmbNoteCategory.ItemsSource = @('Windows', 'Office', 'Software', 'Optimization', 'FSLogix', 'VDI', 'User experience', 'Update block', 'Benchmark', 'Finish', 'Other')
 $ui.CmbNoteCategory.SelectedIndex = 10
 $ui.CmbNoteType.ItemsSource = @('Note', 'Added', 'Changed', 'Updated', 'Removed')
 $ui.CmbNoteType.SelectedIndex = 0

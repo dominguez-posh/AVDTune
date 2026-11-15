@@ -437,7 +437,7 @@ function Get-AVDTuneNextImageVersion {
 }
 
 function Start-AVDTuneImageVersion {
-    # "Start new version": raises the version, clears the seal, keeps the list of versions with their start time
+    # "Start new version": raises the version, clears the finished mark, keeps the list of versions with their start time
     param([string]$Root = (Get-AVDTuneRoot), [datetime]$Date = (Get-Date), [string]$User)
     $version = Get-AVDTuneNextImageVersion -Root $Root -Date $Date
     $state = Get-AVDTuneState $Root
@@ -876,7 +876,7 @@ function Get-AVDTuneSourceImage {
 function Get-AVDTuneHealth {
     <#
         Health checks of the Overview. Status: ok, warn, bad, info. "Must not be" items (AVD agent, join) are bad when present:
-        a master with an agent or a join cannot be sealed.
+        a master with an agent or a join cannot be finished.
     #>
     param([Parameter(Mandatory)]$Machine, [Parameter(Mandatory)]$State, $UpdateBlock)
     $rows = New-Object System.Collections.ArrayList
@@ -898,17 +898,17 @@ function Get-AVDTuneHealth {
         $expected = [string]$State.UpdateBlock
         if ($UpdateBlock.State -eq 'On') { Add-Health 'updateblock' 'Update block for users' 'ok' ('On: ' + $UpdateBlock.Compliant + ' of ' + $UpdateBlock.Applicable + ' settings are in place, users see and run no updates.') }
         elseif ($expected -eq 'On') { Add-Health 'updateblock' 'Update block for users' 'bad' ('Changed from outside: only ' + $UpdateBlock.Compliant + ' of ' + $UpdateBlock.Applicable + ' settings are in place (' + $UpdateBlock.Missing + '). Switch the block on again.') }
-        elseif ($UpdateBlock.State -eq 'Partial') { Add-Health 'updateblock' 'Update block for users' 'warn' ('Partly on: ' + $UpdateBlock.Compliant + ' of ' + $UpdateBlock.Applicable + ' settings. Switch the block on before seal.') }
-        else { Add-Health 'updateblock' 'Update block for users' 'warn' 'Off: users can see and run updates. Switch the block on before seal.' }
+        elseif ($UpdateBlock.State -eq 'Partial') { Add-Health 'updateblock' 'Update block for users' 'warn' ('Partly on: ' + $UpdateBlock.Compliant + ' of ' + $UpdateBlock.Applicable + ' settings. Switch the block on before Finish.') }
+        else { Add-Health 'updateblock' 'Update block for users' 'warn' 'Off: users can see and run updates. Switch the block on before Finish.' }
     }
     else {
         switch ([string]$State.UpdateBlock) {
             'On' { Add-Health 'updateblock' 'Update block for users' 'ok' 'On: users see and run no updates (maintenance mode off).' }
-            'Off' { Add-Health 'updateblock' 'Update block for users' 'warn' 'Off: maintenance mode, updates are possible. Switch the block on before seal.' }
+            'Off' { Add-Health 'updateblock' 'Update block for users' 'warn' 'Off: maintenance mode, updates are possible. Switch the block on before Finish.' }
             default { Add-Health 'updateblock' 'Update block for users' 'info' 'Not set up yet.' }
         }
     }
-    if ($State.Sealed) { Add-Health 'sealed' 'Seal' 'info' 'Sealed: the master is ready for capture.' } else { Add-Health 'sealed' 'Seal' 'info' 'Not sealed.' }
+    if ($State.Sealed) { Add-Health 'sealed' 'Finish' 'info' 'Finished: the master is ready for capture.' } else { Add-Health 'sealed' 'Finish' 'info' 'Not finished.' }
 
     $agent = @('RDAgentBootLoader', 'RDAgent' | Where-Object { & $Machine.ServiceGet $_ })
     $agentKey = & $Machine.RegKeyExists 'HKLM:\SOFTWARE\Microsoft\RDInfraAgent'

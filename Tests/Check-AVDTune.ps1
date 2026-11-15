@@ -273,7 +273,7 @@ try {
     Test-Check 'health: pending file operations, agent key only, unreadable join state' ($hr.reboot -eq 'warn' -and $hr.avdagent -eq 'bad' -and $hr.join -eq 'warn') (Join-Pairs $hr)
     [void](Set-AVDTuneState -Root $tmp -Values @{ UpdateBlock = 'Off'; Sealed = $true })
     $hs = @{}; foreach ($h in (Get-AVDTuneOverview -Machine (New-AVDTuneFakeMachine) -Root $tmp).Health) { $hs[$h.Id] = $h }
-    Test-Check 'health: block off is a warning, sealed is shown' ($hs.updateblock.Status -eq 'warn' -and $hs.sealed.Detail -like 'Sealed*') $null
+    Test-Check 'health: block off is a warning, finished is shown' ($hs.updateblock.Status -eq 'warn' -and $hs.sealed.Detail -like 'Finished*') $null
     $gallery = New-AVDTuneFakeMachine -Seed @{ Imds = [pscustomobject]@{ compute = [pscustomobject]@{ name = 'vm1'; storageProfile = [pscustomobject]@{ imageReference = [pscustomobject]@{ id = '/subscriptions/s/resourceGroups/g/providers/Microsoft.Compute/galleries/gal/images/win11-avd/versions/2026.11.1' } } } } }
     Test-Check 'source image: a gallery image shows its version name' ((Get-AVDTuneSourceImage $gallery).Text -eq '2026.11.1') (Get-AVDTuneSourceImage $gallery).Text
     $noAzure = New-AVDTuneFakeMachine -Seed @{ Imds = $null; Registry = @{ 'HKLM:\SOFTWARE\Microsoft\Office\ClickToRun\Configuration|VersionToReport' = $null } }

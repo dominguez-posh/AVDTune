@@ -470,7 +470,7 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
     @{ Name = 'start: sign-out and dark'; Do = {
         Open-Stage 'SignIn'; $window.UpdateLayout()
         $ui.BtnStageAction2.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
-        Test-Smoke 'sign out removes every token from memory (checked as before seal)' (Test-AVDTuneSessionClear $script:StartContext.Session) $null
+        Test-Smoke 'sign out removes every token from memory (checked before Finish)' (Test-AVDTuneSessionClear $script:StartContext.Session) $null
         $allFiles = (Get-ChildItem $script:StateRoot -Recurse -File | ForEach-Object { [IO.File]::ReadAllText($_.FullName) }) -join "`n"
         Test-Smoke 'no token, refresh token or password in any file of the state folder' ($allFiles -notmatch 'eyJ[A-Za-z0-9_-]{10,}' -and $allFiles -notmatch 'fake-refresh' -and $allFiles -notmatch 'Not-A-Real-Password') $null
         Test-Smoke 'every service of the start sequence was a fake (no real adapter in test mode)' ($script:Services.Auth.Kind -eq 'Fake' -and $script:Services.Arm.Kind -eq 'Fake' -and $script:Services.Ldap.Kind -eq 'Fake') $null
