@@ -137,6 +137,47 @@ function New-AVDTuneMachine {
         }
         catch { $null }
     }
+    # Read-only members of the readiness analysis (docs\plans\avdtune.md, section 2a)
+    $m.RegSubKeys = {
+        param($Path)
+        if (-not (Test-Path -LiteralPath $Path)) { return @() }
+        @(Get-ChildItem -LiteralPath $Path -ErrorAction SilentlyContinue | ForEach-Object { $_.PSChildName })
+    }
+    $m.PathExists = { param($Path) Test-Path -LiteralPath $Path }
+    $m.DirList = {
+        # Names of the files and folders directly in a folder; empty when the folder is not there
+        param($Path, $Filter = '*')
+        if (-not (Test-Path -LiteralPath $Path)) { return @() }
+        @(Get-ChildItem -LiteralPath $Path -Filter $Filter -Force -ErrorAction SilentlyContinue | ForEach-Object { $_.Name })
+    }
+    $m.Hotfixes = {
+        # Installed updates with the date: @{ Id; InstalledOn } (InstalledOn can be $null)
+        @(Get-CimInstance -ClassName Win32_QuickFixEngineering -ErrorAction Stop | ForEach-Object {
+                $on = $null; if ($_.InstalledOn) { try { $on = [datetime]$_.InstalledOn } catch { } }
+                [pscustomobject]@{ Id = [string]$_.HotFixID; InstalledOn = $on }
+            })
+    }
+    $m.NetAdapters = {
+        @(Get-NetAdapter -ErrorAction Stop | ForEach-Object { [pscustomobject]@{ Name = $_.Name; Description = $_.InterfaceDescription; Status = [string]$_.Status } })
+    }
+    $m.PnpPresent = {
+        # True when a present PnP device has an instance ID that matches the regular expression
+        param($Pattern)
+        $found = @(Get-PnpDevice -PresentOnly -ErrorAction Stop | Where-Object { $_.InstanceId -match $Pattern })
+        $found.Count -gt 0
+    }
+    $m.OsArchitecture = {
+        $a = if ($env:PROCESSOR_ARCHITEW6432) { $env:PROCESSOR_ARCHITEW6432 } else { $env:PROCESSOR_ARCHITECTURE }
+        [string]$a
+    }
+    $m.TpmPresent = {
+        # $true / $false, $null when the TPM provider cannot be asked
+        try {
+            $t = @(Get-CimInstance -Namespace 'root\cimv2\Security\MicrosoftTpm' -ClassName Win32_Tpm -ErrorAction Stop)
+            ($t.Count -gt 0 -and [bool]$t[0].IsEnabled_InitialValue)
+        }
+        catch { $null }
+    }
     [pscustomobject]$m
 }
 

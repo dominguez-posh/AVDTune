@@ -3,13 +3,16 @@
 # Dot-source this file, then: $m = New-AVDTuneFakeMachine [-Seed @{ ... }]
 # Seed keys (all optional): Registry (hashtable 'path|name' -> value), Keys (array of registry keys that exist), Services (array of
 # @{ Name; Status; StartType }), Tasks (array of @{ Path; Name; Enabled }), Imds (object or $null), Native (hashtable 'file args' -> @{ ExitCode; Output }),
-# ComputerName, Now (datetime, fixed clock). $m.Store.FailWrites = @('part of a key|name') makes RegSet throw for matching values (error path checks).
+# ComputerName, Now (datetime, fixed clock), and for the readiness analysis: Paths (array of existing paths), Dirs (hashtable folder -> names), Hotfixes (array of @{ Id; InstalledOn }),
+# NetAdapters (array of @{ Name; Description; Status }), Pnp (array of PnP instance IDs that are present), Arch ('AMD64' or 'ARM64'), Tpm ($true/$false/$null). A Native entry can carry Registry (hashtable) that is applied when the command runs. $m.Store.FailWrites = @('part of a key|name') makes RegSet throw for matching values (error path checks).
 
 function New-AVDTuneFakeMachine {
     param([hashtable]$Seed = @{})
     $store = @{
         Registry = @{}; Keys = @{}; Services = @{}; Tasks = @{}; Native = @{}; Log = (New-Object System.Collections.ArrayList)
         ComputerName = $(if ($Seed.ComputerName) { $Seed.ComputerName } else { 'GM-TEST01' }); Now = $Seed.Now; Imds = $null; FailWrites = @()
+        Paths = @(@($Seed.Paths) | Where-Object { $_ }); Dirs = $(if ($Seed.Dirs) { $Seed.Dirs } else { @{} }); Hotfixes = @(@($Seed.Hotfixes) | Where-Object { $_ }); NetAdapters = @(@($Seed.NetAdapters) | Where-Object { $_ })
+        Pnp = @(@($Seed.Pnp) | Where-Object { $_ }); Arch = $(if ($Seed.Arch) { $Seed.Arch } else { 'AMD64' }); Tpm = $(if ($Seed.ContainsKey('Tpm')) { $Seed.Tpm } else { $null })
     }
     $win = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion'
     $office = 'HKLM:\SOFTWARE\Microsoft\Office\ClickToRun\Configuration'
@@ -75,8 +78,27 @@ function New-AVDTuneFakeMachine {
         param($File, [string[]]$Arguments, [int]$TimeoutSeconds = 120)
         $key = (@($File) + @($Arguments)) -join ' '
         [void]$store.Log.Add("Run $key")
-        if ($store.Native.ContainsKey($key)) { [pscustomobject]$store.Native[$key] } else { [pscustomobject]@{ ExitCode = 1; Output = "fake: no answer for $key" } }
+        if ($store.Native.ContainsKey($key)) {
+            $answer = $store.Native[$key]
+            $result = [pscustomobject]$answer
+            if ($answer -is [System.Collections.IDictionary] -and $answer.Contains('Registry') -and $answer['ExitCode'] -eq 0) { foreach ($k in $answer['Registry'].Keys) { $store.Registry[([string]$k).ToLowerInvariant()] = $answer['Registry'][$k] } }
+            $result
+        } else { [pscustomobject]@{ ExitCode = 1; Output = "fake: no answer for $key" } }
     }.GetNewClosure()
     $m.Imds = { $store.Imds }.GetNewClosure()
+    $m.RegSubKeys = {
+        param($Path)
+        $prefix = (([string]$Path).ToLowerInvariant().TrimEnd('\') + '\')
+        $names = @{}
+        foreach ($k in @($store.Keys.Keys) + @($store.Registry.Keys | ForEach-Object { $_.Split('|')[0] })) { if ($k.StartsWith($prefix)) { $names[$k.Substring($prefix.Length).Split('\')[0]] = $true } }
+        @($names.Keys)
+    }.GetNewClosure()
+    $m.PathExists = { param($Path) (@($store.Paths) | Where-Object { $_ -eq $Path }).Count -gt 0 }.GetNewClosure()
+    $m.DirList = { param($Path, $Filter = '*') @(@($store.Dirs[$Path]) | Where-Object { $_ -and $_ -like $Filter }) }.GetNewClosure()
+    $m.Hotfixes = { $store.Hotfixes }.GetNewClosure()
+    $m.NetAdapters = { $store.NetAdapters }.GetNewClosure()
+    $m.PnpPresent = { param($Pattern) (@($store.Pnp | Where-Object { $_ -match $Pattern })).Count -gt 0 }.GetNewClosure()
+    $m.OsArchitecture = { $store.Arch }.GetNewClosure()
+    $m.TpmPresent = { $store.Tpm }.GetNewClosure()
     [pscustomobject]$m
 }
