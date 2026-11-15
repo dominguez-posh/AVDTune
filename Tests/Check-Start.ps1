@@ -381,49 +381,36 @@ try {
     Test-Check 'real LDAP probe: a closed port is a readable failure, not an exception' (-not (& $realLdap.Probe '127.0.0.1' 1).Ok) $null
     Test-Check 'real LDAP adapter refuses an option set that is not allowed before any connection' ($null -ne (Get-ThrownText { & $realLdap.Open ([pscustomobject]@{ Server = '127.0.0.1'; Port = 389; Ssl = $false; Signing = $false; Sealing = $false; AuthType = 'Negotiate'; PinnedSha256 = '' }) 'EXAMPLE' (New-Secret 'x') })) $null
 
-    # ---------------------------------------------------------------- WebView2 DLLs (finding 2): checked before every load
-    $wv = Join-Path $tmp 'WebView2'; $trustFile = Join-Path $tmp 'config\webview2-trust.json'
-    $names = 'Microsoft.Web.WebView2.Core.dll', 'Microsoft.Web.WebView2.Wpf.dll', 'WebView2Loader.dll'
-    $msFile = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'   # signed by Microsoft (catalog), stands in for the SDK files
-    Test-Check 'signature check: a Microsoft-signed file passes (signer, chain to a Microsoft root)' ((Test-AVDTuneMicrosoftSignature -Path $msFile).Ok) (Test-AVDTuneMicrosoftSignature -Path $msFile).Reason
-    Test-Check 'no cache folder: nothing to check, the shared code downloads and checks' ((Assert-AVDTuneWebView2Cache -Folder $wv -TrustFile $trustFile).Status -eq 'Empty') $null
+    # ---------------------------------------------------------------- WebView2 cache folder: what the shared code does not check (it pins version and hashes, checks the signature on every load)
+    $wv = Join-Path $tmp 'WebView2'
+    $names = 'Microsoft.Web.WebView2.Core.dll', 'Microsoft.Web.WebView2.Wpf.dll', 'WebView2Loader.dll', 'webview2-sdk.json'
+    $trustCode = [IO.File]::ReadAllText((Join-Path $repo 'Modules\AVDTune.Trust.psm1'))
+    Test-Check 'no duplicate of the shared WebView2 checks left in AVDTune (no own signature, hash or trust record)' ($trustCode -notmatch 'Get-AuthenticodeSignature|Sha256|SHA256|webview2-trust|Register-AVDTuneWebView2Cache') $null
+    Test-Check 'no cache folder: nothing to check, the shared code downloads the pinned SDK' ((Assert-AVDTuneWebView2Cache -Folder $wv).Status -eq 'Empty') $null
     New-Item -ItemType Directory -Path $wv -Force | Out-Null
-    foreach ($n in $names) { [IO.File]::WriteAllText((Join-Path $wv $n), 'MZ planted by a user without admin rights') }
-    $r = Assert-AVDTuneWebView2Cache -Folder $wv -TrustFile $trustFile
-    Test-Check 'attack: DLLs planted before the first start without a valid signature are deleted before anything loads them' ($r.Status -eq 'Reset' -and -not (Test-Path $wv)) ($r | ConvertTo-Json -Compress)
-    New-Item -ItemType Directory -Path $wv -Force | Out-Null
-    foreach ($n in $names) { Copy-Item $msFile (Join-Path $wv $n) }
-    $r = Assert-AVDTuneWebView2Cache -Folder $wv -TrustFile $trustFile
-    Test-Check 'even Microsoft-signed files without AVDTune''s trust record are not loaded (could be an old, weak version)' ($r.Status -eq 'Reset' -and -not (Test-Path $wv) -and ($r.Problems -join ' ') -like '*trust record*') ($r.Problems -join '; ')
-    New-Item -ItemType Directory -Path $wv -Force | Out-Null
-    foreach ($n in $names) { Copy-Item $msFile (Join-Path $wv $n) }
-    $reg = Register-AVDTuneWebView2Cache -Folder $wv -TrustFile $trustFile
-    $tr = Read-AVDTuneJson $trustFile
-    Test-Check 'after a download that passes the check the trust record holds SHA-256, file version and signer per file' ($reg.Status -eq 'Registered' -and @($tr.Files).Count -eq 3 -and $tr.Files[0].Sha256 -match '^[0-9A-F]{64}$' -and $tr.Files[0].Version -and $tr.Files[0].Signer -like '*Microsoft Corporation*') ($reg | ConvertTo-Json -Compress)
-    Test-Check 'the next sign-in loads the trusted files' ((Assert-AVDTuneWebView2Cache -Folder $wv -TrustFile $trustFile).Status -eq 'Trusted') $null
-    Copy-Item (Join-Path $env:SystemRoot 'System32\cmd.exe') (Join-Path $wv 'WebView2Loader.dll') -Force
-    $r = Assert-AVDTuneWebView2Cache -Folder $wv -TrustFile $trustFile
-    Test-Check 'a swapped file (even one signed by Microsoft) differs from the trust record: folder deleted' ($r.Status -eq 'Reset' -and ($r.Problems -join ' ') -like '*WebView2Loader.dll*SHA-256*' -and -not (Test-Path $wv)) ($r.Problems -join '; ')
-    New-Item -ItemType Directory -Path $wv -Force | Out-Null
-    foreach ($n in $names) { Copy-Item $msFile (Join-Path $wv $n) }
+    foreach ($n in $names) { [IO.File]::WriteAllText((Join-Path $wv $n), 'x') }
+    Test-Check 'only the three DLLs and the marker of the shared module: left for the shared code to check' ((Assert-AVDTuneWebView2Cache -Folder $wv).Status -eq 'Clean' -and (Test-Path (Join-Path $wv 'WebView2Loader.dll'))) $null
     [IO.File]::WriteAllText((Join-Path $wv 'version.dll'), 'MZ side loaded')
-    $r = Assert-AVDTuneWebView2Cache -Folder $wv -TrustFile $trustFile
-    Test-Check 'an extra DLL next to the trusted ones (side loading) is refused: folder deleted' ($r.Status -eq 'Reset' -and ($r.Problems -join ' ') -like '*unexpected file version.dll*' -and -not (Test-Path $wv)) ($r.Problems -join '; ')
-    New-Item -ItemType Directory -Path $wv -Force | Out-Null
-    foreach ($n in $names) { [IO.File]::WriteAllText((Join-Path $wv $n), 'MZ unsigned') }
-    $reg = Register-AVDTuneWebView2Cache -Folder $wv -TrustFile $trustFile
-    Test-Check 'files that fail the check after a download are deleted and the trust record is removed' ($reg.Status -eq 'Reset' -and -not (Test-Path $wv) -and -not (Test-Path $trustFile)) ($reg | ConvertTo-Json -Compress)
+    $r = Assert-AVDTuneWebView2Cache -Folder $wv
+    Test-Check 'an extra DLL next to the SDK files (side loading) is refused: folder deleted' ($r.Status -eq 'Reset' -and ($r.Problems -join ' ') -like '*unexpected file version.dll*' -and -not (Test-Path $wv)) ($r.Problems -join '; ')
+    New-Item -ItemType Directory -Path (Join-Path $wv 'sub') -Force | Out-Null
+    $r = Assert-AVDTuneWebView2Cache -Folder $wv
+    Test-Check 'a sub folder is refused: folder deleted' ($r.Status -eq 'Reset' -and ($r.Problems -join ' ') -like '*unexpected folder sub*' -and -not (Test-Path $wv)) ($r.Problems -join '; ')
     $target = Join-Path $tmp 'junction-target'; New-Item -ItemType Directory -Path $target -Force | Out-Null; [IO.File]::WriteAllText((Join-Path $target 'keep.txt'), 'x')
     New-Item -ItemType Junction -Path $wv -Value $target | Out-Null
-    $r = Assert-AVDTuneWebView2Cache -Folder $wv -TrustFile $trustFile
+    $r = Assert-AVDTuneWebView2Cache -Folder $wv
     Test-Check 'a cache folder that is a link is removed as a link; the target is not touched' ($r.Status -eq 'Reset' -and -not (Test-Path $wv) -and (Test-Path (Join-Path $target 'keep.txt'))) ($r.Problems -join '; ')
     New-Item -ItemType Directory -Path $wv -Force | Out-Null
-    foreach ($n in $names) { [IO.File]::WriteAllText((Join-Path $wv $n), 'MZ planted') }
+    New-Item -ItemType Junction -Path (Join-Path $wv 'WebView2Loader.dll') -Value $target | Out-Null
+    $r = Assert-AVDTuneWebView2Cache -Folder $wv
+    Test-Check 'a link inside the folder is refused; its target is not touched' ($r.Status -eq 'Reset' -and -not (Test-Path $wv) -and (Test-Path (Join-Path $target 'keep.txt'))) ($r.Problems -join '; ')
+    New-Item -ItemType Directory -Path $wv -Force | Out-Null
+    foreach ($n in $names) { [IO.File]::WriteAllText((Join-Path $wv $n), 'x') }
+    [IO.File]::WriteAllText((Join-Path $wv 'planted.dll'), 'MZ planted')
     $hold = [IO.File]::Open((Join-Path $wv $names[0]), 'Open', 'Read', 'None')
-    try { $e = Get-ThrownText { Assert-AVDTuneWebView2Cache -Folder $wv -TrustFile $trustFile } } finally { $hold.Dispose() }
-    Test-Check 'untrusted files that cannot be deleted stop the sign-in (nothing is loaded)' ($e -like '*not trusted*sign-in is stopped*') $e
+    try { $e = Get-ThrownText { Assert-AVDTuneWebView2Cache -Folder $wv } } finally { $hold.Dispose() }
+    Test-Check 'foreign content that cannot be deleted stops the sign-in (nothing is loaded)' ($e -like '*unexpected content*sign-in is stopped*') $e
     Remove-Item $wv -Recurse -Force
-
     # ---------------------------------------------------------------- no Keevault (user decision 2026-11-15): normal Microsoft sign-in only
     $kvPattern = '(?i)\b(Find|Connect|Close|Send|Invoke)-Kee' + 'vaultMcp\w*|Connect-PackTuneWith' + 'Keevault|request_' + 'microsoft_login|get_' + 'totp|sign_in_with_' + 'passkey'
     $own = @(Get-ChildItem $repo -Recurse -File -Include '*.ps1', '*.psm1', '*.xaml' | Where-Object { $_.FullName -notlike (Join-Path $repo 'Shared\*') -and $_.FullName -notlike '*\.git\*' })
@@ -445,8 +432,8 @@ try {
     Test-Check 'new files are plain ASCII' ($nonAscii.Count -eq 0) ($nonAscii -join ',')
     $sessSource = [IO.File]::ReadAllText((Join-Path $repo 'Modules\AVDTune.Session.psm1'))
     Test-Check 'Session module writes nothing to disk and prints no token' ($sessSource -notmatch 'Set-Content|Out-File|WriteAllText|Write-AVDTuneFile|Write-Host|Write-Output') $null
-    $sharedUntouched = & git -C $repo status --porcelain -- Shared 2>$null
-    Test-Check 'Shared\ is not edited by this feature' (-not $sharedUntouched) ($sharedUntouched -join ';')
+    $kvFiles = @(Get-ChildItem (Join-Path $repo 'Shared') -Recurse -File | Where-Object { $_.Name -match ('(?i)kee' + 'vault') } | ForEach-Object { $_.FullName.Substring($repo.Length + 1) })
+    Test-Check 'no Keevault file in Shared\ (the sign-in module is PackTune.SignIn.psm1; Check-Shared proves the copies are unedited)' ($kvFiles.Count -eq 0 -and (Test-Path (Join-Path $repo 'Shared\Modules\PackTune.SignIn.psm1'))) ($kvFiles -join ', ')
 }
 catch { $script:failed++; "FAIL check aborted: $($_.Exception.Message) @ $($_.InvocationInfo.ScriptLineNumber)" }
 finally {
