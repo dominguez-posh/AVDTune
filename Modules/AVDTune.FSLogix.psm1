@@ -590,6 +590,8 @@ function Invoke-AVDTuneFSLogixInstallRecorded {
     param([Parameter(Mandatory)]$Machine, [Parameter(Mandatory)]$F, [string]$Root = (Get-AVDTuneRoot), [string]$User, [string]$SnapshotId, [scriptblock]$Progress)
     if (-not (Test-AVDTuneWriteAllowed)) { throw 'The snapshot gate is not confirmed: AVDTune is read only until a snapshot newer than its last change is confirmed on the Overview.' }
     $started = & $Machine.Now
+    $changeOwner = $false; if ($true) { $changeOwner = Start-AVDTuneChange -Root $Root }   # marker: the first change of the version starts here, no new version or snapshot counts while it runs (#27)
+    try {
     [void](Set-AVDTuneState -Root $Root -Values @{ LastChange = $started.ToString('o') })
     $r = Invoke-AVDTuneFSLogixInstall -Machine $Machine -F $F -Root $Root -Progress $Progress
     $res = [pscustomobject][ordered]@{ Id = 'fslogix.install'; Section = 'FSLogix'; Title = 'FSLogix Apps'; Mode = 'Apply'; Status = $r.Status; Before = $r.Before; After = $r.After; Message = $r.Message; Reboot = [bool]$r.Reboot -and $r.Status -eq 'Changed'; WhatIf = $false; At = $started.ToString('o'); Code = $r.Code }
@@ -602,6 +604,8 @@ function Invoke-AVDTuneFSLogixInstallRecorded {
         [void](Add-AVDTuneChangeLogEntry -Root $Root -Version $state.ImageVersion -Category 'FSLogix' -Component 'FSLogix' -ChangeType $(if ($r.Status -eq 'Changed') { 'Updated' } else { 'Note' }) -Text $text -User $User -SnapshotId $SnapshotId -RunId ([string]$run.Id) -Source Step)
     }
     [pscustomobject]@{ Result = $res; Install = $r; Run = $run }
+    }
+    finally { Stop-AVDTuneChange -Root $Root -Owner $changeOwner }
 }
 
 #endregion

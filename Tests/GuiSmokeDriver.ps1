@@ -400,6 +400,36 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         $expected = (Get-Date).ToString('yyyy.MM') + '.001'
         Test-Smoke 'Confirm asks for the first image version, starts it and confirms the snapshot in it (no ImageVersion binding error)' ($script:ConfirmAsked -like "Start image version $expected*" -and $state.ImageVersion -eq $expected -and (Test-AVDTuneWriteAllowed) -and $state.SnapshotGate.SnapshotName -like 'gm-test01_osdisk-*' -and $script:OpenStage -ne 'Snapshot') "asked='$script:ConfirmAsked' version=$($state.ImageVersion) gate=$($state.SnapshotGate | ConvertTo-Json -Compress) msg=$($ui.TxtStageMessage.Text)"
         $true } }
+    @{ Name = 'start: snapshot reconnect choice (#27)'; Do = {
+        # Reconnect in a version that already has a change: every snapshot of the disk is listed, the ones that do not count are grey with the reason, the newest valid one is preselected, a grey one cannot be confirmed
+        Close-AVDTuneWriteGate
+        $t0 = (Get-Date).AddHours(-30); $first = (Get-Date).AddHours(-5)
+        [void](Set-AVDTuneState -Root $script:StateRoot -Values @{ VersionBaseline = $t0.ToUniversalTime().ToString('o'); FirstChange = $null; FirstChangeSnapshotId = $null; SnapshotGate = $null })
+        [void](Set-AVDTuneState -Root $script:StateRoot -Values @{ LastChange = (Get-Date).AddHours(-1).ToUniversalTime().ToString('o'); FirstChange = $first.ToUniversalTime().ToString('o') })
+        $store = $script:ReadyFakeArm.Store
+        foreach ($s in @(@('gm-v-before-start', $t0.AddHours(-1)), @('gm-v-start-1', $t0.AddHours(2)), @('gm-v-start-2', $first.AddHours(-1)), @('gm-v-after-change', $first.AddHours(1)))) {
+            $id = "/subscriptions/$($script:FakeSubscription)/resourceGroups/$($store.ResourceGroup)/providers/Microsoft.Compute/snapshots/$($s[0])"
+            $store.Snapshots[$id.ToLowerInvariant()] = @{ id = $id; name = $s[0]; location = $store.Location; tags = @{ CreatedWith = 'Someone else' }
+                properties = @{ timeCreated = $s[1].ToUniversalTime().ToString('o'); provisioningState = 'Succeeded'; incremental = $true
+                    creationData = @{ createOption = 'Copy'; sourceResourceId = $store.DiskId } } }
+        }
+        Open-Stage 'Snapshot'; $window.UpdateLayout()
+        $combo = $script:Form.SnapList
+        $items = @($combo.ItemsSource)
+        $byName = @{}; foreach ($i in $items) { $byName[$i.Tag.Name] = $i }
+        Test-Smoke 'reconnect: all snapshots are listed, the ones that do not count are grey (disabled) with the reason, the newest valid one (a version-start or a current-state snapshot, the line says which) is preselected' ($items.Count -ge 4 -and $byName['gm-v-start-2'].IsEnabled -and $byName['gm-v-start-1'].IsEnabled -and -not $byName['gm-v-before-start'].IsEnabled -and -not $byName['gm-v-after-change'].IsEnabled -and $combo.SelectedItem -eq (@($items | Where-Object IsEnabled)[0]) -and $combo.SelectedItem.Tag.Valid -and $byName['gm-v-after-change'].ToolTip -like '*Between the changes of this version*' -and $ui.BtnStageAction.IsEnabled) $ui.TxtStageMessage.Text
+        Test-Smoke 'reconnect: the text says the rollback goes back to the start of the version' ($ui.TxtStageIntro.Text -like '*rollback goes back to the start of the version*' -and $ui.TxtStageMessage.Text -like '*rollback goes back to the start of the version*') $ui.TxtStageMessage.Text
+        Save-SmokeShot '20b-start-snapshot-choice'
+        $script:Form.NameBox.Text = 'Alex Example'
+        $combo.SelectedItem = $byName['gm-v-after-change']
+        $ui.BtnStageAction.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
+        Test-Smoke 'reconnect: a grey snapshot cannot be confirmed, the gate stays closed' (-not (Test-AVDTuneWriteAllowed) -and $ui.TxtStageMessage.Text -like '*Choose one of the snapshots that count*') $ui.TxtStageMessage.Text
+        $combo.SelectedItem = $byName['gm-v-start-2']
+        $ui.BtnStageAction.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
+        $window.UpdateLayout()
+        $state = Get-AVDTuneState $script:StateRoot
+        Test-Smoke 'reconnect: the chosen snapshot is confirmed for the session; state.json and the change log carry it, the rollback hint names the version start' ((Test-AVDTuneWriteAllowed) -and $state.SnapshotGate.SnapshotName -eq 'gm-v-start-2' -and $state.SnapshotGate.Mode -eq 'Reconnect' -and $ui.TxtRollback.Text -like '*the start of the version*' -and @(Get-AVDTuneChangeLog -Root $script:StateRoot | Where-Object { $_.Category -eq 'Snapshot' -and $_.Text -like '*gm-v-start-2*reconnect*' }).Count -eq 1) ($state.SnapshotGate | ConvertTo-Json -Compress)
+        $true } }
     @{ Name = 'updates page'; Do = {
         # the page is read only until the gate is open (it is open here: the start sequence ran). Search runs in a background runspace with the fake adapter.
         if (-not $script:UpdStep) {

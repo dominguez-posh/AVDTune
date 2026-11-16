@@ -267,6 +267,10 @@ function Update-Chip {
     $state = Get-AVDTuneState $script:StateRoot
     $ui.TxtChipName.Text = $(if ($script:Overview) { [string]$script:Overview.ComputerName } else { [string](& $script:Machine.ComputerName) })
     $ui.TxtChipVersion.Text = $(if ($state.ImageVersion) { [string]$state.ImageVersion } else { 'no image version' })
+    # no new version while AVDTune changes the master: the first change of a version and its snapshot must not overlap (#27)
+    $busy = Test-AVDTuneChangeInProgress -Root $script:StateRoot
+    $ui.BtnNewVersion.IsEnabled = -not $busy
+    $ui.BtnNewVersion.ToolTip = $(if ($busy) { 'AVDTune is changing the master right now.' } else { $null })
 }
 function Update-OverviewView {
     Update-Chip
@@ -322,12 +326,13 @@ $script:Timer.Add_Tick({ try { Complete-OverviewRefresh } catch { Show-Error $_.
 
 Add-Click $ui.BtnRefresh { Start-OverviewRefresh }
 function Start-NewVersion {
+    if (Test-AVDTuneChangeInProgress -Root $script:StateRoot) { Show-Error 'AVDTune is changing the master right now. Start the new image version when it has finished.'; return }
     $state = Get-AVDTuneState $script:StateRoot
     $next = Get-AVDTuneNextImageVersion -Root $script:StateRoot
     $ask = if ($state.ImageVersion) { "Start image version $($next)? The current version $($state.ImageVersion) stays in the change log." } else { "Start image version $($next)?" }
     if (-not (Confirm-Action $ask 'Start new version')) { return }
     $user = [string]$env:USERNAME
-    $version = Start-AVDTuneImageVersion -Root $script:StateRoot -User $user
+    try { $version = Start-AVDTuneImageVersion -Root $script:StateRoot -User $user } catch { Show-Error $_.Exception.Message; return }
     [void](Add-AVDTuneChangeLogEntry -Root $script:StateRoot -Version $version -Category 'Setup' -Component 'Image version' -ChangeType Note -Text "Image version $version started" -User $user)
     [void](Add-AVDTuneProtocolNote -Protocol $script:Protocol -Group 'setup' -Subject "Image version $version started")
     Save-Protocol

@@ -186,7 +186,7 @@ function New-AVDTuneFakeArm {
     $diskId = "/subscriptions/$script:FakeSubscription/resourceGroups/$rg/providers/Microsoft.Compute/disks/$vm`_osdisk"
     $store = @{ Offline = $false; ReadForbidden = $false; WriteForbidden = $false; DiskMissing = $false; PollsUntilReady = 1; CreateFails = $false; Unauthorized = $false
         DiskId = $diskId; ResourceGroup = $rg; Snapshots = @{}; Polls = @{}; Log = (New-Object System.Collections.ArrayList); LastPut = $null; Location = 'westeurope'; NextLinkPage = $false; EvilLink = $false
-        VmForbidden = $false; NicForbidden = $false; GalleryForbidden = $false; VmSeed = $(if ($Seed.Vm) { $Seed.Vm } else { @{} }); Galleries = $(if ($Seed.Galleries) { $Seed.Galleries } else { @{} })
+        DiskUniqueId = $(if ($Seed.DiskUniqueId) { $Seed.DiskUniqueId } else { '' }); VmForbidden = $false; NicForbidden = $false; GalleryForbidden = $false; VmSeed = $(if ($Seed.Vm) { $Seed.Vm } else { @{} }); Galleries = $(if ($Seed.Galleries) { $Seed.Galleries } else { @{} })
         Search = $(if ($Seed.Search) { $Seed.Search } else { @{ Subscriptions = @(@{ Id = $script:FakeSubscription; Name = 'Example subscription' }); Galleries = @() } }) }
     foreach ($s in @($Seed.Snapshots)) {
         if (-not $s) { continue }
@@ -194,6 +194,9 @@ function New-AVDTuneFakeArm {
         $store.Snapshots[$id.ToLowerInvariant()] = @{ id = $id; name = $s.Name; location = $store.Location; tags = $s.Tags
             properties = @{ timeCreated = ([datetime]$s.Created).ToUniversalTime().ToString('o'); provisioningState = $(if ($s.State) { $s.State } else { 'Succeeded' }); incremental = $true
                 creationData = @{ createOption = 'Copy'; sourceResourceId = $(if ($s.Source) { $s.Source } else { $diskId }) } } }
+        if ($s.SourceUniqueId) { $store.Snapshots[$id.ToLowerInvariant()].properties.creationData.sourceUniqueId = $s.SourceUniqueId }
+        if ($null -ne $s.Percent) { $store.Snapshots[$id.ToLowerInvariant()].properties.completionPercent = $s.Percent }
+        if ($s.AccessState) { $store.Snapshots[$id.ToLowerInvariant()].properties.snapshotAccessState = $s.AccessState }
     }
     $a = [ordered]@{ Kind = 'Fake'; Store = $store; Log = $store.Log }
     $a.Invoke = {
@@ -209,6 +212,7 @@ function New-AVDTuneFakeArm {
             if ($store.DiskMissing) { return [pscustomobject]@{ Status = 404; Body = $null; Error = 'not found' } }
             $dv = $store.VmSeed
             $diskProps = @{ securityProfile = @{ securityType = $(if ($dv.ContainsKey('SecurityType')) { $dv.SecurityType } else { 'TrustedLaunch' }) } }
+            if ($store.ContainsKey('DiskUniqueId') -and $store.DiskUniqueId) { $diskProps.uniqueId = $store.DiskUniqueId }
             if ($dv.ContainsKey('DiskHyperV')) { if ($dv.DiskHyperV) { $diskProps.hyperVGeneration = $dv.DiskHyperV } } else { $diskProps.hyperVGeneration = 'V2' }
             return [pscustomobject]@{ Status = 200; Body = (ConvertTo-FakeJson @{ id = $store.DiskId; name = "$vm`_osdisk"; location = $store.Location; properties = $diskProps }); Error = '' }
         }

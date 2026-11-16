@@ -150,7 +150,7 @@ function Update-RollbackCard {
     $show = (Test-AVDTuneWriteAllowed) -and $gate -and $gate.Value
     $ui.BoxRollback.Visibility = ConvertTo-Vis ([bool]$show)
     if ($show) {
-        $ui.TxtRollback.Text = "If a run goes wrong, go back to the snapshot $($gate.Value.SnapshotName): create a managed disk from it (Azure portal: the snapshot > Create disk; or az disk create --source), stop (deallocate) this VM, swap the OS disk (VM > Disks > Swap OS disk) and start it again. Everything after the snapshot is gone, so note what was done in the protocol first."
+        $ui.TxtRollback.Text = "If a run goes wrong, go back to the snapshot $($gate.Value.SnapshotName): create a managed disk from it (Azure portal: the snapshot > Create disk; or az disk create --source), stop (deallocate) this VM, swap the OS disk (VM > Disks > Swap OS disk) and start it again. The rollback goes back to the state of the snapshot: the start of the version (everything done in this version since then is gone) or, for a snapshot of the current state, to that state, so note what was done in the protocol first."
     }
 }
 
@@ -491,11 +491,11 @@ function Invoke-DomainConnect {
 # ---------------------------------------------------------------- 4. snapshot gate
 function Build-SnapshotForm {
     $ui.TxtStageTitle.Text = '4. Snapshot gate'
-    $ui.TxtStageIntro.Text = 'Before AVDTune changes the master there must be a finished snapshot of its OS disk that is newer than the last change AVDTune made, so a rollback loses nothing. Create one here (incremental, named by the pattern of this environment) or use an existing one, then confirm it with your first and last name. Until then every page is read only.'
+    $ui.TxtStageIntro.Text = 'One snapshot per image version: before AVDTune changes the master there must be a finished snapshot of its OS disk from after the last change of the previous version and before the first change of this one. A snapshot made after the last change (the current state) counts too, so Create snapshot now is always usable; a rollback goes back to the start of the version or to that current state. Create one here (incremental, named by the pattern of this environment) or choose an existing one, then confirm it with your first and last name. When AVDTune already changed the master in this version, choose a snapshot from the start of the version or one made after the last change; snapshots that do not count are grey with the reason. Until then every page is read only.'
     $f = $script:Form
     $f.Info = New-Object System.Windows.Controls.StackPanel
     [void]$ui.PanelStageBody.Children.Add($f.Info)
-    $f.SnapList = New-Object System.Windows.Controls.ComboBox; $f.SnapList.Width = 520; $f.SnapList.Name = 'CmbSnapshot'
+    $f.SnapList = New-Object System.Windows.Controls.ComboBox; $f.SnapList.Width = 620; $f.SnapList.Name = 'CmbSnapshot'
     [void]$ui.PanelStageBody.Children.Add((New-FormRow 'Snapshot to confirm' $f.SnapList))
     $f.SnapList.Visibility = 'Collapsed'
     $f.Phrase = New-Text (Get-AVDTuneGateText) $null '0,10,0,6'; $f.Phrase.FontWeight = 'SemiBold'
@@ -523,15 +523,17 @@ function Update-SnapshotForm {
         $ui.BtnStageAction.IsEnabled = $false; $ui.BtnStageAction2.IsEnabled = $false
         return
     }
-    $f.LastChange = Get-AVDTuneLastChange -Root $script:StateRoot
+    $f.Window = Get-AVDTuneSnapshotWindow -Root $script:StateRoot
+    $f.LastChange = $f.Window.LastChange
     $e = Get-AVDTuneEnvironment $script:StateRoot
     $f.NamePattern = [string](Get-AVDTuneEnvironmentAnswers $e).SnapshotNamePattern
     foreach ($row in @(@('VM', $vm.VmName), @('Resource group', $vm.ResourceGroup), @('OS disk', $vm.OsDiskName), @('Image version', $(if ($f.ImageVersion) { $f.ImageVersion } else { 'none yet: Create snapshot starts the first one' })),
-            @('Last change by AVDTune', $(if ($f.LastChange) { $f.LastChange.ToString('yyyy-MM-dd HH:mm') } else { 'none yet: every finished snapshot counts' })), @('Name pattern', $f.NamePattern))) {
+            @('Last change by AVDTune', $(if ($f.LastChange) { $f.LastChange.ToString('yyyy-MM-dd HH:mm') } else { 'none yet: every finished snapshot counts' })),
+            @('First change in this version', $(if ($f.Window.FirstChange) { "$($f.Window.FirstChange.ToString('yyyy-MM-dd HH:mm')): choose a snapshot from the start of the version (before it) or one made after the last change (the current state)" } else { 'none yet: this is the start of the version' })), @('Name pattern', $f.NamePattern))) {
         [void]$f.Info.Children.Add((New-InfoRow $row[0] ([string]$row[1])))
     }
     try {
-        $list = Invoke-Busy 'Looking for snapshots of the OS disk ...' { @(Get-AVDTuneOsDiskSnapshots -Arm (Get-StartArm) -Token (Get-ArmToken) -Vm $vm -LastChange $f.LastChange) } -TaskTitle 'Looking for snapshots of the OS disk' -Done 'Looked'
+        $list = Invoke-Busy 'Looking for snapshots of the OS disk ...' { @(Get-AVDTuneOsDiskSnapshots -Arm (Get-StartArm) -Token (Get-ArmToken) -Vm $vm -Window $f.Window) } -TaskTitle 'Looking for snapshots of the OS disk' -Done 'Looked'
     }
     catch {
         $script:StartContext.Failures['Snapshot'] = $_.Exception.Message
@@ -543,16 +545,29 @@ function Update-SnapshotForm {
     $script:StartContext.Failures.Remove('Snapshot')
     $f.Snapshots = $list
     $valid = @($list | Where-Object Valid)
-    $gate = Get-AVDTuneGateStatus -Vm $vm -Snapshots $list -LastChange $f.LastChange
-    $f.SnapList.ItemsSource = @($valid | ForEach-Object { "$($_.Name)  ($($_.Created.ToString('yyyy-MM-dd HH:mm')), $(if ($_.ByAVDTune) { 'made by AVDTune' } else { 'made by someone else' }))" })
-    if ($valid.Count -gt 0) { $f.SnapList.SelectedIndex = 0 }
-    $f.SnapList.Visibility = ConvertTo-Vis ($valid.Count -gt 0)
+    $gate = Get-AVDTuneGateStatus -Vm $vm -Snapshots $list -Window $f.Window
+    # Every snapshot of the OS disk is listed (name, time, status); one that does not count is grey, cannot be chosen and says why. The newest valid one is preselected.
+    $items = New-Object System.Collections.ArrayList
+    foreach ($s in $list) {
+        $item = New-Object System.Windows.Controls.ComboBoxItem
+        $when = if ($s.Created) { $s.Created.ToString('yyyy-MM-dd HH:mm') } else { 'time unknown' }
+        $text = "$($s.Name)  ($when, $($s.State), $(if ($s.ByAVDTune) { 'made by AVDTune' } else { 'made by someone else' }))"
+        if ($s.Valid) { $text += $(if ($s.Kind -eq 'CurrentState') { ' - current state (after the last change)' } else { ' - start of the version' }) } else { $text += " - does not count: $($s.Reason)" }
+        $tb = New-Text $text $null; $tb.MaxWidth = 700
+        $item.Content = $tb; $item.Tag = $s; $item.IsEnabled = [bool]$s.Valid
+        if (-not $s.Valid) { Set-Brush $tb ([System.Windows.Controls.TextBlock]::ForegroundProperty) 'MutedText'; $item.ToolTip = $s.Reason }
+        [void]$items.Add($item)
+    }
+    $f.SnapList.ItemsSource = $items.ToArray()
+    $firstValid = 0; while ($firstValid -lt $items.Count -and -not $items[$firstValid].IsEnabled) { $firstValid++ }
+    if ($firstValid -lt $items.Count) { $f.SnapList.SelectedIndex = $firstValid }
+    $f.SnapList.Visibility = ConvertTo-Vis ($items.Count -gt 0)
     $f.Valid = $valid
     $ui.BtnStageAction.IsEnabled = ($valid.Count -gt 0)
     $ui.BtnStageAction2.IsEnabled = $true
     $others = @($list | Where-Object { -not $_.Valid }).Count
     $kind = if ($valid.Count -gt 0) { 'ok' } else { 'warn' }
-    Set-StageMessage ($gate.Detail + $(if ($others -gt 0) { " ($others snapshot(s) of this disk do not count: not finished or older than the last change.)" })) $kind
+    Set-StageMessage ($gate.Detail + $(if ($others -gt 0) { " ($others snapshot(s) of this disk are grey: they do not count, the reason is shown.)" })) $kind
 }
 function Invoke-SnapshotCreate {
     $f = $script:Form
@@ -613,8 +628,9 @@ $script:SnapTimer.Add_Tick({
     })
 function Invoke-SnapshotConfirm {
     $f = $script:Form
-    if (-not $f.Valid -or $f.Valid.Count -eq 0) { Set-StageMessage 'There is no finished snapshot newer than the last change to confirm.' 'error'; return }
-    $snapshot = $f.Valid[[Math]::Max(0, $f.SnapList.SelectedIndex)]
+    if (-not $f.Valid -or $f.Valid.Count -eq 0) { Set-StageMessage 'There is no valid snapshot to confirm (after the last change of the previous version and before the first change of this one).' 'error'; return }
+    $snapshot = if ($f.SnapList.SelectedItem -and $f.SnapList.SelectedItem.Tag) { $f.SnapList.SelectedItem.Tag } else { $null }
+    if (-not $snapshot -or -not $snapshot.Valid) { Set-StageMessage 'Choose one of the snapshots that count (the grey ones cannot be confirmed).' 'error'; return }
     $session = $script:StartContext.Session
     if (-not $f.ImageVersion) {
         # Confirming an existing snapshot before any image version (found on the test VM): check the name first,
@@ -626,11 +642,11 @@ function Invoke-SnapshotConfirm {
         if (-not $f.ImageVersion) { Set-StageMessage 'The confirmation is recorded in an image version: start a new version first.' 'error'; return }
     }
     try {
-        $record = Confirm-AVDTuneSnapshotGate -Root $script:StateRoot -Snapshot $snapshot -TypedName $f.NameBox.Text -SignedInAccount $(if ($session) { [string]$session.Account } else { '' }) -WindowsAccount "$env:USERDOMAIN\$env:USERNAME" -ImageVersion $f.ImageVersion -Machine $script:Machine
+        $record = Confirm-AVDTuneSnapshotGate -Root $script:StateRoot -Snapshot $snapshot -TypedName $f.NameBox.Text -SignedInAccount $(if ($session) { [string]$session.Account } else { '' }) -WindowsAccount "$env:USERDOMAIN\$env:USERNAME" -ImageVersion $f.ImageVersion -Machine $script:Machine -Arm (Get-StartArm) -Token (Get-ArmToken) -Vm $f.Vm
     }
     catch { Set-StageMessage $_.Exception.Message 'error'; return }
     $made = if ($record.CreatedByAVDTune) { 'yes' } else { 'no' }
-    Add-StartProtocol 'Snapshot gate confirmed' "$($record.SnapshotName), created $(([datetime]$record.SnapshotCreated).ToString('yyyy-MM-dd HH:mm')), by AVDTune: $made, confirmed by $($record.ConfirmedBy) (Microsoft account $($record.SignedInAccount), Windows account $($record.WindowsAccount)), ID $($record.SnapshotId)"
+    Add-StartProtocol 'Snapshot gate confirmed' "$($record.SnapshotName), created $(([datetime]$record.SnapshotCreated).ToString('yyyy-MM-dd HH:mm')), by AVDTune: $made, confirmed by $($record.ConfirmedBy) (Microsoft account $($record.SignedInAccount), Windows account $($record.WindowsAccount)), ID $($record.SnapshotId); $($record.Mode) in version $($record.ImageVersion), snapshot kind $($record.SnapshotKind)$(if ($record.FirstChange) { ", first change of the version $(([datetime]$record.FirstChange).ToString('yyyy-MM-dd HH:mm'))" })"
     $script:StartContext.Failures.Remove('Snapshot')
     Show-Toast 'Snapshot confirmed. The pages can change the master now.'
     Close-Stage

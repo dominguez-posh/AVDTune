@@ -429,30 +429,25 @@ try {
     $arm = New-AVDTuneFakeArm -Seed @{ Snapshots = @(
             @{ Name = 'gm-test01_osdisk-30.10.2026-1'; Created = [datetime]'2026-10-30 09:00'; Tags = @{ CreatedWith = 'AVDTune'; ImageVersion = '2026.10.001' } }
             @{ Name = 'other-disk-snap'; Created = [datetime]'2026-11-15 08:00'; Source = '/subscriptions/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee/resourceGroups/rg-example/providers/Microsoft.Compute/disks/another_disk' }) }
-    Test-Check 'no change by AVDTune recorded yet: no last change' ($null -eq (Get-AVDTuneLastChange -Root $tmp)) (Get-AVDTuneLastChange -Root $tmp)
-    $list = @(Get-AVDTuneOsDiskSnapshots -Arm $arm -Token $armToken -Vm $vm -LastChange (Get-AVDTuneLastChange -Root $tmp))
+    Test-Check 'no change by AVDTune recorded yet: no last change, no first change' ($null -eq (Get-AVDTuneLastChange -Root $tmp) -and -not (Get-AVDTuneState $tmp).FirstChange) (Get-AVDTuneLastChange -Root $tmp)
+    $w0 = Get-AVDTuneSnapshotWindow -Root $tmp
+    Test-Check 'window at the start of a version without any change: VersionStart, no lower and no upper bound' ($w0.Mode -eq 'VersionStart' -and -not $w0.Lower -and -not $w0.FirstChange) ($w0 | ConvertTo-Json -Compress)
+    $list = @(Get-AVDTuneOsDiskSnapshots -Arm $arm -Token $armToken -Vm $vm -Window $w0)
     Test-Check 'snapshots of this OS disk only; the one of another disk is ignored' ($list.Count -eq 1 -and $list[0].Name -like '*30.10.2026*' -and $list[0].ByAVDTune) ($list | ForEach-Object Name)
-    $gate = Get-AVDTuneGateStatus -Vm $vm -Snapshots $list -Confirmed $false
-    Test-Check 'without a recorded change any finished snapshot counts, also an old one ("from today" is gone)' ($gate.Status -eq 'SnapshotReady' -and $gate.Chosen.Name -like '*30.10.2026*') $gate.Status
-    [void](Set-AVDTuneState -Root $tmp -Values @{ LastChange = ([datetime]'2026-11-01 10:00').ToString('o') })
-    $last = Get-AVDTuneLastChange -Root $tmp
-    $list = @(Get-AVDTuneOsDiskSnapshots -Arm $arm -Token $armToken -Vm $vm -LastChange $last)
-    $gate = Get-AVDTuneGateStatus -Vm $vm -Snapshots $list -Confirmed $false -LastChange $last
-    Test-Check 'a snapshot older than the last change of AVDTune does not count: NoValidSnapshot' ($last -eq [datetime]'2026-11-01 10:00' -and -not $list[0].Valid -and $gate.Status -eq 'NoValidSnapshot' -and -not $gate.Chosen -and $gate.Detail -like '*2026-11-01 10:00*') "$last $($gate.Status) $($gate.Detail)"
-    $forged = $list[0].PSObject.Copy(); $forged.Valid = $true
-    Test-Check 'attack: a snapshot older than the last change cannot be confirmed, even when the caller says it is valid' ((Get-ThrownText { Confirm-AVDTuneSnapshotGate -Root $tmp -Snapshot $forged -TypedName 'Alex Example' -ImageVersion '2026.11.001' -Machine $machine }) -like '*older than the last change*' -and -not (Test-AVDTuneWriteAllowed)) $null
+    $gate = Get-AVDTuneGateStatus -Vm $vm -Snapshots $list -Confirmed $false -Window $w0
+    Test-Check 'without a recorded change any finished snapshot counts, also an old one ("from today" is gone)' ($gate.Status -eq 'SnapshotReady' -and $gate.Mode -eq 'VersionStart' -and $gate.Chosen.Name -like '*30.10.2026*') $gate.Status
     Test-Check 'outside Azure: gate status NoVm' ((Get-AVDTuneGateStatus -Vm $noAzure -Snapshots @() -Confirmed $false).Status -eq 'NoVm') $null
 
     $started = Start-AVDTuneSnapshot -Arm $arm -Token $armToken -Vm $vm -ImageVersion '2026.11.001' -User 'Alex Example' -At $now -NamePattern (Get-AVDTuneEnvironmentAnswers (Get-AVDTuneEnvironment $tmp)).SnapshotNamePattern -ExistingNames @($list | ForEach-Object Name)
     $put = $arm.Store.LastPut
     Test-Check 'snapshot request: incremental, copy of the OS disk, tags image version and user, in the disk region' ($put.properties.incremental -eq $true -and $put.properties.creationData.createOption -eq 'Copy' -and $put.properties.creationData.sourceResourceId -eq $vm.OsDiskId -and $put.tags.ImageVersion -eq '2026.11.001' -and $put.tags.CreatedBy -eq 'Alex Example' -and $put.tags.CreatedWith -eq 'AVDTune' -and $put.location -eq 'westeurope') ($put | ConvertTo-Json -Compress -Depth 5)
     Test-Check 'the snapshot is named by the pattern of the environment and starts as Creating' ($started.Name -eq 'gm-test01_osdisk-15.11.2026-1' -and $started.State -eq 'Creating') ($started | ConvertTo-Json -Compress)
-    Test-Check 'a snapshot that is still being created does not unlock the gate' (@(Get-AVDTuneOsDiskSnapshots -Arm $arm -Token $armToken -Vm $vm -LastChange $last | Where-Object Valid).Count -eq 0) $null
+    Test-Check 'a snapshot that is still being created does not unlock the gate and says why' (@(Get-AVDTuneOsDiskSnapshots -Arm $arm -Token $armToken -Vm $vm -Window $w0 | Where-Object { $_.Name -eq $started.Name -and -not $_.Valid -and $_.Reason -like 'Not finished*' }).Count -eq 1) $null
     $ready = Wait-AVDTuneSnapshot -Arm $arm -Token $armToken -Id $started.Id -PollSeconds 0
     Test-Check 'polling until Succeeded' ($ready.State -eq 'Succeeded') $ready.State
-    $list = @(Get-AVDTuneOsDiskSnapshots -Arm $arm -Token $armToken -Vm $vm -LastChange $last)
-    $gate = Get-AVDTuneGateStatus -Vm $vm -Snapshots $list -Confirmed $false -LastChange $last
-    Test-Check 'with a finished snapshot newer than the last change the gate waits for the confirmation' ($gate.Status -eq 'SnapshotReady' -and $gate.Chosen.Name -eq $started.Name -and $gate.Chosen.ByAVDTune) $gate.Status
+    $list = @(Get-AVDTuneOsDiskSnapshots -Arm $arm -Token $armToken -Vm $vm -Window $w0)
+    $gate = Get-AVDTuneGateStatus -Vm $vm -Snapshots $list -Confirmed $false -Window $w0
+    Test-Check 'with a finished snapshot the gate waits for the confirmation; the newest one is chosen' ($gate.Status -eq 'SnapshotReady' -and $gate.Chosen.Name -eq $started.Name -and $gate.Chosen.ByAVDTune) $gate.Status
     Test-Check 'the next snapshot of the same day gets number 2' ((Get-AVDTuneSnapshotName -OsDiskName 'gm-test01_osdisk' -At $now -ExistingNames @($list | ForEach-Object Name)) -eq 'gm-test01_osdisk-15.11.2026-2') $null
     Test-Check 'the confirmation text is the one of the plan' ((Get-AVDTuneGateText) -eq 'Ich bestaetige, dass vor diesem Lauf ein Snapshot des Golden Masters erstellt wurde und ein Rollback moeglich ist.') $null
 
@@ -467,33 +462,287 @@ try {
     $record = Confirm-AVDTuneSnapshotGate -Root $tmp -Snapshot $gate.Chosen -TypedName 'Max  Mustermann' -SignedInAccount 'admin.shared@contoso.example' -WindowsAccount 'GM-TEST01\localadmin' -ImageVersion '2026.11.001' -Machine $machine
     Test-Check 'confirmation opens the gate in memory' ((Test-AVDTuneWriteAllowed) -and (Get-AVDTuneWriteGate).SnapshotId -eq $started.Id -and (Get-AVDTuneWriteGate).ConfirmedBy -eq 'Max Mustermann') $null
     $st = Get-AVDTuneState $tmp
-    Test-Check 'state.json records typed name, Microsoft account, Windows account, time, snapshot ID, created by AVDTune' ($st.SnapshotGate.SnapshotName -eq $started.Name -and $st.SnapshotGate.SnapshotId -eq $started.Id -and $st.SnapshotGate.CreatedByAVDTune -eq $true -and $st.SnapshotGate.ConfirmedBy -eq 'Max Mustermann' -and $st.SnapshotGate.SignedInAccount -eq 'admin.shared@contoso.example' -and $st.SnapshotGate.WindowsAccount -eq 'GM-TEST01\localadmin' -and $st.SnapshotGate.ConfirmedAt -and $st.SnapshotGate.Text -like 'Ich bestaetige*') ($st.SnapshotGate | ConvertTo-Json -Compress)
+    Test-Check 'state.json records typed name, Microsoft account, Windows account, time, snapshot ID, created by AVDTune' ($st.SnapshotGate.SnapshotName -eq $started.Name -and $st.SnapshotGate.SnapshotId -eq $started.Id -and $st.SnapshotGate.CreatedByAVDTune -eq $true -and $st.SnapshotGate.ConfirmedBy -eq 'Max Mustermann' -and $st.SnapshotGate.SignedInAccount -eq 'admin.shared@contoso.example' -and $st.SnapshotGate.WindowsAccount -eq 'GM-TEST01\localadmin' -and $st.SnapshotGate.ConfirmedAt -and $st.SnapshotGate.Text -like 'Ich bestaetige*' -and $st.SnapshotGate.Mode -eq 'VersionStart') ($st.SnapshotGate | ConvertTo-Json -Compress)
     $cl = @(Get-AVDTuneChangeLog -Root $tmp)
     $entry = $cl | Where-Object { $_.Category -eq 'Snapshot' } | Select-Object -First 1
-    Test-Check 'the change log entry has the typed name with both accounts, time, snapshot ID and "created by AVDTune: yes"' ($cl.Count -eq $logBefore + 1 -and $entry.SnapshotId -eq $started.Id -and $entry.Text -like "*$($started.Name)*" -and $entry.Text -like '*confirmed by Max Mustermann (Microsoft account admin.shared@contoso.example, Windows account GM-TEST01\localadmin)*' -and $entry.User -eq 'Max Mustermann' -and $entry.Text -like '*created by AVDTune: yes*' -and $entry.Text -match '\d{4}-\d{2}-\d{2} \d{2}:\d{2}') ($entry | ConvertTo-Json -Compress)
-    Test-Check 'the confirmation itself is no change of the master (last change unchanged)' ((Get-AVDTuneLastChange -Root $tmp) -eq $last) (Get-AVDTuneLastChange -Root $tmp)
-    $catalog = @($stepRan)
-    $run = Invoke-AVDTune -Plan ([pscustomobject]@{ Name = 'gate'; Steps = @('setup.gatetest') }) -Catalog $catalog -Machine $machine -Root $tmp -User 'admin1' -SnapshotId $started.Id
+    Test-Check 'the change log entry has the typed name with both accounts, time, snapshot ID, "created by AVDTune: yes" and the start of the version' ($cl.Count -eq $logBefore + 1 -and $entry.SnapshotId -eq $started.Id -and $entry.Text -like "*$($started.Name)*" -and $entry.Text -like '*confirmed by Max Mustermann (Microsoft account admin.shared@contoso.example, Windows account GM-TEST01\localadmin)*' -and $entry.User -eq 'Max Mustermann' -and $entry.Text -like '*created by AVDTune: yes*' -and $entry.Text -like '*start of version 2026.11.001*' -and $entry.Text -match '\d{4}-\d{2}-\d{2} \d{2}:\d{2}') ($entry | ConvertTo-Json -Compress)
+    Test-Check 'the confirmation itself is no change of the master (no last change, no first change)' ($null -eq (Get-AVDTuneLastChange -Root $tmp) -and -not (Get-AVDTuneState $tmp).FirstChange) (Get-AVDTuneLastChange -Root $tmp)
+    $run = Invoke-AVDTune -Plan ([pscustomobject]@{ Name = 'gate'; Steps = @('setup.gatetest') }) -Catalog @($stepRan) -Machine $machine -Root $tmp -User 'admin1' -SnapshotId $started.Id
     Test-Check 'a change works after the confirmation' ($run.Results[0].Status -eq 'Changed') $run.Results[0].Status
-    $last2 = Get-AVDTuneLastChange -Root $tmp
-    $list2 = @(Get-AVDTuneOsDiskSnapshots -Arm $arm -Token $armToken -Vm $vm -LastChange $last2)
-    Test-Check 'after a change by AVDTune the confirmed snapshot no longer counts for the next start (state.json LastChange)' ($last2 -gt $last -and (Get-AVDTuneState $tmp).LastChange -and @($list2 | Where-Object Valid).Count -eq 0) "$last2"
+    $st = Get-AVDTuneState $tmp
+    Test-Check 'the first change of the version is kept in state.json (start of the run) with the snapshot that was confirmed then' ($st.FirstChange -and ([datetime]$st.FirstChange).ToUniversalTime() -eq ([datetime]$run.Started).ToUniversalTime() -and $st.FirstChangeSnapshotId -eq $started.Id -and $st.PSObject.Properties['VersionBaseline'] -and $null -eq $st.VersionBaseline) ($st | ConvertTo-Json -Compress -Depth 3)
+    $firstSeen = $st.FirstChange
+    [void](Set-AVDTuneState -Root $tmp -Values @{ LastChange = (Get-Date).AddMinutes(5).ToString('o') })
+    $w1 = Get-AVDTuneSnapshotWindow -Root $tmp
+    Test-Check 'a later change does not move the first change; the window is Reconnect now' ((Get-AVDTuneState $tmp).FirstChange -eq $firstSeen -and $w1.Mode -eq 'Reconnect' -and $w1.FirstChange) ($w1 | ConvertTo-Json -Compress)
+    $listRc = @(Get-AVDTuneOsDiskSnapshots -Arm $arm -Token $armToken -Vm $vm -Window $w1)
+    Test-Check 'reconnect: the confirmed snapshot of the version start still counts after the change (no new snapshot per change), also when made less than 10 minutes before the first change' (@($listRc | Where-Object { $_.Id -eq $started.Id -and $_.Valid }).Count -eq 1) ($listRc | ConvertTo-Json -Compress -Depth 2)
     $stages = Get-AVDTuneStartStages -Context (New-AVDTuneStartContext) -Root $tmp
     Test-Check 'the snapshot stage shows Done with the name of the confirming person' (($stages | Where-Object Id -eq 'Snapshot').Status -eq 'Done' -and ($stages | Where-Object Id -eq 'Snapshot').Detail -like '*Max Mustermann*') $null
     Close-AVDTuneWriteGate
-    Test-Check 'a new start is closed again (the gate is memory only)' (-not (Test-AVDTuneWriteAllowed)) $null
-    Test-Check 'Get-AVDTuneLastChange also reads run records and automatic change log entries' (@(Get-AVDTuneRun -Root $tmp | Where-Object { $_.Results[0].Status -eq 'Changed' }).Count -eq 1) $null
+    Test-Check 'a new start is closed again (the gate is memory only): read only until a snapshot is confirmed again' (-not (Test-AVDTuneWriteAllowed) -and $null -ne (Get-ThrownText { Invoke-AVDTuneStep -Step $stepRan -Machine $machine -Mode Apply })) $null
+    Test-Check 'Get-AVDTuneLastChange also reads run records and automatic change log entries' (@(Get-AVDTuneRun -Root $tmp | Where-Object { $_.Results[0].Status -eq 'Changed' }).Count -ge 1) $null
 
-    # an existing snapshot made by someone else after the last change
-    $armClock = New-AVDTuneFakeArm -Seed @{ Snapshots = @(@{ Name = 'just-after-the-change'; Created = $last2.AddMinutes(5) }) }
-    $listClock = @(Get-AVDTuneOsDiskSnapshots -Arm $armClock -Token $armToken -Vm $vm -LastChange $last2)
-    Test-Check 'clock margin: a snapshot only 5 minutes after the last change (VM clock may run behind Azure) does not count, 10 minutes are explained' ((Get-AVDTuneSnapshotClockBuffer) -eq 10 -and -not $listClock[0].Valid -and (Get-AVDTuneGateStatus -Vm $vm -Snapshots $listClock -Confirmed $false -LastChange $last2).Detail -like '*at least 10 minutes after the last change*clock*' -and (Get-ThrownText { Confirm-AVDTuneSnapshotGate -Root $tmp -Snapshot $listClock[0] -TypedName 'Alex Example' -ImageVersion '2026.11.001' -Machine $machine }) -like '*plus 10 minutes*') $null
-    $armOther = New-AVDTuneFakeArm -Seed @{ Snapshots = @(@{ Name = 'manual-snap-before-patching'; Created = $last2.AddMinutes(11) }) }
-    $listOther = @(Get-AVDTuneOsDiskSnapshots -Arm $armOther -Token $armToken -Vm $vm -LastChange $last2)
-    Test-Check 'an existing snapshot newer than the last change is found and counts (not made by AVDTune)' ($listOther.Count -eq 1 -and $listOther[0].Valid -and -not $listOther[0].ByAVDTune) ($listOther | ConvertTo-Json -Compress -Depth 3)
-    [void](Confirm-AVDTuneSnapshotGate -Root $tmp -Snapshot $listOther[0] -TypedName 'Alex Example' -SignedInAccount 'admin.example@contoso.example' -ImageVersion '2026.11.001' -Machine $machine)
-    $entry2 = @(Get-AVDTuneChangeLog -Root $tmp | Where-Object { $_.Category -eq 'Snapshot' }) | Select-Object -Last 1
-    Test-Check 'the change log says created by AVDTune: no' ($entry2.Text -like '*created by AVDTune: no*' -and (Get-AVDTuneState $tmp).SnapshotGate.CreatedByAVDTune -eq $false) $entry2.Text
+    # ---------------------------------------------------------------- one snapshot per image version (#27)
+    # root rc: version 1 had a change at T0, version 2 started afterwards and made its first change at F; a reconnect in version 2
+    $rc = Join-Path $tmp 'issue27-reconnect'; [void](Initialize-AVDTuneState -Root $rc)
+    [void](Start-AVDTuneImageVersion -Root $rc -Date ([datetime]'2026-11-01') -User 'admin1')
+    $T0 = [datetime]'2026-11-01 10:00'; $F = [datetime]'2026-11-02 09:00'
+    [void](Set-AVDTuneState -Root $rc -Values @{ LastChange = $T0.ToString('o') })
+    $v2 = Start-AVDTuneImageVersion -Root $rc -Date ([datetime]'2026-11-02') -User 'admin1'
+    $wStart = Get-AVDTuneSnapshotWindow -Root $rc
+    Test-Check 'new version: the last change of the previous version is the lower bound, no first change yet (VersionStart)' ($v2 -eq '2026.11.002' -and $wStart.Mode -eq 'VersionStart' -and $wStart.Lower -eq $T0 -and -not $wStart.FirstChange -and -not (Get-AVDTuneState $rc).FirstChange) ($wStart | ConvertTo-Json -Compress)
+    $armV = New-AVDTuneFakeArm -Seed @{ Snapshots = @(
+            @{ Name = 'snap-before-v1-end'; Created = $T0.AddHours(-1) }
+            @{ Name = 'snap-5min-after-v1-end'; Created = $T0.AddMinutes(5) }) }
+    $listV = @(Get-AVDTuneOsDiskSnapshots -Arm $armV -Token $armToken -Vm $vm -Window $wStart)
+    $gateV = Get-AVDTuneGateStatus -Vm $vm -Snapshots $listV -Confirmed $false -Window $wStart
+    Test-Check 'counter-test: a new version without a new snapshot does not go (before the end of the previous version, or only 5 minutes after it: VM clock may run behind Azure)' (@($listV | Where-Object Valid).Count -eq 0 -and $gateV.Status -eq 'NoValidSnapshot' -and $gateV.Mode -eq 'VersionStart' -and $gateV.Detail -like '*at least 10 minutes after the last change*clock*' -and $listV[0].Reason -like '*plus 10 minutes*') ($listV | ConvertTo-Json -Compress -Depth 2)
+    $forgedV = $listV[0].PSObject.Copy(); $forgedV.Valid = $true
+    Test-Check 'attack: a snapshot from before the end of the previous version cannot be confirmed, even when the caller says it is valid; the gate stays shut' ((Get-ThrownText { Confirm-AVDTuneSnapshotGate -Root $rc -Snapshot $forgedV -TypedName 'Alex Example' -ImageVersion $v2 -Machine $machine }) -like '*plus 10 minutes*' -and -not (Test-AVDTuneWriteAllowed)) $null
+    $armV2 = New-AVDTuneFakeArm -Seed @{ Snapshots = @(@{ Name = 'snap-after-v1-end'; Created = $T0.AddMinutes(11) }) }
+    $listV2 = @(Get-AVDTuneOsDiskSnapshots -Arm $armV2 -Token $armToken -Vm $vm -Window $wStart)
+    Test-Check 'a new version with a snapshot after the last change of the previous version goes (10 minutes margin kept)' ($listV2[0].Valid -and (Get-AVDTuneGateStatus -Vm $vm -Snapshots $listV2 -Confirmed $false -Window $wStart).Status -eq 'SnapshotReady') $null
+    # first change of version 2 (gate closed: no snapshot id), later snapshots
+    [void](Set-AVDTuneState -Root $rc -Values @{ LastChange = $F.AddHours(1).ToString('o'); FirstChange = $F.ToString('o') })
+    [void](Set-AVDTuneState -Root $rc -Values @{ LastChange = $F.AddHours(3).ToString('o') })
+    $stRc = Get-AVDTuneState $rc
+    Test-Check 'the first change of the version is kept once (a later change does not move it); the baseline is the last change of version 1' (([datetime]$stRc.FirstChange) -eq $F -and ([datetime]$stRc.VersionBaseline) -eq $T0 -and -not $stRc.FirstChangeSnapshotId) ($stRc | ConvertTo-Json -Compress -Depth 3)
+    $armR = New-AVDTuneFakeArm -Seed @{ Snapshots = @(
+            @{ Name = 'snap-a-before-v1-end'; Created = $T0.AddHours(-1) }
+            @{ Name = 'snap-b-5min-after-v1-end'; Created = $T0.AddMinutes(5) }
+            @{ Name = 'snap-c-v1-end-plus-1h'; Created = $T0.AddHours(1) }
+            @{ Name = 'snap-d-2h-before-first-change'; Created = $F.AddHours(-2) }
+            @{ Name = 'snap-e-5min-before-first-change'; Created = $F.AddMinutes(-5) }
+            @{ Name = 'snap-f-after-first-change'; Created = $F.AddHours(1) }
+            @{ Name = 'snap-g-creating'; Created = $F.AddHours(-3); State = 'Creating' }
+            @{ Name = 'snap-h-after-last-change'; Created = $F.AddHours(3).AddMinutes(11) }) }
+    $wRc = Get-AVDTuneSnapshotWindow -Root $rc
+    $listR = @(Get-AVDTuneOsDiskSnapshots -Arm $armR -Token $armToken -Vm $vm -Window $wRc)
+    $byName = @{}; foreach ($s in $listR) { $byName[$s.Name] = $s }
+    Test-Check 'reconnect list: all snapshots of the disk with name, time, status; newest first' ($listR.Count -eq 8 -and $listR[0].Name -eq 'snap-h-after-last-change' -and $listR[-1].Name -eq 'snap-a-before-v1-end' -and $byName['snap-d-2h-before-first-change'].State -eq 'Succeeded' -and $byName['snap-g-creating'].State -eq 'Creating') (($listR | ForEach-Object Name) -join ',')
+    Test-Check 'valid: the start of the version (c and d: after the last change of the previous version, before the first change of this one) or the current state (h: after the last change plus margin; Kind says which); everything else is invalid with a reason' ((@($listR | Where-Object Valid | ForEach-Object Name) -join ',') -eq 'snap-h-after-last-change,snap-d-2h-before-first-change,snap-c-v1-end-plus-1h') (@($listR | Where-Object Valid | ForEach-Object Name) -join ',')
+    Test-Check 'counter-test: a snapshot between the changes of the version (an intermediate state) is invalid, with the reason (a rollback would lose changes)' (-not $byName['snap-f-after-first-change'].Valid -and $byName['snap-f-after-first-change'].Reason -like '*Between the changes of this version*first change*lose changes*' -and $byName['snap-h-after-last-change'].Kind -eq 'CurrentState' -and $byName['snap-d-2h-before-first-change'].Kind -eq 'VersionStart') $byName['snap-f-after-first-change'].Reason
+    Test-Check 'counter-test: a snapshot from before the end of the previous version is invalid (also 5 minutes after it: clock margin)' (-not $byName['snap-a-before-v1-end'].Valid -and -not $byName['snap-b-5min-after-v1-end'].Valid -and $byName['snap-a-before-v1-end'].Reason -like '*last change before this version*plus 10 minutes*') $byName['snap-a-before-v1-end'].Reason
+    Test-Check 'a snapshot less than 10 minutes before the first change is invalid (a VM clock that runs ahead cannot make a later one count); one that is not finished is invalid and says so' (-not $byName['snap-e-5min-before-first-change'].Valid -and $byName['snap-e-5min-before-first-change'].Reason -like '*less than 10 minutes before the first change*' -and -not $byName['snap-g-creating'].Valid -and $byName['snap-g-creating'].Reason -like 'Not finished*') $byName['snap-e-5min-before-first-change'].Reason
+    $gateR = Get-AVDTuneGateStatus -Vm $vm -Snapshots $listR -Confirmed $false -Window $wRc
+    Test-Check 'reconnect without a new snapshot goes: the newest valid snapshot is preselected, the text names both cases (version start or current state)' ($gateR.Status -eq 'SnapshotReady' -and $gateR.Mode -eq 'Reconnect' -and $gateR.Chosen.Name -eq 'snap-h-after-last-change' -and $gateR.Detail -like '*rollback goes back to the start of the version or to the current state*') $gateR.Detail
+    foreach ($bad in 'snap-f-after-first-change', 'snap-a-before-v1-end', 'snap-b-5min-after-v1-end', 'snap-e-5min-before-first-change', 'snap-g-creating') {
+        $forgedR = $byName[$bad].PSObject.Copy(); $forgedR.Valid = $true
+        $err = Get-ThrownText { Confirm-AVDTuneSnapshotGate -Root $rc -Snapshot $forgedR -TypedName 'Alex Example' -ImageVersion $v2 -Machine $machine }
+        Test-Check "attack: $bad cannot be confirmed even when the caller says it is valid; the write gate stays shut" ($err -and -not (Test-AVDTuneWriteAllowed)) $err
+    }
+    Test-Check 'no confirmed valid snapshot: everything stays read only' (-not (Test-AVDTuneWriteAllowed) -and $null -ne (Get-ThrownText { Invoke-AVDTuneStep -Step $stepRan -Machine $machine -Mode Apply })) $null
+    $recordR = Confirm-AVDTuneSnapshotGate -Root $rc -Snapshot $byName['snap-d-2h-before-first-change'] -TypedName 'Max Mustermann' -SignedInAccount 'admin.shared@contoso.example' -WindowsAccount 'GM-TEST01\localadmin' -ImageVersion $v2 -Machine $machine
+    $entryR = @(Get-AVDTuneChangeLog -Root $rc | Where-Object { $_.Category -eq 'Snapshot' }) | Select-Object -Last 1
+    Test-Check 'reconnect confirmed: gate open, the chosen snapshot and the confirmation are in state.json and in the change log of the version (reconnect, first change, rollback to the version start)' ((Test-AVDTuneWriteAllowed) -and $recordR.SnapshotName -eq 'snap-d-2h-before-first-change' -and $recordR.Mode -eq 'Reconnect' -and (Get-AVDTuneState $rc).SnapshotGate.FirstChange -and $entryR.Text -like '*reconnect in version 2026.11.002*rollback goes back to the start of the version*' -and $entryR.Text -like '*confirmed by Max Mustermann*' -and $entryR.Version -eq $v2) ($entryR | ConvertTo-Json -Compress)
+    Test-Check 'the choice itself is no change (last change and first change stay)' (([datetime](Get-AVDTuneState $rc).FirstChange) -eq $F -and (Get-AVDTuneLastChange -Root $rc) -eq $F.AddHours(3)) (Get-AVDTuneLastChange -Root $rc)
+    # (b) a snapshot of the current state (after the last change) is valid too, confirms with its kind, and is invalid again after a further change
+    $recordH = Confirm-AVDTuneSnapshotGate -Root $rc -Snapshot $byName['snap-h-after-last-change'] -TypedName 'Max Mustermann' -ImageVersion $v2 -Machine $machine
+    $entryH = @(Get-AVDTuneChangeLog -Root $rc | Where-Object { $_.Category -eq 'Snapshot' }) | Select-Object -Last 1
+    Test-Check 'a snapshot after the last change (current state) can be confirmed; kind and rollback to the current state are in state.json and the change log' ($recordH.SnapshotKind -eq 'CurrentState' -and $recordR.SnapshotKind -eq 'VersionStart' -and (Test-AVDTuneWriteAllowed) -and $entryH.Text -like '*snapshot of the current state*rollback goes back to this current state*') ($entryH | ConvertTo-Json -Compress)
+    Close-AVDTuneWriteGate
+    [void](Set-AVDTuneState -Root $rc -Values @{ LastChange = $F.AddHours(4).ToString('o') })
+    $listH = @(Get-AVDTuneOsDiskSnapshots -Arm $armR -Token $armToken -Vm $vm -Window (Get-AVDTuneSnapshotWindow -Root $rc))
+    $hAfter = $listH | Where-Object Name -eq 'snap-h-after-last-change'
+    $forgedH = $hAfter.PSObject.Copy(); $forgedH.Valid = $true
+    Test-Check 'counter-test: after a further change the current-state snapshot is invalid again (intermediate state); Confirm checks that itself; the version-start ones stay valid' (-not $hAfter.Valid -and $hAfter.Reason -like '*Between the changes*' -and (Get-ThrownText { Confirm-AVDTuneSnapshotGate -Root $rc -Snapshot $forgedH -TypedName 'Alex Example' -ImageVersion $v2 -Machine $machine }) -like '*lose changes*' -and -not (Test-AVDTuneWriteAllowed) -and (@($listH | Where-Object Valid | ForEach-Object Name) -join ',') -eq 'snap-d-2h-before-first-change,snap-c-v1-end-plus-1h') (($listH | ForEach-Object { "$($_.Name)=$($_.Valid)" }) -join ',')
+    [void](Confirm-AVDTuneSnapshotGate -Root $rc -Snapshot ($listH | Where-Object Name -eq 'snap-d-2h-before-first-change') -TypedName 'Max Mustermann' -ImageVersion $v2 -Machine $machine)
+    # a new version closes the gate when its snapshot is not valid for the new version; keeps it when it is
+    [void](Start-AVDTuneImageVersion -Root $rc -Date ([datetime]'2026-11-03') -User 'admin1')
+    Test-Check 'a new version closes the open gate: the confirmed snapshot is from before the last change of the previous version (new snapshot needed)' (-not (Test-AVDTuneWriteAllowed) -and ([datetime](Get-AVDTuneState $rc).VersionBaseline) -eq $F.AddHours(4) -and -not (Get-AVDTuneState $rc).FirstChange) $null
+    $keep = Join-Path $tmp 'issue27-keep'; [void](Initialize-AVDTuneState -Root $keep); [void](Start-AVDTuneImageVersion -Root $keep -Date ([datetime]'2026-11-01') -User 'admin1')
+    [void](Set-AVDTuneState -Root $keep -Values @{ LastChange = $T0.ToString('o') })
+    [void](Set-AVDTuneState -Root $keep -Values @{ SnapshotGate = [pscustomobject]@{ SnapshotId = 'x'; SnapshotCreated = $T0.AddHours(1).ToString('o') } })
+    Open-AVDTuneWriteGate -SnapshotId 'x' -ConfirmedBy 'Max Mustermann'
+    [void](Start-AVDTuneImageVersion -Root $keep -Date ([datetime]'2026-11-02') -User 'admin1')
+    Test-Check 'a new version keeps the gate open when the confirmed snapshot is already after the last change of the old version' (Test-AVDTuneWriteAllowed) $null
+    Close-AVDTuneWriteGate
+    # the snapshot that was confirmed when the first change was made counts in the reconnect list even when it is less than 10 minutes older (id is kept)
+    $rg = Join-Path $tmp 'issue27-gateid'; [void](Initialize-AVDTuneState -Root $rg); [void](Start-AVDTuneImageVersion -Root $rg -Date ([datetime]'2026-11-01') -User 'admin1')
+    $closeSnap = New-AVDTuneFakeArm -Seed @{ Snapshots = @(@{ Name = 'snap-confirmed-3min-before'; Created = $F.AddMinutes(-3) }; @{ Name = 'snap-other-5min-before'; Created = $F.AddMinutes(-5) }) }
+    $closeId = '/subscriptions/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee/resourceGroups/rg-example/providers/Microsoft.Compute/snapshots/snap-confirmed-3min-before'
+    Open-AVDTuneWriteGate -SnapshotId $closeId -ConfirmedBy 'Max Mustermann' -SnapshotCreated $F.AddMinutes(-3).ToString('o')
+    [void](Set-AVDTuneState -Root $rg -Values @{ LastChange = $F.ToString('o') })
+    Close-AVDTuneWriteGate
+    $listG = @(Get-AVDTuneOsDiskSnapshots -Arm $closeSnap -Token $armToken -Vm $vm -Window (Get-AVDTuneSnapshotWindow -Root $rg))
+    Test-Check 'the snapshot that was confirmed at the first change stays valid for the reconnect, another one that close to the change does not' ((@($listG | Where-Object Valid | ForEach-Object Name) -join ',') -eq 'snap-confirmed-3min-before') (($listG | ForEach-Object { "$($_.Name)=$($_.Valid)" }) -join ',')
+    # older state.json (before #27): no VersionBaseline, no FirstChange; LastChange counts as the start of the version, so no old snapshot becomes valid
+    $ro = Join-Path $tmp 'issue27-old'; [void](Initialize-AVDTuneState -Root $ro); [void](Start-AVDTuneImageVersion -Root $ro -Date ([datetime]'2026-11-01') -User 'admin1')
+    $oldState = Get-AVDTuneState $ro
+    foreach ($drop in 'VersionBaseline', 'FirstChange', 'FirstChangeSnapshotId') { $oldState.PSObject.Properties.Remove($drop) }
+    $oldState | Add-Member -NotePropertyName LastChange -NotePropertyValue $T0.ToString('o') -Force
+    [IO.File]::WriteAllText((Join-Path $ro 'state.json'), ($oldState | ConvertTo-Json -Depth 6))
+    $wOld = Get-AVDTuneSnapshotWindow -Root $ro
+    $armO = New-AVDTuneFakeArm -Seed @{ Snapshots = @(@{ Name = 'old-before-last-change'; Created = $T0.AddHours(-2) }; @{ Name = 'old-5min-after'; Created = $T0.AddMinutes(5) }; @{ Name = 'old-after-last-change'; Created = $T0.AddMinutes(30) }) }
+    $listO = @(Get-AVDTuneOsDiskSnapshots -Arm $armO -Token $armToken -Vm $vm -Window $wOld)
+    Test-Check 'older state.json without the new fields: LastChange is the start of the version; snapshots before it (or only 5 minutes after it) are invalid, one after it is valid' ($wOld.Mode -eq 'VersionStart' -and $wOld.Lower -eq $T0 -and (@($listO | Where-Object Valid | ForEach-Object Name) -join ',') -eq 'old-after-last-change') (($listO | ForEach-Object { "$($_.Name)=$($_.Valid)" }) -join ',')
+    [void](Set-AVDTuneState -Root $ro -Values @{ LastChange = $T0.AddHours(2).ToString('o') })
+    $stOld = Get-AVDTuneState $ro
+    Test-Check 'older state.json, first change with the new code: the old LastChange becomes the baseline (nothing before it becomes valid), the new change the first change' (([datetime]$stOld.VersionBaseline) -eq $T0 -and ([datetime]$stOld.FirstChange) -eq $T0.AddHours(2)) ($stOld | ConvertTo-Json -Compress -Depth 3)
+    # a change that only the change log knows (not state.json) still keeps the lower bound strict
+    $rx = Join-Path $tmp 'issue27-unrecorded'; [void](Initialize-AVDTuneState -Root $rx); [void](Start-AVDTuneImageVersion -Root $rx -Date ([datetime]'2026-11-01') -User 'admin1')
+    [void](Add-AVDTuneChangeLogEntry -Root $rx -Version '2026.11.001' -Category 'Setup' -Component 'x' -ChangeType Changed -Text 'a change without state.json' -User 'admin1' -Source Step -At $T0)
+    Test-Check 'a change that only the change log knows keeps the strict rule (lower bound = that change, no first change)' ((Get-AVDTuneSnapshotWindow -Root $rx).Lower -eq $T0 -and -not (Get-AVDTuneSnapshotWindow -Root $rx).FirstChange) $null
+
+    # ---------------------------------------------------------------- findings of the security review of #27
+    # 1: a change in progress (marker): first change = its start, no new version, no snapshot as the current state meanwhile
+    $rp = Join-Path $tmp 'issue27-progress'; [void](Initialize-AVDTuneState -Root $rp); [void](Start-AVDTuneImageVersion -Root $rp -Date ([datetime]'2026-11-01') -User 'admin1')
+    $tStart = (Get-Date).AddHours(-2)
+    $owner = Start-AVDTuneChange -Root $rp -At $tStart
+    Test-Check 'change in progress: the marker is set (owner, live) and nothing counts as a change yet' ($owner -and (Test-AVDTuneChangeInProgress -Root $rp) -and -not (Get-AVDTuneState $rp).FirstChange) $null
+    Test-Check 'a second start in the same process does not take the marker over (nested operation)' (-not (Start-AVDTuneChange -Root $rp)) $null
+    Test-Check 'counter-test: a new image version is refused while a change runs; the version stays' ((Get-ThrownText { Start-AVDTuneImageVersion -Root $rp -Date ([datetime]'2026-11-02') -User 'admin1' }) -like '*changing the master right now*' -and (Get-AVDTuneState $rp).ImageVersion -eq '2026.11.001') $null
+    [void](Set-AVDTuneState -Root $rp -Values @{ LastChange = (Get-Date).ToString('o') })
+    $stP = Get-AVDTuneState $rp
+    Test-Check 'the first change of the version is the START of the operation, not the moment its end is written' (([datetime]$stP.FirstChange).ToUniversalTime() -eq $tStart.ToUniversalTime()) ($stP | ConvertTo-Json -Compress -Depth 3)
+    $wP = Get-AVDTuneSnapshotWindow -Root $rp
+    $armP = New-AVDTuneFakeArm -Seed @{ Snapshots = @(@{ Name = 'snap-before-start'; Created = $tStart.AddMinutes(-30) }; @{ Name = 'snap-during-change'; Created = (Get-Date).AddMinutes(30) }) }
+    $listP = @(Get-AVDTuneOsDiskSnapshots -Arm $armP -Token $armToken -Vm $vm -Window $wP); $bP = @{}; foreach ($s in $listP) { $bP[$s.Name] = $s }
+    Test-Check 'counter-test: a snapshot made while a change runs is neither version start nor current state; one from before the start still is valid' ($wP.InProgress -and -not $bP['snap-during-change'].Valid -and $bP['snap-during-change'].Reason -like '*changing the master right now*' -and $bP['snap-before-start'].Valid -and $bP['snap-before-start'].Kind -eq 'VersionStart') (($listP | ForEach-Object { "$($_.Name)=$($_.Valid)" }) -join ',')
+    Stop-AVDTuneChange -Root $rp -Owner $true
+    Test-Check 'after the change the marker is gone and a new version may start' (-not (Test-AVDTuneChangeInProgress -Root $rp) -and (Start-AVDTuneImageVersion -Root $rp -Date ([datetime]'2026-11-02') -User 'admin1') -eq '2026.11.002') $null
+    $listP2 = @(Get-AVDTuneOsDiskSnapshots -Arm $armP -Token $armToken -Vm $vm -Window (Get-AVDTuneSnapshotWindow -Root $rp))
+    Test-Check 'the snapshot made during the change of the old version does not count for the new one (it is before its end plus margin)' (@($listP2 | Where-Object { $_.Name -eq 'snap-before-start' -and $_.Valid }).Count -eq 0) (($listP2 | ForEach-Object { "$($_.Name)=$($_.Valid)" }) -join ',')
+    # a marker of a process that is gone (crash): resolved as a change that ended when it is found, nothing is blocked for ever
+    $rs = Join-Path $tmp 'issue27-stale'; [void](Initialize-AVDTuneState -Root $rs); [void](Start-AVDTuneImageVersion -Root $rs -Date ([datetime]'2026-11-01') -User 'admin1')
+    [void](Set-AVDTuneState -Root $rs -Values @{ ChangeInProgress = [ordered]@{ Started = (Get-Date).AddHours(-1).ToUniversalTime().ToString('o'); Pid = 2147480000 } })
+    Test-Check 'a marker of a dead process is no running change; a new version may start and the marker is turned into a last change' (-not (Test-AVDTuneChangeInProgress -Root $rs) -and (Start-AVDTuneImageVersion -Root $rs -Date ([datetime]'2026-11-02') -User 'admin1') -eq '2026.11.002' -and -not (Get-AVDTuneChangeMarker -Root $rs) -and (Get-AVDTuneLastChange -Root $rs) -gt (Get-Date).AddMinutes(-2)) $null
+
+    # 2: older state.json without LastChange but with run records: the baseline comes from the evidence, the lower bound is not lifted
+    $rm = Join-Path $tmp 'issue27-migrate'; [void](Initialize-AVDTuneState -Root $rm); [void](Start-AVDTuneImageVersion -Root $rm -Date ([datetime]'2026-11-01') -User 'admin1')
+    [void](Add-AVDTuneRun -Root $rm -Run ([pscustomobject]@{ Id = 'old-run'; Plan = 'old'; Started = $T0.AddMinutes(-5).ToString('o'); Ended = $T0.ToString('o'); WhatIf = $false; Results = @([pscustomobject]@{ Id = 'a'; Mode = 'Apply'; Status = 'Changed' }) }))
+    $stM = Get-AVDTuneState $rm; foreach ($drop in 'VersionBaseline', 'FirstChange', 'FirstChangeSnapshotId', 'LastChange') { $stM.PSObject.Properties.Remove($drop) }
+    [IO.File]::WriteAllText((Join-Path $rm 'state.json'), ($stM | ConvertTo-Json -Depth 6))
+    Test-Check 'older state.json without LastChange but a run record: the lower bound is that run (not lifted)' ((Get-AVDTuneSnapshotWindow -Root $rm).Lower -eq $T0) ((Get-AVDTuneSnapshotWindow -Root $rm).Lower)
+    [void](Set-AVDTuneState -Root $rm -Values @{ LastChange = $T0.AddHours(3).ToString('o') })
+    $wM = Get-AVDTuneSnapshotWindow -Root $rm
+    $armM = New-AVDTuneFakeArm -Seed @{ Snapshots = @(@{ Name = 'm-before-run'; Created = $T0.AddHours(-1) }; @{ Name = 'm-after-run'; Created = $T0.AddHours(1) }) }
+    $listM = @(Get-AVDTuneOsDiskSnapshots -Arm $armM -Token $armToken -Vm $vm -Window $wM)
+    Test-Check 'counter-test: after the first change with the new code the baseline is the run record, a snapshot from before that run is invalid, one after it is valid' (([datetime](Get-AVDTuneState $rm).VersionBaseline) -eq $T0 -and $wM.Lower -eq $T0 -and (@($listM | Where-Object Valid | ForEach-Object Name) -join ',') -eq 'm-after-run') (($listM | ForEach-Object { "$($_.Name)=$($_.Valid)" }) -join ',')
+    # no evidence at all: nothing ever changed, no lower bound
+    $rn = Join-Path $tmp 'issue27-never'; [void](Initialize-AVDTuneState -Root $rn); [void](Start-AVDTuneImageVersion -Root $rn -Date ([datetime]'2026-11-01') -User 'admin1')
+    Test-Check 'no change anywhere: no lower bound (proof that nothing ever changed)' (-not (Get-AVDTuneSnapshotWindow -Root $rn).Lower) $null
+
+    # a first change is recorded, VersionBaseline is empty, but the run records know an earlier change: the lower bound is that change
+    $rl = Join-Path $tmp 'issue27-lowerevidence'; [void](Initialize-AVDTuneState -Root $rl); [void](Start-AVDTuneImageVersion -Root $rl -Date ([datetime]'2026-11-01') -User 'admin1')
+    [void](Add-AVDTuneRun -Root $rl -Run ([pscustomobject]@{ Id = 'earlier-run'; Plan = 'x'; Started = $T0.AddMinutes(-5).ToString('o'); Ended = $T0.ToString('o'); WhatIf = $false; Results = @([pscustomobject]@{ Id = 'a'; Mode = 'Apply'; Status = 'Changed' }) }))
+    [void](Set-AVDTuneState -Root $rl -Values @{ VersionBaseline = $null; FirstChange = $F.ToString('o'); LastChange = $F.AddHours(1).ToString('o') })
+    $wL = Get-AVDTuneSnapshotWindow -Root $rl
+    $armL = New-AVDTuneFakeArm -Seed @{ Snapshots = @(@{ Name = 'l-before-earlier-run'; Created = $T0.AddHours(-1) }; @{ Name = 'l-after-earlier-run'; Created = $T0.AddHours(1) }) }
+    $listL = @(Get-AVDTuneOsDiskSnapshots -Arm $armL -Token $armToken -Vm $vm -Window $wL)
+    Test-Check 'counter-test: the lower bound is not only the baseline: an earlier change in the run records lifts it (a snapshot from before it is invalid)' ($wL.Lower -eq $T0 -and (@($listL | Where-Object Valid | ForEach-Object Name) -join ',') -eq 'l-after-earlier-run') (($listL | ForEach-Object { "$($_.Name)=$($_.Valid)" }) -join ',')
+    # 3: the exception for the snapshot confirmed at the first change needs the same ID AND creation time, and obeys the lower bound
+    $re = Join-Path $tmp 'issue27-reuse'; [void](Initialize-AVDTuneState -Root $re); [void](Start-AVDTuneImageVersion -Root $re -Date ([datetime]'2026-11-01') -User 'admin1')
+    $idX = '/subscriptions/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee/resourceGroups/rg-example/providers/Microsoft.Compute/snapshots/snap-reused'
+    Open-AVDTuneWriteGate -SnapshotId $idX -ConfirmedBy 'Max Mustermann' -SnapshotCreated $F.AddMinutes(-3).ToString('o')
+    [void](Set-AVDTuneState -Root $re -Values @{ LastChange = $F.AddHours(1).ToString('o'); FirstChange = $F.ToString('o') })
+    Close-AVDTuneWriteGate
+    $armRe = New-AVDTuneFakeArm -Seed @{ Snapshots = @(@{ Name = 'snap-reused'; Created = $F.AddMinutes(-3) }) }
+    Test-Check 'the confirmed snapshot (same ID, same creation time) stays valid between 10 minutes and the first change' ((@(Get-AVDTuneOsDiskSnapshots -Arm $armRe -Token $armToken -Vm $vm -Window (Get-AVDTuneSnapshotWindow -Root $re) | Where-Object Valid).Count) -eq 1) $null
+    $armRe2 = New-AVDTuneFakeArm -Seed @{ Snapshots = @(@{ Name = 'snap-reused'; Created = $F.AddMinutes(-2) }) }
+    $listRe2 = @(Get-AVDTuneOsDiskSnapshots -Arm $armRe2 -Token $armToken -Vm $vm -Window (Get-AVDTuneSnapshotWindow -Root $re))
+    Test-Check 'counter-test: a snapshot that was deleted and made again under the same name (other creation time) does not inherit the exception' (-not $listRe2[0].Valid -and $listRe2[0].Reason -like '*less than 10 minutes before the first change*') $listRe2[0].Reason
+    [void](Set-AVDTuneState -Root $re -Values @{ VersionBaseline = $F.AddMinutes(-5).ToString('o') })
+    Test-Check 'counter-test: the exception obeys the lower bound (the previous version ended after that snapshot)' (-not @(Get-AVDTuneOsDiskSnapshots -Arm $armRe -Token $armToken -Vm $vm -Window (Get-AVDTuneSnapshotWindow -Root $re))[0].Valid) $null
+
+    # 4: a failed step counts as a change (a failed Apply can leave changes behind); the marker is gone afterwards
+    $rf = Join-Path $tmp 'issue27-failed'; [void](Initialize-AVDTuneState -Root $rf); [void](Start-AVDTuneImageVersion -Root $rf -Date ([datetime]'2026-11-01') -User 'admin1')
+    Open-AVDTuneWriteGate -SnapshotId $idX -ConfirmedBy 'Max Mustermann' -SnapshotCreated (Get-Date).AddHours(-1).ToString('o')
+    $badStep = New-AVDTuneStep -Id 'setup.failing' -Section Setup -Title 'Fails' -Test { param($m) @{ Compliant = $false; State = $null } } -Apply { param($m) throw 'half done' }
+    $runF = Invoke-AVDTune -Plan ([pscustomobject]@{ Name = 'failing'; Steps = @('setup.failing') }) -Catalog @($badStep) -Machine $machine -Root $rf -User 'admin1' -SnapshotId $idX
+    $stF = Get-AVDTuneState $rf
+    Test-Check 'counter-test: a plan whose step failed still sets LastChange and FirstChange (start of the run), and the marker is cleared' ($runF.Results[0].Status -eq 'Failed' -and $stF.LastChange -and $stF.FirstChange -and ([datetime]$stF.FirstChange).ToUniversalTime() -le ([datetime]$stF.LastChange).ToUniversalTime() -and $null -eq $stF.ChangeInProgress -and (Get-AVDTuneLastChange -Root $rf)) ($stF | ConvertTo-Json -Compress -Depth 3)
+    $rf2 = Join-Path $tmp 'issue27-failed2'; [void](Initialize-AVDTuneState -Root $rf2); [void](Start-AVDTuneImageVersion -Root $rf2 -Date ([datetime]'2026-11-01') -User 'admin1')
+    [void](Add-AVDTuneRun -Root $rf2 -Run ([pscustomobject]@{ Id = 'failed-run'; Plan = 'x'; Started = $T0.ToString('o'); Ended = $T0.ToString('o'); WhatIf = $false; Results = @([pscustomobject]@{ Id = 'a'; Mode = 'Apply'; Status = 'Failed' }) }))
+    [void](Add-AVDTuneRun -Root $rf2 -Run ([pscustomobject]@{ Id = 'dry-run'; Plan = 'x'; Started = $T0.AddHours(1).ToString('o'); Ended = $T0.AddHours(1).ToString('o'); WhatIf = $true; Results = @([pscustomobject]@{ Id = 'a'; Mode = 'Apply'; Status = 'Changed' }) }))
+    Test-Check 'a failed run record is a change (LastChange), a dry run is not' ((Get-AVDTuneLastChange -Root $rf2) -eq $T0) (Get-AVDTuneLastChange -Root $rf2)
+    Close-AVDTuneWriteGate
+
+    # 5: Confirm reads the snapshot again; the caller's word about time, state and source does not count
+    $rv = Join-Path $tmp 'issue27-verify'; [void](Initialize-AVDTuneState -Root $rv); [void](Start-AVDTuneImageVersion -Root $rv -Date ([datetime]'2026-11-01') -User 'admin1')
+    $armV5 = New-AVDTuneFakeArm -Seed @{ DiskUniqueId = 'disk-unique-1'; Snapshots = @(
+            @{ Name = 'v5-good'; Created = (Get-Date).AddHours(-1); SourceUniqueId = 'disk-unique-1' }
+            @{ Name = 'v5-other-disk'; Created = (Get-Date).AddHours(-1); Source = '/subscriptions/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee/resourceGroups/rg-example/providers/Microsoft.Compute/disks/another_disk' }
+            @{ Name = 'v5-recreated-disk'; Created = (Get-Date).AddHours(-1); SourceUniqueId = 'disk-unique-OTHER' }
+            @{ Name = 'v5-creating'; Created = (Get-Date).AddHours(-1); State = 'Creating' }) }
+    $infoV5 = @{}; foreach ($s in @(Get-AVDTuneOsDiskSnapshots -Arm $armV5 -Token $armToken -Vm $vm)) { $infoV5[$s.Name] = $s }
+    foreach ($n in 'v5-other-disk', 'v5-recreated-disk', 'v5-creating') {
+        $f5 = $(if ($infoV5.ContainsKey($n)) { $infoV5[$n] } else { $infoV5['v5-good'] }).PSObject.Copy(); $f5.State = 'Succeeded'; $f5.Finished = $true; $f5.Valid = $true; $f5.Created = (Get-Date).AddHours(-1)
+        if ($n -eq 'v5-other-disk') { $f5.Id = '/subscriptions/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee/resourceGroups/rg-example/providers/Microsoft.Compute/snapshots/v5-other-disk' }
+        $err = Get-ThrownText { Confirm-AVDTuneSnapshotGate -Root $rv -Snapshot $f5 -TypedName 'Alex Example' -ImageVersion '2026.11.001' -Machine $machine -Arm $armV5 -Token $armToken -Vm $vm }
+        Test-Check "counter-test: $n cannot be confirmed although the caller says it is finished and valid (Azure is asked again); the gate stays shut" ($err -and -not (Test-AVDTuneWriteAllowed)) $err
+    }
+    $liar = $infoV5['v5-good'].PSObject.Copy(); $liar.Created = (Get-Date).AddDays(-30)
+    $recV5 = Confirm-AVDTuneSnapshotGate -Root $rv -Snapshot $liar -TypedName 'Alex Example' -ImageVersion '2026.11.001' -Machine $machine -Arm $armV5 -Token $armToken -Vm $vm
+    Test-Check 'the creation time in the record is the one from Azure, not the one the caller passed; the gate remembers it' ((([datetime]$recV5.SnapshotCreated) - $infoV5['v5-good'].Created).TotalSeconds -lt 1 -and (Test-AVDTuneWriteAllowed) -and (Get-AVDTuneWriteGate).SnapshotCreated) $recV5.SnapshotCreated
+    Close-AVDTuneWriteGate
+
+    # 6: a new version keeps an open gate only for the snapshot the gate was opened with (state.json says which one and when)
+    $rk = Join-Path $tmp 'issue27-gateswap'; [void](Initialize-AVDTuneState -Root $rk); [void](Start-AVDTuneImageVersion -Root $rk -Date ([datetime]'2026-11-01') -User 'admin1')
+    [void](Set-AVDTuneState -Root $rk -Values @{ LastChange = $T0.ToString('o') })
+    [void](Set-AVDTuneState -Root $rk -Values @{ SnapshotGate = [pscustomobject]@{ SnapshotId = 'confirmed-in-state'; SnapshotCreated = $T0.AddHours(1).ToString('o') } })
+    Open-AVDTuneWriteGate -SnapshotId 'another-one-in-memory' -ConfirmedBy 'Max Mustermann'
+    [void](Start-AVDTuneImageVersion -Root $rk -Date ([datetime]'2026-11-02') -User 'admin1')
+    Test-Check 'counter-test: the open gate belongs to another snapshot than state.json says: the new version closes it' (-not (Test-AVDTuneWriteAllowed)) $null
+
+    # ---------------------------------------------------------------- second review of #27: the end is stamped, the marker is tied to its process
+    # the end is stamped by Stop (also after an abort, before any LastChange was written); FirstChange comes from the marker
+    $r2 = Join-Path $tmp 'issue27-stop'; [void](Initialize-AVDTuneState -Root $r2); [void](Start-AVDTuneImageVersion -Root $r2 -Date ([datetime]'2026-11-01') -User 'admin1')
+    $t2 = (Get-Date).AddHours(-2)
+    $o2 = Start-AVDTuneChange -Root $r2 -At $t2
+    Stop-AVDTuneChange -Root $r2 -Owner $o2
+    $st2 = Get-AVDTuneState $r2
+    $w2 = Get-AVDTuneSnapshotWindow -Root $r2
+    Test-Check 'counter-test: start, abort, stop: LastChange is the end (now), FirstChange the start, the marker is gone; a snapshot made mid-change is invalid' ($st2.LastChange -and ([datetime]$st2.LastChange) -gt (Get-Date).AddMinutes(-2) -and ([datetime]$st2.FirstChange).ToUniversalTime() -eq $t2.ToUniversalTime() -and $null -eq $st2.ChangeInProgress -and -not (Test-AVDTuneSnapshotInWindow -Created $t2.AddMinutes(30) -Id 'x' -Window $w2).Valid) ($st2 | ConvertTo-Json -Compress -Depth 3)
+    $r3 = Join-Path $tmp 'issue27-stop2'; [void](Initialize-AVDTuneState -Root $r3); [void](Start-AVDTuneImageVersion -Root $r3 -Date ([datetime]'2026-11-01') -User 'admin1')
+    $o3 = Start-AVDTuneChange -Root $r3 -At $t2
+    [void](Set-AVDTuneState -Root $r3 -Values @{ LastChange = $t2.ToString('o') })   # the Updates pattern: LastChange at the start, then the run
+    Stop-AVDTuneChange -Root $r3 -Owner $o3
+    Test-Check 'counter-test: LastChange at the start and a long run: Stop moves it to the end, so a snapshot from the middle of the run is invalid' (([datetime](Get-AVDTuneState $r3).LastChange) -gt (Get-Date).AddMinutes(-2) -and -not (Test-AVDTuneSnapshotInWindow -Created $t2.AddMinutes(30) -Id 'x' -Window (Get-AVDTuneSnapshotWindow -Root $r3)).Valid) $null
+
+    # the marker is tied to its process (PID, start time, name) and to 12 hours; a foreign live one stops a second writer
+    $child = Start-Process -FilePath (Join-Path ([Environment]::GetFolderPath('System')) 'WindowsPowerShell\v1.0\powershell.exe') -ArgumentList '-NoProfile', '-NonInteractive', '-Command', 'Start-Sleep -Seconds 120' -WindowStyle Hidden -PassThru
+    try {
+        Start-Sleep -Milliseconds 800
+        $r4 = Join-Path $tmp 'issue27-pid'; [void](Initialize-AVDTuneState -Root $r4); [void](Start-AVDTuneImageVersion -Root $r4 -Date ([datetime]'2026-11-01') -User 'admin1')
+        $cs = $child.StartTime.ToUniversalTime().ToString('o'); $cn = $child.ProcessName
+        $setMarker = { param($started, $pidv, $pstart, $pname) [void](Set-AVDTuneState -Root $r4 -Values @{ ChangeInProgress = [ordered]@{ Started = $started; Pid = $pidv; ProcessStart = $pstart; ProcessName = $pname } }) }
+        & $setMarker (Get-Date).AddMinutes(-5).ToUniversalTime().ToString('o') $child.Id $cs $cn
+        Test-Check 'a marker of a live foreign process (PID, start time and name match) is running' ((Get-AVDTuneChangeMarker -Root $r4).Live -and (Test-AVDTuneChangeInProgress -Root $r4)) $null
+        Test-Check 'counter-test: a second writer does not start while a foreign process holds the marker (it throws); the new version is refused too' ((Get-ThrownText { Start-AVDTuneChange -Root $r4 }) -like '*Another AVDTune process*' -and (Get-ThrownText { Start-AVDTuneImageVersion -Root $r4 -Date ([datetime]'2026-11-02') -User 'admin1' }) -like '*changing the master right now*') $null
+        & $setMarker (Get-Date).AddDays(-3).ToUniversalTime().ToString('o') $child.Id (Get-Date).AddDays(-3).ToUniversalTime().ToString('o') $cn
+        Test-Check 'counter-test: a reused PID (same PID and name, other start time) is not the process of the marker' (-not (Get-AVDTuneChangeMarker -Root $r4).Live) $null
+        & $setMarker (Get-Date).AddMinutes(-5).ToUniversalTime().ToString('o') $child.Id $cs 'notepad'
+        Test-Check 'counter-test: another process name is not the process of the marker' (-not (Get-AVDTuneChangeMarker -Root $r4).Live) $null
+        & $setMarker (Get-Date).AddHours(-13).ToUniversalTime().ToString('o') $child.Id $cs $cn
+        Test-Check 'counter-test: a marker older than 12 hours counts as gone even when PID, start time and name match' (-not (Get-AVDTuneChangeMarker -Root $r4).Live) $null
+        & $setMarker (Get-Date).AddMinutes(-5).ToUniversalTime().ToString('o') $child.Id $null $null
+        Test-Check 'a marker without process start (not written by this version) counts as gone' (-not (Get-AVDTuneChangeMarker -Root $r4).Live) $null
+        & $setMarker (Get-Date).AddDays(-3).ToUniversalTime().ToString('o') $child.Id (Get-Date).AddDays(-3).ToUniversalTime().ToString('o') $cn
+        Test-Check 'after a reused PID the new version and the next change are not blocked for ever' ((Start-AVDTuneChange -Root $r4) -and (Test-AVDTuneChangeInProgress -Root $r4)) $null
+        Stop-AVDTuneChange -Root $r4
+    }
+    finally { if ($child -and -not $child.HasExited) { $child.Kill() } }
+
+    # Confirm without Azure (-Arm) only in the test mode (Test-AVDTuneTestMode), not by an environment variable alone
+    $rt = Join-Path $tmp 'issue27-notestmode'; [void](Initialize-AVDTuneState -Root $rt); [void](Start-AVDTuneImageVersion -Root $rt -Date ([datetime]'2026-11-01') -User 'admin1')
+    $snapT = (Get-AVDTuneOsDiskSnapshots -Arm (New-AVDTuneFakeArm -Seed @{ Snapshots = @(@{ Name = 't-snap'; Created = (Get-Date).AddHours(-1) }) }) -Token $armToken -Vm $vm)[0]
+    $savedFake = $env:AVDTUNE_FAKE; $savedRoot = $env:AVDTUNE_ROOT
+    try {
+        $env:AVDTUNE_FAKE = $null; $env:AVDTUNE_ROOT = $null
+        $errT = Get-ThrownText { Confirm-AVDTuneSnapshotGate -Root $rt -Snapshot $snapT -TypedName 'Alex Example' -ImageVersion '2026.11.001' -Machine $machine }
+    }
+    finally { $env:AVDTUNE_FAKE = $savedFake; $env:AVDTUNE_ROOT = $savedRoot }
+    Test-Check 'counter-test: no test mode and no -Arm: Confirm is refused, the gate stays shut' ($errT -like '*only the test mode*' -and -not (Test-AVDTuneWriteAllowed)) $errT
+    Test-Check 'in the test mode Confirm without -Arm still works (the checks above)' ((Test-AVDTuneTestMode).Enabled) $null
+    Close-AVDTuneWriteGate
+
+    # 9: a snapshot that is Succeeded but not complete (Premium SSD v2 / Ultra) is not finished
+    $armU = New-AVDTuneFakeArm -Seed @{ Snapshots = @(@{ Name = 'u-half'; Created = (Get-Date).AddHours(-1); Percent = 40 }; @{ Name = 'u-full'; Created = (Get-Date).AddHours(-1); Percent = 100; AccessState = 'Available' }; @{ Name = 'u-pending'; Created = (Get-Date).AddHours(-1); AccessState = 'Pending' }; @{ Name = 'u-plain'; Created = (Get-Date).AddHours(-1) }) }
+    $lu = @{}; foreach ($s in @(Get-AVDTuneOsDiskSnapshots -Arm $armU -Token $armToken -Vm $vm)) { $lu[$s.Name] = $s }
+    Test-Check 'completionPercent below 100 or an access state other than Available is not finished; a snapshot without these fields counts as before' (-not $lu['u-half'].Valid -and $lu['u-half'].Reason -like 'Not finished (40 percent)*' -and -not $lu['u-pending'].Valid -and $lu['u-pending'].Reason -like 'Not usable yet*' -and $lu['u-full'].Valid -and $lu['u-plain'].Valid) (($lu.Values | ForEach-Object { "$($_.Name)=$($_.Valid)" }) -join ',')
+    Close-AVDTuneWriteGate
     Close-AVDTuneWriteGate
 
     # snapshot error paths
