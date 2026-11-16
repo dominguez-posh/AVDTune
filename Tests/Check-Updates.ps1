@@ -422,6 +422,20 @@ try {
     & $psmAVDTune { Remove-AVDTuneChildTempLeftovers -Parent $args[0] -Tool base } (Join-Path $cl 'temp')
     $left = @(Get-ChildItem (Join-Path $cl 'temp') -Filter 'base.untrusted-*' -Force | ForEach-Object { $_.Name } | Sort-Object)
     Test-Check 'child TEMP (#47): clean-up keeps the two newest set-aside folders, removes older ones and stale entries without following a link; fresh files stay' ($left.Count -eq 2 -and $left[0] -like '*20260101*' -and $left[1] -like '*20260102*' -and (Test-Path -LiteralPath (Join-Path $out3 'keep.txt')) -and -not (Test-Path -LiteralPath $stale) -and (Test-Path -LiteralPath $fresh)) ($left -join ',')
+    # Real finding on the test VM (#65): winget gives the elevated admin an explicit rule on temp\winget\WinGet; the start check set the whole state folder aside
+    $sr = Join-Path $tmp 'state65'
+    foreach ($d in 'temp\winget\WinGet', 'config') { [void](New-Item -ItemType Directory -Path (Join-Path $sr $d) -Force) }
+    $wingetRule = { param($Path, $IsDirectory) $r = @([pscustomobject]@{ Sid = 'S-1-5-32-544'; Inherited = $false }); if ($Path -clike '*\WinGet' -or $Path -clike '*\config\foreign.txt') { $r += [pscustomobject]@{ Sid = 'S-1-5-21-1-2-3-500'; Inherited = $false } }; [pscustomobject]@{ Owner = 'S-1-5-32-544'; Protected = $true; Rules = $r } }
+    $p65 = @(Get-AVDTuneStateSecurityProblems -Root $sr -ReadAcl $wingetRule -AdminSid '')
+    Test-Check 'state check (#65): a rule a tool set inside its TEMP folder (temp\winget\WinGet) does not make the state folder "prepared by someone else"' ($p65.Count -eq 0) (($p65 | ForEach-Object { "$($_.Path): $($_.Problem)" }) -join '; ')
+    Set-Content -LiteralPath (Join-Path $sr 'config\foreign.txt') -Value 'x'
+    $p65b = @(Get-AVDTuneStateSecurityProblems -Root $sr -ReadAcl $wingetRule -AdminSid '')
+    Test-Check 'state check (#65): the same foreign rule elsewhere in the state folder (config) is still a problem' ($p65b.Count -eq 1 -and $p65b[0].Path -like '*\config\foreign.txt') (($p65b | ForEach-Object { "$($_.Path): $($_.Problem)" }) -join '; ')
+    $t65a = Initialize-AVDTuneToolTemp -Tool base -StateRoot $sr -ReadAcl $trustAllAcl
+    Set-Content -LiteralPath (Join-Path $t65a 'left-by-run1.txt') -Value 'x'; [void](New-Item -ItemType Directory -Path (Join-Path $t65a 'WinGet') -Force)
+    $t65b = Initialize-AVDTuneToolTemp -Tool base -StateRoot $sr -ReadAcl $trustAllAcl
+    $used = @(Get-ChildItem (Join-Path $sr 'temp') -Filter 'base.used-*' -Force)
+    Test-Check 'child TEMP (#65): every run gets a fresh, empty folder; the one of the earlier run is removed (nothing a tool left in it is reused)' ($t65b -eq $t65a -and @(Get-ChildItem -LiteralPath $t65b -Force).Count -eq 0 -and $used.Count -eq 0) "$(@(Get-ChildItem -LiteralPath $t65b -Force).Name -join ',') used=$($used.Count)"
 
     # ---------------------------------------------------------------- history
     $h = @(Get-AVDTuneUpdateHistory -Root $tmp)

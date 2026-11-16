@@ -537,9 +537,14 @@ catch { if (-not ('AVDTune.NativeMove' -as [type])) { throw } }
 function Move-AVDTuneFileReplace {
     # Atomic replace: MoveFileEx(REPLACE_EXISTING | WRITE_THROUGH) on the same volume. The target exists at every moment (old or new file) and the new file
     # keeps the ACL of the temp file; the old ACL is gone. Throws when the move fails (the target is then unchanged).
-    param([Parameter(Mandatory)][string]$Temp, [Parameter(Mandatory)][string]$Target)
-    if (-not [AVDTune.NativeMove]::MoveFileEx($Temp, $Target, 0x1 -bor 0x8)) {
-        throw (New-Object ComponentModel.Win32Exception([Runtime.InteropServices.Marshal]::GetLastWin32Error()))
+    # A virus scanner (Defender) briefly holds a fresh file or the target: ERROR_ACCESS_DENIED (5) and ERROR_SHARING_VIOLATION (32) are tried again a few
+    # times (about 2 s in all, #58/#65); any other error, or the same one after the last try, throws.
+    param([Parameter(Mandatory)][string]$Temp, [Parameter(Mandatory)][string]$Target, [int]$Tries = 6, [int]$WaitMs = 100)
+    for ($i = 1; ; $i++) {
+        if ([AVDTune.NativeMove]::MoveFileEx($Temp, $Target, 0x1 -bor 0x8)) { return }
+        $err = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+        if (($err -ne 5 -and $err -ne 32) -or $i -ge $Tries) { throw (New-Object ComponentModel.Win32Exception($err)) }
+        Start-Sleep -Milliseconds ($WaitMs * $i)
     }
 }
 
@@ -601,6 +606,7 @@ function Get-AVDTuneStateSecurityProblems {
         if ($f.Exists) { return @([pscustomobject]@{ Path = $Root; Problem = 'a file, not a folder' }) }
         return @()
     }
+    $tempRoot = (Join-Path $rootInfo.FullName 'temp').TrimEnd('\')
     $queue = New-Object System.Collections.Queue
     $queue.Enqueue($rootInfo)
     $count = 0
@@ -620,7 +626,10 @@ function Get-AVDTuneStateSecurityProblems {
             if ($foreign.Count -gt 0) { [void]$problems.Add([pscustomobject]@{ Path = $item.FullName; Problem = "access for $($foreign -join ', ')" }) }
             if ($Final -and $isRoot -and -not $acl.Protected) { [void]$problems.Add([pscustomobject]@{ Path = $item.FullName; Problem = 'inherits rules from ProgramData' }) }
         }
-        if ($isDir -and -not $NoRecurse) {
+        # The content of a tool's TEMP folder (<root>\temp\<tool>) is not walked: the started program sets its own ACLs there (winget gives the elevated admin an
+        # explicit rule on its WinGet folder, #65). The tool folder itself is checked like everything else, and Initialize-AVDTuneToolTemp gives every run a fresh one.
+        $isToolTemp = $isDir -and $item.Parent -and $item.Parent.FullName.TrimEnd('\') -ieq $tempRoot
+        if ($isDir -and -not $NoRecurse -and -not $isToolTemp) {
             try { foreach ($child in $item.GetFileSystemInfos()) { $queue.Enqueue($child) } }
             catch { [void]$problems.Add([pscustomobject]@{ Path = $item.FullName; Problem = "content cannot be listed: $($_.Exception.Message)" }) }
         }
@@ -701,11 +710,14 @@ function Initialize-AVDTuneToolTemp {
             if ($ReadAcl -and (Test-AVDTuneTestMode).Enabled) { $p.ReadAcl = $ReadAcl; $p.AdminSid = '' }
             $bad = @(Get-AVDTuneStateSecurityProblems @p).Count -gt 0
         }
-        if (-not $bad) { return $dir }
+        # Every run gets a fresh, empty folder (#65): a program may leave rules for the user in it (winget's WinGet folder), which a later elevated run must not
+        # inherit. A good folder is renamed to <tool>.used-<stamp> and removed below; a bad one to <tool>.untrusted-<stamp> and kept for a look.
+        $kind = if ($bad) { 'untrusted' } else { 'used' }
         $stamp = (Get-Date).ToString('yyyyMMdd-HHmmss', [Globalization.CultureInfo]::InvariantCulture)
-        $aside = Join-Path $parent "$Tool.untrusted-$stamp"
-        for ($n = 2; (Test-Path -LiteralPath $aside); $n++) { $aside = Join-Path $parent "$Tool.untrusted-$stamp-$n" }
-        if ($file.Exists) { [IO.File]::Move($dir, $aside) } else { [IO.Directory]::Move($dir, $aside) }   # a rename: nothing inside is opened or followed
+        $aside = Join-Path $parent "$Tool.$kind-$stamp"
+        for ($n = 2; (Test-Path -LiteralPath $aside); $n++) { $aside = Join-Path $parent "$Tool.$kind-$stamp-$n" }
+        try { if ($file.Exists) { [IO.File]::Move($dir, $aside) } else { [IO.Directory]::Move($dir, $aside) } }   # a rename: nothing inside is opened or followed
+        catch { if (-not $bad) { return $dir }; throw }   # in use by a running program of the same tool: that folder was checked and stays admin-only
     }
     Remove-AVDTuneChildTempLeftovers -Parent $parent -Tool $Tool
     $elevated = Test-AVDTuneElevated
@@ -740,6 +752,8 @@ function Remove-AVDTuneChildTempLeftovers {
     try {
         $aside = @((New-Object IO.DirectoryInfo $Parent).GetDirectories("$Tool.untrusted-*") | Sort-Object LastWriteTimeUtc -Descending)
         for ($i = $KeepAside; $i -lt $aside.Count; $i++) { [void](Remove-AVDTuneTreeNoFollow -Path $aside[$i].FullName) }
+        # folders of earlier runs (Initialize-AVDTuneToolTemp, #65): all removed, a link inside as a link only
+        foreach ($u in @((New-Object IO.DirectoryInfo $Parent).GetDirectories("$Tool.used-*"))) { [void](Remove-AVDTuneTreeNoFollow -Path $u.FullName) }
         $own = New-Object IO.DirectoryInfo (Join-Path $Parent $Tool)
         if ($own.Exists -and -not ($own.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
             $limit = (Get-Date).AddDays(-$StaleDays); $n = 0

@@ -236,6 +236,12 @@ try {
     $lockThrew = $false
     try { Write-AVDTuneFile $lockFile 'new' } catch { $lockThrew = $true } finally { $held.Dispose() }
     Test-Check 'Write-AVDTuneFile: a target that is held open makes it throw, the old content stays, no temp file is left' ($lockThrew -and [IO.File]::ReadAllText($lockFile) -eq 'old' -and -not @(Get-ChildItem $tmp -Filter 'locked.json.*.tmp' -Force).Count) $null
+    # A virus scanner holds the file only briefly (#58/#65): the replace is tried again and succeeds
+    $held2 = [IO.File]::Open($lockFile, 'Open', 'Read', 'None')
+    $releaser = [powershell]::Create(); [void]$releaser.AddScript({ param($h) Start-Sleep -Milliseconds 250; $h.Dispose() }).AddArgument($held2); $relRun = $releaser.BeginInvoke()
+    $briefThrew = $false
+    try { Write-AVDTuneFile $lockFile 'after-retry' } catch { $briefThrew = $true } finally { [void]$releaser.EndInvoke($relRun); $releaser.Dispose(); $held2.Dispose() }
+    Test-Check 'Write-AVDTuneFile: a target held only briefly (scanner) is replaced after a retry, no temp file is left' (-not $briefThrew -and [IO.File]::ReadAllText($lockFile) -eq 'after-retry' -and -not @(Get-ChildItem $tmp -Filter 'locked.json.*.tmp' -Force).Count) $null
     $wfSrc = ((Get-Command Write-AVDTuneFile).ScriptBlock.ToString()) + ((Get-Command Write-AVDTuneAccessFile).ScriptBlock.ToString())
     Test-Check 'Write-AVDTuneFile and Write-AVDTuneAccessFile replace atomically (MoveFileEx), never delete the target before the move, never File.Replace' ($wfSrc -notmatch 'File\]::Delete\(\$Path\)\s*\}?\s*;?\s*\r?\n?\s*\[IO\.File\]::Move' -and $wfSrc -notmatch 'File\]::Replace' -and ([IO.File]::ReadAllText((Join-Path $repo 'Modules\AVDTune.psm1')) -match 'DllImport\("kernel32.dll".*MoveFileEx')) $null
     Write-AVDTuneFile (Join-Path $tmp 'state.json') ([ordered]@{ Schema = 1; ImageVersion = $null; Versions = @(); LastUpdate = $null; LastBenchmark = $null; UpdateBlock = $null; Sealed = $false; Identity = $null; LastRunId = $null } | ConvertTo-Json)
