@@ -581,7 +581,7 @@ function Invoke-SnapshotCreate {
     if ($script:PendingSnapshot) { return }
     $vm = $f.Vm
     try {
-        $started = Invoke-Busy 'Asking Azure to create the incremental snapshot ...' { Start-AVDTuneSnapshot -Arm (Get-StartArm) -Token (Get-ArmToken) -Vm $vm -ImageVersion $f.ImageVersion -User ([string]$script:StartContext.Session.Account) -At (& $script:Machine.Now) -NamePattern $f.NamePattern -ExistingNames @(@($f.Snapshots) | Where-Object { $_ } | ForEach-Object { $_.Name }) } -TaskTitle 'Asking Azure to create the snapshot' -Done 'Request accepted'
+        $started = Invoke-Busy 'Asking Azure to create the incremental snapshot ...' { Start-AVDTuneSnapshot -Arm (Get-StartArm) -Token (Get-ArmToken) -Vm $vm -ImageVersion $f.ImageVersion -User ([string]$script:StartContext.Session.Account) -At (& $script:Machine.Now) -NamePattern $f.NamePattern -ExistingNames @(@($f.Snapshots) | Where-Object { $_ } | ForEach-Object { $_.Name }) -ExistingSnapshots @(@($f.Snapshots) | Where-Object { $_ }) } -TaskTitle 'Asking Azure to create the snapshot' -Done 'Request accepted'
     }
     catch {
         $script:StartContext.Failures['Snapshot'] = $_.Exception.Message

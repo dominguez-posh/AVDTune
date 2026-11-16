@@ -159,6 +159,7 @@ function ConvertTo-AVDTuneSnapshotInfo {
     $fit = if ($notReady) { [pscustomobject]@{ Valid = $false; Kind = ''; Reason = $notReady } } else { Test-AVDTuneSnapshotInWindow -Created $created -Id $id -Window $Window }
     [pscustomobject]@{
         Name = [string](Get-AVDTuneProp $Item 'name'); Id = [string](Get-AVDTuneProp $Item 'id'); Created = $created; State = $state
+        Sku = [string](Get-AVDTuneProp (Get-AVDTuneProp $Item 'sku') 'name')
         Incremental = [bool](Get-AVDTuneProp $p 'incremental'); ByAVDTune = $byTool
         ImageVersion = [string](Get-AVDTuneProp $tags 'ImageVersion'); CreatedBy = [string](Get-AVDTuneProp $tags 'CreatedBy')
         Finished = (-not $notReady)
@@ -185,14 +186,28 @@ function Get-AVDTuneOsDiskSnapshots {
     @($found | Sort-Object { if ($_.Created) { $_.Created } else { [datetime]::MinValue } } -Descending)
 }
 
+function Get-AVDTuneIncrementalSnapshotSku {
+    <#
+        The SKU for a new incremental snapshot of a disk: Azure refuses (400) an incremental snapshot whose SKU differs from the existing incremental
+        snapshots of the same disk (e.g. one made as Standard_ZRS in the portal). Only Standard_LRS and Standard_ZRS are used; the newest existing incremental
+        snapshot decides, otherwise Standard_LRS.
+    #>
+    param($Snapshots)
+    $allowed = 'Standard_LRS', 'Standard_ZRS'
+    $inc = @(@($Snapshots) | Where-Object { $_ -and $_.Incremental -and $_.Sku } | Sort-Object { if ($_.Created) { $_.Created } else { [datetime]::MinValue } } -Descending)
+    foreach ($s in $inc) { if ($allowed -ccontains [string]$s.Sku) { return [string]$s.Sku } }
+    'Standard_LRS'
+}
+
 function Start-AVDTuneSnapshot {
     <#
         Starts an incremental snapshot of the OS disk. Returns Name, Id and State immediately; the snapshot is usable when
         Get-AVDTuneSnapshotState says Succeeded. The disk is read first (it must exist and tells the location).
+        -ExistingSnapshots: the snapshots of this disk (Get-AVDTuneOsDiskSnapshots); their SKU is kept (Get-AVDTuneIncrementalSnapshotSku).
     #>
     [CmdletBinding()]
     param([Parameter(Mandatory)]$Arm, [Parameter(Mandatory)][string]$Token, [Parameter(Mandatory)]$Vm, [Parameter(Mandatory)][string]$ImageVersion, [string]$User, [datetime]$At = (Get-Date),
-        [string]$NamePattern = $script:DefaultSnapshotNamePattern, [string[]]$ExistingNames = @())
+        [string]$NamePattern = $script:DefaultSnapshotNamePattern, [string[]]$ExistingNames = @(), $ExistingSnapshots = @())
     if (-not (Test-AVDTuneImageVersion $ImageVersion)) { throw 'Start an image version first (Overview, Start new version): the snapshot tags carry it.' }
     $name = Get-AVDTuneSnapshotName -Pattern $NamePattern -OsDiskName $Vm.OsDiskName -VmName $Vm.VmName -ImageVersion $ImageVersion -At $At -ExistingNames $ExistingNames
     $diskBody = Invoke-AVDTuneArm -Arm $Arm -Method GET -Path "$($Vm.OsDiskId)?api-version=$($script:ComputeApi)" -Token $Token -Action 'Microsoft.Compute/disks/read' -Scope "the OS disk $($Vm.OsDiskName)"
@@ -200,7 +215,7 @@ function Start-AVDTuneSnapshot {
     $id = "/subscriptions/$($Vm.SubscriptionId)/resourceGroups/$($Vm.ResourceGroup)/providers/Microsoft.Compute/snapshots/$name"
     $body = [ordered]@{
         location = $location
-        sku = @{ name = 'Standard_LRS' }
+        sku = @{ name = (Get-AVDTuneIncrementalSnapshotSku $ExistingSnapshots) }
         tags = @{ ImageVersion = (ConvertTo-AVDTuneTagValue $ImageVersion); CreatedBy = (ConvertTo-AVDTuneTagValue $User); CreatedWith = 'AVDTune'; Vm = (ConvertTo-AVDTuneTagValue $Vm.VmName) }
         properties = @{ incremental = $true; creationData = @{ createOption = 'Copy'; sourceResourceId = $Vm.OsDiskId } }
     }
@@ -389,5 +404,5 @@ function New-AVDTuneArmAdapter {
 
 #endregion
 
-Export-ModuleMember -Function Get-AVDTuneVerifiedSnapshot, Get-AVDTuneSnapshotClockBuffer, Get-AVDTuneGateText, Invoke-AVDTuneArm, ConvertTo-AVDTuneArmPath, Get-AVDTuneVmIdentity, Get-AVDTuneDefaultSnapshotNamePattern, Test-AVDTuneSnapshotNamePattern, Get-AVDTuneSnapshotName, Get-AVDTuneOsDiskSnapshots, Start-AVDTuneSnapshot,
+Export-ModuleMember -Function Get-AVDTuneVerifiedSnapshot, Get-AVDTuneSnapshotClockBuffer, Get-AVDTuneGateText, Invoke-AVDTuneArm, ConvertTo-AVDTuneArmPath, Get-AVDTuneVmIdentity, Get-AVDTuneDefaultSnapshotNamePattern, Test-AVDTuneSnapshotNamePattern, Get-AVDTuneSnapshotName, Get-AVDTuneOsDiskSnapshots, Get-AVDTuneIncrementalSnapshotSku, Start-AVDTuneSnapshot,
     Get-AVDTuneSnapshotState, Wait-AVDTuneSnapshot, Test-AVDTuneConfirmationName, Get-AVDTuneGateStatus, Confirm-AVDTuneSnapshotGate, New-AVDTuneArmAdapter

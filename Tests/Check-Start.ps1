@@ -442,6 +442,20 @@ try {
     $put = $arm.Store.LastPut
     Test-Check 'snapshot request: incremental, copy of the OS disk, tags image version and user, in the disk region' ($put.properties.incremental -eq $true -and $put.properties.creationData.createOption -eq 'Copy' -and $put.properties.creationData.sourceResourceId -eq $vm.OsDiskId -and $put.tags.ImageVersion -eq '2026.11.001' -and $put.tags.CreatedBy -eq 'Alex Example' -and $put.tags.CreatedWith -eq 'AVDTune' -and $put.location -eq 'westeurope') ($put | ConvertTo-Json -Compress -Depth 5)
     Test-Check 'the snapshot is named by the pattern of the environment and starts as Creating' ($started.Name -eq 'gm-test01_osdisk-15.11.2026-1' -and $started.State -eq 'Creating') ($started | ConvertTo-Json -Compress)
+    Test-Check 'snapshot SKU: Standard_LRS when the disk has no incremental snapshot of another SKU' ([string]$put.sku.name -eq 'Standard_LRS') ([string]$put.sku.name)
+
+    # Real finding on the test VM (#60): Azure refuses an incremental snapshot whose SKU differs from the existing incremental snapshots of the disk
+    $armZrs = New-AVDTuneFakeArm -Seed @{ Snapshots = @(@{ Name = 'portal-zrs'; Created = $now.AddDays(-1); Sku = 'Standard_ZRS' }) }
+    $zrsList = @(Get-AVDTuneOsDiskSnapshots -Arm $armZrs -Token $armToken -Vm $vm)
+    Test-Check 'the snapshot list carries the SKU of each snapshot' ($zrsList.Count -eq 1 -and $zrsList[0].Sku -eq 'Standard_ZRS') ($zrsList | ForEach-Object Sku)
+    $zrsErr = Get-ThrownText { Start-AVDTuneSnapshot -Arm $armZrs -Token $armToken -Vm $vm -ImageVersion '2026.11.001' -User 'x' -At $now }
+    Test-Check 'the fake answers like Azure: an LRS snapshot next to a ZRS one is refused with the Azure text (400)' ($zrsErr -like "*400*Standard_LRS*does not match*Standard_ZRS*") $zrsErr
+    $zrsStarted = Start-AVDTuneSnapshot -Arm $armZrs -Token $armToken -Vm $vm -ImageVersion '2026.11.001' -User 'x' -At $now -ExistingSnapshots $zrsList
+    Test-Check 'Create snapshot now keeps the SKU of the existing incremental snapshots (Standard_ZRS) and is accepted' ([string]$armZrs.Store.LastPut.sku.name -eq 'Standard_ZRS' -and $zrsStarted.State -eq 'Creating') ([string]$armZrs.Store.LastPut.sku.name)
+    $mixed = @([pscustomobject]@{ Incremental = $true; Sku = 'Premium_LRS'; Created = $now }, [pscustomobject]@{ Incremental = $false; Sku = 'Standard_ZRS'; Created = $now.AddHours(1) }, [pscustomobject]@{ Incremental = $true; Sku = 'Standard_ZRS'; Created = $now.AddDays(-2) })
+    Test-Check 'snapshot SKU: only Standard_LRS/Standard_ZRS of incremental snapshots count, newest first; otherwise Standard_LRS' ((Get-AVDTuneIncrementalSnapshotSku $mixed) -eq 'Standard_ZRS' -and (Get-AVDTuneIncrementalSnapshotSku @()) -eq 'Standard_LRS' -and (Get-AVDTuneIncrementalSnapshotSku @([pscustomobject]@{ Incremental = $true; Sku = 'standard_zrs'; Created = $now })) -eq 'Standard_LRS') $null
+    $guiSource = Get-Content -Raw (Join-Path $repo 'AVDTune-Start.ps1')
+    Test-Check 'the window passes the listed snapshots to Start-AVDTuneSnapshot (SKU of the disk kept)' ($guiSource -match 'Start-AVDTuneSnapshot [^\r\n]*-ExistingSnapshots') $null
     Test-Check 'a snapshot that is still being created does not unlock the gate and says why' (@(Get-AVDTuneOsDiskSnapshots -Arm $arm -Token $armToken -Vm $vm -Window $w0 | Where-Object { $_.Name -eq $started.Name -and -not $_.Valid -and $_.Reason -like 'Not finished*' }).Count -eq 1) $null
     $ready = Wait-AVDTuneSnapshot -Arm $arm -Token $armToken -Id $started.Id -PollSeconds 0
     Test-Check 'polling until Succeeded' ($ready.State -eq 'Succeeded') $ready.State

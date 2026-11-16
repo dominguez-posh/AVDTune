@@ -191,8 +191,8 @@ function New-AVDTuneFakeArm {
     foreach ($s in @($Seed.Snapshots)) {
         if (-not $s) { continue }
         $id = "/subscriptions/$script:FakeSubscription/resourceGroups/$rg/providers/Microsoft.Compute/snapshots/$($s.Name)"
-        $store.Snapshots[$id.ToLowerInvariant()] = @{ id = $id; name = $s.Name; location = $store.Location; tags = $s.Tags
-            properties = @{ timeCreated = ([datetime]$s.Created).ToUniversalTime().ToString('o'); provisioningState = $(if ($s.State) { $s.State } else { 'Succeeded' }); incremental = $true
+        $store.Snapshots[$id.ToLowerInvariant()] = @{ id = $id; name = $s.Name; location = $store.Location; tags = $s.Tags; sku = @{ name = $(if ($s.Sku) { $s.Sku } else { 'Standard_LRS' }) }
+            properties =@{ timeCreated = ([datetime]$s.Created).ToUniversalTime().ToString('o'); provisioningState = $(if ($s.State) { $s.State } else { 'Succeeded' }); incremental = $true
                 creationData = @{ createOption = 'Copy'; sourceResourceId = $(if ($s.Source) { $s.Source } else { $diskId }) } } }
         if ($s.SourceUniqueId) { $store.Snapshots[$id.ToLowerInvariant()].properties.creationData.sourceUniqueId = $s.SourceUniqueId }
         if ($null -ne $s.Percent) { $store.Snapshots[$id.ToLowerInvariant()].properties.completionPercent = $s.Percent }
@@ -315,8 +315,14 @@ function New-AVDTuneFakeArm {
             if ($Method -eq 'PUT') {
                 if ($store.WriteForbidden) { return [pscustomobject]@{ Status = 403; Body = (ConvertTo-FakeJson @{ error = @{ code = 'AuthorizationFailed'; message = 'does not have authorization to perform action Microsoft.Compute/snapshots/write' } }); Error = '' } }
                 $store.LastPut = $Body
+                # Like Azure: an incremental snapshot must have the SKU of the existing incremental snapshots of the same disk (400 otherwise)
+                $wantSku = [string]$Body.sku.name; $src = [string]$Body.properties.creationData.sourceResourceId
+                $other = @($store.Snapshots.Values | Where-Object { $_.properties.incremental -and [string]$_.properties.creationData.sourceResourceId -ieq $src -and $_.sku -and [string]$_.sku.name -ne $wantSku } | Select-Object -First 1)
+                if ($Body.properties.incremental -and $other.Count -gt 0) {
+                    return [pscustomobject]@{ Status = 400; Body = (ConvertTo-FakeJson @{ error = @{ code = 'BadRequest'; message = "Requested Sku '$wantSku' for incremental snapshot of disk '$src' does not match the Sku '$($other[0].sku.name)' for existing incremental snapshots of the disk." } }); Error = '' }
+                }
                 $name = $p.Substring($p.LastIndexOf('/') + 1)
-                $entry = @{ id = $p; name = $name; location = $Body.location; tags = $Body.tags; properties = @{ timeCreated = (Get-Date).ToUniversalTime().ToString('o'); provisioningState = 'Creating'; incremental = [bool]$Body.properties.incremental; creationData = $Body.properties.creationData; completionPercent = 0 } }
+                $entry = @{ id = $p; name = $name; location = $Body.location; tags = $Body.tags; sku = @{ name = $wantSku }; properties =@{ timeCreated = (Get-Date).ToUniversalTime().ToString('o'); provisioningState = 'Creating'; incremental = [bool]$Body.properties.incremental; creationData = $Body.properties.creationData; completionPercent = 0 } }
                 $store.Snapshots[$lower] = $entry; $store.Polls[$lower] = 0
                 return [pscustomobject]@{ Status = 201; Body = (ConvertTo-FakeJson $entry); Error = '' }
             }
