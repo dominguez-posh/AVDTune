@@ -301,6 +301,13 @@ try {
     & cmd.exe /c mklink /J "$jLink" "$jTarget" | Out-Null
     $stL = Get-AVDTuneRedirectionsFolderState -Folder "$jLink\Redirections" -DataRoot $fakePd -ExtraTrusted @($me)
     Test-Check 'real rule: a link above the folder is Unsafe, also for a folder that does not exist yet (68)' ($stL.Kind -eq 'Unsafe' -and $stL.Reason -like '*link*') $stL.Reason
+    # an intermediate folder (ProgramData\FSLogix) made by a user: Unsafe, nothing is created below it (68, CTO)
+    $fakePd2 = Join-Path $tmp 'fakeprogramdata2'; [void](New-Item -ItemType Directory -Path "$fakePd2\FSLogix" -Force)
+    $stI = Get-AVDTuneRedirectionsFolderState -Folder "$fakePd2\FSLogix\Redirections" -DataRoot $fakePd2
+    $madeI = Get-ThrownText { & $real.EnsureFolder "$fakePd2\FSLogix\Redirections" $fakePd2 @() }
+    Test-Check 'real rule: an intermediate folder owned by a user or writable for users is Unsafe, nothing is created below it (68)' ($stI.Kind -eq 'Unsafe' -and $stI.Reason -like "*$fakePd2\FSLogix*" -and $madeI -and -not (Test-Path -LiteralPath "$fakePd2\FSLogix\Redirections")) $stI.Reason
+    $fakePd3 = Join-Path $tmp 'fakeprogramdata3'; [void](New-Item -ItemType Directory -Path $fakePd3 -Force)
+    Test-Check 'real rule: with ProgramData itself the only existing folder, a missing intermediate and target are Missing (created protected in one step) (68)' ((Get-AVDTuneRedirectionsFolderState -Folder "$fakePd3\FSLogix\Redirections" -DataRoot $fakePd3).Kind -eq 'Missing') $null
     $newDir = "$fakePd\FSLogix\Redirections"
     $stM = Get-AVDTuneRedirectionsFolderState -Folder $newDir -DataRoot $fakePd -ExtraTrusted @($me)
     $made = $null; try { & $real.EnsureFolder $newDir $fakePd @($me); $made = 'ok' } catch { $made = $_.Exception.Message }

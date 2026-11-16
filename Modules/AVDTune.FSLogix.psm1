@@ -556,8 +556,8 @@ function Get-AVDTuneRedirectionsFolderState {
     <#
         Whether a folder may hold redirections.xml. Kind: Share (UNC, the administrator's choice), Missing (local, can be created: the nearest existing folder above passes),
         Safe (local, exists, passes), Unsafe (Reason says why: '..', not a local drive path, a link, a foreign owner, write access for anyone but Administrators/SYSTEM).
-        Under ProgramData (the system folder, never an environment variable) the folder itself is checked with the ACL report of the watermark steps and no folder up to
-        ProgramData may be a link (Windows lets users create, not rename or delete, folders there); everywhere else every folder up to the drive root must be admin-only (rule of issue 10).
+        Under ProgramData (the system folder, never an environment variable) only ProgramData itself is exempt (users may create folders there); every existing folder between it and the target
+        (e.g. ProgramData\FSLogix) is checked with the ACL report (owner, write rights, links). Everywhere else every folder up to the drive root must be admin-only (rule of issue 10).
         -DataRoot and -ExtraTrusted are for the checks only.
     #>
     param([Parameter(Mandatory)][string]$Folder, [string]$DataRoot, [string[]]$ExtraTrusted = @())
@@ -578,9 +578,13 @@ function Get-AVDTuneRedirectionsFolderState {
         $item = [IO.Path]::GetDirectoryName($item)
     }
     if ($under) {
-        if (-not $missing) {
-            $problems = @(Get-AVDTuneAclProblems (Read-AVDTuneAclReport $full) -ExtraTrusted $ExtraTrusted)
-            if ($problems.Count -gt 0) { return & $r 'Unsafe' "The folder $full is not safe ($($problems -join '; ')): redirections.xml is only written to a folder that only administrators can change." }
+        # only ProgramData itself is exempt (users may create folders there); every existing folder between it and the target passes the full check:
+        # a folder a user made beforehand would let him rename or replace the protected folder below it
+        $item = $existing
+        while ($item -and $item -ine $pd) {
+            $problems = @(Get-AVDTuneAclProblems (Read-AVDTuneAclReport $item) -ExtraTrusted $ExtraTrusted)
+            if ($problems.Count -gt 0) { return & $r 'Unsafe' "The folder $item is not safe ($($problems -join '; ')): redirections.xml is only written below folders that only administrators can change." }
+            $item = [IO.Path]::GetDirectoryName($item)
         }
     }
     elseif (-not (Test-AVDTuneAdminOnlyPath -Path $existing -Base ([IO.Path]::GetPathRoot($existing)))) { return & $r 'Unsafe' "The local folder $existing can be changed by users (or is not readable): redirections.xml is only written to a folder that only administrators can change." }
