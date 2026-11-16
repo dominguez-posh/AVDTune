@@ -27,7 +27,7 @@ Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, Sys
 $script:AppRoot = $PSScriptRoot
 $script:ToolVersion = (Get-Content -LiteralPath (Join-Path $PSScriptRoot 'VERSION') -Raw -Encoding UTF8).Trim()   # the file VERSION is also the version of the release
 Import-Module (Join-Path $PSScriptRoot 'Modules\AVDTune.psm1') -Force
-foreach ($part in 'Trust', 'Session', 'Snapshot', 'Directory', 'Start', 'UpdateBlock', 'Updates', 'Readiness', 'Watermark', 'Benchmark', 'Shortcut', 'FSLogix', 'Storage', 'Software', 'Office', 'Masking', 'Finish', 'Environment') { Import-Module (Join-Path $PSScriptRoot "Modules\AVDTune.$part.psm1") -Force }
+foreach ($part in 'Trust', 'Session', 'Snapshot', 'Directory', 'Start', 'UpdateBlock', 'Updates', 'Readiness', 'Watermark', 'Benchmark', 'Shortcut', 'FSLogix', 'Storage', 'Software', 'Office', 'Masking', 'Finish', 'Environment', 'Optimization') { Import-Module (Join-Path $PSScriptRoot "Modules\AVDTune.$part.psm1") -Force }
 Import-Module (Join-Path $PSScriptRoot 'Modules\AVDTune.Release.psm1') -Force
 . (Join-Path $PSScriptRoot 'AVDTune-Theme.ps1')
 
@@ -200,7 +200,7 @@ foreach ($page in $script:PageTable) {
 
 function Show-Page([string]$Key) {
     $script:CurrentPage = $Key
-    $isPlaceholder = $Key -notin 'Overview', 'Protocol', 'Updates', 'UpdateBlock', 'UserExperience', 'Benchmark', 'FSLogix', 'Software', 'Office', 'AppMasking', 'Seal', 'Environment'
+    $isPlaceholder = $Key -notin 'Overview', 'Protocol', 'Updates', 'UpdateBlock', 'UserExperience', 'Benchmark', 'FSLogix', 'Software', 'Office', 'AppMasking', 'Seal', 'Environment', 'Optimization'
     $ui.PageOverview.Visibility = ConvertTo-Vis ($Key -eq 'Overview')
     $ui.PageProtocol.Visibility = ConvertTo-Vis ($Key -eq 'Protocol')
     $ui.PageUpdates.Visibility = ConvertTo-Vis ($Key -eq 'Updates')
@@ -213,6 +213,7 @@ function Show-Page([string]$Key) {
     if ($ui.PageAppMasking) { $ui.PageAppMasking.Visibility = ConvertTo-Vis ($Key -eq 'AppMasking') }
     $ui.PageSeal.Visibility = ConvertTo-Vis ($Key -eq 'Seal')
     if ($ui.PageEnvironment) { $ui.PageEnvironment.Visibility = ConvertTo-Vis ($Key -eq 'Environment') }
+    if ($ui.ContainsKey('PageOptimization')) { $ui.PageOptimization.Visibility = ConvertTo-Vis ($Key -eq 'Optimization') }
     $ui.PagePlaceholder.Visibility = ConvertTo-Vis $isPlaceholder
     $ui["Nav$Key"].IsChecked = $true
     Update-ReadOnlyBanner
@@ -234,6 +235,7 @@ function Show-Page([string]$Key) {
     elseif ($Key -eq 'AppMasking') { Update-MaskView }
     elseif ($Key -eq 'Seal') { Update-SealView }
     elseif ($Key -eq 'Environment') { Update-EnvView }
+    elseif ($Key -eq 'Optimization') { Update-OptView }
 }
 
 # ---------------------------------------------------------------- Overview
@@ -464,6 +466,7 @@ $script:ReadyFakeArm = $(if ($script:TestMode) { $script:Services.Arm } else { $
 . (Join-Path $PSScriptRoot 'AVDTune-AppMasking.ps1')
 . (Join-Path $PSScriptRoot 'AVDTune-Seal.ps1')
 . (Join-Path $PSScriptRoot 'AVDTune-Environment.ps1')
+. (Join-Path $PSScriptRoot 'AVDTune-Optimization.ps1')
 
 # ---------------------------------------------------------------- theme switch
 function Update-ThemeButton { $ui.BtnTheme.Content = [string][char]$(if ($script:Settings.Theme -eq 'Dark') { 0xE706 } else { 0xE708 }) }
