@@ -71,7 +71,8 @@ function Complete-SealJob {
     $result = $null; $err = ''
     try { $out = @($job.PS.EndInvoke($job.Handle)); if ($job.PS.Streams.Error.Count -gt 0) { $err = $job.PS.Streams.Error[0].Exception.Message }; $result = $out | Select-Object -Last 1 }
     catch { $err = $_.Exception.Message }
-    finally { $job.PS.Dispose() }    Set-SealBusy $false
+    finally { $job.PS.Dispose() }
+    Set-SealBusy $false
     $failed = [bool]($err -or -not $result -or $result.Status -ne 'Finished')
     $text = if ($err -and -not $result) { "The finish stopped: $err" } elseif ($result) { [string]$result.Message } else { 'The finish returned no result.' }
     $script:SealLast = $text

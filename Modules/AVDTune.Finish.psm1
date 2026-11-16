@@ -40,14 +40,13 @@ $script:TokenPatterns = @(
     'eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}'
     '"(access_token|refresh_token|id_token)"\s*:\s*"[^"]{12,}"'
     # escaped JSON (a JSON text inside a JSON string: refresh_token\":\"...) and form encoding (refresh_token=...)
-    '(access_token|refresh_token|id_token)\\?"?\s*[:=]\s*\\?"?[A-Za-z0-9._-]{20,}'
+    '(access_token|refresh_token|id_token)\\?"?\s*[:=]\s*\\?"?[A-Za-z0-9._+/=-]{20,}'
     # Microsoft tokens by their prefix (0.A... / 1.A...), long
     '(?<![A-Za-z0-9._-])[01]\.A[A-Za-z0-9._-]{100,}'
 )
-$script:ScanExtensions = @('.json', '.txt', '.log', '.html', '.htm', '.xml', '.md', '.csv', '.ps1')
 # Limits: per file and in time, never a total count (a state folder with many run records must not block the finish for ever)
 $script:ScanMaxBytes = 4MB
-$script:ScanMaxSeconds = 120
+$script:ScanMaxSeconds = 600
 
 #region real adapter
 
@@ -68,6 +67,9 @@ if (-not ('AVDTune.Native.FileLinks' -as [type])) {
 public struct BY_HANDLE_FILE_INFORMATION { public uint FileAttributes; public System.Runtime.InteropServices.ComTypes.FILETIME CreationTime; public System.Runtime.InteropServices.ComTypes.FILETIME LastAccessTime; public System.Runtime.InteropServices.ComTypes.FILETIME LastWriteTime; public uint VolumeSerialNumber; public uint FileSizeHigh; public uint FileSizeLow; public uint NumberOfLinks; public uint FileIndexHigh; public uint FileIndexLow; }
 [System.Runtime.InteropServices.DllImport("kernel32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode, SetLastError = true)] public static extern Microsoft.Win32.SafeHandles.SafeFileHandle CreateFileW(string name, uint access, uint share, System.IntPtr security, uint disposition, uint flags, System.IntPtr template);
 [System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true)] public static extern bool GetFileInformationByHandle(Microsoft.Win32.SafeHandles.SafeFileHandle handle, out BY_HANDLE_FILE_INFORMATION info);
+[System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+public struct FILE_BASIC_INFO { public long CreationTime; public long LastAccessTime; public long LastWriteTime; public long ChangeTime; public uint FileAttributes; public uint Padding; }
+[System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true)] public static extern bool SetFileInformationByHandle(Microsoft.Win32.SafeHandles.SafeFileHandle handle, int infoClass, ref FILE_BASIC_INFO info, uint size);
 "@
 }
 
@@ -81,6 +83,30 @@ function Get-AVDTuneFileLinkCount {
         $info = New-Object AVDTune.Native.FileLinks+BY_HANDLE_FILE_INFORMATION
         if (-not [AVDTune.Native.FileLinks]::GetFileInformationByHandle($h, [ref]$info)) { return $null }
         [int]$info.NumberOfLinks
+    }
+    finally { $h.Dispose() }
+}
+
+function Clear-AVDTuneReadOnlyMark {
+    <#
+        Removes the read-only mark of a file through ONE handle: the handle that proves "exactly one link, no reparse point" is the handle that sets the
+        attribute (SetFileInformationByHandle, FileBasicInfo), so no other name and no replaced path can be hit in between. Times are left alone (0 = unchanged).
+        Returns 'Cleared', 'NotSingle' (more than one link, or a reparse point) or 'Failed' (cannot be opened, read or written).
+    #>
+    param([Parameter(Mandatory)][string]$Path)
+    # FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES, share all, OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT
+    $h = [AVDTune.Native.FileLinks]::CreateFileW('\\?\' + $Path, 0x180, 7, [IntPtr]::Zero, 3, 0x00200000, [IntPtr]::Zero)
+    try {
+        if ($h.IsInvalid) { return 'Failed' }
+        $info = New-Object AVDTune.Native.FileLinks+BY_HANDLE_FILE_INFORMATION
+        if (-not [AVDTune.Native.FileLinks]::GetFileInformationByHandle($h, [ref]$info)) { return 'Failed' }
+        if ($info.NumberOfLinks -ne 1 -or ($info.FileAttributes -band 0x400) -ne 0) { return 'NotSingle' }
+        $basic = New-Object AVDTune.Native.FileLinks+FILE_BASIC_INFO
+        $attr = [uint32]($info.FileAttributes -band (-bnot 0x1))
+        if ($attr -eq 0) { $attr = 0x80 }
+        $basic.FileAttributes = $attr
+        if (-not [AVDTune.Native.FileLinks]::SetFileInformationByHandle($h, 0, [ref]$basic, [uint32][Runtime.InteropServices.Marshal]::SizeOf([type]'AVDTune.Native.FileLinks+FILE_BASIC_INFO'))) { return 'Failed' }
+        'Cleared'
     }
     finally { $h.Dispose() }
 }
@@ -108,9 +134,7 @@ function Clear-AVDTuneFolderContents {
                 $removed++; continue
             }
             if (($item.Attributes -band [IO.FileAttributes]::ReadOnly) -ne 0) {
-                $links = Get-AVDTuneFileLinkCount -Path $item.FullName
-                if ($links -ne 1) { $skipped++; continue }
-                $item.Attributes = [IO.FileAttributes]::Normal
+                if ((Clear-AVDTuneReadOnlyMark -Path $item.FullName) -ne 'Cleared') { $skipped++; continue }
             }
             $item.Delete()
             $removed++
@@ -121,31 +145,50 @@ function Clear-AVDTuneFolderContents {
 }
 function Find-AVDTuneTokenFiles {
     <#
-        Files below $Root (no links followed) with a token pattern. Returns relative names only, never content. Limits: per file (larger than
-        ScanMaxBytes: named with its own text) and in time (-MaxSeconds: the scan stops and says so); there is NO limit on the number of files. A file that
-        cannot be read, a file that is too large and a stopped scan count as a hit (fail closed), each with its own text. Only $Root is scanned (the state
-        folder), not export locations the administrator chose himself.
+        Files below $Root (no links followed) with a token pattern. EVERY file is scanned, whatever its extension (a binary file is read as bytes and
+        goes through the same rules). Returns relative names only, never content. Limits: per file (larger than ScanMaxBytes: named with its own text) and
+        in time (-MaxSeconds: the scan stops and says so); there is NO limit on the number of files. A file that cannot be read, a file that is too large
+        and a stopped scan count as a hit (fail closed), each with its own text. The scan stops at the first pattern that hits in a file. Files are read
+        through a buffered FileStream (never more than ScanMaxBytes in memory). -Progress gets (text) about every 250 files. Only $Root is scanned (the state folder),
+        not export locations the administrator chose himself.
     #>
-    param([Parameter(Mandatory)][string]$Root, [double]$MaxSeconds = $script:ScanMaxSeconds)
+    param([Parameter(Mandatory)][string]$Root, [double]$MaxSeconds = $script:ScanMaxSeconds, [scriptblock]$Progress)
     $found = New-Object System.Collections.ArrayList
     if (-not (Test-Path -LiteralPath $Root)) { return @() }
-    $rx = @($script:TokenPatterns | ForEach-Object { New-Object Text.RegularExpressions.Regex($_, [Text.RegularExpressions.RegexOptions]::None, [TimeSpan]::FromSeconds(2)) })
+    $opts = [Text.RegularExpressions.RegexOptions]::Compiled
+    $rx = [Text.RegularExpressions.Regex[]]@($script:TokenPatterns | ForEach-Object { New-Object Text.RegularExpressions.Regex($_, $opts, [TimeSpan]::FromSeconds(5)) })
     $rootInfo = New-Object IO.DirectoryInfo $Root
+    $prefixLen = $rootInfo.FullName.TrimEnd([char]92).Length + 1
     $stack = New-Object System.Collections.Stack
     $stack.Push($rootInfo)
     $clock = [Diagnostics.Stopwatch]::StartNew()
     $maxMb = [int]($script:ScanMaxBytes / 1MB)
+    $latin = [Text.Encoding]::GetEncoding(28591)
+    $buffer = New-Object byte[] ($script:ScanMaxBytes + 4)
+    $count = 0
     while ($stack.Count -gt 0) {
         $dir = $stack.Pop()
         foreach ($item in $dir.GetFileSystemInfos()) {
             if ($clock.Elapsed.TotalSeconds -ge $MaxSeconds) { [void]$found.Add("(scan stopped: time limit of $([int]$MaxSeconds) s reached, not every file was checked)"); return @($found) }
             if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { continue }
             if ($item -is [IO.DirectoryInfo]) { $stack.Push($item); continue }
-            if ($item.Extension.ToLowerInvariant() -notin $script:ScanExtensions) { continue }
-            $rel = $item.FullName.Substring($rootInfo.FullName.TrimEnd([char]92).Length + 1)
+            $rel = $item.FullName.Substring($prefixLen)
+            $count++
+            if ($Progress -and ($count % 250) -eq 0) { & $Progress "Checking files for tokens: $count checked" }
             if ($item.Length -gt $script:ScanMaxBytes) { [void]$found.Add("$rel (not scanned: file larger than $maxMb MB)"); continue }
             try {
-                $text = [IO.File]::ReadAllText($item.FullName)
+                $fs = New-Object IO.FileStream($item.FullName, [IO.FileMode]::Open, [IO.FileAccess]::Read, ([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete), 65536)
+                try {
+                    $n = 0
+                    while ($n -lt $buffer.Length) { $r = $fs.Read($buffer, $n, $buffer.Length - $n); if ($r -le 0) { break }; $n += $r }
+                }
+                finally { $fs.Dispose() }
+                if ($n -gt $script:ScanMaxBytes) { [void]$found.Add("$rel (not scanned: file larger than $maxMb MB)"); continue }
+                # UTF-16 text (BOM) is decoded as such, everything else byte for byte (the tokens are ASCII)
+                $enc = $latin
+                if ($n -ge 2 -and $buffer[0] -eq 0xFF -and $buffer[1] -eq 0xFE) { $enc = [Text.Encoding]::Unicode }
+                elseif ($n -ge 2 -and $buffer[0] -eq 0xFE -and $buffer[1] -eq 0xFF) { $enc = [Text.Encoding]::BigEndianUnicode }
+                $text = $enc.GetString($buffer, 0, $n)
                 foreach ($r in $rx) { if ($r.IsMatch($text)) { [void]$found.Add($rel); break } }
             }
             catch { [void]$found.Add("$rel (not scanned: could not be read or checked)") }
@@ -189,7 +232,7 @@ function New-AVDTuneFinishAdapter {
         if (-not (Test-AVDTuneNoLinkChain -Folder (Split-Path $Path -Parent))) { throw "The path $Path has a link in it: nothing is deleted." }
         Remove-AVDTuneFolderNoFollow $Path
     }
-    $a.FindTokenFiles = { param($StateRoot) Find-AVDTuneTokenFiles -Root $StateRoot }
+    $a.FindTokenFiles = { param($StateRoot, $Progress) Find-AVDTuneTokenFiles -Root $StateRoot -Progress $Progress }
     [pscustomobject]$a
 }
 
@@ -380,11 +423,11 @@ function Get-AVDTuneFinishSteps {
         -SessionProvider returns the CURRENT sign-in session of the window each time it is called (a sign-in during the run replaces the session object);
         -Session is a fixed one for callers without a window ($null and no provider: nothing to remove in memory).
         -Bind (Version, RunId): the image version and the healthcheck run of the gate at the start; finish.version closes exactly this version and only while
-        the files still show that healthcheck. -Report collects what the cleanup skipped.
+        the files still show that healthcheck. -Report collects what the cleanup skipped. -Progress gets (text) while the token scan runs (many files take minutes).
     #>
     param(
         [Parameter(Mandatory)]$Machine, [Parameter(Mandatory)]$Fin, [Parameter(Mandatory)][string]$Root, $Session, [scriptblock]$SessionProvider, [string]$User, [string]$SnapshotId,
-        [hashtable]$Bind, [hashtable]$Report = @{ Skipped = 0; Left = 0 }
+        [hashtable]$Bind, [hashtable]$Report = @{ Skipped = 0; Left = 0 }, [scriptblock]$Progress
     )
     $getSession = { if ($SessionProvider) { & $SessionProvider } else { $Session } }.GetNewClosure()
     $session0 = & $getSession
@@ -453,16 +496,16 @@ function Get-AVDTuneFinishSteps {
         param($m)
         $cur = & $getSession
         $clear = $true; if ($cur) { $clear = [bool](Test-AVDTuneSessionClear -Session $cur) }
-        $files = @(& $Fin.FindTokenFiles $Root)
+        $files = @(& $Fin.FindTokenFiles $Root $Progress)
         @{ Compliant = ($clear -and $files.Count -eq 0); State = "session $(if ($clear) { 'clear' } else { 'holds tokens or sign-in profiles' }); token pattern in $($files.Count) file(s)" }
     }.GetNewClosure()
     $tApply = {
         param($m)
         # files first: a finish that stops here keeps the sign-in (it is not finished)
-        $files = @(& $Fin.FindTokenFiles $Root)
+        $files = @(& $Fin.FindTokenFiles $Root $Progress)
         if ($files.Count -gt 0) { throw "A token pattern is in AVDTune's own state files, or they could not be checked completely (content not shown): $($files -join '; '). Remove or inspect them by hand; AVDTune does not edit its records. Only the state folder is checked, not export locations you chose yourself." }
         $cur = & $getSession
-        if (-not [object]::ReferenceEquals($cur, $session0)) { throw 'A new sign-in happened while the finish was running: the token removal is not trusted. Run the finish again.' }
+        if (-not [object]::ReferenceEquals($cur, $session0)) { throw 'Sign-in state changed during the run: the token removal is not trusted. Run the finish again.' }
         if ($cur) { Disconnect-AVDTuneSession -Session $cur }
         $cur = & $getSession
         if ($cur -and -not (Test-AVDTuneSessionClear -Session $cur)) { throw 'The sign-in could not be removed completely (tokens or temporary sign-in profiles are still there).' }
@@ -516,8 +559,9 @@ function Invoke-AVDTuneFinish {
         [Parameter(Mandatory)]$Machine, [Parameter(Mandatory)]$Fin, [string]$Root = (Get-AVDTuneRoot), [string]$User, [string]$SnapshotId, $Session, [scriptblock]$SessionProvider,
         [scriptblock]$Progress, [switch]$WhatIf
     )
-    $say = { param($t, $p) if ($Progress) { & $Progress $t $p } }
+    $say = { param($t, $p) if ($Progress) { & $Progress $t $p } }.GetNewClosure()
     $report = @{ Skipped = 0; Left = 0 }
+    $scanSay = { param($t) & $say $t 85 }.GetNewClosure()
     if ($WhatIf) {
         $entries = @(Get-AVDTuneFinishSteps -Machine $Machine -Fin $Fin -Root $Root -Session $Session -SessionProvider $SessionProvider -User $User -SnapshotId $SnapshotId -Report $report)
         $r = @($entries | ForEach-Object { Invoke-AVDTuneStep -Step $_.Step -Machine $Machine -Mode Apply -WhatIf })
@@ -528,7 +572,7 @@ function Invoke-AVDTuneFinish {
     if (-not $gate.Allowed) { throw "The finish is not allowed: $($gate.Reasons -join ' ')" }
     # the steps are bound to the version and the healthcheck run that the gate has just accepted
     $version = [string]$gate.Version
-    $entries = @(Get-AVDTuneFinishSteps -Machine $Machine -Fin $Fin -Root $Root -Session $Session -SessionProvider $SessionProvider -User $User -SnapshotId $SnapshotId -Bind @{ Version = $version; RunId = [string]$gate.RunId } -Report $report)
+    $entries = @(Get-AVDTuneFinishSteps -Machine $Machine -Fin $Fin -Root $Root -Session $Session -SessionProvider $SessionProvider -User $User -SnapshotId $SnapshotId -Bind @{ Version = $version; RunId = [string]$gate.RunId } -Report $report -Progress $scanSay)
     $started = & $Machine.Now
     $record = [pscustomobject][ordered]@{
         Active = $true; Id = ($started.ToString('yyyyMMdd-HHmmss', [Globalization.CultureInfo]::InvariantCulture) + '-' + [guid]::NewGuid().ToString('N').Substring(0, 4))
@@ -587,5 +631,5 @@ function Invoke-AVDTuneFinish {
 
 #endregion
 
-Export-ModuleMember -Function New-AVDTuneFinishAdapter, Clear-AVDTuneFolderContents, Get-AVDTuneFileLinkCount, Find-AVDTuneTokenFiles, Test-AVDTuneNoLinkChain, Get-AVDTuneFinishRecord, Get-AVDTuneFinishCrash,
+Export-ModuleMember -Function New-AVDTuneFinishAdapter, Clear-AVDTuneFolderContents, Get-AVDTuneFileLinkCount, Clear-AVDTuneReadOnlyMark, Find-AVDTuneTokenFiles, Test-AVDTuneNoLinkChain, Get-AVDTuneFinishRecord, Get-AVDTuneFinishCrash,
     Start-AVDTuneFinishLift, Restore-AVDTuneFinishLift, Test-AVDTuneFinishBinding, Get-AVDTuneFinishConfirmText, Repair-AVDTuneFinishCrash, Test-AVDTuneFinishGate, Get-AVDTuneFinishSteps, Invoke-AVDTuneFinish

@@ -209,6 +209,16 @@ try {
     Test-Check 'real top level only: files and a read-only file with one link go; the sub folder, its content, the junction and the read-only hard link stay and are counted as skipped' ($tc.Removed -eq 2 -and $tc.Skipped -eq 3 -and (Test-Path -LiteralPath (Join-Path $top 'sub\deep.txt')) -and (Test-Path -LiteralPath (Join-Path $top 'lnk')) -and (Test-Path -LiteralPath (Join-Path $top 'hard.txt')) -and -not (Test-Path -LiteralPath (Join-Path $top 'plain.txt')) -and -not (Test-Path -LiteralPath (Join-Path $top 'ro.txt'))) "$($tc.Removed)/$($tc.Skipped)/$($tc.Left)"
     Test-Check 'real top level only: the other name of the hard link keeps its read-only mark, the junction target is untouched' (((Get-Item -LiteralPath (Join-Path $topTarget 'shared.txt')).Attributes -band [IO.FileAttributes]::ReadOnly) -ne 0 -and (Test-Path -LiteralPath (Join-Path $topTarget 'keep.txt'))) $null
 
+    # the read-only mark is removed through the handle that proved the link count
+    $roSingle = Join-Path $top 'h-single.txt'; $roHard = Join-Path $top 'h-hard.txt'; $roOther = Join-Path $topTarget 'h-other.txt'
+    Set-Content -LiteralPath $roSingle -Value 's'; (Get-Item -LiteralPath $roSingle).Attributes = 'ReadOnly,Hidden'
+    Set-Content -LiteralPath $roOther -Value 'o'; (Get-Item -LiteralPath $roOther).Attributes = 'ReadOnly'
+    cmd.exe /c mklink /H "$roHard" "$roOther" | Out-Null
+    $stamp = (Get-Item -LiteralPath $roSingle -Force).LastWriteTimeUtc
+    $c1 = Clear-AVDTuneReadOnlyMark -Path $roSingle; $c2 = Clear-AVDTuneReadOnlyMark -Path $roHard; $c3 = Clear-AVDTuneReadOnlyMark -Path (Join-Path $top 'does-not-exist.txt')
+    $aSingle = (Get-Item -LiteralPath $roSingle -Force).Attributes
+    Test-Check 'read-only by handle: one link is cleared (other attributes and the time stay), a hard link is not touched, a missing file is Failed' ($c1 -eq 'Cleared' -and ($aSingle -band [IO.FileAttributes]::ReadOnly) -eq 0 -and ($aSingle -band [IO.FileAttributes]::Hidden) -ne 0 -and (Get-Item -LiteralPath $roSingle -Force).LastWriteTimeUtc -eq $stamp -and $c2 -eq 'NotSingle' -and ((Get-Item -LiteralPath $roHard).Attributes -band [IO.FileAttributes]::ReadOnly) -ne 0 -and $c3 -eq 'Failed') "$c1/$c2/$c3 $aSingle"
+
     # token forms: escaped JSON, form encoding, the 0.A / 1.A prefixes; nothing is shown
     $forms = Join-Path $real 'forms'; New-Item -ItemType Directory -Path $forms | Out-Null
     $longA = '0.A' + ('X' * 110)
@@ -222,7 +232,37 @@ try {
     # no limit on the number of files; the limits are per file and in time, each with its own text
     $many = Join-Path $real 'many'; New-Item -ItemType Directory -Path $many | Out-Null
     1..5003 | ForEach-Object { [IO.File]::WriteAllText((Join-Path $many ("r{0:00000}.json" -f $_)), '{}') }
-    Test-Check 'token scan: more than 5000 harmless files are no finding (no total limit)' (@(Find-AVDTuneTokenFiles -Root $many -MaxSeconds 900).Count -eq 0) $null
+    $swMany = [Diagnostics.Stopwatch]::StartNew()
+    $manyHits = @(Find-AVDTuneTokenFiles -Root $many)   # the DEFAULT limit, no limit of the test
+    $swMany.Stop()
+    Test-Check 'token scan: more than 5000 harmless files are no finding with the default limit (a stopped scan would be a finding)' ($manyHits.Count -eq 0 -and $swMany.Elapsed.TotalSeconds -lt 600) "$($manyHits -join ',') after $([int]$swMany.Elapsed.TotalSeconds) s"
+    $progressTexts = New-Object System.Collections.ArrayList
+    [void](Find-AVDTuneTokenFiles -Root $many -Progress { param($t) [void]$progressTexts.Add($t) })
+    Test-Check 'token scan: progress text while it runs (every 250 files)' ($progressTexts.Count -ge 20 -and $progressTexts[0] -like 'Checking files for tokens: 250 checked') "$($progressTexts.Count)"
+    Test-Check 'token scan: the default time limit is 10 minutes' ((& (Get-Module AVDTune.Finish) { $script:ScanMaxSeconds }) -eq 600) $null
+    # every file is scanned, whatever its extension; a binary file runs through the same rules
+    $all = Join-Path $real 'allfiles'; New-Item -ItemType Directory -Path $all | Out-Null
+    $tokLine = '{"refresh_token":"0.AXXXXXXXXXXXXXXXXXXXXXXXXXXX"}'
+    [IO.File]::WriteAllText((Join-Path $all 'noext'), $tokLine)
+    [IO.File]::WriteAllText((Join-Path $all 'leftover.bak'), $tokLine)
+    [IO.File]::WriteAllText((Join-Path $all 'wide.dat'), $tokLine, [Text.Encoding]::Unicode)
+    $bin = New-Object byte[] 70000; (New-Object Random 7).NextBytes($bin); [Array]::Copy([Text.Encoding]::ASCII.GetBytes($tokLine), 0, $bin, 40000, $tokLine.Length)
+    [IO.File]::WriteAllBytes((Join-Path $all 'blob.bin'), $bin)
+    $clean = New-Object byte[] 70000; (New-Object Random 9).NextBytes($clean); for ($i = 0; $i -lt $clean.Length; $i++) { if ($clean[$i] -ge 0x41 -and $clean[$i] -le 0x5A) { $clean[$i] = 0x20 } }
+    [IO.File]::WriteAllBytes((Join-Path $all 'clean.bin'), $clean)
+    $ah = @(Find-AVDTuneTokenFiles -Root $all | Sort-Object)
+    Test-Check 'token scan: files without or with unusual extensions, UTF-16 text and a binary file with a token inside are found; a clean binary file is not' (($ah -join ',') -eq 'blob.bin,leftover.bak,noext,wide.dat') ($ah -join ',')
+    # base64 characters (+ / =) in the value; a clean run record with the same words does not hit
+    $b64 = Join-Path $real 'b64'; New-Item -ItemType Directory -Path $b64 | Out-Null
+    [IO.File]::WriteAllText((Join-Path $b64 'plus.log'), 'refresh_token=abcDEF+ghiJKL/mnoPQR==stuVWX')
+    [IO.File]::WriteAllText((Join-Path $b64 'slash.json'), '{"msg":"x {\"id_token\":\"abc/def+ghi/jkl+mno/pqr=\"}"}')
+    $recRoot = New-Root; [void](Save-Healthcheck -Root $recRoot)
+    $recM = New-Master; $recF = New-AVDTuneFakeFinish -Seed @{}
+    $recR = Invoke-AVDTuneFinish -Machine $recM -Fin $recF -Root $recRoot -User 'admin1'
+    $cleanRec = Join-Path $b64 'run-record.json'
+    [IO.File]::WriteAllText($cleanRec, (@{ Id = 'finish.tokens'; Title = 'Tokens and sign-in caches removed and checked'; State = 'session clear; token pattern in 0 file(s)'; Message = 'the refresh_token is removed: path C:/Windows/Temp/a+b/c=d, hash qT9+Xz/Lm2vP0aBcDeFgHiJk=='; Items = @(1..30 | ForEach-Object { @{ Name = "r$_"; Value = 'a+b/c=' * 8 } }) } | ConvertTo-Json -Depth 4))
+    $bh2 = @(Find-AVDTuneTokenFiles -Root $b64 | Sort-Object)
+    Test-Check 'token scan: base64 characters in escaped JSON and form encoding are found; a normal run record file and the state files of a real finish are not' (($bh2 -join ',') -eq 'plus.log,slash.json' -and @(Find-AVDTuneTokenFiles -Root $recRoot).Count -eq 0 -and $recR.Status -eq 'Finished') (($bh2 -join ',') + ' / ' + (@(Find-AVDTuneTokenFiles -Root $recRoot) -join ','))
     $big = Join-Path $real 'big'; New-Item -ItemType Directory -Path $big | Out-Null
     $fsb = [IO.File]::Create((Join-Path $big 'huge.log')); $fsb.SetLength(5MB); $fsb.Dispose()
     $bh = @(Find-AVDTuneTokenFiles -Root $big)
@@ -327,7 +367,7 @@ exit 0
     $ctx2 = @{ Session = (New-TokenSession $signTemp) }
     $rootS2 = New-Root; [void](Save-Healthcheck -Root $rootS2)
     $rs2 = Invoke-AVDTuneFinish -Machine (New-Master) -Fin (New-AVDTuneFakeFinish) -Root $rootS2 -User 'admin1' -SessionProvider { $ctx2.Session } -Progress { param($t, $p) if ($t -like 'Update block on*') { $ctx2.Session = (New-TokenSession $signTemp) } }
-    Test-Check 'a new sign-in during the run fails the token step; the new session keeps its tokens and the version stays open' ($rs2.Status -eq 'Failed' -and $rs2.Message -like '*new sign-in happened*' -and -not (Test-AVDTuneSessionClear -Session $ctx2.Session) -and -not (Get-AVDTuneState $rootS2).Sealed) $rs2.Message
+    Test-Check 'a new sign-in during the run fails the token step; the new session keeps its tokens and the version stays open' ($rs2.Status -eq 'Failed' -and $rs2.Message -like '*Sign-in state changed during the run*' -and -not (Test-AVDTuneSessionClear -Session $ctx2.Session) -and -not (Get-AVDTuneState $rootS2).Sealed) $rs2.Message
     $ctx3 = @{ Session = (New-TokenSession $signTemp) }
     $rootS3 = New-Root; [void](Save-Healthcheck -Root $rootS3)
     $rs3 = Invoke-AVDTuneFinish -Machine (New-Master) -Fin (New-AVDTuneFakeFinish) -Root $rootS3 -User 'admin1' -SessionProvider { $ctx3.Session } -Progress { param($t, $p) if ($t -eq 'Image version closed') { Connect-FakeToken $ctx3.Session } }
@@ -355,8 +395,38 @@ exit 0
 
     # ---------------------------------------------------------------- the page script (findings 2, 6, 8, 9 and the hint)
     $page = [IO.File]::ReadAllText((Join-Path $repo 'AVDTune-Seal.ps1'))
-    Test-Check 'page: every known job is checked before the start' ($page -match "'SealJob', 'UpdJob', 'BenchJob', 'ReadyJob', 'OverviewJob', 'FslJob'") $null
-    Test-Check 'page: the run is a background runspace also in test mode (fakes handed in), the write block goes in, the current session is read through the context' ($page -notmatch 'Inline' -and $page -match 'FakeMachineScript' -and $page -match 'Get-AVDTuneWriteBlock' -and $page -match 'Set-AVDTuneWriteBlock \$Block' -and $page -match 'SessionProvider \{ \$Ctx\.Session \}') $null
+    # behavior: Start-SealJob is taken out of the page script and run against stubs
+    $pageAst = [Management.Automation.Language.Parser]::ParseInput($page, [ref]$null, [ref]$null)
+    $startFn = $pageAst.Find({ param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Start-SealJob' }, $true)
+    Invoke-Expression $startFn.Extent.Text
+    function Start-AVDTuneUiTask { param($Kind, $Title, $Step) [pscustomobject]@{ Kind = $Kind } }
+    function Set-ShutdownBlock { param($On) }
+    function Set-SealBusy { param($Busy) }
+    function Update-SealView { }
+    $jobNames = 'SealJob', 'UpdJob', 'BenchJob', 'ReadyJob', 'OverviewJob', 'FslJob'
+    $blocked = @()
+    foreach ($jn in $jobNames) {
+        Set-Variable -Scope Script -Name $jn -Value @{ Running = $true }
+        $t = Get-ThrownText { Start-SealJob }
+        Remove-Variable -Scope Script -Name $jn
+        if ($t -like 'Another operation is still running.*') { $blocked += $jn }
+    }
+    Test-Check 'page behavior: a running finish, update, benchmark, readiness, overview or FSLogix job each blocks the start' ($blocked.Count -eq 6) ($blocked -join ',')
+    $rootJ = New-Root; [void](Save-Healthcheck -Root $rootJ)
+    $script:StateRoot = $rootJ; $script:AppRoot = $repo; $script:TestMode = $true
+    $script:TestInfo = @{ FakeScript = (Join-Path $PSScriptRoot 'Fakes\FakeMachine.ps1') }
+    $script:SealFakeScript = (Join-Path $PSScriptRoot 'Fakes\FakeFinish.ps1'); $script:SealFakeSeed = @{}
+    $script:StartContext = @{ Session = $null }; $script:Machine = New-Master
+    $script:SealJob = $null
+    Start-SealJob
+    $jobJ = $script:SealJob
+    $okJ = $jobJ -and $jobJ.Handle.AsyncWaitHandle.WaitOne(120000)
+    $resJ = $null; $errJ = ''
+    if ($okJ) { try { $resJ = @($jobJ.PS.EndInvoke($jobJ.Handle)) | Select-Object -Last 1 } catch { $errJ = $_.Exception.Message } }
+    if ($jobJ) { $jobJ.PS.Dispose() }
+    $script:SealJob = $null
+    Test-Check 'page behavior: in test mode the finish runs in a background runspace with the fakes, finishes the version and reports progress' ($okJ -and $resJ.Status -eq 'Finished' -and (Get-AVDTuneState $rootJ).Sealed -and $jobJ.Sync.Text -eq 'Finished' -and $jobJ.Sync.Percent -eq 100) ("$($resJ.Status) $($resJ.Message) $errJ")
+    Test-Check 'page: the write block goes into the runspace and the current session is read through the context' ($page -match 'Get-AVDTuneWriteBlock' -and $page -match 'Set-AVDTuneWriteBlock \$Block' -and $page -match 'SessionProvider \{ \$Ctx\.Session \}') $null
     Test-Check 'page: the crash box is not shown while a finish runs; the crash text says a restart starts the services too; the token scan hint names the state folder only' ($page -match 'ConvertTo-Vis \(\[bool\]\$crash -and -not \$script:SealJob\)' -and $page -match 'A restart of the master starts the services as well' -and $page -match 'only the state folder is checked, not export locations you chose yourself') $null
 
     # ---------------------------------------------------------------- the module never writes a secret
