@@ -8,7 +8,7 @@
 function New-AVDTuneFakeUpdates {
     param([hashtable]$Seed = @{})
     $s = @{ Wua = @(); WuaSearchFails = $null; WuaResults = @{}; MicrosoftUpdate = $false; RegisterFails = $false; Native = @{}; Tools = @('winget.exe', 'choco.exe', 'teamsbootstrapper.exe')
-        LockError = ''; LockHeld = $false; Defender = @{ Version = '1.400.1.0'; LastUpdated = [datetime]'2026-11-15T01:00:00' }; DefenderFails = $false
+        LockError = ''; LockHeld = $false; Defender = @{ Version = '1.400.1.0'; LastUpdated = (Get-Date).AddHours(-2) }; DefenderFails = $false
         Appx = @{ MSTeams = '25000.1.1.0' }; Signatures = @{}; Missing = @()
         Files = @{ OneDrive = '25.100.0' }; Log = (New-Object System.Collections.ArrayList); Calls = @{} }
     foreach ($e in $Seed.GetEnumerator()) { $s[$e.Key] = $e.Value }

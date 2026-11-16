@@ -371,10 +371,8 @@ function New-AVDTuneMachine {
     $m.Run = {
         # File and arguments are separate; the command line is built here with quoting per argument, never from free text
         param($File, [string[]]$Arguments, [int]$TimeoutSeconds = 120)
-        $psi = New-Object System.Diagnostics.ProcessStartInfo
-        $psi.FileName = $File
-        $psi.Arguments = (@($Arguments | ForEach-Object { ConvertTo-AVDTuneArgument ([string]$_) }) -join ' ')
-        $psi.UseShellExecute = $false; $psi.CreateNoWindow = $true; $psi.RedirectStandardOutput = $true; $psi.RedirectStandardError = $true
+        # environment and TEMP from Windows, not from this process (issue #47): New-AVDTuneChildStartInfo
+        $psi = New-AVDTuneChildStartInfo -File $File -Arguments $Arguments
         $p = [System.Diagnostics.Process]::Start($psi)
         $out = $p.StandardOutput.ReadToEndAsync(); $err = $p.StandardError.ReadToEndAsync()
         if (-not $p.WaitForExit($TimeoutSeconds * 1000)) { try { $p.Kill() } catch { }; return [pscustomobject]@{ ExitCode = -1; Output = 'timeout' } }
@@ -564,7 +562,9 @@ function Get-AVDTuneStateSecurityProblems {
     #>
     param([Parameter(Mandatory)][string]$Root, [switch]$Final, [scriptblock]$ReadAcl = { param($Path, $IsDirectory) Read-AVDTuneAclInfo -Path $Path -IsDirectory $IsDirectory },
         # SID of the elevated administrator running AVDTune (files he creates below the root may carry it); '' when not elevated
-        [string]$AdminSid = $(if (Test-AVDTuneElevated) { [Security.Principal.WindowsIdentity]::GetCurrent().User.Value } else { '' }))
+        [string]$AdminSid = $(if (Test-AVDTuneElevated) { [Security.Principal.WindowsIdentity]::GetCurrent().User.Value } else { '' }),
+        # only the folder itself (its owner and rules), not what is inside (a download cache can be large)
+        [switch]$NoRecurse)
     $problems = New-Object System.Collections.ArrayList
     # Owners that are fine: the root only Administrators or SYSTEM (the admin's own SID could also come from an unelevated process of him);
     # below the root also the elevated administrator running AVDTune
@@ -595,13 +595,156 @@ function Get-AVDTuneStateSecurityProblems {
             if ($foreign.Count -gt 0) { [void]$problems.Add([pscustomobject]@{ Path = $item.FullName; Problem = "access for $($foreign -join ', ')" }) }
             if ($Final -and $isRoot -and -not $acl.Protected) { [void]$problems.Add([pscustomobject]@{ Path = $item.FullName; Problem = 'inherits rules from ProgramData' }) }
         }
-        if ($isDir) {
+        if ($isDir -and -not $NoRecurse) {
             try { foreach ($child in $item.GetFileSystemInfos()) { $queue.Enqueue($child) } }
             catch { [void]$problems.Add([pscustomobject]@{ Path = $item.FullName; Problem = "content cannot be listed: $($_.Exception.Message)" }) }
         }
     }
     @($problems)
 }
+
+#region child environment (issue #47)
+
+$script:ChildEnvHooks = @{ Root = ''; AclReader = $null }   # for the checks: a state folder of their own and a fake ACL reader (they run unelevated); set from the module scope only
+
+function Get-AVDTuneSystemFolder {
+    # Fixed system folders from Windows itself, never from environment variables (a user can set those in HKCU\Environment)
+    param([Parameter(Mandatory)][ValidateSet('Windows', 'System', 'ProgramFiles', 'ProgramFilesX86', 'CommonProgramFiles', 'ProgramData')][string]$Name)
+    $special = switch ($Name) {
+        'Windows' { 'Windows' } 'System' { 'System' } 'ProgramFiles' { 'ProgramFiles' } 'ProgramFilesX86' { 'ProgramFilesX86' }
+        'CommonProgramFiles' { 'CommonProgramFiles' } 'ProgramData' { 'CommonApplicationData' }
+    }
+    $path = [Environment]::GetFolderPath([Environment+SpecialFolder]$special)
+    if (-not $path) { throw "The system folder $Name is not known." }
+    $path
+}
+
+function Get-AVDTuneMachineEnvironmentValue {
+    # A value of the machine environment (HKLM, writable by administrators only); $null when it is not there. Never the process environment.
+    param([Parameter(Mandatory)][string]$Name)
+    try { [string](Get-ItemProperty -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Environment' -Name $Name -ErrorAction Stop).$Name } catch { $null }
+}
+
+function Get-AVDTuneChocolateyRoot {
+    # The machine value of ChocolateyInstall (HKLM, admins only), never the process environment; otherwise the default under ProgramData
+    $v = Get-AVDTuneMachineEnvironmentValue -Name ChocolateyInstall
+    if ($v -and $v -notmatch '%' -and [IO.Path]::IsPathRooted($v)) { return $v.TrimEnd('\') }
+    Join-Path (Get-AVDTuneSystemFolder ProgramData) 'chocolatey'
+}
+
+function Get-AVDTuneChildTool {
+    # The environment profile for a program, by its file name: winget, choco, msiexec, bench (AVDTune.Bench.exe); everything else is base
+    param([Parameter(Mandatory)][string]$File)
+    switch -Regex ([IO.Path]::GetFileName($File).ToLowerInvariant()) {
+        '^winget\.exe$' { return 'winget' }
+        '^choco\.exe$' { return 'choco' }
+        '^msiexec\.exe$' { return 'msiexec' }
+        '^avdtune\.bench\.exe$' { return 'bench' }
+        default { return 'base' }
+    }
+}
+
+function Initialize-AVDTuneToolTemp {
+    <#
+        TEMP of a program AVDTune starts: <state>\temp\<tool>, administrators only. An existing folder is trusted only when it is no link (the folder and the ones above it)
+        and has no owner or rule of someone else (Get-AVDTuneStateSecurityProblems on the folder itself); otherwise it is set aside (renamed to <tool>.untrusted-<stamp>, never
+        repaired or deleted in place) and a new one is created in one step with the protected ACL. Returns the path.
+    #>
+    param([Parameter(Mandatory)][ValidateSet('base', 'winget', 'choco', 'msiexec', 'bench')][string]$Tool, [Parameter(Mandatory)][string]$StateRoot, [scriptblock]$ReadAcl)
+    $parent = Join-Path $StateRoot 'temp'
+    $dir = Join-Path $parent $Tool
+    foreach ($c in @($StateRoot, $parent)) {
+        $attr = $null; try { $attr = [IO.File]::GetAttributes($c) } catch { continue }
+        if ($attr -band [IO.FileAttributes]::ReparsePoint) { throw "A part of the path $c is a link: stopped." }
+    }
+    if (-not (Test-Path -LiteralPath $parent)) { [void][IO.Directory]::CreateDirectory($parent) }
+    $info = New-Object IO.DirectoryInfo $dir
+    $file = New-Object IO.FileInfo $dir
+    if ($info.Exists -or $file.Exists) {
+        $bad = $file.Exists -or (($info.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)
+        if (-not $bad) {
+            $p = @{ Root = $dir; NoRecurse = $true }
+            if ($ReadAcl) { $p.ReadAcl = $ReadAcl; $p.AdminSid = '' }
+            $bad = @(Get-AVDTuneStateSecurityProblems @p).Count -gt 0
+        }
+        if (-not $bad) { return $dir }
+        $stamp = (Get-Date).ToString('yyyyMMdd-HHmmss', [Globalization.CultureInfo]::InvariantCulture)
+        $aside = Join-Path $parent "$Tool.untrusted-$stamp"
+        for ($n = 2; (Test-Path -LiteralPath $aside); $n++) { $aside = Join-Path $parent "$Tool.untrusted-$stamp-$n" }
+        if ($file.Exists) { [IO.File]::Move($dir, $aside) } else { [IO.Directory]::Move($dir, $aside) }   # a rename: nothing inside is opened or followed
+    }
+    $elevated = Test-AVDTuneElevated
+    $security = New-AVDTuneStateSecurity -WithOwner:$elevated
+    # AVDTune starts these programs elevated; a non-elevated process (the checks) must not lock itself out of its own folder
+    if (-not $elevated) { $security.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule([Security.Principal.WindowsIdentity]::GetCurrent().User, 'FullControl', 'ContainerInherit, ObjectInherit', 'None', 'Allow'))) }
+    (New-Object IO.DirectoryInfo $dir).Create($security)
+    $dir
+}
+
+function Get-AVDTuneChildEnvironment {
+    <#
+        The complete environment of a program AVDTune starts (allowlist; ProcessStartInfo gets it after Clear(), so nothing else is passed on: no DOTNET_*, COR*, __COMPAT_LAYER,
+        no variable of the user's profile). Every value comes from Windows (GetFolderPath, HKLM, .NET), never from $env: a process of the same administrator that is not elevated can set
+        HKCU\Environment, which an elevated process started from his session inherits (ChocolateyInstall, TEMP, windir, SystemRoot, PATH).
+        Profiles by -Tool: base (all), winget (+ USERPROFILE, LOCALAPPDATA, APPDATA, HOMEDRIVE/HOMEPATH from the known folders), choco (+ ChocolateyInstall from HKLM, PATH also has the
+        Windows PowerShell folder), msiexec and bench (as base). TEMP and TMP are -TempDir (Initialize-AVDTuneToolTemp).
+    #>
+    param([Parameter(Mandatory)][ValidateSet('base', 'winget', 'choco', 'msiexec', 'bench')][string]$Tool, [Parameter(Mandatory)][string]$TempDir)
+    $windows = Get-AVDTuneSystemFolder Windows; $system = Get-AVDTuneSystemFolder System
+    $e = [ordered]@{}
+    $e['SystemRoot'] = $windows; $e['windir'] = $windows; $e['SystemDrive'] = [IO.Path]::GetPathRoot($windows).TrimEnd('\')
+    $e['ProgramData'] = Get-AVDTuneSystemFolder ProgramData
+    $e['ProgramFiles'] = Get-AVDTuneSystemFolder ProgramFiles
+    $x86 = [Environment]::GetFolderPath('ProgramFilesX86'); if ($x86) { $e['ProgramFiles(x86)'] = $x86 }
+    $e['CommonProgramFiles'] = Get-AVDTuneSystemFolder CommonProgramFiles
+    $e['COMSPEC'] = Join-Path $system 'cmd.exe'
+    $e['PATH'] = $system
+    $e['OS'] = 'Windows_NT'
+    $cpus = Get-AVDTuneMachineEnvironmentValue -Name NUMBER_OF_PROCESSORS
+    $e['NUMBER_OF_PROCESSORS'] = $(if ($cpus -match '^\d{1,4}$') { $cpus } else { [string][Environment]::ProcessorCount })
+    foreach ($n in 'PROCESSOR_ARCHITECTURE', 'PROCESSOR_IDENTIFIER', 'PROCESSOR_LEVEL', 'PROCESSOR_REVISION') {
+        $v = Get-AVDTuneMachineEnvironmentValue -Name $n
+        if ($v) { $e[$n] = $v }
+    }
+    if (-not $e.Contains('PROCESSOR_ARCHITECTURE')) { $e['PROCESSOR_ARCHITECTURE'] = $(if ([Environment]::Is64BitOperatingSystem) { 'AMD64' } else { 'x86' }) }
+    $e['TEMP'] = $TempDir; $e['TMP'] = $TempDir
+    if ($Tool -eq 'winget') {
+        $profileDir = [Environment]::GetFolderPath('UserProfile')
+        $driveRoot = [IO.Path]::GetPathRoot($profileDir).TrimEnd('\')
+        $e['USERPROFILE'] = $profileDir
+        $e['LOCALAPPDATA'] = [Environment]::GetFolderPath('LocalApplicationData')
+        $e['APPDATA'] = [Environment]::GetFolderPath('ApplicationData')
+        $e['HOMEDRIVE'] = $driveRoot; $e['HOMEPATH'] = $profileDir.Substring($driveRoot.Length)
+    }
+    if ($Tool -eq 'choco') {
+        $e['ChocolateyInstall'] = Get-AVDTuneChocolateyRoot
+        $e['PATH'] = $system + ';' + (Join-Path $system 'WindowsPowerShell\v1.0')
+    }
+    $e
+}
+
+function New-AVDTuneChildStartInfo {
+    <#
+        The one place that builds the start of a program for AVDTune (issue #47): File and Arguments as data (quoted per argument), UseShellExecute false, no window, redirected output,
+        the environment from Get-AVDTuneChildEnvironment (profile by file name) with TEMP/TMP in <state>\temp\<tool> (admin-only, no links). choco also gets --cache-location in that folder.
+    #>
+    param([Parameter(Mandatory)][string]$File, [string[]]$Arguments = @(), [string]$Tool, [string]$StateRoot)
+    if (-not $Tool) { $Tool = Get-AVDTuneChildTool -File $File }
+    if (-not $StateRoot) { $StateRoot = $(if ($script:ChildEnvHooks.Root) { $script:ChildEnvHooks.Root } else { Get-AVDTuneRoot }) }
+    $temp = Initialize-AVDTuneToolTemp -Tool $Tool -StateRoot $StateRoot -ReadAcl $script:ChildEnvHooks.AclReader
+    $list = @($Arguments | ForEach-Object { [string]$_ })
+    if ($Tool -eq 'choco') { $list += "--cache-location=$temp" }
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = $File
+    $psi.Arguments = (@($list | ForEach-Object { ConvertTo-AVDTuneArgument $_ }) -join ' ')
+    $psi.UseShellExecute = $false; $psi.CreateNoWindow = $true; $psi.RedirectStandardOutput = $true; $psi.RedirectStandardError = $true
+    $psi.EnvironmentVariables.Clear()
+    $clean = Get-AVDTuneChildEnvironment -Tool $Tool -TempDir $temp
+    foreach ($k in $clean.Keys) { $psi.EnvironmentVariables[$k] = [string]$clean[$k] }
+    $psi
+}
+
+#endregion
 
 function Move-AVDTuneStateToQuarantine {
     <#
@@ -1278,7 +1421,7 @@ function Get-AVDTuneOverview {
 
 #endregion
 
-Export-ModuleMember -Function Get-AVDTuneProp, Get-AVDTuneWebResponse, Test-AVDTuneElevated, Get-AVDTuneRoot, Test-AVDTuneDefaultRoot, Test-AVDTuneTestMode, Resolve-AVDTuneTestScript, Get-AVDTuneLongPath, Get-AVDTuneTestModeRefusal, Confirm-AVDTuneAction, ConvertTo-AVDTuneArgument, New-AVDTuneMachine, Invoke-AVDTuneMachine,
+Export-ModuleMember -Function Get-AVDTuneSystemFolder, Get-AVDTuneChocolateyRoot, Get-AVDTuneChildTool, Initialize-AVDTuneToolTemp, Get-AVDTuneChildEnvironment, New-AVDTuneChildStartInfo, Get-AVDTuneProp, Get-AVDTuneWebResponse, Test-AVDTuneElevated, Get-AVDTuneRoot, Test-AVDTuneDefaultRoot, Test-AVDTuneTestMode, Resolve-AVDTuneTestScript, Get-AVDTuneLongPath, Get-AVDTuneTestModeRefusal, Confirm-AVDTuneAction, ConvertTo-AVDTuneArgument, New-AVDTuneMachine, Invoke-AVDTuneMachine,
     New-AVDTuneStateSecurity, Initialize-AVDTuneState, Read-AVDTuneAclInfo, Get-AVDTuneStateSecurityProblems, Move-AVDTuneStateToQuarantine, New-AVDTuneProtectedFolder, Assert-AVDTuneStateSecurity, Get-AVDTuneStateSecurityReport, Get-AVDTuneState, Set-AVDTuneState, Test-AVDTuneImageVersion, Get-AVDTuneNextImageVersion, Start-AVDTuneImageVersion,
     Add-AVDTuneRun, Get-AVDTuneRun, Get-AVDTuneLastChange, New-AVDTuneStep, Invoke-AVDTuneStep, New-AVDTuneStepFromData, Get-AVDTuneStepCatalog, Invoke-AVDTune,
     Add-AVDTuneChangeLogEntry, Get-AVDTuneChangeLog, Get-AVDTuneChangeLogVersions, ConvertTo-AVDTuneChangeLogDocument, Export-AVDTuneChangeLog,

@@ -59,6 +59,10 @@ try {
     [void](Initialize-AVDTuneState -Root $tmp)
     [void](Start-AVDTuneImageVersion -Root $tmp -Date ([datetime]'2026-11-15') -User 'admin1')
     Close-AVDTuneWriteGate
+    # the real Run builds the child's TEMP folder below the state folder (issue #47): this check's own folder and a fake ACL reader (the check runs unelevated)
+    $psmAVDTune = Get-Module AVDTune
+    $trustAllAcl = { param($Path, $IsDirectory) [pscustomobject]@{ Owner = 'S-1-5-32-544'; Protected = $true; Rules = @([pscustomobject]@{ Sid = 'S-1-5-32-544'; Inherited = $false }) } }
+    & $psmAVDTune { $script:ChildEnvHooks.Root = $args[0]; $script:ChildEnvHooks.AclReader = $args[1] } $tmp $trustAllAcl
 
     # ---------------------------------------------------------------- settings, parsers, explanations
     $s0 = Get-AVDTuneUpdateSettings $tmp
@@ -293,11 +297,11 @@ try {
     $childPids = @()
     try {
         $t0 = Get-Date
-        $rt = & $real.Run $ps @('-NoProfile', '-NonInteractive', '-EncodedCommand', (& $enc ($startChild -f 60, 60))) 4
+        $rt = & $real.Run $ps @('-NoProfile', '-NonInteractive', '-EncodedCommand', (& $enc ($startChild -f 60, 60))) 20
         $kid = [int](Get-Content -LiteralPath $pidFile); $childPids += $kid
         Start-Sleep -Milliseconds 500
         $alive = [bool](Get-Process -Id $kid -ErrorAction SilentlyContinue | Where-Object { $_.ProcessName -eq 'PING' })
-        Test-Check 'real Run: a timeout ends the whole tree (the child of the tool too), so the lock is not freed while an installer still runs' ($rt.Output -eq 'timeout' -and -not $alive -and ((Get-Date) - $t0).TotalSeconds -lt 40) "alive=$alive"
+        Test-Check 'real Run: a timeout ends the whole tree (the child of the tool too), so the lock is not freed while an installer still runs' ($rt.Output -eq 'timeout' -and -not $alive -and ((Get-Date) - $t0).TotalSeconds -lt 70) "alive=$alive"
         Remove-Item -LiteralPath $pidFile -ErrorAction SilentlyContinue
         $t1 = Get-Date
         $rn = & $real.Run $ps @('-NoProfile', '-NonInteractive', '-EncodedCommand', (& $enc ($startChild -f 4, 0))) 60
@@ -307,6 +311,83 @@ try {
         Test-Check 'real Run: returns only when the child the tool left behind has ended (the lock is held until then)' ($rn.ExitCode -eq 0 -and -not $alive2 -and $took -ge 2.5) "took $took s, alive=$alive2"
     }
     finally { foreach ($k in $childPids) { Get-Process -Id $k -ErrorAction SilentlyContinue | Where-Object { $_.ProcessName -eq 'PING' } | Stop-Process -Force -ErrorAction SilentlyContinue } }
+
+    # ---------------------------------------------------------------- child environment (issue #47)
+    # a small console program (compiled here, copies named like the tools) prints the environment and the arguments it got; this process has evil values for everything the elevated child must not inherit
+    $toolDir = Join-Path $tmp 'envtools'; [void](New-Item -ItemType Directory -Path $toolDir -Force)
+    $dumpExe = Join-Path $toolDir 'envdump.exe'
+    Add-Type -TypeDefinition 'using System; using System.Collections; public static class EnvDump { public static int Main(string[] a) { foreach (DictionaryEntry e in Environment.GetEnvironmentVariables()) Console.WriteLine("ENV:" + e.Key + "=" + e.Value); Console.WriteLine("ARGS:" + string.Join("|", a)); return 0; } }' -OutputAssembly $dumpExe -OutputType ConsoleApplication
+    foreach ($n in 'winget', 'choco', 'msiexec') { Copy-Item -LiteralPath $dumpExe -Destination (Join-Path $toolDir "$n.exe") }
+    $readEnv = {
+        param($Exe)
+        $r = & $real.Run $Exe @('one arg') 120
+        $h = @{}; $argLine = ''
+        foreach ($line in ($r.Output -split "`r?`n")) {
+            if ($line -like 'ENV:*') { $i = $line.IndexOf('='); $h[$line.Substring(4, $i - 4)] = $line.Substring($i + 1) }
+            elseif ($line -like 'ARGS:*') { $argLine = $line.Substring(5) }
+        }
+        [pscustomobject]@{ Env = $h; Args = $argLine; Output = $r.Output; ExitCode = $r.ExitCode }
+    }
+    $evilNames = 'ChocolateyInstall', 'TEMP', 'TMP', 'windir', 'PATH', 'USERPROFILE', 'LOCALAPPDATA', 'APPDATA', 'ProgramData', 'COMSPEC', 'AVDTUNE_EVIL_EXTRA', 'DOTNET_AVDTUNE_EVIL'
+    $keepEvil = @{}; foreach ($n in $evilNames) { $keepEvil[$n] = [Environment]::GetEnvironmentVariable($n, 'Process') }
+    $seenEnv = @{}
+    try {
+        foreach ($n in $evilNames) { [Environment]::SetEnvironmentVariable($n, 'evil', 'Process') }
+        $seenEnv.base = & $readEnv $dumpExe
+        foreach ($n in 'winget', 'choco', 'msiexec') { $seenEnv[$n] = & $readEnv (Join-Path $toolDir "$n.exe") }
+    }
+    finally { foreach ($n in $evilNames) { [Environment]::SetEnvironmentVariable($n, $keepEvil[$n], 'Process') } }
+    $sysDir = [Environment]::GetFolderPath('System'); $winDir = [Environment]::GetFolderPath('Windows')
+    $okFixed = $true; $why = @()
+    foreach ($t in 'base', 'winget', 'choco', 'msiexec') {
+        $e = $seenEnv[$t].Env; $tempExpected = Join-Path $tmp "temp\$t"
+        $bad = @()
+        if ($seenEnv[$t].ExitCode -ne 0) { $bad += "exit $($seenEnv[$t].ExitCode)" }
+        if ($e['SystemRoot'] -ne $winDir -or $e['windir'] -ne $winDir) { $bad += "SystemRoot/windir $($e['SystemRoot']) $($e['windir'])" }
+        if ($e['TEMP'] -ne $tempExpected -or $e['TMP'] -ne $tempExpected) { $bad += "TEMP/TMP $($e['TEMP']) $($e['TMP'])" }
+        if ($e['COMSPEC'] -ne (Join-Path $sysDir 'cmd.exe') -or $e['ProgramData'] -ne [Environment]::GetFolderPath('CommonApplicationData')) { $bad += 'COMSPEC/ProgramData' }
+        if ($t -eq 'choco') { if ($e['PATH'] -ne ($sysDir + ';' + (Join-Path $sysDir 'WindowsPowerShell\v1.0'))) { $bad += "PATH $($e['PATH'])" } } elseif ($e['PATH'] -ne $sysDir) { $bad += "PATH $($e['PATH'])" }
+        if ($e.ContainsKey('AVDTUNE_EVIL_EXTRA') -or $e.ContainsKey('DOTNET_AVDTUNE_EVIL')) { $bad += 'foreign variable passed on' }
+        if ($t -ne 'winget' -and ($e['USERPROFILE'] -eq 'evil' -or $e['LOCALAPPDATA'] -eq 'evil' -or $e['APPDATA'] -eq 'evil')) { $bad += 'profile variable of the process passed on' }
+        if ($bad.Count) { $okFixed = $false; $why += "${t}: $($bad -join '; ')" }
+    }
+    Test-Check 'real Run (#47): with evil ChocolateyInstall, TEMP, TMP, windir, PATH (SystemRoot cannot be set to evil: it breaks this process itself) in this process, every tool profile gets only the fixed values from Windows (and TEMP/TMP in its own folder below the state folder)' $okFixed ($why -join ' | ')
+    $wi = $seenEnv.winget.Env
+    Test-Check 'real Run (#47): winget also gets USERPROFILE, LOCALAPPDATA and APPDATA from the known folders, not from the environment' ($wi['USERPROFILE'] -eq [Environment]::GetFolderPath('UserProfile') -and $wi['LOCALAPPDATA'] -eq [Environment]::GetFolderPath('LocalApplicationData') -and $wi['APPDATA'] -eq [Environment]::GetFolderPath('ApplicationData')) "$($wi['USERPROFILE']) $($wi['LOCALAPPDATA'])"
+    $ch = $seenEnv.choco
+    $chocoTemp = Join-Path $tmp 'temp\choco'
+    Test-Check 'real Run (#47): choco gets ChocolateyInstall from HKLM (Get-AVDTuneChocolateyRoot) and --cache-location in its admin-only folder; others get neither' ($ch.Env['ChocolateyInstall'] -eq (Get-AVDTuneChocolateyRoot) -and $ch.Args -eq "one arg|--cache-location=$chocoTemp" -and -not $seenEnv.base.Env.ContainsKey('ChocolateyInstall') -and $seenEnv.winget.Args -eq 'one arg' -and $seenEnv.msiexec.Args -eq 'one arg') "$($ch.Env['ChocolateyInstall']) | $($ch.Args)"
+    $np = $seenEnv.base.Env['NUMBER_OF_PROCESSORS']; $pa = $seenEnv.base.Env['PROCESSOR_ARCHITECTURE']
+    Test-Check 'real Run (#47): NUMBER_OF_PROCESSORS and PROCESSOR_ARCHITECTURE are passed on (from HKLM)' ($np -match '^\d+$' -and [int]$np -ge 1 -and $pa -match '^(AMD64|x86|ARM64)$') "$np $pa"
+    # a TEMP folder somebody prepared (junction; folder with a write rule for Users) is set aside, never used, never followed
+    $outside2 = Join-Path $tmp 'outside2'; [void](New-Item -ItemType Directory -Path $outside2 -Force); Set-Content -LiteralPath (Join-Path $outside2 'keep.txt') -Value 'keep'
+    $wTemp = Join-Path $tmp 'temp\winget'
+    Remove-Item -LiteralPath $wTemp -Recurse -Force
+    [void](& $cmd /c mklink /J $wTemp $outside2)
+    $viaJunction = & $readEnv (Join-Path $toolDir 'winget.exe')
+    $asideJ = @(Get-ChildItem (Join-Path $tmp 'temp') -Filter 'winget.untrusted-*' -Force)
+    Test-Check 'real Run (#47): a junction prepared as the TEMP folder is set aside as a link (target untouched), the child gets a new real folder' ($asideJ.Count -eq 1 -and (Test-Path -LiteralPath (Join-Path $outside2 'keep.txt')) -and $viaJunction.Env['TEMP'] -eq $wTemp -and -not ((Get-Item -LiteralPath $wTemp -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) -and $viaJunction.ExitCode -eq 0) ($asideJ.Name -join ',')
+    [IO.Directory]::Delete($asideJ[0].FullName)
+    $mTemp = Join-Path $tmp 'temp\msiexec'
+    [void](New-Item -ItemType Directory -Path $mTemp -Force); Set-Content -LiteralPath (Join-Path $mTemp 'prepared.txt') -Value 'x'
+    $usersRule = { param($Path, $IsDirectory) $r = @([pscustomobject]@{ Sid = 'S-1-5-32-544'; Inherited = $false }); if ($Path -like '*\msiexec') { $r += [pscustomobject]@{ Sid = 'S-1-5-32-545'; Inherited = $false } }; [pscustomobject]@{ Owner = 'S-1-5-32-544'; Protected = $true; Rules = $r } }
+    & $psmAVDTune { $script:ChildEnvHooks.AclReader = $args[0] } $usersRule
+    try { $viaRule = & $readEnv (Join-Path $toolDir 'msiexec.exe') }
+    finally { & $psmAVDTune { $script:ChildEnvHooks.AclReader = $args[0] } $trustAllAcl }
+    $asideR = @(Get-ChildItem (Join-Path $tmp 'temp') -Filter 'msiexec.untrusted-*' -Force)
+    Test-Check 'real Run (#47): a TEMP folder with a write rule for Users is set aside with its content, not repaired; the child does not see it' ($asideR.Count -eq 1 -and (Test-Path -LiteralPath (Join-Path $asideR[0].FullName 'prepared.txt')) -and -not (Test-Path -LiteralPath (Join-Path $mTemp 'prepared.txt')) -and $viaRule.Env['TEMP'] -eq $mTemp) ($asideR.Name -join ',')
+    # the link check also covers the folder above (<state>\temp as a junction): nothing is started
+    $linkParent = Join-Path $tmp 'tlink'; [void](New-Item -ItemType Directory -Path $linkParent -Force)
+    [void](& $cmd /c mklink /J (Join-Path $linkParent 'temp') $outside2)
+    $linkThrown = Get-ThrownText { Initialize-AVDTuneToolTemp -Tool base -StateRoot $linkParent }
+    Test-Check 'child TEMP (#47): <state>\temp as a link stops the start (nothing is created in its target)' ($linkThrown -like '*is a link*' -and -not (Test-Path -LiteralPath (Join-Path $outside2 'base'))) $linkThrown
+    [IO.Directory]::Delete((Join-Path $linkParent 'temp'))
+    # profile by file name, and the one place that starts programs
+    Test-Check 'child tool (#47): the profile follows the file name (winget, choco, msiexec, bench), anything else is base' ((Get-AVDTuneChildTool 'C:\x\WinGet.exe') -eq 'winget' -and (Get-AVDTuneChildTool 'C:\x\choco.exe') -eq 'choco' -and (Get-AVDTuneChildTool 'msiexec.exe') -eq 'msiexec' -and (Get-AVDTuneChildTool 'D:\a\AVDTune.Bench.exe') -eq 'bench' -and (Get-AVDTuneChildTool 'C:\x\dism.exe') -eq 'base') $null
+    $psi = New-AVDTuneChildStartInfo -File (Join-Path $toolDir 'choco.exe') -Arguments @('outdated', '-r') -StateRoot $tmp
+    Test-Check 'child start (#47): no shell, no window, redirected output, choco gets --cache-location, the environment is exactly Get-AVDTuneChildEnvironment' (-not $psi.UseShellExecute -and $psi.CreateNoWindow -and $psi.Arguments -eq "outdated -r --cache-location=$chocoTemp" -and $psi.EnvironmentVariables.Count -eq (Get-AVDTuneChildEnvironment -Tool choco -TempDir $chocoTemp).Count) $psi.Arguments
+    $srcFiles = @(Get-ChildItem -LiteralPath (Join-Path $repo 'Modules') -Filter '*.psm1' | Where-Object { (Get-Content -LiteralPath $_.FullName -Raw) -match 'New-Object\s+(System\.)?Diagnostics\.ProcessStartInfo|Start-Process' } | ForEach-Object { $_.Name } | Sort-Object)
+    Test-Check 'child start (#47): only AVDTune.psm1 (New-AVDTuneChildStartInfo) and AVDTune.Benchmark.psm1 (Invoke-AVDTuneChildProcess, same Get-AVDTuneChildEnvironment) build a process start; Updates.Run uses New-AVDTuneChildStartInfo' (($srcFiles -join ',') -eq 'AVDTune.Benchmark.psm1,AVDTune.psm1' -and (Get-Content -LiteralPath (Join-Path $repo 'Modules\AVDTune.Updates.psm1') -Raw) -match 'New-AVDTuneChildStartInfo -File \$File') ($srcFiles -join ',')
 
     # ---------------------------------------------------------------- history
     $h = @(Get-AVDTuneUpdateHistory -Root $tmp)

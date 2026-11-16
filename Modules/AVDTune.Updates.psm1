@@ -627,26 +627,6 @@ function Get-AVDTuneUpdateHistory {
 
 #region the real adapter
 
-function Get-AVDTuneSystemFolder {
-    # Fixed system folders from Windows itself, never from environment variables (a user can set those in HKCU\Environment)
-    param([Parameter(Mandatory)][ValidateSet('Windows', 'System', 'ProgramFiles', 'ProgramFilesX86', 'CommonProgramFiles', 'ProgramData')][string]$Name)
-    $special = switch ($Name) {
-        'Windows' { 'Windows' } 'System' { 'System' } 'ProgramFiles' { 'ProgramFiles' } 'ProgramFilesX86' { 'ProgramFilesX86' }
-        'CommonProgramFiles' { 'CommonProgramFiles' } 'ProgramData' { 'CommonApplicationData' }
-    }
-    $path = [Environment]::GetFolderPath([Environment+SpecialFolder]$special)
-    if (-not $path) { throw "The system folder $Name is not known." }
-    $path
-}
-
-function Get-AVDTuneChocolateyRoot {
-    # The machine value of ChocolateyInstall (HKLM, admins only), never the process environment; otherwise the default under ProgramData
-    $v = $null
-    try { $v = [string](Get-ItemProperty -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Environment' -Name ChocolateyInstall -ErrorAction Stop).ChocolateyInstall } catch { }
-    if ($v -and $v -notmatch '%' -and [IO.Path]::IsPathRooted($v)) { return $v.TrimEnd('\') }
-    Join-Path (Get-AVDTuneSystemFolder ProgramData) 'chocolatey'
-}
-
 function Select-AVDTuneNewestPackageFolder {
     # Pure: the folder name of the newest package version, by [version] (Microsoft.DesktopAppInstaller_1.29.380.0_x64__8wekyb3d8bbwe), not by text
     param([string[]]$Names)
@@ -837,10 +817,8 @@ function New-AVDTuneUpdateAdapter {
             only when every process of the tree has ended, so the caller's lock (Global\PackTune) is held until then. On a timeout the tree is ended.
         #>
         param($File, [string[]]$Arguments, [int]$TimeoutSeconds = 600)
-        $psi = New-Object System.Diagnostics.ProcessStartInfo
-        $psi.FileName = $File
-        $psi.Arguments = (@($Arguments | ForEach-Object { ConvertTo-AVDTuneArgument ([string]$_) }) -join ' ')
-        $psi.UseShellExecute = $false; $psi.CreateNoWindow = $true; $psi.RedirectStandardOutput = $true; $psi.RedirectStandardError = $true
+        # environment, TEMP and (choco) --cache-location from Windows and an admin-only folder, not from this process (issue #47)
+        try { $psi = New-AVDTuneChildStartInfo -File $File -Arguments $Arguments } catch { return [pscustomobject]@{ ExitCode = -1; Output = $_.Exception.Message } }
         $job = [IntPtr]::Zero
         try { Initialize-AVDTuneProcessTree; $job = [AVDTune.ProcessTree]::Create() } catch { $job = [IntPtr]::Zero }
         try {
@@ -962,5 +940,5 @@ function New-AVDTuneUpdateAdapter {
 
 Export-ModuleMember -Function Get-AVDTuneUpdateSettings, Set-AVDTuneUpdateSettings, ConvertTo-AVDTuneKbList, Resolve-AVDTuneWuaError, Resolve-AVDTuneSoftwareError,
     ConvertFrom-AVDTuneWingetUpgrade, ConvertFrom-AVDTuneChocoOutdated, Invoke-AVDTuneLocked, Test-AVDTuneToolTrust, Test-AVDTuneAdminOnlyAcl, Test-AVDTuneAdminOnlyPath,
-    Select-AVDTuneNewestPackageFolder, Get-AVDTuneSystemFolder, Resolve-AVDTuneTool, Clear-AVDTuneStageFolder, Remove-AVDTuneStageDir, Get-AVDTuneUpdateList, Invoke-AVDTuneUpdateRun, Invoke-AVDTuneRepair,
+    Select-AVDTuneNewestPackageFolder, Resolve-AVDTuneTool, Clear-AVDTuneStageFolder, Remove-AVDTuneStageDir, Get-AVDTuneUpdateList, Invoke-AVDTuneUpdateRun, Invoke-AVDTuneRepair,
     Get-AVDTuneUpdateHistory, New-AVDTuneUpdateAdapter
