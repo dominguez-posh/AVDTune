@@ -29,6 +29,8 @@ function Add-AVDTuneOptimizationFakeMembers {
     $Machine | Add-Member -NotePropertyName MpSet -NotePropertyValue ({
             param($Name, $Value, $Restore = $false)
             foreach ($bad in @($store.FailWrites)) { if ($bad -and ([string]$Name).ToLowerInvariant() -like "*$($bad.ToLowerInvariant())*") { throw "fake: Set-MpPreference refused for $Name" } }
+            # like Set-MpPreference: the threat actions are an enum (Clean=1, Quarantine=2, Remove=3, Allow=6, UserDefined=8, NoAction=9, Block=10, None=11), 0 and other numbers cannot be bound
+            if ([string]$Name -like '*ThreatDefaultAction' -and (@(1, 2, 3, 6, 8, 9, 10, 11) -notcontains [int]$Value)) { throw "fake: Set-MpPreference cannot bind $Value to $Name (not a value of the enum ThreatAction)" }
             $store.Mp[[string]$Name] = $Value; [void]$store.Log.Add("MpSet $Name=$Value restore=$Restore")
         }.GetNewClosure())
     $Machine | Add-Member -NotePropertyName RegInfo -NotePropertyValue ({
@@ -42,7 +44,13 @@ function Add-AVDTuneOptimizationFakeMembers {
         }.GetNewClosure())
     $Machine | Add-Member -NotePropertyName RegKeyRemoveEmpty -NotePropertyValue ({
             param($Path)
-            [void]$store.Log.Add("RegKeyRemoveEmpty $Path")
+            # like the real member: only when the key holds no values and no sub keys; otherwise it stays (logged as RegKeyKept)
+            $p = ([string]$Path).ToLowerInvariant()
+            $hasValues = $false; $hasSub = $false
+            foreach ($k in $store.Registry.Keys) { if ($k.StartsWith($p + '|')) { $hasValues = $true }; if ($k.StartsWith($p + '\')) { $hasSub = $true } }
+            foreach ($k in $store.Keys.Keys) { if ($k.StartsWith($p + '\')) { $hasSub = $true } }
+            if ($hasValues -or $hasSub) { [void]$store.Log.Add("RegKeyKept $Path"); return }
+            $store.Keys.Remove($p); [void]$store.Log.Add("RegKeyRemoveEmpty $Path")
         }.GetNewClosure())
     $Machine
 }

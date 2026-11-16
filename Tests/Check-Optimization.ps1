@@ -53,6 +53,19 @@ try {
     Test-Check 'presets: conservative has no AppX removal and nothing above risk Low' (@($entries | Where-Object { $_.Id -in $con -and ($_.Kind -eq 'AppxRemove' -or $_.Risk -ne 'Low') }).Count -eq 0) $null
     Test-Check 'presets: High-risk and Medium-risk entries are not in recommended' (@($entries | Where-Object { $_.Id -in $rec -and $_.Risk -eq 'High' }).Count -eq 0) $null
 
+    # the allow lists are exactly what is shipped: every shipped entry passes (the file is valid), and no list holds more than the file ships
+    $opt = Get-Module AVDTune.Optimization
+    $listed = & $opt { @{ Reg = @($script:RegAllow.Keys).Count; Task = @($script:TaskAllow.Keys).Count; Appx = @($script:AppxAllow).Count; Svc = @($script:ServiceAllow).Count } }
+    Test-Check 'allow list: the lists hold exactly the registry values, tasks, AppX packages and services that the data ships (nothing more)' (($listed.Reg -eq @($entries | Where-Object Kind -eq 'Registry').Count) -and ($listed.Task -eq @($entries | Where-Object Kind -eq 'TaskDisabled').Count) -and ($listed.Appx -eq @($entries | Where-Object Kind -eq 'AppxRemove').Count) -and ($listed.Svc -eq @($entries | Where-Object Kind -eq 'ServiceStartup').Count)) ($listed | ConvertTo-Json -Compress)
+    $threat = @($entries | Where-Object { $_.Parameter -like '*ThreatDefaultAction' })
+    Test-Check 'data: the four threat default actions are off by default' ($threat.Count -eq 4 -and @($threat | Where-Object Default).Count -eq 0) $null
+    # the entries of the behaviour checks are not shipped: they are put on the allow lists of the module here (test only; the production code has no way to do this)
+    & $opt {
+        foreach ($k in 'HKLM:\SOFTWARE\Policies\AVDTuneTest|Val', 'HKLM:\SOFTWARE\Policies\AVDTuneTest|ValA', 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\Explorer|Val', 'HKLM:\SOFTWARE\Policies\AVDTuneNew\Sub|Fresh', 'HKLM:\SOFTWARE\Policies\AVDTuneTest|Big') { $script:RegAllow[$k] = 'DWord' }
+        $script:RegAllow['HKLM:\SOFTWARE\Policies\AVDTuneTest|ValS'] = 'String'
+        foreach ($k in '\Microsoft\Test\|TestTask', '\Microsoft\Test\|NoSuchTask') { $script:TaskAllow[$k] = $true }
+        $script:AppxAllow = @($script:AppxAllow) + @('Test.App', 'Test.AppA', 'Test.AppB')
+    }
     # ---------------------------------------------------------------- type checks of the data file (counter-tests)
     $src = @([ordered]@{ Id = 'own'; Name = 'Test'; Url = 'https://learn.microsoft.com/en-us/x'; License = 'MIT'; Copyright = 'c'; Checked = '2026-11-15' })
     $base = @{
@@ -485,6 +498,113 @@ try {
     Clear-Backups
     $dt = @($entries | Where-Object { $_.Name -eq 'DiagTrack' -or $_.TaskName -eq 'Microsoft Compatibility Appraiser' })
     Test-Check 'data: DiagTrack and the Compatibility Appraiser are Medium risk and off by default, with the reason that names Defender for Endpoint and the reports' ($dt.Count -eq 2 -and @($dt | Where-Object { $_.Default -or $_.Risk -ne 'Medium' }).Count -eq 0 -and ($dt[0].Why -like '*Defender for Endpoint*' -or $dt[1].Why -like '*Defender for Endpoint*') -and ($dt | Where-Object Why -like '*Windows Update for Business*').Count -eq 2) $null
+
+    # ---------------------------------------------------------------- follow-up of the security re-check (#33): closures, ThreatDefaultAction unset, allow lists, syntax, value ranges
+    function Invoke-OptGate { Open-AVDTuneWriteGate -SnapshotId 'snap-1' -ConfirmedBy 'admin1'; Invoke-AVDTuneOptimization @args }
+    function Invoke-Opt($Machine, [string[]]$Ids, [string]$Mode = 'Apply', [switch]$Confirm, [switch]$WhatIf) { Open-AVDTuneWriteGate -SnapshotId 'snap-1' -ConfirmedBy 'admin1'; Invoke-AVDTuneOptimization -Machine $Machine -Root $state -DataPath $small -Ids $Ids -Mode $Mode -ConfirmIrreversible:$Confirm -User 'admin1' -SnapshotId 'snap-1' -WhatIf:$WhatIf }
+    function New-OpenMachine { Open-AVDTuneWriteGate -SnapshotId 'snap-1' -ConfirmedBy 'admin1'; New-TestMachine }
+    # N1: the check of the real registry members must work on a real machine (it ran in a closure where the $script: lists were empty and refused every path)
+    function Test-NotRefused([scriptblock]$Block) { try { & $Block | Out-Null; $true } catch { -not ($_.Exception.Message -match 'Refused|Invalid registry|not on the list') } }
+    Test-Check 'closures: the real RegInfo member reads an allowed policy path (read only) and does not answer Refused' (Test-NotRefused { & $rm.RegInfo 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\System' 'DisableAcrylicBackgroundOnLogon' }) $null
+    Test-Check 'closures: the real RegInfo member reads an allowed autologger Start and the FirewallPolicy value (read only) without Refused' ((Test-NotRefused { & $rm.RegInfo 'HKLM:\SYSTEM\CurrentControlSet\Control\WMI\Autologger\ReadyBoot' 'Start' }) -and (Test-NotRefused { & $rm.RegInfo 'HKLM:\SYSTEM\CurrentControlSet\Services\SharedAccess\Parameters\FirewallPolicy' 'DeleteUserAppContainersOnLogoff' })) $null
+    Test-Check 'closures: the key check of RegKeyRemoveEmpty accepts a key of the list and its parents, and refuses others (no key is removed here)' (-not (Test-Throws { Assert-OptRegistryAccess -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Search' -Name $null }) -and -not (Test-Throws { Assert-OptRegistryAccess -Path 'HKLM:\SOFTWARE\Policies\Microsoft' -Name $null }) -and (Test-Throws { Assert-OptRegistryAccess -Path 'HKLM:\SOFTWARE\Policies\Contoso' -Name $null }) -and (Test-Throws { Assert-OptRegistryAccess -Path 'HKLM:\SOFTWARE\Policies' -Name $null })) $null
+    Test-Check 'closures: the real MpGet member answers for a setting of the list (read only) without the list error' (Test-NotRefused { & $rm.MpGet 'PUAProtection' }) $null
+    $modAst = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $repo 'Modules\AVDTune.Optimization.psm1'), [ref]$null, [ref]$null)
+    $closures = @($modAst.FindAll({ param($a) $a -is [System.Management.Automation.Language.InvokeMemberExpressionAst] -and $a.Member.Value -eq 'GetNewClosure' }, $true))
+    $scriptVars = @($closures | ForEach-Object { $_.Expression.FindAll({ param($v) $v -is [System.Management.Automation.Language.VariableExpressionAst] -and $v.VariablePath.IsScript }, $true) })
+    Test-Check 'closures: no GetNewClosure block of the module uses a $script: variable (they are empty in a closure)' ($closures.Count -gt 10 -and $scriptVars.Count -eq 0) "closures=$($closures.Count) scriptvars=$($scriptVars.Count)"
+
+    # N2: ThreatDefaultAction has no 0 (Clean=1 ... None=11): unset is noted in the backup, Undo gives nothing to Set-MpPreference
+    $thrEntry = Get-Mut Defender { param($e) $e.Id = 'optimization.defender-low'; $e.Parameter = 'LowThreatDefaultAction'; $e.Value = 2; $e.Default = $false }
+    $thrDoc = Join-Path $tmp 'threat.json'
+    [IO.File]::WriteAllText($thrDoc, ([ordered]@{ SchemaVersion = 1; Sources = $src; Entries = @($thrEntry) } | ConvertTo-Json -Depth 6))
+    Open-AVDTuneWriteGate -SnapshotId 'snap-1' -ConfirmedBy 'admin1'
+    Clear-Backups
+    $m = New-OpenMachine; $m.Store.Mp['LowThreatDefaultAction'] = 0
+    Test-Check 'threat action: the fake enforces the real enum (0 and 5 are refused, 2 and 11 are accepted)' ((Test-Throws { & $m.MpSet 'LowThreatDefaultAction' 0 $true }) -and (Test-Throws { & $m.MpSet 'SevereThreatDefaultAction' 5 $true }) -and -not (Test-Throws { & $m.MpSet 'HighThreatDefaultAction' 11 $true }) -and -not (Test-Throws { & $m.MpSet 'ModerateThreatDefaultAction' 2 })) $null
+    $m = New-OpenMachine; $m.Store.Mp['LowThreatDefaultAction'] = 0
+    $r = Invoke-OptGate -Machine $m -Root $state -DataPath $thrDoc -Ids 'optimization.defender-low' -User 'admin1'
+    $bk = Get-AVDTuneOptimizationBackup -Root $state -Id 'optimization.defender-low'
+    Test-Check 'threat action: Apply sets 2, and the backup of the earlier 0 says unset (no value, no restore later)' ($r.Changed -eq 1 -and $m.Store.Mp['LowThreatDefaultAction'] -eq 2 -and $bk.Unset -eq $true -and $null -eq $bk.Value) ($bk | ConvertTo-Json -Compress)
+    $lc = (Get-AVDTuneState $state).LastChange; $logN = @($m.Log).Count
+    $u = Invoke-OptGate -Machine $m -Root $state -DataPath $thrDoc -Ids 'optimization.defender-low' -Mode Undo -User 'admin1'
+    $ur = Get-R $u 'optimization.defender-low'
+    Test-Check 'threat action: Undo of an unset value gives nothing to Set-MpPreference, the setting stays, status Reverted with the hint' ($ur.Status -eq 'Reverted' -and $ur.Message -like '*no previous value*' -and $ur.Message -like '*Defender policy*' -and $m.Store.Mp['LowThreatDefaultAction'] -eq 2 -and @($m.Log).Count -eq $logN) ($ur | ConvertTo-Json -Compress)
+    Test-Check 'threat action: Undo releases the backup, and an Undo that changes no machine value does not move LastChange' (-not (Get-AVDTuneOptimizationBackup -Root $state -Id 'optimization.defender-low') -and (Get-AVDTuneState $state).LastChange -eq $lc) $null
+    $m = New-OpenMachine; $m.Store.Mp['LowThreatDefaultAction'] = 3
+    [void](Invoke-OptGate -Machine $m -Root $state -DataPath $thrDoc -Ids 'optimization.defender-low' -User 'admin1')
+    $bk = Get-AVDTuneOptimizationBackup -Root $state -Id 'optimization.defender-low'
+    $u = Invoke-OptGate -Machine $m -Root $state -DataPath $thrDoc -Ids 'optimization.defender-low' -Mode Undo -User 'admin1'
+    Test-Check 'threat action: an earlier real value (3 = Remove) is not unset and is given back by the restore path' ($bk.Unset -eq $false -and $bk.Value -eq 3 -and $m.Store.Mp['LowThreatDefaultAction'] -eq 3 -and @($m.Log | Where-Object { $_ -eq 'MpSet LowThreatDefaultAction=3 restore=True' }).Count -eq 1) (@($m.Log) -join ' | ')
+    $m = New-OpenMachine; $m.Store.Mp['LowThreatDefaultAction'] = 3
+    [void](Invoke-OptGate -Machine $m -Root $state -DataPath $thrDoc -Ids 'optimization.defender-low' -User 'admin1')
+    $bf = Join-Path $state 'config\optimization-backup.json'
+    function Edit-Backup([string]$Id, [scriptblock]$Change) { $d = Get-Content $bf -Raw | ConvertFrom-Json; & $Change $d.Items.$Id; [IO.File]::WriteAllText($bf, ($d | ConvertTo-Json -Depth 6)) }
+    Edit-Backup 'optimization.defender-low' { param($i) $i.Value = 0; $i.Unset = $false }
+    $u = Invoke-OptGate -Machine $m -Root $state -DataPath $thrDoc -Ids 'optimization.defender-low' -Mode Undo -User 'admin1'
+    Test-Check 'threat action: a backup with the value 0 that is not marked unset is refused at Undo (not in the enum), the setting stays' ((Get-R $u 'optimization.defender-low').Status -eq 'Failed' -and $m.Store.Mp['LowThreatDefaultAction'] -eq 2) (Get-R $u 'optimization.defender-low').Message
+    Clear-Backups
+
+    # N3: allow lists (instead of prefix plus deny list), syntax of '.', '..', '*', PSPath in every gate
+    Test-Refused 'a registry value that is not shipped (new name in a known key)' Registry Registry @{ Path = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\System'; Name = 'SomethingElse' } 'allow list'
+    Test-Refused 'a registry key that is not shipped (below the policy prefix)' Registry Registry @{ Path = 'HKLM:\SOFTWARE\Policies\Contoso\Thing'; Name = 'x' } 'allow list'
+    Test-Refused 'a known value with the type String instead of DWord' Registry Registry @{ Path = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\System'; Name = 'DisableAcrylicBackgroundOnLogon'; Type = 'String'; Value = '1' } 'type'
+    Test-Refused 'a task that is not shipped' Task Task @{ TaskName = 'NotShipped' } 'allow list'
+    Test-Refused 'an AppX package that is not shipped' Appx Appx @{ PackageName = 'Microsoft.SomethingNew' } 'allow list'
+    Test-Refused 'a path segment . ' Registry Registry @{ Path = 'HKLM:\SOFTWARE\Policies\.\AVDTuneTest' } 'below HKLM'
+    Test-Refused 'a path segment .. at the end' Registry Registry @{ Path = 'HKLM:\SOFTWARE\Policies\AVDTuneTest\..' } 'below HKLM'
+    Test-Check 'syntax: Get-OptRegistryProblem itself refuses . and .. segments, PSPath, and an empty segment' ((@('HKLM:\SOFTWARE\Policies\.\AVDTuneTest', 'HKLM:\SOFTWARE\Policies\..\Microsoft', 'HKLM:\SOFTWARE\Policies\\AVDTuneTest') | Where-Object { -not (Get-OptRegistryProblem -Category Registry -Path $_ -Name 'Val') }).Count -eq 0 -and (Get-OptRegistryProblem -Category Registry -Path 'HKLM:\SOFTWARE\Policies\AVDTuneTest' -Name 'PSPath')) $null
+    $mk = { param($kind, $over) $e = [ordered]@{}; foreach ($k in $base[$kind].Keys) { $e[$k] = $base[$kind][$k] }; foreach ($k in $over.Keys) { $e[$k] = $over[$k] }; if ($kind -eq 'Registry' -and -not $e.Contains('OnlyIfKeyExists')) { $e.OnlyIfKeyExists = $false }; [pscustomobject]$e }
+    $hand = @(
+        @('a registry name with *', (& $mk Registry @{ Name = '*' })), @('a registry name PSPath', (& $mk Registry @{ Name = 'PSPath' })), @('a registry path with *', (& $mk Registry @{ Path = 'HKLM:\SOFTWARE\Policies\*' })),
+        @('a registry path with ..', (& $mk Registry @{ Path = 'HKLM:\SOFTWARE\Policies\..\Run' })), @('a service with *', (& $mk Service @{ Name = 'SysM*' })), @('a task name with *', (& $mk Task @{ TaskName = '*' })),
+        @('a task path with ..', (& $mk Task @{ TaskPath = '\Microsoft\..\Test\' })), @('an AppX name with *', (& $mk Appx @{ PackageName = 'Test.*' })), @('a DWord that is text', (& $mk Registry @{ Value = '1' }))
+    )
+    foreach ($h in $hand) { Test-Check "syntax: a hand-made entry with $($h[0]) gets no step (same check as the data check)" (Test-Throws { New-AVDTuneOptimizationStep -Entry $h[1] -Root $state }) $null }
+    Test-Check 'syntax: a hand-made entry that is on the lists still builds a step' (-not (Test-Throws { New-AVDTuneOptimizationStep -Entry (& $mk Registry @{ Name = 'ValA' }) -Root $state })) (Get-OptEntryProblem (& $mk Registry @{ Name = 'ValA' }))
+
+    # DWord with bit 31 (read as unsigned, restore takes the full DWord range) and the range of restore values
+    Clear-Backups
+    $m = New-OpenMachine; $m.Store.Registry['hklm:\software\policies\avdtunetest|vala'] = [int]-1
+    [void](Invoke-Opt $m 'optimization.reg-a')
+    $bk = Get-AVDTuneOptimizationBackup -Root $state -Id 'optimization.reg-a'
+    Test-Check 'dword: a value with bit 31 (stored as -1) is saved as the unsigned 4294967295' ($bk.Value -eq 4294967295 -and $bk.ValueKind -eq 'DWord') ($bk | ConvertTo-Json -Compress)
+    $u = Invoke-Opt $m 'optimization.reg-a' 'Undo'
+    Test-Check 'dword: Undo restores it (given to the registry with the same bits) and accepts the full DWord range' ($u.Changed -eq 1 -and $m.Store.Registry['hklm:\software\policies\avdtunetest|vala'] -eq -1) ((@($m.Log) -join ' | ') + ' ' + (@($u.Results.Message) -join ' '))
+    Test-Check 'dword: the unsigned range is checked (0..4294967295; 4294967296, -1 and text are not DWord values; String up to 4096 characters)' (-not (Get-OptRestoreProblem -Kind DWord -Value 4294967295) -and (Get-OptRestoreProblem -Kind DWord -Value 4294967296) -and (Get-OptRestoreProblem -Kind DWord -Value -1) -and (Get-OptRestoreProblem -Kind DWord -Value '5') -and (Get-OptRestoreProblem -Kind String -Value ('x' * 4097)) -and -not (Get-OptRestoreProblem -Kind String -Value 'abc') -and (Get-OptRestoreProblem -Kind Binary -Value 1)) $null
+    Clear-Backups
+    foreach ($c in @(@('a DWord above 4294967295', { param($i) $i.Value = 4294967296 }), @('a negative DWord', { param($i) $i.Value = -5 }), @('a kind that is not a registry kind', { param($i) $i.ValueKind = 'Binary' }), @('a backup of another kind', { param($i) $i.Kind = 'ServiceStartup' }), @('a backup for another value name', { param($i) $i.Name = 'Other' }), @('a backup for another key', { param($i) $i.Path = 'HKLM:\SOFTWARE\Policies\Other' }))) {
+        $m = New-OpenMachine
+        [void](Invoke-Opt $m 'optimization.reg-a')
+        Edit-Backup 'optimization.reg-a' $c[1]
+        $u = Invoke-Opt $m 'optimization.reg-a' 'Undo'
+        Test-Check "restore range: $($c[0]) in the backup is refused at Undo and the value stays" ((Get-R $u 'optimization.reg-a').Status -eq 'Failed' -and (& $m.RegGet 'HKLM:\SOFTWARE\Policies\AVDTuneTest' 'ValA') -eq 1) (Get-R $u 'optimization.reg-a').Message
+        Clear-Backups
+    }
+    foreach ($c in @(@('a value above the range of PUAProtection', { param($i) $i.Value = 9 }), @('a backup for another setting', { param($i) $i.Parameter = 'UILockdown' }), @('a backup of another kind', { param($i) $i.Kind = 'Registry' }))) {
+        $m = New-OpenMachine
+        [void](Invoke-Opt $m 'optimization.defender-pua')
+        Edit-Backup 'optimization.defender-pua' $c[1]
+        $u = Invoke-Opt $m 'optimization.defender-pua' 'Undo'
+        Test-Check "restore range: Defender, $($c[0]), is refused at Undo and the setting stays" ((Get-R $u 'optimization.defender-pua').Status -eq 'Failed' -and $m.Store.Mp['PUAProtection'] -eq 1) (Get-R $u 'optimization.defender-pua').Message
+        Clear-Backups
+    }
+    Test-Check 'restore range: Defender restore limits (PUAProtection 0..2, threat actions only the enum, booleans any boolean)' (-not (Get-OptDefenderProblem -Parameter PUAProtection -Value 2 -Restore) -and (Get-OptDefenderProblem -Parameter PUAProtection -Value 3 -Restore) -and (Get-OptDefenderProblem -Parameter PUAProtection -Value -1 -Restore) -and (Get-OptDefenderProblem -Parameter LowThreatDefaultAction -Value 0 -Restore) -and -not (Get-OptDefenderProblem -Parameter LowThreatDefaultAction -Value 11 -Restore) -and (Get-OptDefenderProblem -Parameter LowThreatDefaultAction -Value 4 -Restore) -and -not (Get-OptDefenderProblem -Parameter UILockdown -Value $false -Restore)) $null
+
+    # fake RegKeyRemoveEmpty: only when the key is empty (like the real member)
+    $m = New-OpenMachine
+    $m.Store.Keys['hklm:\software\policies\avdtunekeep'] = $true; $m.Store.Registry['hklm:\software\policies\avdtunekeep|x'] = 1
+    $m.Store.Keys['hklm:\software\policies\avdtuneparent'] = $true; $m.Store.Keys['hklm:\software\policies\avdtuneparent\child'] = $true
+    $m.Store.Keys['hklm:\software\policies\avdtuneempty'] = $true
+    foreach ($k in 'AVDTuneKeep', 'AVDTuneParent', 'AVDTuneEmpty') { & $m.RegKeyRemoveEmpty "HKLM:\SOFTWARE\Policies\$k" }
+    Test-Check 'fake RegKeyRemoveEmpty: a key with a value or a sub key stays, an empty key goes' ((& $m.RegKeyExists 'HKLM:\SOFTWARE\Policies\AVDTuneKeep') -and (& $m.RegKeyExists 'HKLM:\SOFTWARE\Policies\AVDTuneParent') -and -not (& $m.RegKeyExists 'HKLM:\SOFTWARE\Policies\AVDTuneEmpty') -and @($m.Log | Where-Object { $_ -like 'RegKeyRemoveEmpty*' }).Count -eq 1 -and @($m.Log | Where-Object { $_ -like 'RegKeyKept*' }).Count -eq 2) (@($m.Log) -join ' | ')
+    $m = New-OpenMachine
+    [void](Invoke-OptGate -Machine $m -Root $state -DataPath $newDoc -Ids 'optimization.reg-new' -User 'admin1')
+    $m.Store.Registry['hklm:\software\policies\avdtunenew\sub|other'] = 1     # somebody else put a value into the key after Apply
+    $u = Invoke-OptGate -Machine $m -Root $state -DataPath $newDoc -Ids 'optimization.reg-new' -Mode Undo -User 'admin1'
+    Test-Check 'registry: Undo does not remove a created key that has a foreign value in the meantime (key and its parent stay)' ($u.Changed -eq 1 -and @($m.Log | Where-Object { $_ -like 'RegKeyRemoveEmpty*' }).Count -eq 0 -and @($m.Log | Where-Object { $_ -like 'RegKeyKept*' }).Count -eq 2 -and $m.Store.Registry.ContainsKey('hklm:\software\policies\avdtunenew\sub|other')) (@($m.Log) -join ' | ')
+    Clear-Backups
+    Close-AVDTuneWriteGate
 
     # ---------------------------------------------------------------- status
     $m = New-TestMachine

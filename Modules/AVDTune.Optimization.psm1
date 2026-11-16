@@ -35,14 +35,16 @@ $script:KindProps = @{
     AppxRemove = @('PackageName'); DefenderPref = @('Parameter', 'Value')
 }
 # Set-MpPreference parameters an entry may use. Only protecting values are allowed (Allowed / Only / Min..Max); the name is data, so only this list goes to the cmdlet.
-# Undo may restore any earlier value of the right type (the value that was there before), so it checks the Type only.
+# Undo may restore any earlier value of the right type and range (RestoreMax: 0..n, RestoreAllowed: the values of the enum), so it checks the type and that range, not the protecting values.
+# NoZero: the enum has no 0 (Clean=1 ... None=11), Get-MpPreference answers 0 for "never set", and 0 cannot be given back to Set-MpPreference: such a value is saved as "unset".
+$script:ThreatActionEnum = @(1, 2, 3, 6, 8, 9, 10, 11)
 $script:DefenderParams = @{
-    PUAProtection = @{ Type = 'int'; Allowed = @(1, 2) }; DisableLocalAdminMerge = @{ Type = 'bool'; Only = $true }; RandomizeScheduleTaskTimes = @{ Type = 'bool'; Only = $true }
-    MAPSReporting = @{ Type = 'int'; Allowed = @(1, 2) }; CloudBlockLevel = @{ Type = 'int'; Allowed = @(2, 4, 6) }; CloudExtendedTimeout = @{ Type = 'int'; Min = 1; Max = 50 }
-    ScanAvgCPULoadFactor = @{ Type = 'int'; Min = 5; Max = 100 }; SignatureUpdateInterval = @{ Type = 'int'; Min = 1; Max = 24 }; DisableCatchupQuickScan = @{ Type = 'bool'; Only = $false }
+    PUAProtection = @{ Type = 'int'; Allowed = @(1, 2); RestoreMax = 2 }; DisableLocalAdminMerge = @{ Type = 'bool'; Only = $true }; RandomizeScheduleTaskTimes = @{ Type = 'bool'; Only = $true }
+    MAPSReporting = @{ Type = 'int'; Allowed = @(1, 2); RestoreMax = 2 }; CloudBlockLevel = @{ Type = 'int'; Allowed = @(2, 4, 6); RestoreMax = 6 }; CloudExtendedTimeout = @{ Type = 'int'; Min = 1; Max = 50; RestoreMax = 50 }
+    ScanAvgCPULoadFactor = @{ Type = 'int'; Min = 5; Max = 100; RestoreMax = 100 }; SignatureUpdateInterval = @{ Type = 'int'; Min = 1; Max = 24; RestoreMax = 24 }; DisableCatchupQuickScan = @{ Type = 'bool'; Only = $false }
     CheckForSignaturesBeforeRunningScan = @{ Type = 'bool'; Only = $true }; UILockdown = @{ Type = 'bool'; Only = $true }
-    LowThreatDefaultAction = @{ Type = 'int'; Allowed = @(2, 3) }; ModerateThreatDefaultAction = @{ Type = 'int'; Allowed = @(2, 3) }
-    HighThreatDefaultAction = @{ Type = 'int'; Allowed = @(2, 3) }; SevereThreatDefaultAction = @{ Type = 'int'; Allowed = @(2, 3) }
+    LowThreatDefaultAction = @{ Type = 'int'; Allowed = @(2, 3); RestoreAllowed = $script:ThreatActionEnum; NoZero = $true }; ModerateThreatDefaultAction = @{ Type = 'int'; Allowed = @(2, 3); RestoreAllowed = $script:ThreatActionEnum; NoZero = $true }
+    HighThreatDefaultAction = @{ Type = 'int'; Allowed = @(2, 3); RestoreAllowed = $script:ThreatActionEnum; NoZero = $true }; SevereThreatDefaultAction = @{ Type = 'int'; Allowed = @(2, 3); RestoreAllowed = $script:ThreatActionEnum; NoZero = $true }
 }
 # Limits of what the list may touch (checked when the data is read, when a step is built, and again in the members of the real machine). Case-insensitive.
 $script:RegAllowPrefixes = @('HKLM:\SOFTWARE\Policies\', 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\')
@@ -55,6 +57,106 @@ $script:ServiceAllow = @('DiagTrack', 'MapsBroker', 'lfsvc', 'RmSvc', 'SEMgrSvc'
 $script:ServiceDeny = @('WinDefend', 'WdNisSvc', 'WdNisDrv', 'WdFilter', 'WdBoot', 'Sense', 'SecurityHealthService', 'wscsvc', 'mpssvc', 'BFE', 'EventLog', 'wuauserv', 'UsoSvc', 'WaaSMedicSvc', 'BITS', 'TrustedInstaller', 'CryptSvc', 'RpcSs', 'RpcEptMapper', 'DcomLaunch', 'LSM', 'SamSs', 'lanmanserver', 'lanmanworkstation', 'Winmgmt', 'ProfSvc', 'TermService', 'UmRdpService', 'SessionEnv', 'Netlogon', 'KeyIso', 'Dhcp', 'Dnscache', 'NlaSvc', 'W32Time', 'Schedule', 'gpsvc', 'Appinfo', 'AppIDSvc', 'VSS', 'InstallService', 'ClipSVC', 'wlidsvc', 'frxsvc', 'frxccd', 'RdAgent', 'WindowsAzureGuestAgent', 'WaAppAgent', 'Spooler', 'StorSvc', 'seclogon', 'SgrmBroker', 'sppsvc', 'LicenseManager', 'CDPSvc', 'webthreatdefsvc', 'Sysmon')
 $script:TaskDenyComponents = @('windowsupdate', 'updateorchestrator', 'windows defender', 'waasmedic')
 $script:AppxDeny = @('Microsoft.WindowsStore', 'Microsoft.SecHealthUI', 'Microsoft.DesktopAppInstaller', 'Microsoft.AAD.BrokerPlugin', 'Microsoft.Windows.ShellExperienceHost', 'Microsoft.Windows.StartMenuExperienceHost', 'Microsoft.VCLibs*', 'Microsoft.UI.Xaml*', 'Microsoft.NET.Native*', 'MSTeams', 'Microsoft.Windows.CloudExperienceHost', 'Microsoft.LockApp', 'Microsoft.WindowsAppRuntime*', 'Microsoft.Windows.Search', 'MicrosoftWindows.Client.*')
+# Allow lists: exactly the registry values, tasks and AppX packages that data\optimization.json ships (the services are listed above). Anything else is refused, in the data check, when a step is built and in the real machine members.
+# The deny lists stay as a second layer. Case-insensitive. Registry: 'key|value name' -> the registry type.
+$script:RegAllow = @{}
+foreach ($x in @(
+    'HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Search|ConnectedSearchUseWeb',
+    'HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Search|AllowCloudSearch',
+    'HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Search|EnableDynamicContentInWSB',
+    'HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Search|AllowSearchToUseLocation',
+    'HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Search|AllowCortanaAboveLock',
+    'HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Search|PreventIndexingUncachedExchangeFolders',
+    'HKLM:\SOFTWARE\Policies\Microsoft\Dsh|AllowNewsAndInterests',
+    'HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Feeds|EnableFeeds',
+    'HKLM:\SOFTWARE\Policies\Microsoft\Windows\CloudContent|DisableWindowsConsumerFeatures',
+    'HKLM:\SOFTWARE\Policies\Microsoft\Windows\CloudContent|DisableSoftLanding',
+    'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsCopilot|TurnOffWindowsCopilot',
+    'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System|EnableFirstLogonAnimation',
+    'HKLM:\SOFTWARE\Policies\Microsoft\Windows\System|DisableAcrylicBackgroundOnLogon',
+    'HKLM:\SOFTWARE\Policies\Microsoft\Windows\System|DisableLockScreenAppNotifications',
+    'HKLM:\SOFTWARE\Policies\Microsoft\Windows\System|DontEnumerateConnectedUsers',
+    'HKLM:\SOFTWARE\Policies\Microsoft\SQMClient\Windows|CEIPEnable',
+    'HKLM:\SOFTWARE\Policies\Microsoft\Windows\AppCompat|DisableInventory',
+    'HKLM:\SOFTWARE\Policies\Microsoft\Windows\DataCollection|DoNotShowFeedbackNotifications',
+    'HKLM:\SOFTWARE\Policies\Microsoft\Windows\AdvertisingInfo|DisabledByGroupPolicy',
+    'HKLM:\SOFTWARE\Policies\Microsoft\Windows\GameDVR|AllowGameDVR',
+    'HKLM:\SOFTWARE\Policies\Microsoft\Windows\DeliveryOptimization|DODownloadMode',
+    'HKLM:\SOFTWARE\Policies\Microsoft\Windows\BITS|DisableBranchCache',
+    'HKLM:\SOFTWARE\Policies\Microsoft\Windows\LocationAndSensors|DisableLocation',
+    'HKLM:\SOFTWARE\Policies\Microsoft\WindowsInkWorkspace|AllowWindowsInkWorkspace',
+    'HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\SystemRestore|DisableSR',
+    'HKLM:\SOFTWARE\Policies\Microsoft\Windows\StorageHealth|AllowDiskHealthModelUpdates',
+    'HKLM:\SOFTWARE\Policies\Microsoft\FindMyDevice|AllowFindMyDevice',
+    'HKLM:\SOFTWARE\Policies\Microsoft\Windows\Maps|AutoDownloadAndUpdateMapData',
+    'HKLM:\SOFTWARE\Policies\Microsoft\Windows\Messaging|AllowMessageSync',
+    'HKLM:\SOFTWARE\Policies\Microsoft\Speech|AllowSpeechModelUpdate',
+    'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\Explorer|NoAutoRun',
+    'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\Explorer|NoDriveTypeAutoRun',
+    'HKLM:\SOFTWARE\Policies\Microsoft\Windows\PreviewBuilds|AllowBuildPreview',
+    'HKLM:\SOFTWARE\Policies\Microsoft\Windows\System|EnableCdp',
+    'HKLM:\SOFTWARE\Policies\Microsoft\Windows\Device Metadata|PreventDeviceMetadataFromNetwork',
+    'HKLM:\SOFTWARE\Policies\Microsoft\Windows\DriverSearching|DontSearchWindowsUpdate',
+    'HKLM:\SOFTWARE\Policies\Microsoft\Windows\FileHistory|Disabled',
+    'HKLM:\SOFTWARE\Policies\Microsoft\Windows\CurrentVersion\PushNotifications|NoCloudApplicationNotification',
+    'HKLM:\SYSTEM\CurrentControlSet\Services\SharedAccess\Parameters\FirewallPolicy|DeleteUserAppContainersOnLogoff',
+    'HKLM:\SOFTWARE\Policies\Microsoft\Windows\DWM|DisallowAnimations',
+    'HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services|fEnableTimeZoneRedirection',
+    'HKLM:\SOFTWARE\Policies\Microsoft\Windows\StorageSense|AllowStorageSenseGlobal',
+    'HKLM:\SOFTWARE\Policies\Microsoft\Edge|StartupBoostEnabled',
+    'HKLM:\SOFTWARE\Policies\Microsoft\Edge|BackgroundModeEnabled',
+    'HKLM:\SOFTWARE\Policies\Microsoft\Edge|SleepingTabsEnabled',
+    'HKLM:\SOFTWARE\Policies\Microsoft\Edge|HardwareAccelerationModeEnabled',
+    'HKLM:\SOFTWARE\Policies\Google\Chrome|HighEfficiencyModeEnabled',
+    'HKLM:\SOFTWARE\Policies\Google\Chrome|BackgroundModeEnabled',
+    'HKLM:\SYSTEM\CurrentControlSet\Control\WMI\Autologger\Cellcore|Start',
+    'HKLM:\SYSTEM\CurrentControlSet\Control\WMI\Autologger\ReadyBoot|Start',
+    'HKLM:\SYSTEM\CurrentControlSet\Control\WMI\Autologger\WDIContextLog|Start',
+    'HKLM:\SYSTEM\CurrentControlSet\Control\WMI\Autologger\WiFiDriverIHVSession|Start',
+    'HKLM:\SYSTEM\CurrentControlSet\Control\WMI\Autologger\WiFiSession|Start',
+    'HKLM:\SYSTEM\CurrentControlSet\Control\WMI\Autologger\ReFSLog|Start',
+    'HKLM:\SYSTEM\CurrentControlSet\Control\WMI\Autologger\Mellanox-Kernel|Start'
+)) { $script:RegAllow[$x] = 'DWord' }
+$script:TaskAllow = @{}
+foreach ($x in @(
+    '\Microsoft\Windows\Application Experience\|Microsoft Compatibility Appraiser',
+    '\Microsoft\Windows\Application Experience\|ProgramDataUpdater',
+    '\Microsoft\Windows\Customer Experience Improvement Program\|Consolidator',
+    '\Microsoft\Windows\Customer Experience Improvement Program\|UsbCeip',
+    '\Microsoft\Windows\Customer Experience Improvement Program\|KernelCeipTask',
+    '\Microsoft\Windows\DiskDiagnostic\|Microsoft-Windows-DiskDiagnosticDataCollector',
+    '\Microsoft\Windows\Defrag\|ScheduledDefrag',
+    '\Microsoft\Windows\Maps\|MapsToastTask',
+    '\Microsoft\Windows\Maps\|MapsUpdateTask',
+    '\Microsoft\Windows\Shell\|FamilySafetyMonitor',
+    '\Microsoft\Windows\Shell\|FamilySafetyRefreshTask',
+    '\Microsoft\Windows\Windows Error Reporting\|QueueReporting',
+    '\Microsoft\Windows\Power Efficiency Diagnostics\|AnalyzeSystem',
+    '\Microsoft\Windows\MemoryDiagnostic\|ProcessMemoryDiagnosticEvents',
+    '\Microsoft\Windows\MemoryDiagnostic\|RunFullMemoryDiagnostic',
+    '\Microsoft\Windows\Diagnosis\|RecommendedTroubleshootingScanner',
+    '\Microsoft\Windows\Registry\|RegIdleBackup',
+    '\Microsoft\Windows\Speech\|SpeechModelDownloadTask',
+    '\Microsoft\Windows\SystemRestore\|SR',
+    '\Microsoft\Windows\Work Folders\|Work Folders Logon Synchronization',
+    '\Microsoft\Windows\Work Folders\|Work Folders Maintenance Work',
+    '\Microsoft\Windows\Autochk\|Proxy',
+    '\Microsoft\Windows\Maintenance\|WinSAT',
+    '\Microsoft\XblGameSave\|XblGameSaveTask',
+    '\Microsoft\Windows\Location\|WindowsActionDialog',
+    '\Microsoft\Windows\Management\Provisioning\|Cellular'
+)) { $script:TaskAllow[$x] = $true }
+$script:AppxAllow = @(
+    'Microsoft.BingNews', 'Microsoft.BingWeather', 'Clipchamp.Clipchamp', 'Microsoft.GamingApp',
+    'Microsoft.XboxApp', 'Microsoft.Xbox.TCUI', 'Microsoft.XboxGameOverlay', 'Microsoft.XboxGamingOverlay',
+    'Microsoft.XboxIdentityProvider', 'Microsoft.XboxSpeechToTextOverlay', 'Microsoft.Getstarted', 'Microsoft.MicrosoftSolitaireCollection',
+    'Microsoft.People', 'Microsoft.SkypeApp', 'Microsoft.YourPhone', 'Microsoft.WindowsFeedbackHub',
+    'Microsoft.WindowsMaps', 'Microsoft.ZuneMusic', 'Microsoft.ZuneVideo', 'Microsoft.MixedReality.Portal',
+    'Microsoft.Microsoft3DViewer', 'Microsoft.MSPaint', 'Microsoft.549981C3F5F10', 'Microsoft.Wallet',
+    'Microsoft.GetHelp', 'Microsoft.MicrosoftOfficeHub', 'Microsoft.Office.OneNote', 'Microsoft.MicrosoftStickyNotes',
+    'Microsoft.PowerAutomateDesktop', 'Microsoft.Todos', 'Microsoft.WindowsAlarms', 'microsoft.windowscommunicationsapps',
+    'Microsoft.OutlookForWindows', 'Microsoft.Copilot', 'MicrosoftTeams', 'MicrosoftCorporationII.QuickAssist'
+)
 $script:RegexCache = @{}
 #region data: read and check
 
@@ -85,39 +187,116 @@ function Test-OptProps($Object, [string[]]$Allowed, [string[]]$Required) {
     @{ Extra = $extra; Missing = $missing }
 }
 
-function Get-OptRegistryProblem {
-    # Why a registry value may not be touched, or $null. Category Autologger: only Start of the known loggers. Registry: below the policy prefixes, never in the protected places.
-    param([string]$Category, [string]$Path, [string]$Name)
+function Test-OptRegPathSyntax($Path) {
+    # one syntax for the data check, the step builder and the real members: HKLM:\ and plain key names, no '.' or '..' segment, no empty segment
+    if (-not ((Test-OptText $Path 8 260) -and (Test-OptPattern $Path '\AHKLM:\\[A-Za-z0-9 _.{}()\-]+(\\[A-Za-z0-9 _.{}()\-]+)*\z'))) { return $false }
+    $segs = @(([string]$Path).Split('\'))
+    -not ($segs -contains '..' -or $segs -contains '.')
+}
+function Test-OptRegNameSyntax($Name) {
+    (Test-OptText $Name 1 100) -and (Test-OptPattern $Name '\A[A-Za-z0-9 _.\-]+\z') -and -not (Test-OptPattern $Name '(?i)\APS(Path|ParentPath|ChildName|Drive|Provider)\z')
+}
+function Test-OptTaskPathSyntax($TaskPath) {
+    if (-not ((Test-OptText $TaskPath 2 200) -and (Test-OptPattern $TaskPath '\A\\([A-Za-z0-9 _.\-]+\\)+\z'))) { return $false }
+    $segs = @(([string]$TaskPath).Split('\'))
+    -not ($segs -contains '..' -or $segs -contains '.')
+}
+function Test-OptTaskNameSyntax($TaskName) { (Test-OptText $TaskName 1 100) -and (Test-OptPattern $TaskName '\A[A-Za-z0-9 _.\-]+\z') -and $TaskName -ne '.' -and $TaskName -ne '..' }
+function Test-OptAppxNameSyntax($Name) { (Test-OptText $Name 3 100) -and (Test-OptPattern $Name '\A[A-Za-z0-9._\-]+\z') }
+function Test-OptServiceNameSyntax($Name) { (Test-OptText $Name 1 80) -and (Test-OptPattern $Name '\A[A-Za-z0-9_.\-]+\z') }
+
+function Get-OptRegistryKeyProblem {
+    # A key (not a value): below the allowed prefixes, never in a protected place, and a key of the allow list or one of its parents (only these are ever removed again)
+    param([string]$Path)
+    if (-not (Test-OptRegPathSyntax $Path)) { return 'the registry path is not valid.' }
     $cmp = [StringComparison]::OrdinalIgnoreCase
-    if ($Category -eq 'Autologger') {
-        $ok = ($Name -eq 'Start') -and $Path.StartsWith($script:AutologgerPrefix, $cmp) -and (@($script:AutologgerNames) -contains $Path.Substring($script:AutologgerPrefix.Length))
-        if ($ok) { return $null } else { return 'an autologger entry may only set Start of one of the known loggers.' }
-    }
-    if ($Path.Equals($script:FirewallPath, $cmp)) { if ($Name -eq $script:FirewallName) { return $null } else { return 'only DeleteUserAppContainersOnLogoff may be set in FirewallPolicy.' } }
-    $allowed = $false; foreach ($p in $script:RegAllowPrefixes) { if ($Path.StartsWith($p, $cmp) -and $Path.Length -gt $p.Length) { $allowed = $true } }
-    if (-not $allowed) { return 'the key is not below HKLM:\SOFTWARE\Policies\ or HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\.' }
+    $under = $false
+    foreach ($p in (@($script:RegAllowPrefixes) + @($script:AutologgerPrefix))) { if ($Path.StartsWith($p, $cmp) -and $Path.Length -gt $p.Length) { $under = $true } }
+    if (-not $under) { return 'the key is not below an allowed prefix.' }
     foreach ($c in $Path.Split('\')) {
         $l = $c.ToLowerInvariant()
         if (@($script:RegDenyComponents) -contains $l -or $l -like '*smartscreen*' -or $l -like '*defender*' -or $l -like '*antimalware*') { return "the key '$c' is protected (security, updates, start-up or logon settings are never changed by this list)." }
     }
-    if ($Name -like '*smartscreen*') { return 'SmartScreen settings are never changed by this list.' }
+    foreach ($k in $script:RegAllow.Keys) { $kp = $k.Substring(0, $k.LastIndexOf('|')); if ($kp.Equals($Path, $cmp) -or $kp.StartsWith($Path + '\', $cmp)) { return $null } }
+    'the key is not one of the keys this list may change.'
+}
+function Get-OptRegistryProblem {
+    # Why a registry value may not be touched, or $null. Syntax first, then the places (prefixes, protected keys), last the allow list of the values that are shipped.
+    param([string]$Category, [string]$Path, [string]$Name)
+    if (-not (Test-OptRegPathSyntax $Path)) { return 'the registry path is not valid (a key below HKLM:\, no . or .. segment).' }
+    if (-not (Test-OptRegNameSyntax $Name)) { return 'the value name is not valid (PSPath and similar names are refused).' }
+    $cmp = [StringComparison]::OrdinalIgnoreCase
+    $problem = $null
+    if ($Category -eq 'Autologger') {
+        $ok = ($Name -eq 'Start') -and $Path.StartsWith($script:AutologgerPrefix, $cmp) -and (@($script:AutologgerNames) -contains $Path.Substring($script:AutologgerPrefix.Length))
+        if (-not $ok) { return 'an autologger entry may only set Start of one of the known loggers.' }
+    }
+    elseif ($Path.Equals($script:FirewallPath, $cmp)) { if ($Name -ne $script:FirewallName) { return 'only DeleteUserAppContainersOnLogoff may be set in FirewallPolicy.' } }
+    else {
+        $allowed = $false; foreach ($p in $script:RegAllowPrefixes) { if ($Path.StartsWith($p, $cmp) -and $Path.Length -gt $p.Length) { $allowed = $true } }
+        if (-not $allowed) { return 'the key is not below HKLM:\SOFTWARE\Policies\ or HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\.' }
+        foreach ($c in $Path.Split('\')) {
+            $l = $c.ToLowerInvariant()
+            if (@($script:RegDenyComponents) -contains $l -or $l -like '*smartscreen*' -or $l -like '*defender*' -or $l -like '*antimalware*') { return "the key '$c' is protected (security, updates, start-up or logon settings are never changed by this list)." }
+        }
+        if ($Name -like '*smartscreen*') { return 'SmartScreen settings are never changed by this list.' }
+    }
+    if (-not $script:RegAllow.ContainsKey("$Path|$Name")) { return 'this registry value is not one of the values this list ships (allow list).' }
     $null
 }
+function Get-OptRegistryValueProblem {
+    # The type and value an entry wants to write: the type of the allow list, DWord 0..2147483647, String up to 260 characters
+    param([string]$Path, [string]$Name, $Type, $Value)
+    $want = $script:RegAllow["$Path|$Name"]
+    if ($Type -cne $want) { return "the type of this value must be $want." }
+    if ($Type -ceq 'DWord') { if (-not ((Test-OptInt $Value) -and [int64]$Value -ge 0 -and [int64]$Value -le 2147483647)) { return 'a DWord value must be a whole number from 0 to 2147483647.' } }
+    elseif (-not (Test-OptText $Value 0 260)) { return 'a String value must be text of up to 260 characters.' }
+    $null
+}
+function Get-OptRestoreProblem {
+    # The earlier value that Undo puts back: the full range of its registry type (DWord is unsigned 32 bit, bit 31 allowed), text of up to 4096 characters without control characters
+    param($Kind, $Value)
+    if ($Kind -ceq 'DWord') { if ((Test-OptInt $Value) -and [int64]$Value -ge 0 -and [int64]$Value -le 4294967295) { return $null }; return 'not a DWord number (0 to 4294967295).' }
+    if ($Kind -ceq 'String') { if (Test-OptText $Value 0 4096) { return $null }; return 'not text of up to 4096 characters.' }
+    'the registry type cannot be restored (only DWord and String).'
+}
+function ConvertTo-OptDWordRead($Value) {
+    # DWord as the registry returns it is a signed Int32; AVDTune treats it as unsigned (bit 31 set = a big number, not a negative one)
+    if ($Value -is [int] -and $Value -lt 0) { return [int64][BitConverter]::ToUInt32([BitConverter]::GetBytes([int]$Value), 0) }
+    $Value
+}
+function ConvertTo-OptDWordWrite($Value) {
+    # a number above 2147483647 goes to the registry as the Int32 with the same bits
+    if ((Test-OptInt $Value) -and [int64]$Value -gt 2147483647) { return [BitConverter]::ToInt32([BitConverter]::GetBytes([uint32][int64]$Value), 0) }
+    $Value
+}
 function Get-OptServiceProblem([string]$Name) {
+    if (-not (Test-OptServiceNameSyntax $Name)) { return 'the service name is not valid (no wildcards).' }
     if (@($script:ServiceDeny) -contains $Name) { return "the service '$Name' is protected and never changed by this list." }
     if (@($script:ServiceAllow) -notcontains $Name) { return "the service '$Name' is not on the list of services this tool may change." }
     $null
 }
-function Get-OptTaskProblem([string]$TaskPath) {
+function Get-OptTaskProblem([string]$TaskPath, [string]$TaskName) {
+    if (-not (Test-OptTaskPathSyntax $TaskPath)) { return 'the task path is not valid (starts and ends with a backslash, no . or .. segment).' }
+    if (-not (Test-OptTaskNameSyntax $TaskName)) { return 'the task name is not valid (no wildcards, no path).' }
     foreach ($c in $TaskPath.Split('\')) { if (@($script:TaskDenyComponents) -contains $c.ToLowerInvariant()) { return "tasks below '$c' (updates, Defender) are never changed by this list." } }
+    if (-not $script:TaskAllow.ContainsKey("$TaskPath|$TaskName")) { return 'this task is not one of the tasks this list ships (allow list).' }
     $null
 }
 function Get-OptAppxProblem([string]$PackageName) {
+    if (-not (Test-OptAppxNameSyntax $PackageName)) { return 'the package name is not valid (no wildcards).' }
     foreach ($d in $script:AppxDeny) { if ($PackageName -like $d) { return "the package '$PackageName' is protected and never removed by this list." } }
+    if (@($script:AppxAllow) -notcontains $PackageName) { return "the package '$PackageName' is not one of the packages this list ships (allow list)." }
     $null
 }
+function Test-OptDefenderUnset([string]$Parameter, $Value) {
+    # Get-MpPreference reports 0 for a setting with no value, and for the threat actions 0 is not a value of the enum: it was "unset"
+    if (@($script:DefenderParams.Keys) -cnotcontains $Parameter) { return $false }
+    $d = $script:DefenderParams[$Parameter]
+    $d.ContainsKey('NoZero') -and ((Test-OptInt $Value) -or $Value -is [byte] -or $Value -is [uint32] -or $Value -is [int16] -or $Value -is [uint16]) -and [int64]$Value -eq 0
+}
 function Get-OptDefenderProblem {
-    # Set: only a protecting value. -Restore (Undo): the type only, the value is the one that was there before.
+    # Set: only a protecting value. -Restore (Undo): the type and the range of the setting, the value is the one that was there before.
     param([string]$Parameter, $Value, [switch]$Restore)
     if (@($script:DefenderParams.Keys) -cnotcontains $Parameter) { return 'the Defender setting is not on the list.' }
     $d = $script:DefenderParams[$Parameter]
@@ -127,18 +306,37 @@ function Get-OptDefenderProblem {
         return $null
     }
     if (-not (Test-OptInt $Value)) { return "the value of $Parameter must be a whole number." }
-    if ($Restore) { return $null }
+    if ($Restore) {
+        if ($d.ContainsKey('RestoreAllowed')) { if ([int64]$Value -notin $d.RestoreAllowed) { return "the earlier value of $Parameter is not one of $($d.RestoreAllowed -join ', ')." } }
+        elseif ([int64]$Value -lt 0 -or [int64]$Value -gt $d.RestoreMax) { return "the earlier value of $Parameter must be from 0 to $($d.RestoreMax)." }
+        return $null
+    }
     if ($d.ContainsKey('Allowed') -and ([int64]$Value -notin $d.Allowed)) { return "the value of $Parameter must be one of $($d.Allowed -join ', ') (other values weaken protection)." }
     if ($d.ContainsKey('Min') -and ([int64]$Value -lt $d.Min -or [int64]$Value -gt $d.Max)) { return "the value of $Parameter must be from $($d.Min) to $($d.Max)." }
     $null
 }
+function Assert-OptRegistryAccess {
+    # The check of the real registry members. A module function on purpose: the members are closures, and $script: variables are empty inside a closure.
+    param([string]$Path, [string]$Name)
+    if (-not (Test-OptRegPathSyntax $Path)) { throw 'Invalid registry path.' }
+    if ($Name) {
+        if (-not (Test-OptRegNameSyntax $Name)) { throw 'Invalid registry value name.' }
+        $cat = if ($Path.StartsWith($script:AutologgerPrefix, [StringComparison]::OrdinalIgnoreCase)) { 'Autologger' } else { 'Registry' }
+        $problem = Get-OptRegistryProblem -Category $cat -Path $Path -Name $Name
+    }
+    else { $problem = Get-OptRegistryKeyProblem -Path $Path }
+    if ($problem) { throw "Refused: $problem" }
+}
 function Get-OptEntryProblem {
-    # The limits of the list for one typed entry (as made by ConvertTo-OptEntry): $null or the reason. Also used when a step is built.
+    # The limits of the list for one typed entry (as made by ConvertTo-OptEntry or by hand): $null or the reason. Also used when a step is built.
     param([Parameter(Mandatory)]$Entry)
     switch ([string]$Entry.Kind) {
-        'Registry' { Get-OptRegistryProblem -Category ([string]$Entry.Category) -Path ([string]$Entry.Path) -Name ([string]$Entry.Name) }
+        'Registry' {
+            $p = Get-OptRegistryProblem -Category ([string]$Entry.Category) -Path ([string]$Entry.Path) -Name ([string]$Entry.Name)
+            if ($p) { $p } else { Get-OptRegistryValueProblem -Path ([string]$Entry.Path) -Name ([string]$Entry.Name) -Type (Get-AVDTuneProp $Entry 'Type') -Value (Get-AVDTuneProp $Entry 'Value') }
+        }
         'ServiceStartup' { Get-OptServiceProblem ([string]$Entry.Name) }
-        'TaskDisabled' { Get-OptTaskProblem ([string]$Entry.TaskPath) }
+        'TaskDisabled' { Get-OptTaskProblem ([string]$Entry.TaskPath) ([string]$Entry.TaskName) }
         'AppxRemove' { Get-OptAppxProblem ([string]$Entry.PackageName) }
         'DefenderPref' { Get-OptDefenderProblem -Parameter ([string]$Entry.Parameter) -Value $Entry.Value }
         default { "unknown kind '$($Entry.Kind)'." }
@@ -178,9 +376,9 @@ function ConvertTo-OptEntry {
     switch ([string]$kind) {
         'Registry' {
             $path = Get-AVDTuneProp $Raw 'Path'; $name = Get-AVDTuneProp $Raw 'Name'; $type = Get-AVDTuneProp $Raw 'Type'; $value = Get-AVDTuneProp $Raw 'Value'
-            $okPath = (Test-OptText $path 8 260) -and (Test-OptPattern $path '^HKLM:\\[A-Za-z0-9 _.{}()\-]+(\\[A-Za-z0-9 _.{}()\-]+)*$') -and -not (@(([string]$path).Split('\')) -contains '..') -and -not (@(([string]$path).Split('\')) -contains '.')
+            $okPath = Test-OptRegPathSyntax $path
             if (-not $okPath) { [void]$errors.Add("${label}: Path must be a key below HKLM:\ (letters, digits, space and _ . { } ( ) - only).") }
-            if (-not ((Test-OptText $name 1 100) -and (Test-OptPattern $name '\A[A-Za-z0-9 _.\-]+\z') -and -not (Test-OptPattern $name '(?i)\APS(Path|ParentPath|ChildName|Drive|Provider)\z'))) { [void]$errors.Add("${label}: Name is not a valid value name (PSPath and similar names are refused).") }
+            if (-not (Test-OptRegNameSyntax $name)) { [void]$errors.Add("${label}: Name is not a valid value name (PSPath and similar names are refused).") }
             if (-not ((Test-OptText $type 3 10) -and ([string]$type -cin @('DWord', 'String')))) { [void]$errors.Add("${label}: Type must be DWord or String.") }
             elseif ([string]$type -eq 'DWord' -and -not ((Test-OptInt $value) -and [int64]$value -ge 0 -and [int64]$value -le 2147483647)) { [void]$errors.Add("${label}: a DWord Value must be a whole number from 0 to 2147483647 (a number, not text).") }
             elseif ([string]$type -eq 'String' -and -not (Test-OptText $value 0 260)) { [void]$errors.Add("${label}: a String Value must be text of up to 260 characters.") }
@@ -191,19 +389,19 @@ function ConvertTo-OptEntry {
         }
         'ServiceStartup' {
             $name = Get-AVDTuneProp $Raw 'Name'; $startup = Get-AVDTuneProp $Raw 'Startup'
-            if (-not ((Test-OptText $name 1 80) -and (Test-OptPattern $name '^[A-Za-z0-9_.\-]+$'))) { [void]$errors.Add("${label}: Name is not a valid service name.") }
+            if (-not (Test-OptServiceNameSyntax $name)) { [void]$errors.Add("${label}: Name is not a valid service name.") }
             if (-not ((Test-OptText $startup 5 10) -and ([string]$startup -cin @('Disabled', 'Manual')))) { [void]$errors.Add("${label}: Startup must be Disabled or Manual.") }
             $e.Name = [string]$name; $e.Startup = [string]$startup
         }
         'TaskDisabled' {
             $tp = Get-AVDTuneProp $Raw 'TaskPath'; $tn = Get-AVDTuneProp $Raw 'TaskName'
-            if (-not ((Test-OptText $tp 2 200) -and (Test-OptPattern $tp '^\\([A-Za-z0-9 _.\-]+\\)+$') -and -not (@(([string]$tp).Split('\')) -contains '..'))) { [void]$errors.Add("${label}: TaskPath must start and end with a backslash (letters, digits, space, _ . - only).") }
-            if (-not ((Test-OptText $tn 1 100) -and (Test-OptPattern $tn '^[A-Za-z0-9 _.\-]+$') -and $tn -ne '.' -and $tn -ne '..')) { [void]$errors.Add("${label}: TaskName is not valid (no wildcards, no path).") }
+            if (-not (Test-OptTaskPathSyntax $tp)) { [void]$errors.Add("${label}: TaskPath must start and end with a backslash (letters, digits, space, _ . - only).") }
+            if (-not (Test-OptTaskNameSyntax $tn)) { [void]$errors.Add("${label}: TaskName is not valid (no wildcards, no path).") }
             $e.TaskPath = [string]$tp; $e.TaskName = [string]$tn
         }
         'AppxRemove' {
             $pk = Get-AVDTuneProp $Raw 'PackageName'
-            if (-not ((Test-OptText $pk 3 100) -and (Test-OptPattern $pk '^[A-Za-z0-9._\-]+$'))) { [void]$errors.Add("${label}: PackageName is not a valid package name (no wildcards).") }
+            if (-not (Test-OptAppxNameSyntax $pk)) { [void]$errors.Add("${label}: PackageName is not a valid package name (no wildcards).") }
             $e.PackageName = [string]$pk
         }
         'DefenderPref' {
@@ -365,15 +563,6 @@ function Add-AVDTuneOptimizationMachineMembers {
     param([Parameter(Mandatory)]$Machine)
     $defenderNames = @($script:DefenderParams.Keys)
     $appx = @{ At = [datetime]::MinValue; Prov = @(); Inst = @() }
-    $regGuard = {
-        param($Path, $Name)
-        if (-not ((Test-OptText $Path 8 260) -and (Test-OptPattern $Path '\AHKLM:\\[A-Za-z0-9 _.{}()\-]+(\\[A-Za-z0-9 _.{}()\-]+)*\z'))) { throw 'Invalid registry path.' }
-        if ($Name -and -not ((Test-OptText $Name 1 100) -and (Test-OptPattern $Name '\A[A-Za-z0-9 _.\-]+\z') -and -not (Test-OptPattern $Name '(?i)\APS(Path|ParentPath|ChildName|Drive|Provider)\z'))) { throw 'Invalid registry value name.' }
-        $cat = if ($Path.StartsWith($script:AutologgerPrefix, [StringComparison]::OrdinalIgnoreCase)) { 'Autologger' } else { 'Registry' }
-        $problem = Get-OptRegistryProblem -Category $cat -Path $Path -Name $(if ($Name) { $Name } else { $(if ($cat -eq 'Autologger') { 'Start' } else { $script:FirewallName }) })
-        if ($problem -and $Path.Equals($script:FirewallPath, [StringComparison]::OrdinalIgnoreCase)) { $problem = $null }
-        if ($problem) { throw "Refused: $problem" }
-    }.GetNewClosure()
     $real = @{
         AppxState = {
             # The two package lists are read once and kept for 10 seconds (the status asks about dozens of packages; each call of the cmdlets takes seconds)
@@ -414,19 +603,21 @@ function Add-AVDTuneOptimizationMachineMembers {
         RegInfo = {
             # Value as it is stored (not expanded) with its kind, read through the registry key (never through a property object: names like PSPath cannot clash)
             param($Path, $Name)
-            & $regGuard $Path $Name
+            Assert-OptRegistryAccess -Path $Path -Name $Name
             $key = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($Path.Substring(6))
             if (-not $key) { return [pscustomobject]@{ KeyExists = $false; Exists = $false; Kind = $null; Value = $null } }
             try {
                 if (@($key.GetValueNames() | Where-Object { $_ -eq $Name }).Count -eq 0) { return [pscustomobject]@{ KeyExists = $true; Exists = $false; Kind = $null; Value = $null } }
-                [pscustomobject]@{ KeyExists = $true; Exists = $true; Kind = [string]$key.GetValueKind($Name); Value = $key.GetValue($Name, $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames) }
+                $kind = [string]$key.GetValueKind($Name); $val = $key.GetValue($Name, $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+                if ($kind -eq 'DWord') { $val = ConvertTo-OptDWordRead $val }   # unsigned, bit 31 is a big number
+                [pscustomobject]@{ KeyExists = $true; Exists = $true; Kind = $kind; Value = $val }
             }
             finally { $key.Close() }
         }.GetNewClosure()
         RegKeyRemoveEmpty = {
             # Removes a key this tool created, but only when it holds no values and no sub keys
             param($Path)
-            & $regGuard $Path $null
+            Assert-OptRegistryAccess -Path $Path -Name $null
             $i = $Path.LastIndexOf('\'); $parent = $Path.Substring(6, $i - 6); $leaf = $Path.Substring($i + 1)
             $pk = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($parent, $true)
             if (-not $pk) { return }
@@ -477,21 +668,23 @@ function New-AVDTuneOptimizationStep {
                 param($m)
                 $info = & $m.RegInfo $path $name
                 if ($info.Exists -and [string]$info.Kind -notin 'DWord', 'String') { throw "The value exists with the type $($info.Kind), which this tool cannot save and restore. Nothing was changed." }
+                $oldValue = $info.Value; if ($info.Exists -and [string]$info.Kind -eq 'DWord') { $oldValue = ConvertTo-OptDWordRead $oldValue }
+                if ($info.Exists) { $rp = Get-OptRestoreProblem -Kind ([string]$info.Kind) -Value (ConvertTo-OptScalar $oldValue); if ($rp) { throw "The value that is there cannot be saved and restored ($rp) Nothing was changed." } }
                 $created = @(Get-OptCreatedKeys -Machine $m -Path $path)
-                [void](Save-AVDTuneOptimizationBackup -Root $Root -Id $id -Record @{ Kind = 'Registry'; Exists = [bool]$info.Exists; ValueKind = $(if ($info.Exists) { [string]$info.Kind } else { $null }); Value = (ConvertTo-OptScalar $info.Value); KeyCreated = $created; At = (& $m.Now).ToString('o') })
+                [void](Save-AVDTuneOptimizationBackup -Root $Root -Id $id -Record @{ Kind = 'Registry'; Path = $path; Name = $name; Exists = [bool]$info.Exists; ValueKind = $(if ($info.Exists) { [string]$info.Kind } else { $null }); Value = (ConvertTo-OptScalar $oldValue); KeyCreated = $created; At = (& $m.Now).ToString('o') })
                 & $m.RegSet $path $name $want $type
             }.GetNewClosure()
             $undo = {
                 param($m)
                 $b = Get-AVDTuneOptimizationBackup -Root $Root -Id $id
                 if ($null -eq $b) { throw 'There is no saved earlier value for this entry (AVDTune did not set it), so there is nothing to undo.' }
+                if ((Get-AVDTuneProp $b 'Kind') -cne 'Registry' -or [string](Get-AVDTuneProp $b 'Path') -ne $path -or [string](Get-AVDTuneProp $b 'Name') -ne $name) { throw 'The saved earlier value does not belong to this entry (kind, key or name differ).' }
                 if ((Get-AVDTuneProp $b 'Exists') -isnot [bool]) { throw 'The saved earlier value is damaged.' }
                 if ($b.Exists) {
                     $old = Get-AVDTuneProp $b 'Value'; $kind = [string](Get-AVDTuneProp $b 'ValueKind')
-                    if ($kind -cnotin 'DWord', 'String') { throw 'The saved earlier value type is damaged.' }
-                    if ($kind -eq 'DWord' -and -not ((Test-OptInt $old) -and [int64]$old -ge 0 -and [int64]$old -le 2147483647)) { throw 'The saved earlier value is damaged (not a number).' }
-                    if ($kind -eq 'String' -and $old -isnot [string]) { throw 'The saved earlier value is damaged (not text).' }
-                    & $m.RegSet $path $name $old $kind
+                    $rp = Get-OptRestoreProblem -Kind $kind -Value $old
+                    if ($rp) { throw "The saved earlier value is damaged: $rp" }
+                    & $m.RegSet $path $name $(if ($kind -ceq 'DWord') { ConvertTo-OptDWordWrite $old } else { $old }) $kind
                 }
                 else {
                     & $m.RegRemove $path $name
@@ -511,13 +704,14 @@ function New-AVDTuneOptimizationStep {
                 param($m)
                 $s = & $m.ServiceGet $name
                 $delayed = & $m.RegGet $svcKey 'DelayedAutostart'
-                [void](Save-AVDTuneOptimizationBackup -Root $Root -Id $id -Record @{ Kind = 'ServiceStartup'; StartType = [string]$s.StartType; DelayedAutostart = $(if ($null -ne $delayed) { [int64]$delayed } else { $null }); At = (& $m.Now).ToString('o') })
+                [void](Save-AVDTuneOptimizationBackup -Root $Root -Id $id -Record @{ Kind = 'ServiceStartup'; Name = $name; StartType = [string]$s.StartType; DelayedAutostart = $(if ($null -ne $delayed) { [int64]$delayed } else { $null }); At = (& $m.Now).ToString('o') })
                 & $m.ServiceSetStartup $name $startup
             }.GetNewClosure()
             $undo = {
                 param($m)
                 $b = Get-AVDTuneOptimizationBackup -Root $Root -Id $id
                 if ($null -eq $b) { throw 'There is no saved earlier value for this entry (AVDTune did not set it), so there is nothing to undo.' }
+                if ((Get-AVDTuneProp $b 'Kind') -cne 'ServiceStartup' -or [string](Get-AVDTuneProp $b 'Name') -ne $name) { throw 'The saved earlier value does not belong to this entry (kind or name differ).' }
                 $old = Get-AVDTuneProp $b 'StartType'
                 if (-not ((Test-OptText $old 4 10) -and ([string]$old -cin @('Automatic', 'Manual', 'Disabled')))) { throw "The saved earlier start type '$old' cannot be restored (only Automatic, Manual or Disabled)." }
                 & $m.ServiceSetStartup $name ([string]$old)
@@ -535,13 +729,14 @@ function New-AVDTuneOptimizationStep {
             $apply = {
                 param($m)
                 $t = & $m.TaskGet $tp $tn
-                [void](Save-AVDTuneOptimizationBackup -Root $Root -Id $id -Record @{ Kind = 'TaskDisabled'; Enabled = [bool]$t.Enabled; At = (& $m.Now).ToString('o') })
+                [void](Save-AVDTuneOptimizationBackup -Root $Root -Id $id -Record @{ Kind = 'TaskDisabled'; TaskPath = $tp; TaskName = $tn; Enabled = [bool]$t.Enabled; At = (& $m.Now).ToString('o') })
                 & $m.TaskSetEnabled $tp $tn $false
             }.GetNewClosure()
             $undo = {
                 param($m)
                 $b = Get-AVDTuneOptimizationBackup -Root $Root -Id $id
                 if ($null -eq $b) { throw 'There is no saved earlier value for this entry (AVDTune did not set it), so there is nothing to undo.' }
+                if ((Get-AVDTuneProp $b 'Kind') -cne 'TaskDisabled' -or [string](Get-AVDTuneProp $b 'TaskPath') -ne $tp -or [string](Get-AVDTuneProp $b 'TaskName') -ne $tn) { throw 'The saved earlier value does not belong to this entry (kind, path or name differ).' }
                 if ((Get-AVDTuneProp $b 'Enabled') -isnot [bool]) { throw 'The saved earlier state is damaged.' }
                 & $m.TaskSetEnabled $tp $tn ([bool]$b.Enabled)
             }.GetNewClosure()
@@ -565,13 +760,16 @@ function New-AVDTuneOptimizationStep {
             $apply = {
                 param($m)
                 $v = & $m.MpGet $param
-                [void](Save-AVDTuneOptimizationBackup -Root $Root -Id $id -Record @{ Kind = 'DefenderPref'; Value = (ConvertTo-OptScalar $v); At = (& $m.Now).ToString('o') })
+                $unset = Test-OptDefenderUnset $param $v   # no value was set (Windows reports 0, which is not in the enum): the backup says so
+                [void](Save-AVDTuneOptimizationBackup -Root $Root -Id $id -Record @{ Kind = 'DefenderPref'; Parameter = $param; Unset = [bool]$unset; Value = $(if ($unset) { $null } else { ConvertTo-OptScalar $v }); At = (& $m.Now).ToString('o') })
                 & $m.MpSet $param $want $false
             }.GetNewClosure()
             $undo = {
                 param($m)
                 $b = Get-AVDTuneOptimizationBackup -Root $Root -Id $id
                 if ($null -eq $b) { throw 'There is no saved earlier value for this entry (AVDTune did not set it), so there is nothing to undo.' }
+                if ((Get-AVDTuneProp $b 'Kind') -cne 'DefenderPref' -or [string](Get-AVDTuneProp $b 'Parameter') -cne $param) { throw 'The saved earlier value does not belong to this entry (kind or setting differ).' }
+                if ((Get-AVDTuneProp $b 'Unset') -eq $true) { return }   # nothing to give back: Set-MpPreference cannot unset a value (Invoke-AVDTuneOptimization reports it)
                 $old = Get-AVDTuneProp $b 'Value'
                 $problem = Get-OptDefenderProblem -Parameter $param -Value $old -Restore
                 if ($problem) { throw "The saved earlier value is damaged: $problem" }
@@ -645,7 +843,7 @@ function Invoke-AVDTuneOptimization {
         if ($pending.Count -gt 0) { throw "$($pending.Count) AppX removal(s) cannot be undone and need their own confirmation (ConfirmIrreversible). Nothing was changed." }
     }
     $results = New-Object System.Collections.ArrayList
-    $touched = $false
+    $touched = $false; $noMachineChange = @{}
     try {
         foreach ($it in $items) {
             $step = $it.Step
@@ -654,6 +852,22 @@ function Invoke-AVDTuneOptimization {
             if (-not $present) {
                 [void]$results.Add([pscustomobject]@{ Id = $step.Id; Section = $step.Section; Title = $step.Title; Mode = $Mode; Status = 'Skipped'; Before = $null; After = $null; Message = $(if ($presentError) { "Cannot be read: $presentError" } else { 'Not present on this machine.' }); Reboot = $false; WhatIf = [bool]$WhatIf; At = $null })
                 continue
+            }
+            # Undo of a Defender setting that had no value before: nothing can be given back (Set-MpPreference cannot unset a value). The backup is released, the status is Reverted with a hint.
+            $unsetUndo = $false
+            if ($Mode -eq 'Undo' -and $it.Entry.Kind -eq 'DefenderPref') {
+                try { $ub = Get-AVDTuneOptimizationBackup -Root $Root -Id $step.Id; $unsetUndo = ($null -ne $ub -and (Get-AVDTuneProp $ub 'Kind') -ceq 'DefenderPref' -and [string](Get-AVDTuneProp $ub 'Parameter') -ceq $it.Entry.Parameter -and (Get-AVDTuneProp $ub 'Unset') -eq $true) } catch { $unsetUndo = $false }
+            }
+            if ($unsetUndo) {
+                $ut = $null; try { $ut = ConvertTo-AVDTuneTestResult (& $step.Test $Machine) } catch { $ut = $null }
+                if ($ut -and $ut.Compliant) {
+                    $r = [pscustomobject]@{ Id = $step.Id; Section = $step.Section; Title = $step.Title; Mode = $Mode; Status = 'Reverted'; Before = $ut.State; After = $ut.State; Message = 'No previous value, the setting stays; remove it via Defender policy if needed.'; Reboot = $false; WhatIf = [bool]$WhatIf; At = (& $Machine.Now).ToString('o') }
+                    if ($WhatIf) { $r.Status = 'WhatIf'; $r.Message = 'Would release the backup; the setting stays (it had no previous value).'; [void]$results.Add($r); continue }
+                    [void]$results.Add($r); $noMachineChange[$step.Id] = $true
+                    try { Remove-AVDTuneOptimizationBackup -Root $Root -Id $step.Id }
+                    catch { $r.Message = (($r.Message + ' ' + "The file of saved values could not be updated: $($_.Exception.Message)").Trim()) }
+                    continue
+                }
             }
             # The snapshot gate must see the change even when the run is cut short: LastChange is written before the step that is about to change something
             if (-not $WhatIf -and -not $touched) {
@@ -672,7 +886,7 @@ function Invoke-AVDTuneOptimization {
         }
     }
     finally {
-        $anyChange = @($results | Where-Object { $_.Status -in 'Changed', 'Reverted', 'Failed' }).Count -gt 0
+        $anyChange = @($results | Where-Object { $_.Status -in 'Changed', 'Reverted', 'Failed' -and -not $noMachineChange.ContainsKey($_.Id) }).Count -gt 0
         if (-not $WhatIf -and ($touched -or $anyChange)) { [void](Set-AVDTuneState -Root $Root -Values @{ LastChange = (& $Machine.Now).ToString('o') }) }
     }
     $changed = @($results | Where-Object { $_.Status -in 'Changed', 'Reverted' })
@@ -709,4 +923,4 @@ function Invoke-AVDTuneOptimization {
 
 Export-ModuleMember -Function Get-AVDTuneOptimizationDataPath, Read-AVDTuneOptimizationData, Get-AVDTuneOptimizationPresetIds, Get-AVDTuneOptimizationCategoryLabel, Get-AVDTuneOptimizationCategoryOrder,
     Add-AVDTuneOptimizationMachineMembers, New-AVDTuneOptimizationStep, Get-AVDTuneOptimizationStatus, Invoke-AVDTuneOptimization,
-    Get-AVDTuneOptimizationBackup, Save-AVDTuneOptimizationBackup, Remove-AVDTuneOptimizationBackup, ConvertTo-OptScalar, ConvertTo-OptCompare, Test-OptInt, Test-OptText, Test-OptPattern, Get-OptRegistryProblem, Get-OptServiceProblem, Get-OptTaskProblem, Get-OptAppxProblem, Get-OptDefenderProblem, Get-OptEntryProblem, Get-OptCreatedKeys
+    Get-AVDTuneOptimizationBackup, Save-AVDTuneOptimizationBackup, Remove-AVDTuneOptimizationBackup, ConvertTo-OptScalar, ConvertTo-OptCompare, Test-OptInt, Test-OptText, Test-OptPattern, Get-OptRegistryProblem, Get-OptServiceProblem, Get-OptTaskProblem, Get-OptAppxProblem, Get-OptDefenderProblem, Get-OptEntryProblem, Get-OptCreatedKeys, Assert-OptRegistryAccess, Get-OptRegistryKeyProblem, Get-OptRegistryValueProblem, Get-OptRestoreProblem, Test-OptDefenderUnset, ConvertTo-OptDWordRead, ConvertTo-OptDWordWrite, Test-OptRegPathSyntax, Test-OptRegNameSyntax
