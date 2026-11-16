@@ -1,0 +1,75 @@
+<!-- The Software page (issue 31). Loaded by AVDTune-Software.ps1 and added next to the other pages, so UI\AVDTune.xaml stays untouched.
+     Brushes and styles are DynamicResource (the theme of the window); the rows of the lists are made in code. -->
+<Grid xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+      xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+      x:Name="PageSoftware" Visibility="Collapsed">
+    <ScrollViewer Style="{DynamicResource PageScroll}">
+        <StackPanel Margin="40,32,40,28" MaxWidth="1000" HorizontalAlignment="Left">
+            <Grid>
+                <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+                <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                <TextBlock Text="Software" Style="{DynamicResource PageTitle}"/>
+                <TextBlock x:Name="TxtSwSubtitle" Grid.Row="1" Grid.ColumnSpan="2" Style="{DynamicResource Subtitle}" Text="What is on the master, and install, update and remove from the winget and Chocolatey catalog and from the PackTune library. Everything that changes the master is behind the snapshot gate and goes into the change log."/>
+                <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center" Margin="24,0,0,0">
+                    <Button x:Name="BtnSwRefresh" Content="Refresh" Margin="0,0,8,0" AutomationProperties.Name="Read the installed software and the library again"/>
+                    <Button x:Name="BtnSwUpdateAll" Style="{DynamicResource PrimaryButton}" Content="Update all" AutomationProperties.Name="Update every winget and Chocolatey package that has a newer version"/>
+                </StackPanel>
+            </Grid>
+            <TextBlock x:Name="TxtSwState" Style="{DynamicResource Hint}" Margin="0,12,0,0" TextWrapping="Wrap"/>
+            <TextBlock x:Name="TxtSwNotes" Style="{DynamicResource Hint}" Margin="0,6,0,0" TextWrapping="Wrap"/>
+
+            <Border Style="{DynamicResource CardBox}" Margin="0,16,0,0" Background="{DynamicResource Card}" Padding="20,16">
+                <StackPanel>
+                    <TextBlock Text="Packages that winget and Chocolatey manage" Style="{DynamicResource CardTitle}"/>
+                    <TextBlock Style="{DynamicResource Hint}" Margin="0,4,0,0" TextWrapping="Wrap" Text="Update and remove run inside the lock Global\PackTune, with the signed program from its fixed place."/>
+                    <StackPanel x:Name="PanelSwManaged" Margin="0,8,0,0"/>
+                </StackPanel>
+            </Border>
+
+            <Border Style="{DynamicResource CardBox}" Margin="0,16,0,0" Background="{DynamicResource Card}" Padding="20,16">
+                <StackPanel>
+                    <TextBlock Text="Find software" Style="{DynamicResource CardTitle}"/>
+                    <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
+                        <TextBox x:Name="TxtSwQuery" Width="320" Margin="0,0,8,0" AutomationProperties.Name="Search text for the winget and Chocolatey catalog" MaxLength="64"/>
+                        <ComboBox x:Name="CmbSwSource" Width="150" Margin="0,0,8,0" AutomationProperties.Name="Where to search"/>
+                        <Button x:Name="BtnSwSearch" Style="{DynamicResource PrimaryButton}" Content="Search" AutomationProperties.Name="Search the catalog"/>
+                    </StackPanel>
+                    <TextBlock Style="{DynamicResource Hint}" Margin="0,4,0,0" TextWrapping="Wrap" Text="Letters, digits, space and . _ + - (up to 64 characters). Install uses the machine scope and the exact package id."/>
+                    <StackPanel x:Name="PanelSwResults" Margin="0,8,0,0"/>
+                </StackPanel>
+            </Border>
+
+            <Border Style="{DynamicResource CardBox}" Margin="0,16,0,0" Background="{DynamicResource Card}" Padding="20,16">
+                <StackPanel>
+                    <TextBlock Text="PackTune library" Style="{DynamicResource CardTitle}"/>
+                    <TextBlock Style="{DynamicResource Hint}" Margin="0,4,0,0" TextWrapping="Wrap" Text="The package store on SharePoint, read with the sign-in of AVDTune (read only). A package is installed only when Intune carries its manifest hash (the trust anchor) and every file matches the manifest. MSI packages only."/>
+                    <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
+                        <TextBlock Text="Site" VerticalAlignment="Center" Margin="0,0,8,0" Width="60"/>
+                        <TextBox x:Name="TxtSwSite" Width="420" Margin="0,0,8,0" AutomationProperties.Name="SharePoint site of the package store, https://tenant.sharepoint.com/sites/name"/>
+                    </StackPanel>
+                    <StackPanel Orientation="Horizontal" Margin="0,6,0,0">
+                        <TextBlock Text="Library" VerticalAlignment="Center" Margin="0,0,8,0" Width="60"/>
+                        <TextBox x:Name="TxtSwLibrary" Width="260" Margin="0,0,8,0" AutomationProperties.Name="Name of the document library"/>
+                        <Button x:Name="BtnSwSaveSite" Content="Save and read" AutomationProperties.Name="Save the site and read the library"/>
+                    </StackPanel>
+                    <TextBlock x:Name="TxtSwLibState" Style="{DynamicResource Hint}" Margin="0,8,0,0" TextWrapping="Wrap"/>
+                    <StackPanel x:Name="PanelSwLibrary" Margin="0,8,0,0"/>
+                </StackPanel>
+            </Border>
+
+            <Border Style="{DynamicResource CardBox}" Margin="0,16,0,0" Background="{DynamicResource Card}" Padding="20,16">
+                <StackPanel>
+                    <TextBlock x:Name="TxtSwInstalledTitle" Text="Installed on this master" Style="{DynamicResource CardTitle}"/>
+                    <StackPanel x:Name="PanelSwInstalled" Margin="0,8,0,0"/>
+                </StackPanel>
+            </Border>
+
+            <Border Style="{DynamicResource CardBox}" Margin="0,16,0,0" Background="{DynamicResource Card}" Padding="20,16">
+                <StackPanel>
+                    <TextBlock Text="History" Style="{DynamicResource CardTitle}"/>
+                    <StackPanel x:Name="PanelSwHistory" Margin="0,8,0,0"/>
+                </StackPanel>
+            </Border>
+        </StackPanel>
+    </ScrollViewer>
+</Grid>
