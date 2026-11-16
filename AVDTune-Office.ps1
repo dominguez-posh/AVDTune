@@ -201,9 +201,16 @@ Add-Click $ui.BtnOffFixUndo {
     $names = @(Get-AVDTuneOfficeFixRecorded -Root $script:StateRoot)
     if ($names.Count -eq 0) { $ui.TxtOffState.Text = 'No one-click fix of this page is recorded: nothing to undo.'; return }
     if (-not (Confirm-Action "Put back the values found before the one-click fix(es) ($($names -join ', '))? Undo does not restart the master and does not restore reset activations." 'Office')) { return }
+    $lines = @()
     foreach ($n in $names) {
-        $run = Undo-AVDTuneOfficeFix -Machine $script:Machine -Name $n -Root $script:StateRoot -User (Get-FslUser) -SnapshotId (Get-FslGateSnapshot)
-        foreach ($r in @($run.Results)) { Register-StepResult $r }
+        try {
+            $run = Undo-AVDTuneOfficeFix -Machine $script:Machine -Name $n -Root $script:StateRoot -User (Get-FslUser) -SnapshotId (Get-FslGateSnapshot)
+            foreach ($r in @($run.Results)) { Register-StepResult $r }
+            $st = @($run.Results | ForEach-Object { [string]$_.Status }) -join '/'
+            $note = @($run.Results | Where-Object { $_.Message } | ForEach-Object { [string]$_.Message }) -join ' '
+            $lines += "$n $st" + $(if ($note) { " ($note)" } else { '' })
+        }
+        catch { $lines += "$n Failed ($($_.Exception.Message))" }
     }
-    $ui.TxtOffState.Text = "Office one-click fixes undone: $($names -join ', ')."; Show-Toast $ui.TxtOffState.Text; Start-OverviewRefresh; Update-OffView
+    $ui.TxtOffState.Text = "Office one-click fix undo: $($lines -join '; ')"; Show-Toast $ui.TxtOffState.Text; Start-OverviewRefresh; Update-OffView
 }

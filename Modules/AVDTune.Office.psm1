@@ -15,6 +15,7 @@
 Set-StrictMode -Version 2.0
 Import-Module (Join-Path $PSScriptRoot 'AVDTune.psm1')
 Import-Module (Join-Path $PSScriptRoot 'AVDTune.Updates.psm1')
+Import-Module (Join-Path $PSScriptRoot 'AVDTune.UpdateBlock.psm1')   # status of the update block and the maintenance record (Undo of the updates fix must not take a value the block owns)
 Import-Module (Join-Path $PSScriptRoot 'AVDTune.Trust.psm1')
 Import-Module (Join-Path $PSScriptRoot 'AVDTune.Benchmark.psm1')   # Invoke-AVDTuneChildProcess (issue 19): allowlist environment, job object
 
@@ -144,7 +145,7 @@ function ConvertTo-AVDTuneOfficeConfig {
     if ($problems.Count -gt 0) { throw "The Office configuration is not valid: $($problems -join ' ')" }
     [pscustomobject][ordered]@{
         Channel = [string]$Config.Channel; Edition = [string]$Config.Edition; Product = [string]$Config.Product
-        Languages = @(@($Config.Languages) | ForEach-Object { [string]$_ }); Outlook = [string]$Config.Outlook; ExcludeApps = @(@($Config.ExcludeApps) | Where-Object { $_ } | ForEach-Object { [string]$_ } | Sort-Object -Unique); RemoveMSI = [bool]$Config.RemoveMSI
+        Languages = @(@($Config.Languages) | ForEach-Object { [string]$_ }); Outlook = [string]$Config.Outlook; ExcludeApps = @(@(@($Config.ExcludeApps) | Where-Object { $_ } | ForEach-Object { [string]$_ }) + @($script:AlwaysExcluded) | Sort-Object -Unique); RemoveMSI = [bool]$Config.RemoveMSI   # OneDrive and Teams are always excluded, also in a saved or converted configuration (own VDI packages, issue 56)
     }
 }
 
@@ -167,7 +168,7 @@ function ConvertFrom-AVDTuneOfficeStored {
 function Get-AVDTuneOfficeEffectiveExcludes {
     # The ExcludeApp IDs of the ODT run: the unticked apps plus what the Outlook choice leaves out (classic = ODT app Outlook, new = OutlookForWindows)
     param([Parameter(Mandatory)]$Config)
-    $x = @($Config.ExcludeApps)
+    $x = @(@($Config.ExcludeApps) + @($script:AlwaysExcluded))
     switch ([string]$Config.Outlook) { 'classic' { $x += 'OutlookForWindows' } 'new' { $x += 'Outlook' } }
     @($x | Where-Object { $_ } | Sort-Object -Unique)
 }
@@ -504,7 +505,9 @@ function Invoke-AVDTuneOfficeRecorded {
         $type = if ($r.Status -ne 'Changed') { 'Note' } elseif ($Mode -eq 'Remove') { 'Removed' } elseif ($pre.Installed) { 'Changed' } else { 'Added' }
         [void](Add-AVDTuneChangeLogEntry -Root $Root -Version $state.ImageVersion -Category 'Office' -Component 'Microsoft 365 Apps' -ChangeType $type -Text $text -User $User -SnapshotId $SnapshotId -RunId ([string]$run.Id) -Source Step)
     }
-    [pscustomobject]@{ Result = $res; Setup = $r; Run = $run }
+    # the ODT now decides the Office values: the undo records of the one-click fixes describe a state that is gone (an Undo would put back an outdated value)
+    $discarded = @(); if ($r.Status -eq 'Changed' -and $Mode -eq 'Install') { $discarded = @(Remove-AVDTuneOfficeFixRecords -Root $Root -User $User -SnapshotId $SnapshotId -RunId ([string]$run.Id) -Why 'Office was installed or reconfigured afterwards, the earlier value is outdated.') }
+    [pscustomobject]@{ Result = $res; Setup = $r; Run = $run; FixRecordsDiscarded = $discarded }
 }
 
 function Get-AVDTuneOfficeRemoveText {
@@ -640,25 +643,30 @@ function Undo-AVDTuneOfficePolicies {
             $prev[$p.Name] = @{ Value = $val; Type = $type }
         }
     }
+    $changeOwner = $false
     if (-not $WhatIf) {
         if (-not (Test-AVDTuneWriteAllowed)) { throw 'The snapshot gate is not confirmed: AVDTune is read only until a snapshot newer than its last change is confirmed on the Overview.' }
-        [void](Set-AVDTuneState -Root $Root -Values @{ LastChange = (& $Machine.Now).ToString('o') })   # before the attempt: a failed undo may have changed the master
+        $changeOwner = Start-AVDTuneChange -Root $Root   # marker while the master is written (snapshot gate, #27)
     }
-    $steps = @(Get-AVDTuneOfficePolicySteps -Previous $prev)   # Mode Undo of a step puts back the value found before
-    $results = foreach ($s in $steps) { Invoke-AVDTuneStep -Step $s -Machine $Machine -Mode Undo -WhatIf:$WhatIf }
-    $run = [pscustomobject]@{ Plan = 'Office policies undo'; WhatIf = [bool]$WhatIf; Results = @($results) }
-    if (-not $WhatIf) {
-        $state = Get-AVDTuneState $Root
-        $ended = (& $Machine.Now).ToString('o')
-        [void](Set-AVDTuneState -Root $Root -Values @{ LastChange = $ended })   # also when a step failed
-        $saved = [pscustomobject][ordered]@{ Id = $null; Plan = 'Office policies undo'; Started = $ended; Ended = $ended; User = $User; SnapshotId = $SnapshotId; WhatIf = $false; ImageVersion = $state.ImageVersion; Reboot = $false; Results = @($results) }
-        [void](Add-AVDTuneRun -Root $Root -Run $saved)
-        foreach ($r in @($results | Where-Object { $_.Status -eq 'Reverted' })) {
-            if ($state.ImageVersion) { [void](Add-AVDTuneChangeLogEntry -Root $Root -Version $state.ImageVersion -Category 'Office' -Component $r.Id -ChangeType Changed -Text "Undo: $($r.Title)" -User $User -SnapshotId $SnapshotId -RunId ([string]$saved.Id) -Source Step) }
+    try {
+        if (-not $WhatIf) { [void](Set-AVDTuneState -Root $Root -Values @{ LastChange = (& $Machine.Now).ToString('o') }) }   # before the attempt: a failed undo may have changed the master
+        $steps = @(Get-AVDTuneOfficePolicySteps -Previous $prev)   # Mode Undo of a step puts back the value found before
+        $results = foreach ($s in $steps) { Invoke-AVDTuneStep -Step $s -Machine $Machine -Mode Undo -WhatIf:$WhatIf }
+        $run = [pscustomobject]@{ Plan = 'Office policies undo'; WhatIf = [bool]$WhatIf; Results = @($results) }
+        if (-not $WhatIf) {
+            $state = Get-AVDTuneState $Root
+            $ended = (& $Machine.Now).ToString('o')
+            [void](Set-AVDTuneState -Root $Root -Values @{ LastChange = $ended })   # also when a step failed
+            $saved = [pscustomobject][ordered]@{ Id = $null; Plan = 'Office policies undo'; Started = $ended; Ended = $ended; User = $User; SnapshotId = $SnapshotId; WhatIf = $false; ImageVersion = $state.ImageVersion; Reboot = $false; Results = @($results) }
+            [void](Add-AVDTuneRun -Root $Root -Run $saved)
+            foreach ($r in @($results | Where-Object { $_.Status -eq 'Reverted' })) {
+                if ($state.ImageVersion) { [void](Add-AVDTuneChangeLogEntry -Root $Root -Version $state.ImageVersion -Category 'Office' -Component $r.Id -ChangeType Changed -Text "Undo: $($r.Title)" -User $User -SnapshotId $SnapshotId -RunId ([string]$saved.Id) -Source Step) }
+            }
+            if (@($results | Where-Object { $_.Status -eq 'Failed' }).Count -eq 0) { Remove-Item -LiteralPath $undoPath -Force -ErrorAction SilentlyContinue }
         }
-        if (@($results | Where-Object { $_.Status -eq 'Failed' }).Count -eq 0) { Remove-Item -LiteralPath $undoPath -Force -ErrorAction SilentlyContinue }
+        $run
     }
-    $run
+    finally { Stop-AVDTuneChange -Root $Root -Owner $changeOwner }
 }
 
 #endregion
@@ -727,8 +735,30 @@ function Test-AVDTuneOfficeFixPrevious {
         ($type -ceq 'DWord' -and ($val -is [int] -or ($val -is [long] -and $val -ge [int]::MinValue -and $val -le [uint32]::MaxValue))) -or
         ($type -ceq 'QWord' -and ($val -is [int] -or $val -is [long])) -or ($type -cin 'String', 'ExpandString' -and $val -is [string]))
     if (-not $ok) { throw "The undo record of the Office fix $Name is not usable: it has no typed earlier value. Nothing was changed." }
+    # only the registry type the value of this fix has (updates: DWord, shared: String); key and name always come from the fix, never from the record
+    if ($Name -cin @(Get-AVDTuneOfficeFixNames) -and $type -cne (Get-AVDTuneOfficeFixDefs)[$Name].Type) { throw "The undo record of the Office fix $Name is not usable: the earlier value has the type $type, the value of this fix is $((Get-AVDTuneOfficeFixDefs)[$Name].Type). Nothing was changed." }
     if ($type -ceq 'DWord') { $val = ConvertTo-AVDTunePolicyDword $val }
     @{ Value = $val; Type = $type }
+}
+
+function Test-AVDTuneOfficeUpdateBlockOwns {
+    # $true when the update block (On or Partial, by settings other than the fix's own value) or a maintenance mode holds the value of the "updates" fix (officeupdate policy enableautomaticupdates): Undo of the fix must not touch it
+    param([Parameter(Mandatory)]$Machine, [string]$Root = (Get-AVDTuneRoot))
+    $mr = Get-AVDTuneProp (Get-AVDTuneState $Root) 'Maintenance'
+    if ($mr -and (Get-AVDTuneProp $mr 'Active')) { return $true }
+    # The block is On or Partial when any of its settings is in place. The fix itself sets the block's own Office item (updateblock.office-auto), so that item alone does not count: right after the fix the block reads Partial.
+    $st = Get-AVDTuneUpdateBlockStatus $Machine
+    @($st.Items | Where-Object { $_.Applicable -and $_.Compliant -and $_.Id -cne 'updateblock.office-auto' }).Count -gt 0
+}
+
+function Remove-AVDTuneOfficeFixRecords {
+    # Discards the fix records (after an install or reconfigure the state of the registry is the ODT's, not the one the records describe); one change log entry names them. Returns the names.
+    param([string]$Root = (Get-AVDTuneRoot), [string]$User, [string]$SnapshotId, [string]$RunId, [string]$Why)
+    $names = @(Get-AVDTuneOfficeFixRecorded -Root $Root)
+    foreach ($n in $names) { Remove-Item -LiteralPath (Get-AVDTuneOfficeFixUndoPath $Root $n) -Force -ErrorAction SilentlyContinue }
+    $state = Get-AVDTuneState $Root
+    if ($names.Count -gt 0 -and $state.ImageVersion) { [void](Add-AVDTuneChangeLogEntry -Root $Root -Version $state.ImageVersion -Category 'Office' -Component 'office.fix' -ChangeType Note -Text "Undo record of the one-click fix(es) $($names -join ', ') discarded: $Why" -User $User -SnapshotId $SnapshotId -RunId $RunId -Source Step) }
+    $names
 }
 
 function Set-AVDTuneOfficeFix {
@@ -739,9 +769,18 @@ function Set-AVDTuneOfficeFix {
     $prev = Get-AVDTunePolicyPrevious -Machine $Machine -Name $d.Name -Key $d.Key
     $step = Get-AVDTuneOfficeFixStep -Name $Name -Previous $prev
     $already = [bool](& $step.Test $Machine).Compliant
+    # an earlier value of another registry type than this fix writes could not be put back by Undo: refuse before anything is changed
+    if (-not $already -and $null -ne $prev -and $prev.Type -cne $d.Type) { throw "The earlier value of $($d.Name) has the registry type $($prev.Type), the fix writes $($d.Type) and Undo would not put it back. Nothing was changed." }
     # the record of the earlier value is written once and never overwritten (an older record is the way back); nothing is written when there is nothing to change
-    if (-not $WhatIf -and -not $already -and (Test-AVDTuneWriteAllowed) -and -not (Test-Path -LiteralPath $undoPath)) { Write-AVDTuneFile $undoPath ([ordered]@{ At = (& $Machine.Now).ToString('o'); Previous = $prev } | ConvertTo-Json -Depth 4) }
-    Invoke-AVDTune -Plan ([pscustomobject]@{ Name = "Office fix: $Name"; Steps = @($step.Id) }) -Catalog @($step) -Machine $Machine -Root $Root -User $User -SnapshotId $SnapshotId -WhatIf:$WhatIf
+    $created = $false
+    if (-not $WhatIf -and -not $already -and (Test-AVDTuneWriteAllowed) -and -not (Test-Path -LiteralPath $undoPath)) { Write-AVDTuneFile $undoPath ([ordered]@{ At = (& $Machine.Now).ToString('o'); Previous = $prev } | ConvertTo-Json -Depth 4); $created = $true }
+    $run = $null
+    try { $run = Invoke-AVDTune -Plan ([pscustomobject]@{ Name = "Office fix: $Name"; Steps = @($step.Id) }) -Catalog @($step) -Machine $Machine -Root $Root -User $User -SnapshotId $SnapshotId -WhatIf:$WhatIf }
+    finally {
+        # a record this call wrote goes again when the run threw or changed nothing (an older record is the way back and stays); a Failed step keeps it: the master may have changed
+        if ($created -and (-not $run -or @($run.Results | Where-Object { $_.Status -in 'Changed', 'Failed' }).Count -eq 0)) { Remove-Item -LiteralPath $undoPath -Force -ErrorAction SilentlyContinue }
+    }
+    $run
 }
 
 function Undo-AVDTuneOfficeFix {
@@ -751,14 +790,31 @@ function Undo-AVDTuneOfficeFix {
     $u = Read-AVDTuneJson $undoPath
     if (-not $u) { throw 'There is nothing to undo: this fix was not recorded.' }
     $prev = Test-AVDTuneOfficeFixPrevious (Get-AVDTuneProp $u 'Previous') $Name
+    # an Office install or reconfigure after the fix made the record outdated: its earlier value is not what the ODT left behind
+    $applied = Get-AVDTuneOfficeAppliedPath $Root; $at = ConvertTo-AVDTuneUtc (Get-AVDTuneProp $u 'At')
+    if ($at -and (Test-Path -LiteralPath $applied -PathType Leaf) -and (Get-Item -LiteralPath $applied -Force).LastWriteTimeUtc -gt $at) { throw "The undo record of the Office fix $Name is older than the last Office install or reconfigure: its earlier value is outdated. Nothing was changed." }
     if (-not $WhatIf) {
         if (-not (Test-AVDTuneWriteAllowed)) { throw 'The snapshot gate is not confirmed: AVDTune is read only until a snapshot newer than its last change is confirmed on the Overview.' }
-        [void](Set-AVDTuneState -Root $Root -Values @{ LastChange = (& $Machine.Now).ToString('o') })   # before the attempt: a failed undo may have changed the master
     }
     $step = Get-AVDTuneOfficeFixStep -Name $Name -Previous $prev
-    $r = Invoke-AVDTuneStep -Step $step -Machine $Machine -Mode Undo -WhatIf:$WhatIf
-    $run = [pscustomobject]@{ Plan = "Office fix undo: $Name"; WhatIf = [bool]$WhatIf; Results = @($r) }
-    if (-not $WhatIf) {
+    # the update block (or a maintenance mode) owns the value of the updates fix: Undo must not take it away, only the fix record goes
+    if ($Name -ceq 'updates' -and (Test-AVDTuneOfficeUpdateBlockOwns -Machine $Machine -Root $Root)) {
+        $msg = 'The value now belongs to the update block (or a running maintenance mode): it was not touched, only the record of the fix was discarded.'
+        $r = [pscustomobject][ordered]@{ Id = $step.Id; Section = $step.Section; Title = $step.Title; Mode = 'Undo'; Status = 'Unchanged'; Before = $null; After = $null; Message = $msg; Reboot = $false; WhatIf = [bool]$WhatIf; At = (& $Machine.Now).ToString('o') }
+        if ($WhatIf) { return [pscustomobject]@{ Plan = "Office fix undo: $Name"; WhatIf = $true; Results = @($r) } }
+        $state = Get-AVDTuneState $Root
+        $ended = (& $Machine.Now).ToString('o')
+        $saved = [pscustomobject][ordered]@{ Id = $null; Plan = "Office fix undo: $Name"; Started = $ended; Ended = $ended; User = $User; SnapshotId = $SnapshotId; WhatIf = $false; ImageVersion = $state.ImageVersion; Reboot = $false; Results = @($r) }   # no LastChange: the master was not changed
+        [void](Add-AVDTuneRun -Root $Root -Run $saved)
+        if ($state.ImageVersion) { [void](Add-AVDTuneChangeLogEntry -Root $Root -Version $state.ImageVersion -Category 'Office' -Component $r.Id -ChangeType Note -Text "Undo of the fix discarded: value now belongs to the update block ($($step.Title))" -User $User -SnapshotId $SnapshotId -RunId ([string]$saved.Id) -Source Step) }
+        Remove-Item -LiteralPath $undoPath -Force -ErrorAction SilentlyContinue
+        return [pscustomobject]@{ Plan = "Office fix undo: $Name"; WhatIf = $false; Results = @($r) }
+    }
+    if ($WhatIf) { return [pscustomobject]@{ Plan = "Office fix undo: $Name"; WhatIf = $true; Results = @(Invoke-AVDTuneStep -Step $step -Machine $Machine -Mode Undo -WhatIf) } }
+    $changeOwner = Start-AVDTuneChange -Root $Root   # marker while the master is written (snapshot gate, #27)
+    try {
+        [void](Set-AVDTuneState -Root $Root -Values @{ LastChange = (& $Machine.Now).ToString('o') })   # before the attempt: a failed undo may have changed the master
+        $r = Invoke-AVDTuneStep -Step $step -Machine $Machine -Mode Undo
         $state = Get-AVDTuneState $Root
         $ended = (& $Machine.Now).ToString('o')
         [void](Set-AVDTuneState -Root $Root -Values @{ LastChange = $ended })   # also when the step failed
@@ -766,8 +822,9 @@ function Undo-AVDTuneOfficeFix {
         [void](Add-AVDTuneRun -Root $Root -Run $saved)
         if ($r.Status -eq 'Reverted' -and $state.ImageVersion) { [void](Add-AVDTuneChangeLogEntry -Root $Root -Version $state.ImageVersion -Category 'Office' -Component $r.Id -ChangeType Changed -Text "Undo: $($r.Title)" -User $User -SnapshotId $SnapshotId -RunId ([string]$saved.Id) -Source Step) }
         if ($r.Status -ne 'Failed') { Remove-Item -LiteralPath $undoPath -Force -ErrorAction SilentlyContinue }
+        [pscustomobject]@{ Plan = "Office fix undo: $Name"; WhatIf = $false; Results = @($r) }
     }
-    $run
+    finally { Stop-AVDTuneChange -Root $Root -Owner $changeOwner }
 }
 
 #endregion

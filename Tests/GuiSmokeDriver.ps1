@@ -890,7 +890,7 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         # fix buttons: none on a master that is right, only on red rows, one per fix
         Update-OffView; $window.UpdateLayout()
         Test-Smoke 'Office state list: on a master that is right there is no Fix button' (@(& $fixButtons).Count -eq 0 -and $ui.PanelOffRows.Children.Count -ge 7) $ui.PanelOffRows.Children.Count
-        $polKey = 'HKLM:\SOFTWARE\Policies\Microsoft\office\16.0\common\officeupdate'; $polWas = & $m.RegGet $polKey 'enableautomaticupdates'; & $m.RegRemove $polKey 'enableautomaticupdates'   # the update block of an earlier step may have set it
+        $polKey = 'HKLM:\SOFTWARE\Policies\Microsoft\office\16.0\common\officeupdate'; $polWas = & $m.RegGet $polKey 'enableautomaticupdates'; $blockWas = (Get-AVDTuneUpdateBlockStatus $m).State; if ($blockWas -ne 'Off') { [void](Set-AVDTuneUpdateBlock -Machine $m -Root $script:StateRoot -Mode Off -User 'smoke') }; & $m.RegRemove $polKey 'enableautomaticupdates'   # the update block of an earlier step is switched off for this part: while it is on, Undo of the updates fix leaves the value to the block (issue 61)
         & $m.RegSet 'HKLM:\SOFTWARE\Microsoft\Office\ClickToRun\Configuration' 'SharedComputerLicensing' '0' 'String'; & $m.RegSet 'HKLM:\SOFTWARE\Microsoft\Office\ClickToRun\Configuration' 'UpdatesEnabled' 'TRUE' 'String'
         Update-OffView; $window.UpdateLayout()
         $fb = @(& $fixButtons)
@@ -904,7 +904,9 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         Test-Smoke 'Office Fix updates: policy enableautomaticupdates = 0, no Fix button left' ((& $m.RegGet 'HKLM:\SOFTWARE\Policies\Microsoft\office\16.0\common\officeupdate' 'enableautomaticupdates') -eq 0 -and @(& $fixButtons).Count -eq 0 -and $script:ConfirmAsked -like '*enableautomaticupdates = 0*') $script:ConfirmAsked
         & $click $ui.BtnOffFixUndo; $window.UpdateLayout()
         Test-Smoke 'Office Undo one-click fixes: both earlier values are back and both rows are red with their Fix button again' ((& $m.RegGet 'HKLM:\SOFTWARE\Microsoft\Office\ClickToRun\Configuration' 'SharedComputerLicensing') -ceq '0' -and $null -eq (& $m.RegGet 'HKLM:\SOFTWARE\Policies\Microsoft\office\16.0\common\officeupdate' 'enableautomaticupdates') -and (@(& $fixButtons | ForEach-Object { [string]$_.DataContext } | Sort-Object) -join ',') -ceq 'shared,updates') ((@(& $fixButtons | ForEach-Object { [string]$_.DataContext })) -join ',')
+        Test-Smoke 'Office Undo one-click fixes: the status line reports the result per fix (Reverted), not a fixed "undone"' ($ui.TxtOffState.Text -like '*shared Reverted*' -and $ui.TxtOffState.Text -like '*updates Reverted*' -and $ui.TxtOffState.Text -notlike '*undone*') $ui.TxtOffState.Text
         # leave the fake master as it was
+        if ($blockWas -and $blockWas -ne 'Off') { [void](Set-AVDTuneUpdateBlock -Machine $m -Root $script:StateRoot -Mode On -User 'smoke') }
         if ($null -ne $polWas) { & $m.RegSet $polKey 'enableautomaticupdates' $polWas 'DWord' }
         & $m.RegSet 'HKLM:\SOFTWARE\Microsoft\Office\ClickToRun\Configuration' 'SharedComputerLicensing' '1' 'String'; & $m.RegSet 'HKLM:\SOFTWARE\Microsoft\Office\ClickToRun\Configuration' 'UpdatesEnabled' 'FALSE' 'String'
         Update-OffView; $window.UpdateLayout()
