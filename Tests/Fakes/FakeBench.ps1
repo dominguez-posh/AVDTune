@@ -8,6 +8,7 @@
 # DiskspdExitCode, DiskspdXml (a fixed answer), TaskRegisterFails, Throttle (cpu.sustained value).
 # Round 2: Gpu ($true: a hardware GPU is listed), SkipApps (app keys that are 'not installed'), NoSite (the Speedometer copy is missing; default $true), ShareFails ($true: the share folder cannot be made),
 # VhdFails, VhdParallelFails, CapacityFails, CapacityBlock (the info.capacity object), RefusedPrograms (names the adapter would refuse). .Store.ShareFolders = test folders that exist now (the checks look for leftovers).
+# Round 2 fixes: Volumes and WorkLeftovers (what the leftover scan reports).
 # .Store holds the state, .Log what was asked (never a secret).
 
 function New-FakeDiskspdXml {
@@ -46,7 +47,7 @@ function New-AVDTuneFakeBench {
         Sessions = @(); UptimeMinutes = 120; CpuLoad = 2.0; FreeGiB = 100.0; PendingReboot = $false; OnBattery = $false; UpdateBusyCalls = 0; LockBusy = $false
         ZipSha256 = [string]$Config.diskspd.zipSha256; ExeSha256 = [string]$Config.diskspd.exeSha256; ZipBytes = [long]$Config.diskspd.zipBytes; SigStatus = 'Valid'; SigSubject = 'CN=Microsoft Windows, O=Microsoft Corporation'
         DownloadFails = $false; DiskspdExitCode = 0; DiskspdXml = $null; TaskRegisterFails = $false; Throttle = 0.98
-        Gpu = $false; SkipApps = @(); NoSite = $true; ShareFails = $false; VhdFails = $false; VhdParallelFails = $false; CapacityFails = $false; CapacityBlock = $null; RefusedPrograms = @(); ShareFolders = @{}
+        Gpu = $false; SkipApps = @(); NoSite = $true; ShareFails = $false; VhdFails = $false; VhdParallelFails = $false; CapacityFails = $false; CapacityBlock = $null; RefusedPrograms = @(); ShareFolders = @{}; Volumes = @(); WorkLeftovers = @()
         Tasks = @{}; Counts = @{}; Log = (New-Object System.Collections.ArrayList); BusyAsked = 0; LockHeld = $false; Sleeps = 0
         Reference = $Reference; Config = $Config
     }
@@ -227,6 +228,15 @@ function New-AVDTuneFakeBench {
     }.GetNewClosure()
     $b.RestoreTaskRemove = { $store.Tasks.Remove('AVDTune-BenchmarkRestore'); [void]$store.Log.Add('TaskRemove') }.GetNewClosure()
     $b.RestoreTaskExists = { $store.Tasks.ContainsKey('AVDTune-BenchmarkRestore') }.GetNewClosure()
+    $b.LeftoverScan = {
+        # like the real scan: share test folders that still exist, attached containers (Volumes with the label), mount points and Edge/Office leftovers of the work folder
+        param([string]$Root)
+        $l = @()
+        foreach ($d in @($store.ShareFolders.Keys)) { $l += "share test folder $d" }
+        foreach ($v in @($store.Volumes)) { $l += 'attached container (volume label AVDTuneBench)' }
+        foreach ($m in @($store.WorkLeftovers)) { $l += "work leftover $m" }
+        $l
+    }.GetNewClosure()
     $b.NetDns = { param([string]$Name) [void]$store.Log.Add("Dns $Name"); if ($store.Offline) { $null } else { 14.0 + ($store.Log.Count % 3) } }.GetNewClosure()
     $b.NetTcp = { param([string]$Name, [int]$Port, [int]$TimeoutMs) [void]$store.Log.Add("Tcp $Name $Port"); if ($store.Offline) { $null } else { 10.0 + ($store.Log.Count % 5) } }.GetNewClosure()
     $b.NetDownload = {

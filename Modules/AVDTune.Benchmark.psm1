@@ -267,6 +267,18 @@ function Initialize-AVDTuneBenchTemp {
     $dir
 }
 
+function Get-AVDTuneProfilePath {
+    # Profile folder of the user of this token, from HKLM ProfileList (never from user-controlled settings or the environment); the folder API only when the key is missing
+    $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+    try { $v = [string](Get-ItemProperty -LiteralPath ('HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\' + $sid) -ErrorAction Stop).ProfileImagePath; if ($v) { return [Environment]::ExpandEnvironmentVariables($v) } } catch { }
+    [Environment]::GetFolderPath('UserProfile')
+}
+
+function Get-AVDTuneHklmValue([string]$Name) {
+    # ProgramFilesDir / CommonFilesDir (64-bit view) from HKLM
+    try { [string](Get-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion' -Name $Name -ErrorAction Stop).$Name } catch { [Environment]::GetFolderPath('ProgramFiles') }
+}
+
 function Get-AVDTuneChildEnvironment {
     # Allowlist of the environment of a child: only what Windows programs need to find the system, plus fixed PATH, TEMP and TMP. Everything else (DOTNET_*, COR*, __COMPAT_LAYER,
     # variables from the profile of the user) is not passed on.
@@ -280,10 +292,14 @@ function Get-AVDTuneChildEnvironment {
     }
     $env['PATH'] = [Environment]::GetFolderPath('System'); $env['TEMP'] = $TempDir; $env['TMP'] = $TempDir
     if ($Extended) {
-        $profile = [Environment]::GetFolderPath('UserProfile')
+        # USERPROFILE from ProfileList (HKLM, by the SID of the token); APPDATA and LOCALAPPDATA are DERIVED from it: HKCU shell folders are controlled by the user
+        $profile = Get-AVDTuneProfilePath
         $who = [Security.Principal.WindowsIdentity]::GetCurrent().Name
         $env['USERPROFILE'] = $profile
-        $env['APPDATA'] = [Environment]::GetFolderPath('ApplicationData'); $env['LOCALAPPDATA'] = [Environment]::GetFolderPath('LocalApplicationData')
+        $env['APPDATA'] = Join-Path $profile 'AppData\Roaming'; $env['LOCALAPPDATA'] = Join-Path $profile 'AppData\Local'
+        # missing in the child otherwise: from HKLM (ProgramW6432, CommonProgramW6432) and the folder API (ALLUSERSPROFILE, PUBLIC)
+        $env['ProgramW6432'] = Get-AVDTuneHklmValue 'ProgramFilesDir'; $env['CommonProgramW6432'] = Get-AVDTuneHklmValue 'CommonFilesDir'
+        $env['ALLUSERSPROFILE'] = [Environment]::GetFolderPath('CommonApplicationData'); $env['PUBLIC'] = ([Environment]::GetFolderPath('CommonDocuments') -replace '\\Documents$', '')
         $bs = [string][char]92
         $at = $who.IndexOf($bs)
         $env['USERNAME'] = $(if ($at -ge 0) { $who.Substring($at + 1) } else { $who }); $env['USERDOMAIN'] = $(if ($at -ge 0) { $who.Substring(0, $at) } else { [Environment]::MachineName })
@@ -453,7 +469,7 @@ function New-AVDTuneBenchAdapter {
                 $args2 += @('--app', "$key=$path")
             }
             $timeout = if ($Command -eq 'capacity') { $limits.CapacityMs } else { $limits.AppsMs }
-            $json = & $runner $Command $args2 $timeout $true
+            $json = & $runner $Command $args2 $timeout ($Command -eq 'apps')
             if ($refused.Count -gt 0 -and $json.PSObject.Properties['info'] -eq $null) { $json | Add-Member -NotePropertyName info -NotePropertyValue ([pscustomobject]@{}) }
             if ($refused.Count -gt 0) { $json | Add-Member -NotePropertyName refusedPrograms -NotePropertyValue @($refused) -Force }
             $json
@@ -466,8 +482,23 @@ function New-AVDTuneBenchAdapter {
         if ($Unc -notmatch '^\\\\[A-Za-z0-9][A-Za-z0-9.-]{0,200}\\[A-Za-z0-9._$ -]{1,80}(\\[A-Za-z0-9._ -]{1,80}){0,4}$') { throw 'The share path is not a plain UNC path.' }
         if ($Unc -match '(^|\\)\.+(\\|$)') { throw 'The share path is not a plain UNC path.' }
         $dir = Join-Path $Unc ('AVDTune-Bench-' + [guid]::NewGuid().ToString('N'))
-        $info = [IO.Directory]::CreateDirectory($dir)
+        # created in ONE step with a protected DACL (current administrator, SYSTEM, Administrators; no inheritance from the share): nobody else can prepare or swap what is inside
+        $sec = New-Object System.Security.AccessControl.DirectorySecurity
+        $sec.SetAccessRuleProtection($true, $false)
+        $me = [Security.Principal.WindowsIdentity]::GetCurrent().User
+        foreach ($sid in @($me, (New-Object Security.Principal.SecurityIdentifier 'S-1-5-18'), (New-Object Security.Principal.SecurityIdentifier 'S-1-5-32-544'))) {
+            $sec.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($sid, 'FullControl', 'ContainerInherit, ObjectInherit', 'None', 'Allow')))
+        }
+        $info = New-Object IO.DirectoryInfo $dir
+        $info.Create($sec)
+        $info.Refresh()
         if (($info.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'The test folder on the share is a link.' }
+        # afterwards: the owner is us, Administrators or SYSTEM, and there is no rule for anyone else
+        $acl = $info.GetAccessControl()
+        $owner = $acl.GetOwner([Security.Principal.SecurityIdentifier]).Value
+        $allowed = @($me.Value, 'S-1-5-18', 'S-1-5-32-544')
+        $foreign = @($acl.GetAccessRules($true, $false, [Security.Principal.SecurityIdentifier]) | Where-Object { $_.IdentityReference.Value -notin $allowed })
+        if ($owner -notin $allowed -or $foreign.Count -gt 0) { throw 'The test folder on the share has a foreign owner or rule; it is not used.' }
         $dir
     }
     $b.ShareRemoveFolder = { param([string]$Dir) if ($Dir -notmatch 'AVDTune-Bench-[0-9a-f]{32}$') { throw 'Not a test folder of AVDTune.' }; if (Test-Path -LiteralPath $Dir) { Remove-AVDTuneFolderNoFollow $Dir } }
@@ -530,6 +561,24 @@ function New-AVDTuneBenchAdapter {
     }
     $b.RestoreTaskRemove = { Unregister-ScheduledTask -TaskName $script:RestoreTaskName -Confirm:$false -ErrorAction SilentlyContinue }
     $b.RestoreTaskExists = { [bool](Get-ScheduledTask -TaskName $script:RestoreTaskName -ErrorAction SilentlyContinue) }
+    $b.LeftoverScan = {
+        # leftovers of round 2 that live outside the state folder: test folders AVDTune-Bench-<guid> on the FSLogix share, attached containers (volume label AVDTuneBench), mount points
+        # (mnt<n> folders that are still mount points) and Edge or Office leftovers in a work folder. Reads only.
+        param([string]$Root)
+        $found = @()
+        try {
+            $vl = (Get-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\FSLogix\Profiles' -ErrorAction Stop).VHDLocations
+            foreach ($loc in @($vl)) { if ([string]$loc -match '^\\\\') { foreach ($d in @(Get-ChildItem -LiteralPath ([string]$loc) -Directory -Force -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '^AVDTune-Bench-[0-9a-f]{32}$' })) { $found += "share test folder $($d.FullName)" } } }
+        } catch { }
+        try { foreach ($v in @(Get-Volume -ErrorAction Stop | Where-Object { $_.FileSystemLabel -eq 'AVDTuneBench' })) { $found += 'attached container (volume label AVDTuneBench)' } } catch { }
+        $work = Join-Path $Root 'benchmark\work'
+        if (Test-Path -LiteralPath $work) {
+            foreach ($d in @(Get-ChildItem -LiteralPath $work -Recurse -Directory -Force -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '^(mnt\d+|edge-.*|apps-.*|cap-.*)$' })) {
+                $found += $(if ($d.Name -like 'mnt*') { "mount point $($d.FullName)" } else { "work leftover $($d.FullName)" })
+            }
+        }
+        $found
+    }
     $b.NetDns = {
         # one uncached DNS lookup, milliseconds, or $null on failure (DnsQuery_W with DNS_QUERY_BYPASS_CACHE)
         param([string]$Name)
@@ -709,8 +758,11 @@ namespace AVDTuneBenchNative {
             $st.disk = [int]([regex]::Match([AVDTuneBenchNative.Vhd]::PhysicalPath($st.h), '(\d+)$').Groups[1].Value)
             Initialize-Disk -Number $st.disk -PartitionStyle GPT -ErrorAction Stop
             [void](New-Partition -DiskNumber $st.disk -UseMaximumSize -ErrorAction Stop)
+            # no drive letter before the format (nothing may show up in Explorer or be indexed), checked again after the mount
+            foreach ($pp in @(Get-Partition -DiskNumber $st.disk | Where-Object { $_.Type -eq 'Basic' })) { Set-Partition -DiskNumber $st.disk -PartitionNumber $pp.PartitionNumber -NoDefaultDriveLetter $true -ErrorAction Stop }
             [void](Get-Partition -DiskNumber $st.disk | Where-Object { $_.Type -eq 'Basic' } | Format-Volume -FileSystem NTFS -NewFileSystemLabel 'AVDTuneBench' -Confirm:$false -ErrorAction Stop)
             & $mount
+            if (@(Get-Partition -DiskNumber $st.disk -ErrorAction SilentlyContinue | Where-Object { $_.DriveLetter -and [int]$_.DriveLetter -ne 0 }).Count -gt 0) { throw 'The container got a drive letter; it is not used.' }
         }
         $rng = New-Object Random 4242
         $buf = New-Object byte[] (4MB); $rng.NextBytes($buf)
@@ -726,8 +778,9 @@ namespace AVDTuneBenchNative {
             }
         }
         $out.WriteMBps = $WriteMB / [math]::Max($writeSeconds, 0.001)
-        $out.Detach = & $time { & $unmount; [AVDTuneBenchNative.Vhd]::Detach($st.h); [AVDTuneBenchNative.Vhd]::Close($st.h); $st.h = [IntPtr]::Zero }
-        $out.Attach = & $time { $st.h = [AVDTuneBenchNative.Vhd]::Open($vhd); [AVDTuneBenchNative.Vhd]::Attach($st.h); & $mount }
+        # the handle stays open between detach and attach: nobody can swap the file in the gap, and the same object is attached again
+        $out.Detach = & $time { & $unmount; [AVDTuneBenchNative.Vhd]::Detach($st.h) }
+        $out.Attach = & $time { [AVDTuneBenchNative.Vhd]::Attach($st.h); & $mount }
         $reSeconds = & $time { foreach ($f in $files) { [void][IO.File]::ReadAllBytes($f) } }
         $out.Reattach = $out.Attach + $reSeconds
         & $unmount; [AVDTuneBenchNative.Vhd]::Detach($st.h); [AVDTuneBenchNative.Vhd]::Close($st.h); $st.h = [IntPtr]::Zero
@@ -955,6 +1008,8 @@ function Test-AVDTuneBenchmarkClean {
     if (Test-Path -LiteralPath (Get-AVDTuneBenchmarkJournalPath $Root)) { $left += 'restore journal' }
     if (Test-Path -LiteralPath (Get-AVDTuneBenchmarkRestoreScriptPath $Root)) { $left += 'restore script' }
     if (& $Bench.RestoreTaskExists) { $left += "scheduled task $script:RestoreTaskName" }
+    # round 2 artefacts: test folders on the share, attached containers (label AVDTuneBench) and mount points, Edge/Office leftovers in the work folder
+    if ($Bench.PSObject.Properties['LeftoverScan']) { foreach ($l in @(& $Bench.LeftoverScan $Root)) { $left += $l } }
     $left
 }
 
@@ -1228,7 +1283,7 @@ function New-AVDTuneBenchmarkReport {
     $usePrev = & $same $Current $Previous
     $useBase = $Baseline -and $Baseline.runId -ne $Current.runId -and (& $same $Current $Baseline)
     $h = New-Object System.Text.StringBuilder
-    [void]$h.AppendLine('<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">')
+    [void]$h.AppendLine('<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta http-equiv="Content-Security-Policy" content="default-src ''none''; style-src ''unsafe-inline''">')
     [void]$h.AppendLine("<title>AVDTune benchmark $(& $e $ver)</title>")
     [void]$h.AppendLine('<style>:root{--bg:#fff;--fg:#1b1b1f;--mute:#6b6b76;--line:#d8d8e0;--good:#0f7b3f;--bad:#b3261e;--warn:#fff4d6}@media (prefers-color-scheme:dark){:root{--bg:#16161a;--fg:#ececf1;--mute:#a0a0ad;--line:#33333c;--good:#58c98b;--bad:#ff8a80;--warn:#3a3217}}body{background:var(--bg);color:var(--fg);font:15px/1.5 "Segoe UI",sans-serif;margin:0;padding:16px;max-width:1000px}h1{font-size:22px}h2{font-size:17px;margin-top:28px}table{border-collapse:collapse;width:100%}th,td{border-bottom:1px solid var(--line);padding:5px 8px;text-align:left}td.n,th.n{text-align:right}.big{font-size:34px;font-weight:600}.cards{display:flex;flex-wrap:wrap;gap:12px}.card{border:1px solid var(--line);border-radius:8px;padding:12px 16px;min-width:200px;flex:1}.mute{color:var(--mute)}.good{color:var(--good)}.bad{color:var(--bad)}.note{background:var(--warn);padding:8px 12px;border-radius:6px}</style></head><body>')
     [void]$h.AppendLine("<h1>AVDTune benchmark, image version $(& $e $(if ($ver) { $ver } else { 'unknown' }))</h1>")
@@ -1702,7 +1757,7 @@ function Invoke-AVDTuneBenchmark {
         if ($quiet) {
             try { $back = Stop-AVDTuneBenchmarkQuiet -Machine $Machine -Bench $Bench -Root $Root; if ($result -and @($back.Failed).Count -gt 0) { $result.info.warnings = @($result.info.warnings) + "Quiet mode could not be fully restored: $($back.Failed -join '; ')" } } catch { $errors += "restore: $($_.Exception.Message)"; if ($result) { $result.info.errors = @($result.info.errors) + "restore: $($_.Exception.Message)" } }
         }
-        if (Test-Path -LiteralPath $work) { Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue }
+        if (Test-Path -LiteralPath $work) { try { Remove-AVDTuneFolderNoFollow $work } catch { $errors += "work folder: $($_.Exception.Message)" } }
         & $Bench.Unlock $lock
     }
     # store (append only), state, change log
@@ -1759,7 +1814,7 @@ function Get-AVDTuneBenchmarkSummaryText {
 
 #endregion
 
-Export-ModuleMember -Function Get-AVDTuneBenchShare, Get-AVDTuneBenchShareHost, Invoke-AVDTuneBenchApps, Invoke-AVDTuneBenchGpu, Invoke-AVDTuneBenchFslogix, Invoke-AVDTuneBenchCapacity, Compare-AVDTuneCapacity, Get-AVDTuneVersionSortKey, Get-AVDTuneBenchmarkVersionResults, Get-AVDTunePreviousVersionResult, Get-AVDTuneBenchDelta, New-AVDTuneBenchmarkReport, Save-AVDTuneBenchmarkReport, Get-AVDTuneAppProgramPath, Invoke-AVDTuneVhdCycle, Get-AVDTuneBenchCategorySet, Get-AVDTuneBenchRound, Get-AVDTuneBenchmarkConfig, Invoke-AVDTuneChildProcess, Initialize-AVDTuneBenchTemp, Get-AVDTuneChildEnvironment, Get-AVDTuneBenchmarkReference, Get-AVDTuneBenchCategoryKey, Get-AVDTuneBenchMedian, Get-AVDTuneBenchCv, Get-AVDTuneBenchIndex,
+Export-ModuleMember -Function Get-AVDTuneBenchShare, Get-AVDTuneBenchShareHost, Invoke-AVDTuneBenchApps, Invoke-AVDTuneBenchGpu, Invoke-AVDTuneBenchFslogix, Invoke-AVDTuneBenchCapacity, Compare-AVDTuneCapacity, Get-AVDTuneVersionSortKey, Get-AVDTuneBenchmarkVersionResults, Get-AVDTunePreviousVersionResult, Get-AVDTuneBenchDelta, New-AVDTuneBenchmarkReport, Save-AVDTuneBenchmarkReport, Get-AVDTuneAppProgramPath, Invoke-AVDTuneVhdCycle, Get-AVDTuneBenchCategorySet, Get-AVDTuneBenchRound, Get-AVDTuneBenchmarkConfig, Invoke-AVDTuneChildProcess, Initialize-AVDTuneBenchTemp, Get-AVDTuneChildEnvironment, Get-AVDTuneProfilePath, Get-AVDTuneBenchmarkReference, Get-AVDTuneBenchCategoryKey, Get-AVDTuneBenchMedian, Get-AVDTuneBenchCv, Get-AVDTuneBenchIndex,
     Get-AVDTuneBenchGeometricMean, Get-AVDTuneBenchWeightedGeometricMean, Get-AVDTuneBenchPercentile, Get-AVDTuneBenchmarkScores, ConvertFrom-AVDTuneDiskspdXml, New-AVDTuneBenchAdapter,
     Get-AVDTuneDiskspd, Test-AVDTuneBenchmarkPreconditions, Wait-AVDTuneUpdateIdle, Get-AVDTuneBenchmarkJournalPath, Get-AVDTuneBenchmarkRestoreScriptPath, New-AVDTuneBenchmarkRestoreScript,
     Start-AVDTuneBenchmarkQuiet, Stop-AVDTuneBenchmarkQuiet, Get-AVDTuneBenchmarkCrash, Repair-AVDTuneBenchmarkCrash, Test-AVDTuneBenchmarkClean, Get-AVDTuneBenchRestoreAction, Remove-AVDTuneDiskspdCache, Invoke-AVDTuneBenchDisk, Invoke-AVDTuneBenchNetwork,
