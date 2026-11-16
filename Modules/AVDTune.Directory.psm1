@@ -227,12 +227,12 @@ function Get-AVDTuneDirectoryInfo {
     catch { [void]$warnings.Add("OU tree not read: $($_.Exception.Message)") }
     $groups = @()
     try {
-        $groups = @(& $Ldap.Search $Connection $defaultNc '(objectClass=group)' 'Subtree' @('name', 'distinguishedName', 'objectSid', 'groupType', 'description') | ForEach-Object {
+        $groups = @(& $Ldap.Search $Connection $defaultNc '(objectClass=group)' 'Subtree' @('name', 'distinguishedName', 'sAMAccountName', 'objectSid', 'groupType', 'description') | ForEach-Object {
                 $gt = Get-AVDTuneAttr $_ 'groupType'
                 [pscustomobject]@{
                     Name = [string](Get-AVDTuneAttr $_ 'name'); Dn = [string]$(if (Get-AVDTuneAttr $_ 'distinguishedName') { Get-AVDTuneAttr $_ 'distinguishedName' } else { $_.Dn })
                     Sid = (ConvertTo-AVDTuneSid (Get-AVDTuneAttr $_ 'objectSid')); Security = $(if ($null -ne $gt) { ([int]$gt) -lt 0 } else { $true })
-                    Description = [string](Get-AVDTuneAttr $_ 'description')
+                    Description = [string](Get-AVDTuneAttr $_ 'description'); Sam = $(if (Get-AVDTuneAttr $_ 'sAMAccountName') { [string](Get-AVDTuneAttr $_ 'sAMAccountName') } else { [string](Get-AVDTuneAttr $_ 'name') })
                 }
             } | Where-Object { $_.Sid })
     }

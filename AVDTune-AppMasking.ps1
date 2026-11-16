@@ -17,6 +17,7 @@ $script:MaskUiBuilt = $false
 function Get-MaskAdapter { if ($script:TestMode) { $script:MaskFake.M } else { if (-not $script:RealMask) { $script:RealMask = New-AVDTuneMaskingAdapter }; $script:RealMask } }
 function Get-MaskAnswers { $e = $null; try { $e = Get-AVDTuneEnvironment $script:StateRoot } catch { }; if ($e) { Get-AVDTuneEnvironmentAnswers $e } else { $null } }
 function Get-MaskDirectory { $d = $null; try { $d = Read-AVDTuneJson (Join-Path $script:StateRoot 'config\directory.json') } catch { }; if ($d -and (Get-AVDTuneProp $d 'Directory')) { $d.Directory } else { $null } }
+function Get-MaskGroupSam($G) { $s = [string](Get-AVDTuneProp $G 'Sam'); if ($s) { $s } else { [string]$G.Name } }
 function Get-MaskGateSnapshot { $g = Get-AVDTuneWriteGate; if ($g) { [string]$g.SnapshotId } else { '' } }
 function Assert-MaskWrite { if (-not (Test-AVDTuneWriteAllowed)) { throw 'Read only: confirm a snapshot of today on the Overview first.' } }
 
@@ -130,7 +131,7 @@ function Update-MaskView {
     $ui.CmbMaskVis.ItemsSource = @('Nobody except Administrators (hidden for everyone)') + $(if ($caps.AdGroups -or $caps.LocalGroups) { @('Administrators and one group') })
     if ($ui.CmbMaskVis.SelectedIndex -lt 0) { $ui.CmbMaskVis.SelectedIndex = 0 }
     $ui.CmbMaskKind.ItemsSource = @(Get-MaskKindChoices $caps); if ($ui.CmbMaskKind.SelectedIndex -lt 0) { $ui.CmbMaskKind.SelectedIndex = 0 }
-    $ui.CmbMaskExisting.ItemsSource = @(if ($dir) { @($dir.Groups | Where-Object { $_.Security } | ForEach-Object { [string]$_.Name }) } else { @() })
+    $ui.CmbMaskExisting.ItemsSource = @(if ($dir) { @($dir.Groups | Where-Object { $_.Security } | ForEach-Object { Get-MaskGroupSam $_ }) } else { @() })
     $ous = New-Object System.Collections.ArrayList
     $walk = $null; $walk = { param($nodes, $depth) foreach ($n in @($nodes)) { if ($n) { [void]$ous.Add(([string]$n.Dn)); & $walk @($n.Children) ($depth + 1) } } }
     if ($dir) { & $walk @($dir.OuTree) 0 }
@@ -179,10 +180,14 @@ function Get-MaskLdap {
     # A connection for one change: the domain account of the form, pinned LDAPS only (nothing is sent without a pin; the start sequence pins it). Returns Ldap, Conn, Dispose.
     $server = $ui.TxtMaskDc.Text.Trim(); $user = $ui.TxtMaskUser.Text.Trim()
     if ($script:TestMode) { return [pscustomobject]@{ Ldap = $script:MaskFake.Ldap; Conn = 'c'; Close = { } } }
-    if ($ui.PwdMask.SecurePassword.Length -eq 0) { throw 'Enter the domain account and its password for the connection to the domain controller.' }
-    $ldap = New-AVDTuneLdapAdapter
-    $e = Get-AVDTuneEnvironment $script:StateRoot
-    $r = Connect-AVDTuneDirectory -Ldap $ldap -Server $server -User $user -Password $ui.PwdMask.SecurePassword -Pins (Get-AVDTuneDcPins $e)
+    $secure = $ui.PwdMask.SecurePassword   # a copy: disposed as soon as the connection is made or has failed
+    try {
+        if ($secure.Length -eq 0) { throw 'Enter the domain account and its password for the connection to the domain controller.' }
+        $ldap = New-AVDTuneLdapAdapter
+        $e = Get-AVDTuneEnvironment $script:StateRoot
+        $r = Connect-AVDTuneDirectory -Ldap $ldap -Server $server -User $user -Password $secure -Pins (Get-AVDTuneDcPins $e)
+    }
+    finally { $secure.Dispose() }
     if ($r.Status -ne 'Connected') { throw "No connection to the domain controller ($($r.Status)): $($r.Message) Pin the certificate and connect in the start sequence first." }
     $conn = $r.Connection
     [pscustomobject]@{ Ldap = $ldap; Conn = $conn; Close = { Disconnect-AVDTuneDirectory -Ldap $ldap -Connection $conn }.GetNewClosure() }
@@ -213,9 +218,10 @@ function Get-MaskRequest {
         $dir = Get-MaskDirectory
         if ($kind -like 'Existing AD*') {
             $gn = [string]$ui.CmbMaskExisting.SelectedItem
-            $g = if ($dir) { @($dir.Groups | Where-Object { $_.Name -eq $gn })[0] } else { $null }
+            $g = if ($dir) { @($dir.Groups | Where-Object { (Get-MaskGroupSam $_) -eq $gn })[0] } else { $null }
             if (-not $g) { throw 'Choose an existing AD group (read from the domain controller in the start sequence).' }
-            $p.Groups = @([pscustomobject]@{ Account = "$($dir.NetBiosName)\$($g.Name)"; Dn = [string]$g.Dn })
+            # bound by sAMAccountName and SID: the module checks both against the domain controller and takes account and DN from there
+            $p.Groups = @([pscustomobject]@{ Sam = (Get-MaskGroupSam $g); Sid = [string]$g.Sid; Account = "$($dir.NetBiosName)\$(Get-MaskGroupSam $g)"; Dn = [string]$g.Dn })
             $p.Directory = $dir
         }
         elseif ($kind -like 'New AD*') {
@@ -237,28 +243,32 @@ function Show-MaskRun($Run, [string]$What) {
 }
 
 function Invoke-MaskSave([bool]$WhatIf) {
-    $p = Get-MaskRequest
-    $m = Get-MaskAdapter
-    $needLdap = ($p.CreateGroup -and $p.CreateGroup.Kind -eq 'Ad') -or $p.Directory
-    if ($WhatIf) {
-        $lc = $null
-        try { if ($needLdap -and $p.CreateGroup) { $lc = Get-MaskLdap; $p.Ldap = $lc.Ldap; $p.Conn = $lc.Conn }
-            $run = Save-AVDTuneRuleSet -Machine $script:Machine -M $m -Root $script:StateRoot @p -WhatIf }
-        finally { if ($lc) { & $lc.Close } }
-        $lines = @($run.Results | ForEach-Object { "$($_.Title): $($_.Status)" })
-        $ui.TxtMaskState.Text = 'Preview (nothing written): ' + ($lines -join '; ') + '. Rule lines: ' + ((@($p.Entries) | ForEach-Object { "$($_.Folder)  $($_.Name)  flags 0x00000222" }) -join ' | ')
-        return
-    }
-    Assert-MaskWrite
-    $confirm = $true; $text = "Write the rule set '$($p.Name)' with $(@($p.Entries).Count) hiding rule(s) to C:\Program Files\FSLogix\Apps\Rules?"
-    if ($p.CreateGroup) {
-        $where = if ($p.CreateGroup.Kind -eq 'Ad') { "in Active Directory, OU $($p.CreateGroup.OuDn), domain $($p.Directory.DnsName)" } else { 'on this master' }
-        $text = "Create the group '$($p.CreateGroup.Name)' $where and write the rule set '$($p.Name)'? The group is deleted again by 'Undo the last change' as long as it has no members."
-    }
-    if (-not (Confirm-Action $text 'App Masking')) { return }
-    $lc = $null
+    # One try/finally around everything: the connection is closed and the password box is cleared on every path (preview, refusal of the confirmation, error, success)
+    $lc = $null; $run = $null
     try {
-        if ($p.Directory) { $lc = Get-MaskLdap; $p.Ldap = $lc.Ldap; $p.Conn = $lc.Conn }   # the DN of the built-in Administrators group is read from the DC, also for an existing group
+        $p = Get-MaskRequest
+        $m = Get-MaskAdapter
+        if ($p.Directory) { $lc = Get-MaskLdap; $p.Ldap = $lc.Ldap; $p.Conn = $lc.Conn }   # the groups are checked against the DC (name, SID) and the DN of the built-in Administrators group is read from it
+        if ($WhatIf) {
+            $run = Save-AVDTuneRuleSet -Machine $script:Machine -M $m -Root $script:StateRoot @p -WhatIf
+            $lines = @($run.Results | ForEach-Object { "$($_.Title): $($_.Status)" })
+            $chg = if ($run.AssignmentChange) { " The existing assignment changes from '$($run.AssignmentChange.Old)' to '$($run.AssignmentChange.New)'." } else { '' }
+            $ui.TxtMaskState.Text = 'Preview (nothing written): ' + ($lines -join '; ') + '.' + $chg + ' Rule lines: ' + ((@($p.Entries) | ForEach-Object { "$($_.Folder)  $($_.Name)  flags 0x00000222" }) -join ' | ')
+            return
+        }
+        Assert-MaskWrite
+        $text = "Write the rule set '$($p.Name)' with $(@($p.Entries).Count) hiding rule(s) to C:\Program Files\FSLogix\Apps\Rules?"
+        if ($p.CreateGroup) {
+            $where = if ($p.CreateGroup.Kind -eq 'Ad') { "in Active Directory, OU $($p.CreateGroup.OuDn), domain $($p.Directory.DnsName)" } else { 'on this master' }
+            $text = "Create the group '$($p.CreateGroup.Name)' $where and write the rule set '$($p.Name)'? The group is deleted again by 'Undo the last change' as long as it has no members."
+        }
+        # an existing rule set whose assignment would mean something else: both meanings in the question, accepted explicitly
+        $preview = Save-AVDTuneRuleSet -Machine $script:Machine -M $m -Root $script:StateRoot @p -WhatIf
+        if ($preview.AssignmentChange) {
+            $text += "`n`nThe rule set exists already and its assignment changes:`nNow: $($preview.AssignmentChange.Old)`nNew: $($preview.AssignmentChange.New)`nThis changes who sees the hidden items. Continue?"
+            $p.AcceptAssignmentChange = $true
+        }
+        if (-not (Confirm-Action $text 'App Masking')) { return }
         if ($p.CreateGroup) { $p.Confirmed = $true }
         $run = Invoke-MaskChange -Title 'Writing the App Masking rule set' -Step "Rule set $($p.Name)" -Block { Save-AVDTuneRuleSet -Machine $script:Machine -M $m -Root $script:StateRoot @p -User ([string]$env:USERNAME) -SnapshotId (Get-MaskGateSnapshot) }
     }
@@ -287,10 +297,10 @@ Add-Click $ui.BtnMaskLogoff {
     Show-MaskRun $run 'Comfort shortcut'; Update-MaskView
 }
 Add-Click $ui.BtnMaskUndo {
-    Assert-MaskWrite
-    if (-not (Confirm-Action 'Put back what the last App Masking change found (files, shortcut, or the group it created)?' 'Undo')) { return }
     $m = Get-MaskAdapter; $lc = $null
     try {
+        Assert-MaskWrite
+        if (-not (Confirm-Action 'Put back what the last App Masking change found (files, shortcut, or the group it created)? A file that was changed after AVDTune wrote it, or a group with members, is not touched.' 'Undo')) { return }
         $u = Read-AVDTuneJson (Get-AVDTuneMaskingUndoPath $script:StateRoot)
         $p = @{}
         if ($u -and @(Get-AVDTuneProp $u 'Groups' | Where-Object { $_ -and $_.Kind -eq 'Ad' }).Count -gt 0) { $lc = Get-MaskLdap; $p.Ldap = $lc.Ldap; $p.Conn = $lc.Conn }
