@@ -602,11 +602,11 @@ function Assert-AVDTuneRedirectionsPath {
 }
 
 function Get-AVDTuneRedirectionsDefaultFolder {
-    <# The folder the redirections.xml field starts with: the value of RedirXMLSourceFolder when it is set, otherwise <ProgramData>\FSLogix\Redirections (system folder, not hard coded). #>
+    <# The folder the redirections.xml field starts with: the value of RedirXMLSourceFolder when it is set, otherwise <ProgramData>\AVDTune-Public\FSLogix\Redirections (system folder, not hard coded). AVDTune-Public is the folder AVDTune already makes for the watermark copy (Users read only, created and checked with New-AVDTuneUsersReadSecurity and Get-AVDTuneAclProblems); ProgramData\FSLogix is not proposed, the FSLogix installer makes it with a Users write right. #>
     param([Parameter(Mandatory)]$Machine)
     $cur = [string](& $Machine.RegGet $script:ProfilesKey 'RedirXMLSourceFolder')
     if ($cur) { return $cur }
-    Join-Path (Get-AVDTuneSystemFolder ProgramData) 'FSLogix\Redirections'
+    Join-Path (Get-AVDTuneSystemFolder ProgramData) 'AVDTune-Public\FSLogix\Redirections'
 }
 
 function Get-AVDTuneRedirectionsTarget {

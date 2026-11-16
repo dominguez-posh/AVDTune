@@ -786,7 +786,7 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         $ui.BtnFslGroupAdd.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
         Test-Smoke 'a name that is no group and no SID is refused with the reason' ($script:LastToast -like '*neither a group of the domain nor a SID*') $script:LastToast
         # redirections.xml
-        Test-Smoke 'redirections.xml (#68): the folder field is prefilled with <ProgramData>\FSLogix\Redirections when no folder is set in the registry' ($ui.TxtFslRedirFolder.Text -ceq (Join-Path ([Environment]::GetFolderPath('CommonApplicationData')) 'FSLogix\Redirections')) $ui.TxtFslRedirFolder.Text
+        Test-Smoke 'redirections.xml (#68): the folder field is prefilled with <ProgramData>\AVDTune-Public\FSLogix\Redirections when no folder is set in the registry' ($ui.TxtFslRedirFolder.Text -ceq (Join-Path ([Environment]::GetFolderPath('CommonApplicationData')) 'AVDTune-Public\FSLogix\Redirections')) $ui.TxtFslRedirFolder.Text
         $ui.TxtFslRedirFolder.Text ='\\storageaccount.file.core.windows.net\profiles'
         $ui.BtnFslRedirGenerate.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
         $ui.BtnFslRedirValidate.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))

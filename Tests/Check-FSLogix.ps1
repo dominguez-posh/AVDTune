@@ -276,9 +276,9 @@ try {
     Test-Check 'a UNC target is not blocked by that check (the share is the administrator''s choice)' ($null -eq (Get-ThrownText { Assert-AVDTuneRedirectionsPath "$share\redirections.xml" })) $null
     # issue 68: the folder field is prefilled, the folder is created protected, a foreign folder is refused
     $pdDir = [Environment]::GetFolderPath('CommonApplicationData')
-    $defFolder = Join-Path $pdDir 'FSLogix\Redirections'
+    $defFolder = Join-Path $pdDir 'AVDTune-Public\FSLogix\Redirections'
     Test-Check 'prefill: the value set in the registry wins (68)' ((Get-AVDTuneRedirectionsDefaultFolder (New-Master -Reg @{ "$pk|RedirXMLSourceFolder" = $share })) -eq $share) $null
-    Test-Check 'prefill: without a registry value it is <ProgramData>\FSLogix\Redirections from the system folder, not hard coded (68)' ((Get-AVDTuneRedirectionsDefaultFolder (New-Master)) -eq $defFolder -and $defFolder -like '*\FSLogix\Redirections' -and ((Get-Content -LiteralPath (Join-Path $repo 'Modules\AVDTune.FSLogix.psm1') -Raw) -notmatch "'C:\\ProgramData\\FSLogix\\Redirections")) $defFolder
+    Test-Check 'prefill: without a registry value it is <ProgramData>\AVDTune-Public\FSLogix\Redirections (not ProgramData\FSLogix) from the system folder, not hard coded (68)' ((Get-AVDTuneRedirectionsDefaultFolder (New-Master)) -eq $defFolder -and $defFolder -like '*\AVDTune-Public\FSLogix\Redirections' -and $defFolder -notlike '*\ProgramData\FSLogix\*' -and ((Get-Content -LiteralPath (Join-Path $repo 'Modules\AVDTune.FSLogix.psm1') -Raw) -notmatch "'C:\\ProgramData\\FSLogix\\Redirections")) $defFolder
     $r68 = New-AVDTuneFakeFSLogix; $m68 = New-Master
     $s68 = Save-AVDTuneRedirections -Machine $m68 -F $r68 -Root $tmp -Xml $xml -Folder $defFolder -User 'admin1' -SnapshotId 'snap-check'
     $ix = [array]::IndexOf(@($r68.Log), "EnsureFolder $defFolder"); $iw = [array]::IndexOf(@($r68.Log), "WriteText $defFolder\redirections.xml")

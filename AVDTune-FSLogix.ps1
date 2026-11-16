@@ -300,7 +300,7 @@ function Build-FslTemplate {
     }
 }
 function Update-FslRedirections {
-    # prefilled: the folder set in the registry, otherwise <ProgramData>\FSLogix\Redirections; only the groups are left to pick (the folder is created protected on save)
+    # prefilled: the folder set in the registry, otherwise <ProgramData>\AVDTune-Public\FSLogix\Redirections; only the groups are left to pick (the folder is created protected on save)
     if (-not $ui.TxtFslRedirFolder.IsKeyboardFocused -and -not $ui.TxtFslRedirFolder.Text) { $ui.TxtFslRedirFolder.Text = Get-AVDTuneRedirectionsDefaultFolder $script:Machine }
     if (-not $ui.TxtFslRedirXml.Text) {
         $target = Get-AVDTuneRedirectionsTarget $script:Machine
