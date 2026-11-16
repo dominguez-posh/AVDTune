@@ -51,6 +51,19 @@ On the FSLogix page, "Apply recommended lists" (and "Apply" of the settings, whi
 - Test (WhatIf), Apply and Undo run through `Invoke-AVDTune` (write gate, change log, `LastChange`). "Undo recommended lists" removes exactly the members the last Apply added (a stack in `config\fslogix-lists-undo.json`: older entries are never overwritten); members that were there before and foreign members stay.
 - Source: the include/exclude groups concept page above (exclude groups, the include list for Everyone, why administrators are excluded) and the well-known SID table. Not verified offline: the exact wording of the Learn recommendation to exclude administrators (the page names the groups but not their names, see "Not verified"); the group names and adding a domain SID through the WinNT provider are tried on the VM (F3, F9).
 
+## Status pill of the installation (issue 63)
+
+The pill of the "Installation" card compares the installed version with the newest release. The newest release is read when the page opens, in the background, with the same function as the Updates page (`Get-AVDTuneFSLogixLatest`: HEAD request to `https://aka.ms/fslogix_download`, no redirect followed, only `download.microsoft.com` over https accepted, 15 second limit, no download). The result is cached for 60 minutes (5 minutes when it failed, then it is asked again).
+
+| Pill | When |
+|---|---|
+| red "Not installed" | no `InstallVersion` |
+| yellow "Update available: <yy.mm>" | the installed version is older than the newest release |
+| green "Installed, up to date" | the installed version is not older than the newest release |
+| grey "Installed, newest version unknown" + reason (tooltip and the line below) | the lookup failed or timed out, the file name has no `<yy>.<mm>`, or the same year (below) |
+
+Not verified (Learn does not state it): the release is named `FSLogix_<yy>.<mm>.zip` and the product version is `3.<yy>.<build>` (`2.9.<build>` before). The month cannot be read from the product version, so within the same year the pill is grey with that reason, never green by guessing; the Updates page compares the installer after the download (file version). Only the year decides yellow (older year, or product 2.x) and green (later year). To be confirmed on the VM with a real release.
+
 ## Storage token for the NTFS rows (issue 18)
 
 The ACL rows of the storage check read the NTFS rights over the Azure Files REST API with the signed-in user's token (OAuth, header `x-ms-file-request-intent: backup`, never a key). That is the fourth audience of the sign-in (`AVDTune.Session.psm1`):

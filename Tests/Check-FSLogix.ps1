@@ -155,6 +155,26 @@ try {
     Test-Check 'without the write gate the lists are not written (counter-test)' (@($fl.Store.Groups['FSLogix Profile Exclude List']).Count -eq 1 -and (@($fl.Store.Groups['FSLogix Profile Exclude List']) -notcontains 'S-1-5-32-544')) $noGate
     [IO.File]::WriteAllText($dirFile, $dirKeep)
 
+    # ---------------------------------------------------------------- version state of the installation (issue 63)
+    $latOk = Get-AVDTuneFSLogixLatest -F (New-AVDTuneFakeFSLogix)
+    $vNew = Get-AVDTuneFSLogixVersionState -Installed '3.27.100.1' -Latest $latOk
+    $vOld = Get-AVDTuneFSLogixVersionState -Installed '3.25.404.1' -Latest $latOk
+    $vOld2 = Get-AVDTuneFSLogixVersionState -Installed '2.9.8884.27471' -Latest $latOk
+    Test-Check 'version state: not older than the newest release is green' ($vNew.State -eq 'Current' -and $vNew.Pill -eq 'green') ($vNew | ConvertTo-Json -Compress)
+    Test-Check 'version state: older (3.25 against 26.08, and 2.9) is yellow "Update available: 26.08"' ($vOld.State -eq 'Update' -and $vOld.Pill -eq 'yellow' -and $vOld.Text -eq 'Update available: 26.08' -and $vOld2.Pill -eq 'yellow' -and $vOld2.Text -eq 'Update available: 26.08') ($vOld | ConvertTo-Json -Compress)
+    $latBad = Get-AVDTuneFSLogixLatest -F (New-AVDTuneFakeFSLogix -Seed @{ Latest = @{ Ok = $false; Url = ''; Error = 'fake: no connection' } })
+    $vUn = Get-AVDTuneFSLogixVersionState -Installed '3.25.404.1' -Latest $latBad
+    Test-Check 'version state: newest release not readable is grey "Installed, newest version unknown" with the reason, never green' ($vUn.State -eq 'Unknown' -and $vUn.Pill -eq 'unknown' -and $vUn.Text -eq 'Installed, newest version unknown' -and $vUn.Reason -like '*fake: no connection*') ($vUn | ConvertTo-Json -Compress)
+    $latOdd = Get-AVDTuneFSLogixLatest -F (New-AVDTuneFakeFSLogix -Seed @{ Latest = @{ Ok = $true; Url = 'https://download.microsoft.com/x/FSLogix-latest.zip'; Error = '' } })
+    $latHost = Get-AVDTuneFSLogixLatest -F (New-AVDTuneFakeFSLogix -Seed @{ Latest = @{ Ok = $true; Url = 'https://evil.example/FSLogix_99.99.zip'; Error = '' } })
+    Test-Check 'version state: a release name without <yy>.<mm> and a foreign host are grey (no guessing)' ((Get-AVDTuneFSLogixVersionState -Installed '3.25.404.1' -Latest $latOdd).Pill -eq 'unknown' -and (Get-AVDTuneFSLogixVersionState -Installed '3.25.404.1' -Latest $latHost).Pill -eq 'unknown') $null
+    $vSame = Get-AVDTuneFSLogixVersionState -Installed '3.26.826.17182' -Latest $latOk
+    Test-Check 'version state: the same year cannot be decided from the product version: grey with the reason, not green' ($vSame.Pill -eq 'unknown' -and $vSame.Reason -like '*same year*') $vSame.Reason
+    Test-Check 'version state: no latest read yet is grey; not installed is red; an unreadable installed version is grey' ((Get-AVDTuneFSLogixVersionState -Installed '3.25.1.1' -Latest $null).Pill -eq 'unknown' -and (Get-AVDTuneFSLogixVersionState -Installed '' -Latest $latOk).Pill -eq 'red' -and (Get-AVDTuneFSLogixVersionState -Installed 'abc' -Latest $latOk).Pill -eq 'unknown') $null
+    $fRead = New-AVDTuneFakeFSLogix
+    [void](Get-AVDTuneFSLogixLatest -F $fRead)
+    Test-Check 'the lookup is read only: no download, no folder, no file (HEAD of the link only)' (@($fRead.Log | Where-Object { $_ -notlike 'LatestRelease' }).Count -eq 0) ($fRead.Log -join ',')
+
     # ---------------------------------------------------------------- redirections.xml
     $tpl = @(Get-AVDTuneRedirectionTemplate)
     Test-Check 'template: Windows, Edge, Chrome, Teams, Office; only Teams is verified (Learn)' ((($tpl.Group | Sort-Object) -join ',') -eq 'Chrome,Edge,Office,Teams,Windows' -and @($tpl | Where-Object Verified).Count -eq 1 -and ($tpl | Where-Object Group -eq 'Teams').Paths.Count -eq 5) $null

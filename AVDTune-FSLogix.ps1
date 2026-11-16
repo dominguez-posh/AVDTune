@@ -17,6 +17,8 @@ $script:FslTest = $null
 $script:FslStorage = $null
 $script:FslTemplateBoxes = @{}
 $script:FslLatest = $null
+$script:FslLatestLookup = $null   # the running read-only lookup of the newest release (issue 63)
+$script:FslLatestResult = $null   # @{ Result (Get-AVDTuneFSLogixLatest); At }: cached, 60 minutes when it worked, 5 minutes when it did not
 $script:FslSharedGate = $null
 
 function Get-FslAdapter { if ($script:TestMode) { $script:FslFake.F } else { if (-not $script:RealFsl) { $script:RealFsl = New-AVDTuneFSLogixAdapter }; $script:RealFsl } }
@@ -59,16 +61,54 @@ function New-FslResultRow($Row) {
 }
 
 # ---------------------------------------------------------------- the form: installation
+function Start-FslLatestLookup {
+    # Reads the newest release (HEAD on the Microsoft link, no download, 15 s limit) with the same function as the Updates page, in the background; cached.
+    if ($script:FslLatestLookup) { return }
+    $r = $script:FslLatestResult
+    if ($r -and ((Get-Date) - $r.At).TotalMinutes -lt $(if ($r.Result.Ok) { 60 } else { 5 })) { return }
+    if ($script:TestMode) { $script:FslLatestResult = @{ Result = (Get-AVDTuneFSLogixLatest -F $script:FslFake.F); At = (Get-Date) }; return }
+    $ps = [powershell]::Create()
+    [void]$ps.AddScript({
+            param($AppRoot)
+            $ErrorActionPreference = 'Stop'
+            Import-Module (Join-Path $AppRoot 'Modules\AVDTune.psm1') -Force
+            Import-Module (Join-Path $AppRoot 'Modules\AVDTune.FSLogix.psm1') -Force
+            Get-AVDTuneFSLogixLatest -F (New-AVDTuneFSLogixAdapter)
+        }).AddArgument($script:AppRoot)
+    $script:FslLatestLookup = @{ PS = $ps; Handle = $ps.BeginInvoke(); Started = (Get-Date) }
+}
+function Complete-FslLatestLookup {
+    $job = $script:FslLatestLookup
+    if (-not $job) { return }
+    $late = ((Get-Date) - $job.Started).TotalSeconds -gt 45
+    if (-not $job.Handle.IsCompleted -and -not $late) { return }
+    $script:FslLatestLookup = $null
+    $res = $null
+    if ($job.Handle.IsCompleted) {
+        try { $res = @($job.PS.EndInvoke($job.Handle)) | Select-Object -Last 1; if ($job.PS.Streams.Error.Count -gt 0) { $res = [pscustomobject]@{ Ok = $false; Error = $job.PS.Streams.Error[0].Exception.Message } } }
+        catch { $res = [pscustomobject]@{ Ok = $false; Error = $_.Exception.Message } }
+        finally { $job.PS.Dispose() }
+    }
+    else { try { $job.PS.Stop() } catch { }; $job.PS.Dispose(); $res = [pscustomobject]@{ Ok = $false; Error = 'The lookup took longer than 45 seconds.' } }
+    if (-not $res) { $res = [pscustomobject]@{ Ok = $false; Error = 'The lookup returned nothing.' } }
+    $script:FslLatestResult = @{ Result = $res; At = (Get-Date) }
+    if ($script:CurrentPage -eq 'FSLogix') { Update-FslInstall }
+}
 function Update-FslInstall {
     $info = Get-AVDTuneFSLogixInfo -Machine $script:Machine
+    $vs = $null
     if ($info.Installed) {
-        Set-FslPill $ui.PillFslInstall $ui.TxtFslInstallPill 'green'; $ui.TxtFslInstallPill.Text = 'Installed'
+        Start-FslLatestLookup
+        $vs = Get-AVDTuneFSLogixVersionState -Installed $info.Version -Latest $(if ($script:FslLatestResult) { $script:FslLatestResult.Result })
+        if ($script:FslLatestLookup -and -not $script:FslLatestResult) { Set-FslPill $ui.PillFslInstall $ui.TxtFslInstallPill 'info'; $ui.TxtFslInstallPill.Text = 'Installed, checking for updates ...' }
+        else { Set-FslPill $ui.PillFslInstall $ui.TxtFslInstallPill $vs.Pill; $ui.TxtFslInstallPill.Text = $vs.Text }
+        $ui.PillFslInstall.ToolTip = $(if ($vs.Reason) { $vs.Reason } else { $null })
         $svc = if ($info.Frxsvc.Present) { "frxsvc $($info.Frxsvc.Status)" } else { 'frxsvc missing' }
         $drv = if (-not $info.DriversRead) { 'drivers not read' } elseif ($info.Drivers.Count -gt 0) { "drivers: $($info.Drivers -join ', ')" } else { 'no filter driver loaded' }
         $ui.TxtFslVersion.Text = "FSLogix $($info.Version); $svc; $drv"
     }
     else { Set-FslPill $ui.PillFslInstall $ui.TxtFslInstallPill 'red'; $ui.TxtFslInstallPill.Text = 'Not installed'; $ui.TxtFslVersion.Text = 'FSLogix is not installed on this master.' }
-    $ui.TxtFslLatest.Text = $(if ($script:FslLatest) { $script:FslLatest } else { 'The newest release is looked up when you press Install or update (Microsoft download page; the file is checked for the Microsoft signature before it runs, in a folder only administrators can write to).' })
+    $ui.TxtFslLatest.Text = $(if ($vs -and $vs.State -in 'Update', 'Unknown' -and $vs.Reason -and -not $script:FslLatest) { $vs.Reason } elseif ($script:FslLatest) { $script:FslLatest } else { 'The newest release is looked up when you press Install or update (Microsoft download page; the file is checked for the Microsoft signature before it runs, in a folder only administrators can write to).' })
 }
 
 # ---------------------------------------------------------------- the form: settings
@@ -479,6 +519,7 @@ function Complete-FslJob {
     Update-FslView
 }
 $script:Timer.Add_Tick({ try { Complete-FslJob } catch { Show-Error $_.Exception.Message } })
+$script:Timer.Add_Tick({ try { Complete-FslLatestLookup } catch { } })
 
 Add-Click $ui.BtnFslTest { Start-FslJob 'Test' @{ Write = $false }; $ui.TxtFslState.Text = 'Running the function test ...' }
 Add-Click $ui.BtnFslTestWrite {

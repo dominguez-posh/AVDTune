@@ -729,7 +729,16 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         $script:FslFake.F.Store.Defender = @{ Paths = @('C:\Program Files\FSLogix\Apps\', 'C:\ProgramData\FSLogix\'); Processes = @('frxsvc.exe') }
         Show-Page 'FSLogix'; $window.UpdateLayout()
         Test-Smoke 'FSLogix page: own page (no placeholder), the nav item is checked' ($ui.PageFSLogix.Visibility -eq 'Visible' -and $ui.PagePlaceholder.Visibility -eq 'Collapsed' -and $ui.NavFSLogix.IsChecked) $null
-        Test-Smoke 'installation card: installed version, service and drivers' ($ui.TxtFslVersion.Text -like '*2.9.8884.27471*frxsvc Running*frxdrv*' -and $ui.TxtFslInstallPill.Text -eq 'Installed') $ui.TxtFslVersion.Text
+        Test-Smoke 'installation card: installed version, service and drivers' ($ui.TxtFslVersion.Text -like '*2.9.8884.27471*frxsvc Running*frxdrv*' -and $ui.TxtFslInstallPill.Text -eq 'Update available: 26.08') $ui.TxtFslVersion.Text
+        # issue 63: the status pill against the newest release (the fake release is 26.08): older yellow, newer green, not readable grey
+        $pillYellow = ($ui.TxtFslInstallPill.Text -eq 'Update available: 26.08' -and $ui.PillFslInstall.ToolTip -like '*older than the release 26.08*')
+        $script:Machine.Store.Registry['hklm:\software\fslogix\apps|installversion'] = '3.27.100.1'; $script:FslLatestResult = $null; Update-FslInstall
+        $pillGreen = ($ui.TxtFslInstallPill.Text -eq 'Installed, up to date')
+        $script:FslFake.F.Store.Latest = @{ Ok = $false; Url = ''; Error = 'fake: no connection' }; $script:FslLatestResult = $null; Update-FslInstall
+        $pillGrey = ($ui.TxtFslInstallPill.Text -eq 'Installed, newest version unknown' -and $ui.PillFslInstall.ToolTip -like '*fake: no connection*' -and $ui.TxtFslLatest.Text -like '*fake: no connection*')
+        $script:Machine.Store.Registry['hklm:\software\fslogix\apps|installversion'] = '2.9.8884.27471'
+        $script:FslFake.F.Store.Latest = @{ Ok = $true; Url = 'https://download.microsoft.com/download/00000000-0000-0000-0000-000000000000/FSLogix_26.08.zip'; Error = '' }; $script:FslLatestResult = $null; Update-FslInstall
+        Test-Smoke 'status pill (#63): older = yellow with the new version, newer = green, newest not readable = grey with the reason; no download ran' ($pillYellow -and $pillGreen -and $pillGrey -and $ui.TxtFslInstallPill.Text -eq 'Update available: 26.08' -and @($script:FslFake.F.Log | Where-Object { $_ -like 'Download*' }).Count -eq 0) "$pillYellow $pillGreen $pillGrey"
         Test-Smoke 'settings: every setting of the plan as a row with its recommendation and reason, differing values marked' ($script:FslInputs.Count -ge 19 -and (Find-Text $ui.PanelFslSettings 'LockedRetryCount') -and (Find-Text $ui.PanelFslSettings 'Differs') -and (Find-Text $ui.PanelFslSettings 'Office container (ODFC), optional')) $script:FslInputs.Count
         Save-SmokeShot '50-fslogix-top-light'
         # fill in the recommendation, dry run first, then write behind the gate

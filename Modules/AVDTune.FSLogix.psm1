@@ -625,6 +625,33 @@ function Get-AVDTuneFSLogixLatest {
 
 function ConvertTo-AVDTuneVersion([string]$Text) { $v = $null; if ([version]::TryParse(($Text -replace '[^0-9.].*$', ''), [ref]$v)) { $v } else { $null } }
 
+function Get-AVDTuneFSLogixVersionState {
+    <#
+        The state of the installation against the newest release (issue 63), for the status pill. -Latest is the result of Get-AVDTuneFSLogixLatest (the same
+        lookup as the Updates page) or $null when it was not read. Never green by guessing:
+          NotInstalled (red) | Update (yellow, "Update available: <new>") | Current (green) | Unknown (grey, "Installed, newest version unknown" and the reason).
+        The newest release is named like FSLogix_<yy>.<mm>.zip, the installed product version is 3.<yy>.<build>... (older ones 2.9.<build>). The month cannot be
+        read from the product version, so only these cases are decided: product 2.x is older than any <yy>.<mm> release; the year of 3.<yy> older than the year of the
+        release is older; a later year is not older. The same year is Unknown (the Updates page decides after the download, from the file version of the installer).
+        Learn does not state this naming (Verified=false, docs\fslogix.md).
+    #>
+    param([string]$Installed, $Latest)
+    $mk = { param($s, $p, $t, $r, $lv) [pscustomobject]@{ State = $s; Pill = $p; Text = $t; Reason = $r; LatestVersion = $lv } }
+    if (-not $Installed) { return & $mk 'NotInstalled' 'red' 'Not installed' '' '' }
+    if (-not $Latest) { return & $mk 'Unknown' 'unknown' 'Installed, newest version unknown' 'The newest release was not read yet.' '' }
+    if (-not $Latest.Ok) { return & $mk 'Unknown' 'unknown' 'Installed, newest version unknown' "The newest release could not be read: $($Latest.Error)" '' }
+    $lv = [string]$Latest.Version
+    if ($lv -notmatch '\A(\d{2})\.(\d{2})(\.\d+)?\z') { return & $mk 'Unknown' 'unknown' 'Installed, newest version unknown' "The release file name ($($Latest.FileName)) has no version of the form <yy>.<mm>." '' }
+    $ly = [int]$Matches[1]
+    $iv = ConvertTo-AVDTuneVersion $Installed
+    if (-not $iv) { return & $mk 'Unknown' 'unknown' 'Installed, newest version unknown' "The installed version '$Installed' could not be read." $lv }
+    if ($iv.Major -lt 3) { return & $mk 'Update' 'yellow' "Update available: $lv" "Installed $Installed is older than the release $lv." $lv }
+    $iy = $iv.Minor
+    if ($iy -lt $ly) { return & $mk 'Update' 'yellow' "Update available: $lv" "Installed $Installed is older than the release $lv." $lv }
+    if ($iy -gt $ly) { return & $mk 'Current' 'green' 'Installed, up to date' "Installed $Installed is newer than the newest release $lv." $lv }
+    & $mk 'Unknown' 'unknown' 'Installed, newest version unknown' "The newest release is $lv; installed $Installed is from the same year and the month cannot be read from the product version. The Updates page compares the installer after the download." $lv
+}
+
 function Invoke-AVDTuneFSLogixInstall {
     <#
         Installs or updates FSLogix Apps: latest release from Microsoft -> a new folder below the protected state folder -> unzip -> the installer's
@@ -978,7 +1005,7 @@ function New-AVDTuneFSLogixAdapter {
         try {
             [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
             $req = [System.Net.HttpWebRequest]::Create('https://aka.ms/fslogix_download')
-            $req.Method = 'HEAD'; $req.AllowAutoRedirect = $false; $req.Timeout = 30000
+            $req.Method = 'HEAD'; $req.AllowAutoRedirect = $false; $req.Timeout = 15000; $req.ReadWriteTimeout = 15000
             try { $resp = $req.GetResponse() } catch [System.Net.WebException] { $resp = $_.Exception.Response; if (-not $resp) { throw } }
             try { $loc = [string]$resp.Headers['Location'] } finally { $resp.Close() }
             if (-not $loc) { return @{ Ok = $false; Url = ''; Error = 'aka.ms returned no redirect.' } }
@@ -1140,7 +1167,7 @@ function Remove-AVDTuneFolderNoFollowSafe([string]$Dir) { Remove-AVDTuneFolderNo
 #endregion
 
 Export-ModuleMember -Function Get-AVDTuneFSLogixSettingCatalog, Test-AVDTuneFSLogixUncPath, Test-AVDTuneFSLogixValue, Get-AVDTuneFSLogixInfo, Get-AVDTuneFSLogixSettingsState,
-    New-AVDTuneFSLogixRegStep, Get-AVDTuneFSLogixGroupMembers, Get-AVDTuneFSLogixUndoPath, Set-AVDTuneFSLogixSettings, Undo-AVDTuneFSLogixSettings, Get-AVDTuneFSLogixLastChange, Test-AVDTuneSid, Test-AVDTuneDomainSid, New-AVDTuneFSLogixGroupStep, Get-AVDTuneFSLogixRecommendedLists, Set-AVDTuneFSLogixRecommendedLists, Undo-AVDTuneFSLogixRecommendedLists, Get-AVDTuneFSLogixListsUndoPath, Get-AVDTuneFSLogixGroups,
+    New-AVDTuneFSLogixRegStep, Get-AVDTuneFSLogixGroupMembers, Get-AVDTuneFSLogixUndoPath, Set-AVDTuneFSLogixSettings, Undo-AVDTuneFSLogixSettings, Get-AVDTuneFSLogixLastChange, Test-AVDTuneSid, Test-AVDTuneDomainSid, New-AVDTuneFSLogixGroupStep, Get-AVDTuneFSLogixRecommendedLists, Set-AVDTuneFSLogixRecommendedLists, Undo-AVDTuneFSLogixRecommendedLists, Get-AVDTuneFSLogixListsUndoPath, Get-AVDTuneFSLogixGroups, Get-AVDTuneFSLogixVersionState,
     Get-AVDTuneFSLogixGroupChoices, Set-AVDTuneFSLogixGroupMember, Get-AVDTuneRedirectionTemplate, Test-AVDTuneRedirectionPath, New-AVDTuneRedirectionsXml,
     Test-AVDTuneRedirectionsXml, Get-AVDTuneRedirectionsTarget, Assert-AVDTuneRedirectionsPath, Write-AVDTuneUndoFile, Split-AVDTuneLogonName, Save-AVDTuneRedirections, Undo-AVDTuneRedirections, Get-AVDTuneFSLogixDefenderList,
     Get-AVDTuneFSLogixDefenderState, Set-AVDTuneFSLogixDefender, Undo-AVDTuneFSLogixDefender, Get-AVDTuneFSLogixLatest, Invoke-AVDTuneFSLogixInstall, Invoke-AVDTuneFSLogixInstallRecorded,
