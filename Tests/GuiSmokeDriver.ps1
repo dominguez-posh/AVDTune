@@ -909,6 +909,7 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         }
         $t = @(Get-AVDTuneUiTasks | Where-Object { $_.Kind -eq 'optimization-read' } | Select-Object -Last 1)
         Test-Smoke 'Optimization: after the read the task ended, the rows are there and Apply is open' ($t[0].Status -eq 'succeeded' -and $script:OptStatus -and $script:OptStatus.DataValid -and $ui.PanelOptList.Children.Count -gt 10 -and $ui.BtnOptApply.IsEnabled -and $ui.BtnOptRefresh.IsEnabled) "$($t[0].Status) rows=$($ui.PanelOptList.Children.Count)"
+        Test-Smoke 'Optimization: the preset buttons show their status after the read' ($ui.OptPresets['recommended'].Content -like '*in place*') $ui.OptPresets['recommended'].Content
         Save-SmokeShot '56-page-optimization'
         Show-Page 'Overview'
         $true } }

@@ -666,6 +666,31 @@ try {
     Close-AVDTuneWriteGate
     Complete-OptRead
     Test-Check 'page load: after the read the task is succeeded, the status is there and Apply, Undo and Refresh are open' (-not $script:OptJob -and $script:Tasks[0].Status -eq 'succeeded' -and $script:OptStatus.DataValid -and $ui.BtnOptApply.IsEnabled -and $ui.BtnOptUndo.IsEnabled -and $ui.BtnOptRefresh.IsEnabled) $null
+    # the presets say whether their set is in place (#66)
+    $keepSt = $script:OptStatus
+    $presetIds = @{}; foreach ($pn in 'recommended', 'conservative', 'all') { $presetIds[$pn] = @(Get-AVDTuneOptimizationPresetIds -Entries $keepSt.Rows -Preset $pn) }
+    $mk = { param([scriptblock]$Mod) $rs = @($keepSt.Rows | ForEach-Object { $c = $_.PSObject.Copy(); $c.Present = $true; $c.Compliant = $true; $c.Failed = $false; $c }); & $Mod $rs; [pscustomobject]@{ DataValid = $true; DataErrors = @(); Sources = $keepSt.Sources; Rows = $rs; BackupError = $null } }
+    $script:OptStatus = & $mk { param($rs) }
+    Show-OptList
+    Test-Check 'presets: every entry in place gives each of the three sets a check and "in place", Nothing has no status' ((@('recommended', 'conservative', 'all' | Where-Object { $ui.OptPresets[$_].Content -like "*$([char]0x2713) in place" }).Count -eq 3) -and $ui.OptPresets['none'].Content -eq 'Nothing') (($ui.OptPresets.Values | ForEach-Object { $_.Content }) -join ' | ')
+    $victim = $presetIds['conservative'][0]
+    $script:OptStatus = & $mk { param($rs) $v = @($rs | Where-Object Id -eq $victim)[0]; $v.Compliant = $false }
+    Show-OptList
+    $nRec = $presetIds['recommended'].Count
+    Test-Check 'presets: one entry not in place gives "x of y in place" (neutral, no check) for the sets that contain it and the tooltip says the same' ($ui.OptPresets['conservative'].Content -like "*($($presetIds['conservative'].Count - 1) of $($presetIds['conservative'].Count) in place)" -and $ui.OptPresets['conservative'].Content -notlike "*$([char]0x2713)*" -and $ui.OptPresets['recommended'].Content -like "*($($nRec - 1) of $nRec in place)" -and $ui.OptPresets['conservative'].ToolTip -like "*of*in place*") $ui.OptPresets['conservative'].Content
+    $naId = $presetIds['all'][0]
+    $script:OptStatus = & $mk { param($rs) $v = @($rs | Where-Object Id -eq $naId)[0]; $v.Present = $false; $v.Compliant = $false }
+    Show-OptList
+    Test-Check 'presets: an entry that is not on this host counts as in place' ($ui.OptPresets['all'].Content -like "*$([char]0x2713) in place") $ui.OptPresets['all'].Content
+    $script:OptStatus = & $mk { param($rs) $v = @($rs | Where-Object Id -eq $victim)[0]; $v.Failed = $true; $v.Compliant = $false }
+    Show-OptList
+    Test-Check 'presets: an entry that cannot be read does not count as in place' ($ui.OptPresets['all'].Content -like '*(*of*in place)') $ui.OptPresets['all'].Content
+    $script:OptStatus = & $mk { param($rs) }
+    Start-OptRead
+    Test-Check 'presets: while the state is read there is no status' (@('recommended', 'conservative', 'all' | Where-Object { $ui.OptPresets[$_].Content -match 'in place' }).Count -eq 0) $ui.OptPresets['recommended'].Content
+    Complete-OptRead
+    Test-Check 'presets: after the read the status is back' ($ui.OptPresets['recommended'].Content -match 'in place') $null
+    $script:OptStatus = $keepSt; Show-OptList
     $rowsShown = @($ui.PanelOptList.Children | Where-Object { $_ -is [System.Windows.Controls.Grid] })
     Test-Check 'page: the list shows a row per entry with a checkbox, reason, source and state' ($rowsShown.Count -eq $entries.Count -and ($rowsShown[0].Children[0] -is [System.Windows.Controls.CheckBox]) -and ($rowsShown[0].Children[1].Children.Count -ge 3)) "$($rowsShown.Count) rows"
     $selectedBefore = @(Get-OptSelectedRows)
