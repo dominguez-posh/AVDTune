@@ -54,6 +54,27 @@ public static class CapacityMath
     }
 }
 
+/// <summary>Capacity rules before a load worker is started (finding 6 of the round 2 security review: a load simulation must not be able to take the machine down). Pure, so they are checked
+/// without a lot of memory.</summary>
+public static class CapacityGuard
+{
+    public const double WorkerShareOfFreeRam = 0.7;
+    public const double CommitReserveMB = 512;
+
+    /// <summary>The hard limit of the committed memory of one worker's job: its working set twice, 300 MB for the runtime, 700 MB more when it encodes the desktop clip. Not measured on a VM yet.</summary>
+    public static long JobMemoryLimitBytes(double workingSetMB, bool encode) => (long)((workingSetMB * 2 + 300 + (encode ? 700 : 0)) * 1048576);
+
+    /// <summary>Null when another worker may start, otherwise why not. <paramref name="runningWsMB"/> is the measured sum of the running workers (the planned sum is used when it is higher).</summary>
+    public static string? WhyNotStart(int running, double workingSetMB, bool encode, double freeRamAtStartMB, double availCommitMB, double runningWsMB)
+    {
+        double sum = Math.Max(running * workingSetMB, runningWsMB) + workingSetMB;
+        if (sum > WorkerShareOfFreeRam * freeRamAtStartMB) return $"worker memory limit: the working sets of {running + 1} workers ({sum:0} MB) would pass 70 percent of the free memory at the start ({freeRamAtStartMB:0} MB)";
+        double need = JobMemoryLimitBytes(workingSetMB, encode) / 1048576.0 + CommitReserveMB;
+        if (availCommitMB < need) return $"commit limit: another worker needs up to {need:0} MB of commit, {availCommitMB:0} MB are free";
+        return null;
+    }
+}
+
 /// <summary>What one probe user costs per minute (measured while the probe runs alone). The load workers replay it.</summary>
 public sealed record Footprint(double CpuSecPerMin, double WorkingSetMB, double IoOpsPerMin, double IoMBPerMin)
 {
@@ -76,6 +97,7 @@ public sealed class Probe : IDisposable
     private readonly Func<long> _doc, _sheet, _mail, _web;
     private readonly string _dir;
     private readonly string? _powershell;
+    private readonly string? _shellDir;
     private readonly Rng _rng = new(9001);
     private readonly double _idleScale;
     private byte[]? _pdf;
@@ -84,6 +106,7 @@ public sealed class Probe : IDisposable
     {
         _dir = dir; _powershell = powershell; _idleScale = idleScale;
         Directory.CreateDirectory(Path.Combine(dir, "src"));
+        if (powershell != null) { _shellDir = Path.Combine(dir, "ps"); Apps.CreateUserFolder(_shellDir); }
         _doc = Workloads.Deflate(DataGen.TextCorpus(11, 2 << 20));
         _sheet = Workloads.Sort(DataGen.Strings(12, 80_000));
         _mail = Workloads.RegexSearch(DataGen.LogLines(13, 1 << 20));
@@ -128,17 +151,15 @@ public sealed class Probe : IDisposable
         finally { try { Directory.Delete(dst, true); } catch { } try { File.Delete(zip); } catch { } }
     }
 
+    /// <summary>Starts powershell.exe NOT elevated (reduced token, Medium integrity, see <see cref="RestrictedLauncher"/>) in its own small folder (<c>ps</c>, the only place the reduced token may
+    /// write; the probe files stay administrator-only). Null when it cannot be started.</summary>
     private double? StartShell()
     {
         try
         {
             using var job = new JobGroup();
-            var psi = new ProcessStartInfo(_powershell!) { UseShellExecute = false, CreateNoWindow = true, WorkingDirectory = _dir };
-            foreach (var a in new[] { "-NoProfile", "-NonInteractive", "-Command", "exit" }) psi.ArgumentList.Add(a);
             double t0 = Timing.Now();
-            using var p = Process.Start(psi);
-            if (p == null) return null;
-            job.Assign(p);
+            using var p = RestrictedLauncher.Start(_powershell!, RestrictedLauncher.BuildArguments(new[] { "-NoProfile", "-NonInteractive", "-Command", "exit" }), _shellDir, Apps.ChildEnvironment(_shellDir!), job);
             if (!p.WaitForExit(30000)) return null;
             return (Timing.Now() - t0) * 1000.0;
         }
@@ -180,6 +201,14 @@ public sealed class SystemSampler : IDisposable
         var m = new MemStatus { Length = (uint)Marshal.SizeOf<MemStatus>() };
         GlobalMemoryStatusEx(ref m);
         return (m.TotalPage == 0 ? 0 : (m.TotalPage - m.AvailPage) * 100.0 / m.TotalPage, m.AvailPhys / 1048576.0);
+    }
+
+    /// <summary>Free commit (physical memory plus page file that can still be promised), in MB.</summary>
+    public static double CommitFreeMB()
+    {
+        var m = new MemStatus { Length = (uint)Marshal.SizeOf<MemStatus>() };
+        GlobalMemoryStatusEx(ref m);
+        return m.AvailPage / 1048576.0;
     }
 
     public static IoCounters Io() { GetProcessIoCounters(Process.GetCurrentProcess().Handle, out var c); return c; }
@@ -284,6 +313,7 @@ public static class Capacity
             fp = Footprint.FromDeltas(me.TotalProcessorTime.TotalSeconds - cpu0, me.PeakWorkingSet64, (long)(io1.ReadOps + io1.WriteOps - io0.ReadOps - io0.WriteOps), (long)(io1.ReadBytes + io1.WriteBytes - io0.ReadBytes - io0.WriteBytes), Timing.Now() - t0);
             if (alone.Count == 0) { stopReason = "stopped before the first cycle"; return Done(); }
             levels.Add(LevelEntry(0, alone, null));
+            double freeRamAtStartMB = SystemSampler.Memory().AvailMB;   // before the first worker: the base for the 70 percent rule
             bool encode = true;   // CPU-only (no hardware GPU): the RDP stream is encoded in software
             try { encode = Gpu.Pick(Gpu.Enumerate()) == null; } catch (Exception e) when (e is InvalidOperationException or DllNotFoundException or COMException) { }
 
@@ -292,7 +322,16 @@ public static class Capacity
                 if (Stop()) { stopReason = "stopped by the stop file"; break; }
                 if (Timing.Now() - started > limit) { stopReason = "time limit"; break; }
                 Log.Progress($"capacity: {users} users");
-                while (workers.Count < users) workers.Add(StartWorker(work, workers.Count, fp, encode, (int)(limit + 120)));
+                string? why = null;
+                while (workers.Count < users)
+                {
+                    // capacity is checked before EVERY worker (finding 6): commit, and the sum of the working sets at 70 percent of the free memory
+                    double actualWs = 0; foreach (var w in workers) { try { w.P.Refresh(); actualWs += w.P.WorkingSet64 / 1048576.0; } catch (InvalidOperationException) { } }
+                    why = CapacityGuard.WhyNotStart(workers.Count, fp.WorkingSetMB, encode, freeRamAtStartMB, SystemSampler.CommitFreeMB(), actualWs);
+                    if (why != null) break;
+                    workers.Add(StartWorker(work, workers.Count, fp, encode, (int)(limit + 120)));
+                }
+                if (why != null) { stopReason = why; break; }
                 double rampEnd = Timing.Now() + o.Seconds(60), measureEnd = rampEnd + o.Seconds(120);
                 var counted = new List<Dictionary<string, double>>();
                 sampler.Reset();
@@ -373,8 +412,8 @@ public static class Capacity
 
     private static (Process, JobGroup) StartWorker(string work, int index, Footprint fp, bool encode, int seconds)
     {
-        var job = new JobGroup();
-        var inv = System.Globalization.CultureInfo.InvariantCulture;
+        var job = new JobGroup(CapacityGuard.JobMemoryLimitBytes(fp.WorkingSetMB, encode));   // hard memory limit per worker (JOB_OBJECT_LIMIT_JOB_MEMORY)
+        var inv =System.Globalization.CultureInfo.InvariantCulture;
         var psi = new ProcessStartInfo(Environment.ProcessPath!) { UseShellExecute = false, CreateNoWindow = true };
         foreach (var a in new[] { "load", "--user", (index + 1).ToString(inv), "--dir", Path.Combine(work, "u" + (index + 1)), "--quiet",
             "--cpu-sec-per-min", fp.CpuSecPerMin.ToString(inv), "--ws-mb", fp.WorkingSetMB.ToString(inv), "--io-ops-per-min", fp.IoOpsPerMin.ToString(inv), "--io-mb-per-min", fp.IoMBPerMin.ToString(inv),

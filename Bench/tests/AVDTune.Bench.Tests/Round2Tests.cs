@@ -20,7 +20,7 @@ internal static class Round2
 
     public static int Run()
     {
-        Docs(); Site(); AppRules(); SpeedometerParsing(); CapacityChecks(); GpuChecks(); ShareChecks(); JobChecks();
+        Docs(); Site(); AppRules(); SpeedometerParsing(); LauncherChecks(); CapacityChecks(); GpuChecks(); ShareChecks(); JobChecks();
         return _failed;
     }
 
@@ -117,14 +117,40 @@ internal static class Round2
             Check("server: loopback address, random port", server.Origin.StartsWith("http://127.0.0.1:") && server.Port > 1024);
             string ok = Raw(server.Port, $"GET /sub/a.mjs HTTP/1.1\r\nHost: 127.0.0.1:{server.Port}\r\n\r\n");
             Check("server: serves a file of the folder with its type", ok.StartsWith("HTTP/1.1 200") && ok.Contains("text/javascript") && ok.EndsWith("export {}"), ok);
-            Check("server: the start page calls back to /ready", Raw(server.Port, $"GET /start.html HTTP/1.1\r\nHost: 127.0.0.1:{server.Port}\r\n\r\n").Contains("/ready") && !server.ReadyCalled);
-            Raw(server.Port, $"GET /ready HTTP/1.1\r\nHost: 127.0.0.1:{server.Port}\r\n\r\n");
-            Check("server: /ready is noticed", server.WaitReady(2000));
+            string G(string path) => Raw(server.Port, $"GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{server.Port}\r\n\r\n");
+            Check("server: the token is 128 bits (32 hex characters), new for every server", server.Token.Length == 32 && server.Token.All(Uri.IsHexDigit) && server.Token != new SiteServer(null).Token);
+            Check("server: the start page calls back to /ready/<token>", G("/start.html").Contains("/ready/" + server.Token) && !server.ReadyCalled);
+            Check("server: /ready without the token or with a wrong one gets 404 and is not noticed", G("/ready").StartsWith("HTTP/1.1 404") && G("/ready/" + new string('0', 32)).StartsWith("HTTP/1.1 404") && G("/ready/" + server.Token.Substring(0, 31)).StartsWith("HTTP/1.1 404") && !server.ReadyCalled);
+            G("/ready/" + server.Token);
+            Check("server: /ready/<token> is noticed", server.WaitReady(2000));
+            server.AddWrapper(3);
+            string wrap = G("/w/" + server.Token);
+            Check("wrapper: same origin page with Speedometer in an iframe, reading #result-number and reporting to /result/<token>", wrap.StartsWith("HTTP/1.1 200") && wrap.Contains("<iframe") && wrap.Contains("src=\"/index.html?startAutomatically&amp;iterationCount=3\"") && wrap.Contains("result-number") && wrap.Contains("/result/" + server.Token) && !wrap.Contains("http://") && !wrap.Contains("devtools", StringComparison.OrdinalIgnoreCase));
+            Check("wrapper: a wrong token gets 404, no page", G("/w/" + new string('a', 32)).StartsWith("HTTP/1.1 404") && !G("/w/x").Contains("<iframe"));
+            Check("result: nothing is reported before the page does", server.Result == null);
+            Check("result: a wrong token or a bad value is refused and changes nothing", G("/result/" + new string('b', 32) + "?v=99").StartsWith("HTTP/1.1 404") && G("/result/" + server.Token + "?v=abc").StartsWith("HTTP/1.1 400") && G("/result/" + server.Token + "?v=1e9").StartsWith("HTTP/1.1 400") && G("/result/" + server.Token + "?v=-4").StartsWith("HTTP/1.1 400") && G("/result/" + server.Token).StartsWith("HTTP/1.1 400") && G("/result/" + server.Token + "?v=0").StartsWith("HTTP/1.1 400") && server.Result == null);
+            Check("result: the first valid report is kept, a second one does not replace it", G("/result/" + server.Token + "?v=27.5").StartsWith("HTTP/1.1 200") && server.Result == "27.5" && G("/result/" + server.Token + "?v=99").StartsWith("HTTP/1.1 200") && server.Result == "27.5");
+            Check("request: the query is returned (and the fragment dropped)", SiteServer.ParseRequestFull("GET /result/x?v=1.5#f HTTP/1.1\r\nHost: 127.0.0.1:5000", 5000) is ("/result/x", "v=1.5", 200));
             string wrong = Raw(server.Port, "GET /index.html HTTP/1.1\r\nHost: attacker.example\r\n\r\n");
             Check("server: a wrong Host gets 421, no content", wrong.StartsWith("HTTP/1.1 421") && !wrong.Contains("idx"));
             Check("server: a traversal request gets 404", Raw(server.Port, $"GET /../x.txt HTTP/1.1\r\nHost: 127.0.0.1:{server.Port}\r\n\r\n").StartsWith("HTTP/1.1 404"));
             Check("server: POST gets 405", Raw(server.Port, $"POST /index.html HTTP/1.1\r\nHost: 127.0.0.1:{server.Port}\r\n\r\n").StartsWith("HTTP/1.1 405"));
             Check("server: refused requests are counted", server.RefusedCount >= 3, server.RefusedCount.ToString());
+            // slow clients: a connection that sends nothing is dropped after the time limit, and only a few are served at the same time
+            using (var slow = new SiteServer(root, readTimeoutMs: 400, maxConnections: 3))
+            {
+                var held = new List<System.Net.Sockets.TcpClient>();
+                for (int i2 = 0; i2 < 10; i2++) { var c = new System.Net.Sockets.TcpClient("127.0.0.1", slow.Port); held.Add(c); }
+                Thread.Sleep(300);
+                Check("server: more connections than the limit are closed at once (counted as refused)", slow.RefusedCount >= 5, slow.RefusedCount.ToString());
+                double t0 = Timing.Now(); bool closed = false;
+                try { var ns = held[0].GetStream(); held[0].ReceiveTimeout = 4000; closed = ns.Read(new byte[16], 0, 16) == 0; } catch (IOException) { closed = true; }
+                Check("server: a client that sends nothing is dropped after the read time limit (cancellation token)", closed && Timing.Now() - t0 < 3.0, (Timing.Now() - t0).ToString("0.0"));
+                foreach (var c in held) c.Dispose();
+                Thread.Sleep(600);
+                string again = Raw(slow.Port, $"GET /index.html HTTP/1.1\r\nHost: 127.0.0.1:{slow.Port}\r\n\r\n");
+                Check("server: it answers again after the slow clients are gone", again.StartsWith("HTTP/1.1 200"), again);
+            }
         }
         finally { Directory.Delete(root, true); }
     }
@@ -181,11 +207,72 @@ internal static class Round2
     private static void SpeedometerParsing()
     {
         Check("speedometer: a score is a positive number", Speedometer.TryParseScore("27.5", out double s) && s == 27.5 && !Speedometer.TryParseScore("abc", out _) && !Speedometer.TryParseScore("-1", out _) && !Speedometer.TryParseScore("NaN", out _) && !Speedometer.TryParseScore(null, out _) && !Speedometer.TryParseScore("0", out _));
-        Check("devtools: first line of DevToolsActivePort is the port", Speedometer.ParseActivePort("9222\n/devtools/browser/abc") == 9222 && Throws(() => Speedometer.ParseActivePort("0\nx")) && Throws(() => Speedometer.ParseActivePort("abc")) && Throws(() => Speedometer.ParseActivePort("70000")));
-        string json = "[{\"type\":\"page\",\"url\":\"http://127.0.0.1:8000/index.html?x\",\"webSocketDebuggerUrl\":\"ws://127.0.0.1:9222/devtools/page/AB12\"},{\"type\":\"service_worker\",\"url\":\"http://127.0.0.1:8000/x\",\"webSocketDebuggerUrl\":\"ws://127.0.0.1:9222/devtools/page/CD\"}]";
-        Check("devtools: the page of our origin is picked", Speedometer.PickPageSocket(json, "http://127.0.0.1:8000", 9222) == "ws://127.0.0.1:9222/devtools/page/AB12");
-        Check("devtools: another origin, port or host in the socket address is refused", Speedometer.PickPageSocket(json, "http://127.0.0.1:9000", 9222) == null && Speedometer.PickPageSocket(json, "http://127.0.0.1:8000", 9223) == null && Speedometer.PickPageSocket(json.Replace("ws://127.0.0.1", "ws://evil.example"), "http://127.0.0.1:8000", 9222) == null);
-        Check("devtools: an evaluate answer is matched by id", Speedometer.ParseEvaluate("{\"id\":3,\"result\":{\"result\":{\"type\":\"string\",\"value\":\"#summary\"}}}", 3) == "#summary" && Speedometer.ParseEvaluate("{\"id\":2,\"result\":{}}", 3) == null && Speedometer.ParseEvaluate("{\"method\":\"event\"}", 3) == null);
+        string? srcDir = null;
+        for (var d = new DirectoryInfo(AppContext.BaseDirectory); d != null && srcDir == null; d = d.Parent) if (File.Exists(Path.Combine(d.FullName, "src", "Speedometer.cs"))) srcDir = Path.Combine(d.FullName, "src");
+        string all = srcDir == null ? "" : string.Concat(Directory.GetFiles(srcDir, "*.cs").Select(File.ReadAllText));
+        Check("source: no remote-debugging-port, DevToolsActivePort, WebSocket client or Runtime.evaluate anywhere in the measure program (finding 1)", all.Length > 1000 && !all.Contains("remote-debugging-port") && !all.Contains("DevToolsActivePort") && !all.Contains("ClientWebSocket") && !all.Contains("Runtime.evaluate") && !all.Contains("System.Net.WebSockets"), srcDir ?? "src not found");
+        var edge = Apps.EdgeArgs(@"C:\p", "http://127.0.0.1:1/w/x", "--window-size=1280,900");
+        Check("edge: InPrivate, throw-away profile, no first run, no sync, no extensions, no debugging port, the page last", edge.Contains("--inprivate") && edge.Contains(@"--user-data-dir=C:\p") && edge.Contains("--no-first-run") && edge.Contains("--disable-sync") && edge.Contains("--disable-extensions") && !edge.Any(a => a.Contains("remote-debugging")) && edge[^1].StartsWith("http://127.0.0.1:"));
+    }
+
+    [System.Runtime.InteropServices.DllImport("kernel32.dll")] private static extern bool CloseHandle(IntPtr h);
+
+    private static void LauncherChecks()
+    {
+        Check("launcher: arguments are quoted the way CommandLineToArgvW reads them back", RestrictedLauncher.QuoteArg("abc") == "abc" && RestrictedLauncher.QuoteArg("a b") == "\"a b\"" && RestrictedLauncher.QuoteArg("") == "\"\"" && RestrictedLauncher.QuoteArg("a\"b") == "\"a\\\"b\"" && RestrictedLauncher.QuoteArg(@"C:\x y\") == "\"C:\\x y\\\\\"" && RestrictedLauncher.BuildArguments(new[] { "/q", "a b" }) == "/q \"a b\"");
+        Check("launcher: the environment block is sorted, NUL-ended, NUL at the end", RestrictedLauncher.EnvironmentBlock(new Dictionary<string, string> { ["b"] = "2", ["A"] = "1" }) == "A=1\0b=2\0\0");
+        Check("launcher: only a token that is not elevated and Medium or lower is accepted", RestrictedLauncher.IntegrityAcceptable(0x2000, false) && RestrictedLauncher.IntegrityAcceptable(0x1000, false) && !RestrictedLauncher.IntegrityAcceptable(0x3000, false) && !RestrictedLauncher.IntegrityAcceptable(0x2000, true) && !RestrictedLauncher.IntegrityAcceptable(0x4000, true));
+        var env = Apps.ChildEnvironment(@"C:\tmp1");
+        Check("apps: the child environment is ours with TEMP and TMP in the program's own folder", env["TEMP"] == @"C:\tmp1" && env["TMP"] == @"C:\tmp1" && env.ContainsKey("SystemRoot") == (Environment.GetEnvironmentVariable("SystemRoot") != null));
+
+        var dir = Temp();
+        try
+        {
+            string made = Path.Combine(dir, "user");
+            Apps.CreateUserFolder(made);
+            var sec = new DirectoryInfo(made).GetAccessControl();
+            var rules = sec.GetAccessRules(true, false, typeof(System.Security.Principal.SecurityIdentifier)).Cast<System.Security.AccessControl.FileSystemAccessRule>().ToList();
+            string me = System.Security.Principal.WindowsIdentity.GetCurrent().User!.Value;
+            var sids = rules.Select(r => r.IdentityReference.Value).Distinct().OrderBy(x => x).ToList();
+            var want = new[] { "S-1-5-18", "S-1-5-32-544", me }.Distinct().OrderBy(x => x).ToList();
+            Check("user folder: protected, only Administrators, SYSTEM and the user of the process have a rule, none for Everyone or Users", sec.AreAccessRulesProtected && sids.SequenceEqual(want) && rules.All(r => r.AccessControlType == System.Security.AccessControl.AccessControlType.Allow), string.Join(",", sids));
+            Check("user folder: the user gets Modify, not full control (no change of permissions)", rules.Where(r => r.IdentityReference.Value == me && me != "S-1-5-18" && me != "S-1-5-32-544").All(r => (r.FileSystemRights & System.Security.AccessControl.FileSystemRights.ChangePermissions) == 0 && (r.FileSystemRights & System.Security.AccessControl.FileSystemRights.Write) != 0));
+            Check("user folder: an existing folder is refused (it could have been prepared by someone else)", Throws(() => Apps.CreateUserFolder(made)));
+
+            // live: a program started with the reduced token (the Safer API gives a standard-user token from a normal or an elevated process)
+            try
+            {
+                IntPtr token = RestrictedLauncher.MakeToken();
+                var (rid, elevated) = RestrictedLauncher.Query(token);
+                CloseHandle(token);
+                Check("launcher: the token made from this process is Medium or lower and not elevated", RestrictedLauncher.IntegrityAcceptable(rid, elevated), $"0x{rid:X} {elevated}");
+                string cmd = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "cmd.exe");
+                string tmp = Path.Combine(made, "t"); Apps.CreateUserFolder(tmp);
+                using var job = new JobGroup();
+                string mark = Path.Combine(tmp, "mark.txt");
+                using var p = RestrictedLauncher.Start(cmd, "/c echo ok > \"" + mark + "\"", made, Apps.ChildEnvironment(tmp), job);
+                Check("launcher: a program is started with the reduced token inside the job and writes in its own folder", p.WaitForExit(15000) && File.Exists(mark));
+                using var job2 = new JobGroup();
+                using var q = RestrictedLauncher.Start(cmd, "/c ping -n 30 127.0.0.1 >nul", made, Apps.ChildEnvironment(tmp), job2);
+                Thread.Sleep(300);
+                var (qr, qe) = RestrictedLauncher.QueryProcess(q.Handle);
+                Check("launcher: the running program really has a Medium or lower, not elevated token, and is in the job", RestrictedLauncher.IntegrityAcceptable(qr, qe) && job2.Pids().Contains(q.Id), $"0x{qr:X} {qe}");
+                job2.Terminate();
+                Check("launcher: ending the job ends the program", q.WaitForExit(5000));
+            }
+            catch (System.ComponentModel.Win32Exception e) when (e.NativeErrorCode == 1314)
+            { Console.WriteLine("SKIP launcher live checks: this account lacks a privilege for CreateProcessAsUser (" + e.Message + ")"); }
+        }
+        finally { try { Directory.Delete(dir, true); } catch { } }
+
+        // memory rules of the load workers
+        Check("capacity guard: the job memory limit of a worker is its working set twice plus the runtime, more with the encoder", CapacityGuard.JobMemoryLimitBytes(100, false) == (long)((200 + 300) * 1048576.0) && CapacityGuard.JobMemoryLimitBytes(100, true) == (long)((200 + 300 + 700) * 1048576.0));
+        Check("capacity guard: the sum of the working sets stays at 70 percent of the free memory", CapacityGuard.WhyNotStart(0, 100, false, 1000, 100000, 0) == null && CapacityGuard.WhyNotStart(6, 100, false, 1000, 100000, 0) == null && CapacityGuard.WhyNotStart(7, 100, false, 1000, 100000, 0) is { } w && w.Contains("70 percent"));
+        Check("capacity guard: the measured working sets count when they are higher than planned", CapacityGuard.WhyNotStart(2, 100, false, 1000, 100000, 650) is { } w2 && w2.Contains("70 percent"));
+        Check("capacity guard: not enough free commit stops the start with the reason", CapacityGuard.WhyNotStart(0, 100, false, 100000, 600, 0) is { } w3 && w3.Contains("commit") && CapacityGuard.WhyNotStart(0, 100, false, 100000, 1100, 0) == null);
+        using (var limited = new JobGroup(CapacityGuard.JobMemoryLimitBytes(50, false)))
+        using (var plain = new JobGroup())
+            Check("job: the memory limit is set in the job object (read back), a plain job has none", limited.MemoryLimitBytes() == CapacityGuard.JobMemoryLimitBytes(50, false) && plain.MemoryLimitBytes() == 0);
     }
 
     private static void CapacityChecks()

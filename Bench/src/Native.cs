@@ -21,12 +21,14 @@ public sealed class JobGroup : IDisposable
 
     private IntPtr _job;
 
-    public JobGroup()
+    /// <param name="jobMemoryBytes">Hard limit of the committed memory of the whole job (JOB_OBJECT_LIMIT_JOB_MEMORY); 0 = none. A process that would go over it fails its allocation instead of eating the machine.</param>
+    public JobGroup(long jobMemoryBytes = 0)
     {
         _job = CreateJobObjectW(IntPtr.Zero, null);
         if (_job == IntPtr.Zero) throw new Win32Exception();
         var l = new ExtendedLimit();
         l.Basic.LimitFlags = 0x2000;   // JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+        if (jobMemoryBytes > 0) { l.Basic.LimitFlags |= 0x200; l.JobMemory = (UIntPtr)(ulong)jobMemoryBytes; }   // JOB_OBJECT_LIMIT_JOB_MEMORY
         if (!SetInformationJobObject(_job, 9, ref l, Marshal.SizeOf<ExtendedLimit>())) { int e = Marshal.GetLastWin32Error(); CloseHandle(_job); _job = IntPtr.Zero; throw new Win32Exception(e); }
     }
 
@@ -39,6 +41,12 @@ public sealed class JobGroup : IDisposable
             try { p.Kill(true); } catch { }
             throw new Win32Exception(e);
         }
+    }
+
+    /// <summary>The same for a process handle (a process that was made suspended, so it has run no code outside the job). The caller ends the process when this throws.</summary>
+    public void AssignHandle(IntPtr process)
+    {
+        if (!AssignProcessToJobObject(_job, process)) throw new Win32Exception(Marshal.GetLastWin32Error());
     }
 
     /// <summary>Process ids that are in the job now (the start process and everything it started).</summary>
@@ -56,6 +64,20 @@ public sealed class JobGroup : IDisposable
         }
         finally { Marshal.FreeHGlobal(buf); }
         return set;
+    }
+
+    /// <summary>The job memory limit that is set now (0 = none), read back from the job object.</summary>
+    public long MemoryLimitBytes()
+    {
+        if (_job == IntPtr.Zero) return 0;
+        IntPtr buf = Marshal.AllocHGlobal(Marshal.SizeOf<ExtendedLimit>());
+        try
+        {
+            if (!QueryInformationJobObject(_job, 9, buf, Marshal.SizeOf<ExtendedLimit>(), out _)) return 0;
+            var l = Marshal.PtrToStructure<ExtendedLimit>(buf);
+            return (l.Basic.LimitFlags & 0x200) != 0 ? (long)(ulong)l.JobMemory : 0;
+        }
+        finally { Marshal.FreeHGlobal(buf); }
     }
 
     public void Terminate() { if (_job != IntPtr.Zero) TerminateJobObject(_job, 0xFFFFFFFF); }

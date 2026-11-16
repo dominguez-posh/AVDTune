@@ -1,4 +1,6 @@
 using System.Diagnostics;
+using System.Security.AccessControl;
+using System.Security.Principal;
 
 namespace AVDTune.Bench;
 
@@ -6,7 +8,9 @@ namespace AVDTune.Bench;
 /// AVDTune with their full path after it has checked the Authenticode signature and holds the files open (checklist "Programs started"); this program only accepts a path
 /// that is below a Windows or Program Files folder (from Known Folders, never from the environment) and has the expected file name. Every program that is started goes into
 /// its own job object with a timeout; only windows of the job are closed (File Explorer: only the new folder window). Ready = the window class is there and visible (and
-/// WaitForInputIdle returned). Not UI Automation: the self-contained runtime has no managed wrapper for it without a third-party library.</summary>
+/// WaitForInputIdle returned). Not UI Automation: the self-contained runtime has no managed wrapper for it without a third-party library.
+/// The programs are NOT started elevated (round 2 security review, finding 3): <see cref="RestrictedLauncher"/> gives them a standard-user token at Medium integrity, still inside the job object.
+/// Only their own work folder (<see cref="CreateUserFolder"/>) gets rights for that token, nothing else; TEMP and TMP of the children point into it.</summary>
 public static class Apps
 {
     public static readonly string[] Keys = { "word", "excel", "edge", "explorer", "powershell", "outlook", "teams" };
@@ -35,6 +39,45 @@ public static class Apps
         return null;
     }
 
+    /// <summary>Folder security for the work folder of the started programs: protected (no inheritance), Administrators and SYSTEM full control, and the user of this process (the token of the programs
+    /// is a reduced version of it) Modify. Nobody else. Only this folder and what is made below it.</summary>
+    public static DirectorySecurity UserFolderSecurity(SecurityIdentifier user)
+    {
+        var s = new DirectorySecurity();
+        s.SetAccessRuleProtection(true, false);
+        foreach (var (sid, rights) in new[] { (new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null), FileSystemRights.FullControl), (new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null), FileSystemRights.FullControl), (user, FileSystemRights.Modify) })
+            s.AddAccessRule(new FileSystemAccessRule(sid, rights, InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit, PropagationFlags.None, AccessControlType.Allow));
+        return s;
+    }
+
+    /// <summary>Makes the folder in one step with <see cref="UserFolderSecurity"/> (an existing folder is an error: it could have been prepared by someone else).</summary>
+    public static string CreateUserFolder(string path)
+    {
+        var d = new DirectoryInfo(path);
+        if (d.Exists) throw new IOException("the folder exists already: " + path);
+        var user = WindowsIdentity.GetCurrent().User ?? throw new InvalidOperationException("the user of this process is unknown");
+        d.Create(UserFolderSecurity(user));
+        return path;
+    }
+
+    /// <summary>Environment of a started program: the variables of this process (the allowlist AVDTune made) with TEMP and TMP in the program's own folder, which the reduced token can write.</summary>
+    public static Dictionary<string, string> ChildEnvironment(string tempDir)
+    {
+        var env = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (System.Collections.DictionaryEntry e in Environment.GetEnvironmentVariables()) env[(string)e.Key] = (string?)e.Value ?? "";
+        env["TEMP"] = tempDir; env["TMP"] = tempDir;
+        return env;
+    }
+
+    /// <summary>Edge command line: a throw-away profile folder, InPrivate, no first-run dialogs, no sync or sign-in, no extensions. NO debugging port (finding 1).</summary>
+    public static string[] EdgeArgs(string profileDir, string url, string? extra = null)
+    {
+        var list = new List<string> { "--user-data-dir=" + profileDir, "--inprivate", "--no-first-run", "--no-default-browser-check", "--disable-sync", "--disable-extensions", "--disable-background-networking" };
+        if (extra != null) list.Add(extra);
+        list.Add(url);
+        return list.ToArray();
+    }
+
     public sealed record WinInfo(IntPtr Handle, string Class, string Title, bool Visible);
 
     /// <summary>Ready conditions (pure, so the rules are checked without Office): the window of the application is there and visible.</summary>
@@ -59,7 +102,12 @@ public static class Apps
         var list = new List<Measure>();
         if (string.IsNullOrWhiteSpace(o.Dir) || !Directory.Exists(o.Dir)) return new() { Measure.Not("host.app.word.warm", "ms", false, "failed", "--dir (an existing work folder) is needed") };
         var work = Path.Combine(o.Dir, "apps-" + Guid.NewGuid().ToString("N").Substring(0, 12));
-        Directory.CreateDirectory(work);
+        try
+        {
+            CreateUserFolder(work);
+            CreateUserFolder(Path.Combine(work, "tmp"));
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or InvalidOperationException) { RemoveFolder(work); return new() { Measure.Not("host.app.word.warm", "ms", false, "failed", "the work folder of the programs could not be made: " + e.Message) }; }
         try
         {
             var roots = DefaultRoots();
@@ -109,7 +157,7 @@ public static class Apps
             else if (Path_("edge") is not { } edge) list.Add(Measure.Not("host.app.speedometer", "runs/min", true, "skipped", Why("edge")));
             else list.Add(Speedometer.Run(o, edge, o.Site, work));
         }
-        finally { try { Directory.Delete(work, true); } catch { } }
+        finally { RemoveFolder(work); }
         return list;
     }
 
@@ -119,36 +167,35 @@ public static class Apps
         Log.Progress($"apps: {key} {phase}");
         try
         {
-            var r = key == "explorer" ? StartExplorer(exe, folder!) : StartInJob(key, exe, work, docx, xlsx);
+            var r = key == "explorer" ? StartExplorer(exe, folder!, work) : StartInJob(key, exe, work, docx, xlsx);
             if (r.Ms == null) return Measure.Not(id, "ms", false, "failed", r.Reason);
             var m = Measure.Ok(id, "ms", false, r.Ms.Value);
+            if (key == "explorer") m.Detail["viaRunningShell"] = r.ViaShell;
             return m;
         }
         catch (Exception e) when (e is System.ComponentModel.Win32Exception or InvalidOperationException or IOException)
         { return Measure.Not(id, "ms", false, "failed", e.Message); }
     }
 
-    private static (double? Ms, string Reason) StartInJob(string key, string exe, string work, string? docx, string? xlsx)
+    private static (double? Ms, string Reason, bool ViaShell) StartInJob(string key, string exe, string work, string? docx, string? xlsx)
     {
         using var job = new JobGroup();
         string? profile = null;
-        var psi = new ProcessStartInfo(exe) { UseShellExecute = false, CreateNoWindow = true, WorkingDirectory = work };
+        var args = new List<string>();
         SiteServer? server = null;
         try
         {
             switch (key)
             {
-                case "word": psi.ArgumentList.Add("/q"); psi.ArgumentList.Add("/n"); psi.ArgumentList.Add(docx!); break;
-                case "excel": psi.ArgumentList.Add("/e"); psi.ArgumentList.Add(xlsx!); break;
+                case "word": args.Add("/q"); args.Add("/n"); args.Add(docx!); break;
+                case "excel": args.Add("/e"); args.Add(xlsx!); break;
                 case "edge":
                     server = new SiteServer(null);
                     profile = Path.Combine(work, "edge-" + Guid.NewGuid().ToString("N").Substring(0, 8));
-                    psi.ArgumentList.Add("--user-data-dir=" + profile); psi.ArgumentList.Add("--no-first-run"); psi.ArgumentList.Add("--no-default-browser-check");
-                    psi.ArgumentList.Add(server.Origin + "/start.html"); break;
+                    args.AddRange(EdgeArgs(profile, server.Origin + "/start.html")); break;
             }
             double t0 = Timing.Now();
-            using var p = Process.Start(psi) ?? throw new InvalidOperationException("the program did not start");
-            job.Assign(p);
+            using var p = RestrictedLauncher.Start(exe, RestrictedLauncher.BuildArguments(args), work, ChildEnvironment(Path.Combine(work, "tmp")), job);
             double deadline = t0 + TimeoutMs / 1000.0;
             bool ready = false;
             while (Timing.Now() < deadline)
@@ -157,11 +204,11 @@ public static class Apps
                 if (IsReady(key, wins, WindowTools.HasChildClass, server?.ReadyCalled ?? false)) { ready = true; break; }
                 Thread.Sleep(20);
             }
-            if (!ready) return (null, $"{key} was not ready in {TimeoutMs / 1000} s");
+            if (!ready) return (null, $"{key} was not ready in {TimeoutMs / 1000} s", false);
             if (key != "edge") { try { p.WaitForInputIdle(Math.Max(100, (int)((deadline - Timing.Now()) * 1000))); } catch (InvalidOperationException) { } }
             double ms = (Timing.Now() - t0) * 1000.0;
             CloseJob(job);
-            return (ms, "");
+            return (ms, "", false);
         }
         finally
         {
@@ -190,24 +237,33 @@ public static class Apps
         }
     }
 
-    private static (double? Ms, string Reason) StartExplorer(string exe, string folder)
+    /// <summary>File Explorer: with the reduced token explorer.exe hands the new folder window to the running shell of the session (Explorer opens "in the running process" and the one we started
+    /// may end at once). The window is found by its unique folder title (the folder is ours), so the time is from the start to the window of the shell. The detail "viaRunningShell" says whether
+    /// that happened. NOT verified on a real session yet (issue #17); when the started program cannot be made the measure fails with the reason, it never runs elevated.</summary>
+    private static (double? Ms, string Reason, bool ViaShell) StartExplorer(string exe, string folder, string work)
     {
         string title = Path.GetFileName(folder);
-        var psi = new ProcessStartInfo(exe) { UseShellExecute = false, CreateNoWindow = true, Arguments = $"/n,\"{folder}\"" };
+        using var job = new JobGroup();
         double t0 = Timing.Now();
-        using var p = Process.Start(psi) ?? throw new InvalidOperationException("explorer.exe did not start");
+        using var p = RestrictedLauncher.Start(exe, $"/n,\"{folder}\"", work, ChildEnvironment(Path.Combine(work, "tmp")), job);
         double deadline = t0 + TimeoutMs / 1000.0;
-        IntPtr hwnd = IntPtr.Zero;
+        IntPtr hwnd = IntPtr.Zero; int pid = 0;
         while (Timing.Now() < deadline && hwnd == IntPtr.Zero)
         {
-            var wins = WindowTools.TopLevel(null).Where(w => w.Class == "CabinetWClass").Select(w => new WinInfo(w.Handle, w.Class, w.Title, w.Visible)).ToList();
-            if (IsReady("explorer", wins, (_, _) => false, false, title)) hwnd = wins.First(w => w.Visible && string.Equals(w.Title, title, StringComparison.OrdinalIgnoreCase)).Handle;
+            var wins = WindowTools.TopLevel(null).Where(w => w.Class == "CabinetWClass").ToList();
+            var infos = wins.Select(w => new WinInfo(w.Handle, w.Class, w.Title, w.Visible)).ToList();
+            if (IsReady("explorer", infos, (_, _) => false, false, title)) { var w = wins.First(x => x.Visible && string.Equals(x.Title, title, StringComparison.OrdinalIgnoreCase)); hwnd = w.Handle; pid = w.Pid; }
             else Thread.Sleep(20);
         }
-        if (hwnd == IntPtr.Zero) return (null, $"the Explorer window was not there in {TimeoutMs / 1000} s");
-        double ms = (Timing.Now() - t0) * 1000.0;
-        WindowTools.Close(hwnd);   // only this window; explorer.exe itself is never ended
-        return (ms, "");
+        try
+        {
+            if (hwnd == IntPtr.Zero) return (null, $"the Explorer window was not there in {TimeoutMs / 1000} s", false);
+            double ms = (Timing.Now() - t0) * 1000.0;
+            bool viaShell = !job.Pids().Contains(pid);
+            WindowTools.Close(hwnd);   // only this window; the explorer.exe of the session is never ended (the job holds only the process we started)
+            return (ms, "", viaShell);
+        }
+        finally { job.Terminate(); }
     }
 
     private static Measure MeasurePowerShell(string exe, string work)
@@ -219,11 +275,8 @@ public static class Apps
             try
             {
                 using var job = new JobGroup();
-                var psi = new ProcessStartInfo(exe) { UseShellExecute = false, CreateNoWindow = true, WorkingDirectory = work };
-                foreach (var a in new[] { "-NoProfile", "-NonInteractive", "-Command", "exit" }) psi.ArgumentList.Add(a);
                 double t0 = Timing.Now();
-                using var p = Process.Start(psi) ?? throw new InvalidOperationException("powershell.exe did not start");
-                job.Assign(p);
+                using var p = RestrictedLauncher.Start(exe, RestrictedLauncher.BuildArguments(new[] { "-NoProfile", "-NonInteractive", "-Command", "exit" }), work, ChildEnvironment(Path.Combine(work, "tmp")), job);
                 if (!p.WaitForExit(TimeoutMs)) return Measure.Not("host.app.powershell.warm", "ms", false, "failed", $"powershell.exe did not end in {TimeoutMs / 1000} s");
                 times.Add((Timing.Now() - t0) * 1000.0);
             }
