@@ -72,6 +72,7 @@ function New-Env([hashtable]$UExtra = @{}, [hashtable]$Registry = @{}) {
 $tmp = Join-Path ([IO.Path]::GetTempPath()) ('avdtune-sw-' + [guid]::NewGuid().ToString('N'))
 try {
     $env:AVDTUNE_ROOT = $tmp
+    $env:AVDTUNE_FAKE = Join-Path $PSScriptRoot 'Fakes\FakeSoftware.ps1'   # the test mode (Test-AVDTuneTestMode): the checks may override the ACL of the work folder
     [void](Initialize-AVDTuneState -Root $tmp)
     [void](Start-AVDTuneImageVersion -Root $tmp -Date ([datetime]'2026-11-15') -User 'admin1')
     Close-AVDTuneWriteGate
@@ -146,6 +147,8 @@ try {
     Test-Check 'a msiexec without a valid signature is not started' ((Invoke-AVDTuneSoftwareTool -U $xn.U -Tool 'msiexec.exe' -Arguments @('/i', 'x.msi')).Code -eq 'BadSignature' -and (Get-RunLog $xn.U).Count -eq 0) $null
     $xo = New-Env -UExtra @{ Signatures = @{ 'msiexec.exe' = @{ Valid = $true; Subject = 'CN=Microsoft Windows, O=Microsoft Corporation'; Issuer = 'CN=Microsoft Windows Production PCA 2011, O=Microsoft Corporation'; OriginalFilename = 'cmd.exe' } } }
     Test-Check 'a msiexec with another original file name is not started' ((Invoke-AVDTuneSoftwareTool -U $xo.U -Tool 'msiexec.exe' -Arguments @('/i', 'x.msi')).Code -eq 'BadSignature') $null
+    $msiSig = { param($issuer) [pscustomobject]@{ Valid = $true; Subject = 'CN=Microsoft Windows, O=Microsoft Corporation'; Issuer = "$issuer, O=Microsoft Corporation"; OriginalFilename = 'msiexec.exe' } }
+    Test-Check 'msiexec signer: the real issuer names pass; text after the year or after PCA, or a lookalike, does not' ((Test-AVDTuneMsiexecTrust (& $msiSig 'CN=Microsoft Windows Production PCA 2011')).Ok -and (Test-AVDTuneMsiexecTrust (& $msiSig 'CN=Microsoft Code Signing PCA 2024')).Ok -and -not (Test-AVDTuneMsiexecTrust (& $msiSig 'CN=Microsoft Windows Production PCA 2011 evil')).Ok -and -not (Test-AVDTuneMsiexecTrust (& $msiSig 'CN=Microsoft Windows Production PCA evil')).Ok -and -not (Test-AVDTuneMsiexecTrust (& $msiSig 'CN=Microsoft Windows Production PCA 20111')).Ok) $null
     $xm = New-Env -UExtra @{ Tools = @('choco.exe') }
     $rm = Invoke-AVDTuneSoftwareTool -U $xm.U -Tool 'winget.exe' -Arguments @('list')
     Test-Check 'a tool that is not found is not searched in PATH: ToolMissing, nothing started' ($rm.Code -eq 'ToolMissing' -and (Get-RunLog $xm.U).Count -eq 0) $null
@@ -247,6 +250,11 @@ try {
     $ctx = New-AVDTuneLibraryContext -SitesToken $lib.SitesToken -GraphToken $lib.GraphToken -SiteUrl $lib.SiteUrl -Transport $lib.Transport
     $xl = New-Env
     $li = Get-AVDTuneLibraryItems -Context $ctx -Machine $xl.M
+    $libV = New-AVDTuneFakeLibrary
+    foreach ($vv in '1.0.0', '1..0', 'v 2', '2.0.0') { [void](Add-AVDTuneFakeLibraryPackage $libV -App 'contoso-tool' -Version $vv) }
+    $liV = Get-AVDTuneLibraryItems -Context (New-AVDTuneLibraryContext -SitesToken $libV.SitesToken -GraphToken $libV.GraphToken -SiteUrl $libV.SiteUrl -Transport $libV.Transport) -Machine (New-Env).M
+    $vers = (@($liV.Items | ForEach-Object { $_.Version } | Sort-Object) -join ',')
+    Test-Check 'library list: a version folder with an invalid name is skipped on its own, the valid versions of the same app stay' ($liV.State -eq 'Ready' -and $vers -eq '1.0.0,2.0.0' -and @($liV.Notes | Where-Object { $_ -like '*invalid name*' }).Count -eq 2) ($vers + ' / ' + ($liV.Notes -join ';'))
     $by = @{}; foreach ($i in $li.Items) { $by["$($i.AppId)|$($i.Version)"] = $i }
     Test-Check 'library list: the complete versions of the store with their Intune anchor; the version without manifest is not listed' ($li.State -eq 'Ready' -and $by.Count -eq 6 -and -not $by.ContainsKey('half-pkg|1.0') -and $by['contoso-tool|1.0.0'].Installable -and $by['contoso-tool|1.0.0'].Manifest -eq $hashA -and $by['contoso-tool|1.0.0'].Name -eq 'Contoso Tool' -and $by['contoso-tool|1.0.0'].Installed -eq '1.0.0') ($li | ConvertTo-Json -Depth 4 -Compress)
     Test-Check 'library list: without Intune anchor, MSIX, the short hash prefix and a missing product code are listed but not installable, with the reason' (-not $by['orphan-pkg|2.0'].Installable -and $by['orphan-pkg|2.0'].Why -like '*no trust anchor*' -and -not $by['msix-pkg|3.0'].Installable -and $by['msix-pkg|3.0'].Why -like '*MSIX*' -and -not $by['prefix-pkg|1.0'].Installable -and $by['prefix-pkg|1.0'].Why -like '*no trust anchor*' -and -not $by['noproduct-pkg|1.0'].Installable -and $by['noproduct-pkg|1.0'].Why -like '*product code*') $null
@@ -278,6 +286,21 @@ try {
     $libH5 = New-AVDTuneFakeLibrary; [void](Add-AVDTuneFakeLibraryPackage $libH5 -App 'contoso-tool' -Version '1.0.0'); $libH5.Store.Redirect = $true; $libH5.Store.RedirectHops = 5
     $f5 = & $getFile (& $swContext $libH5) 1MB
     Test-Check 'a chain of five redirects still works, and the token is on the first request only' ((Get-Item $f5).Length -gt 0 -and @($libH5.Log | Where-Object { $_ -like '* auth=True *' }).Count -eq 1 -and @($libH5.Log | Where-Object { $_ -like 'GET contoso.sharepoint.com auth=True*' }).Count -eq 0) (($libH5.Log) -join ' | ')
+    $libHt = New-AVDTuneFakeLibrary; [void](Add-AVDTuneFakeLibraryPackage $libHt -App 'contoso-tool' -Version '1.0.0'); $libHt.Store.Redirect = $true; $libHt.Store.RedirectTo = 'http://contoso.sharepoint.com/dl/x'
+    $htText = Get-ThrownText { & $getFile (& $swContext $libHt) 1MB }
+    Test-Check 'a 302 to http (no TLS) on the right host is refused and nothing is requested from it' ($htText -like '*redirect to contoso.sharepoint.com was refused*' -and @($libHt.Log | Where-Object { $_ -like '*/dl/x*' }).Count -eq 0) $htText
+    $libRel = New-AVDTuneFakeLibrary; [void](Add-AVDTuneFakeLibraryPackage $libRel -App 'contoso-tool' -Version '1.0.0'); $libRel.Store.Redirect = $true; $libRel.Store.RedirectTo = '/dl/x'
+    $relText = Get-ThrownText { & $getFile (& $swContext $libRel) 1MB }
+    Test-Check 'a relative Location from Graph stays on graph.microsoft.com (checked as a Graph address, here a 404): nothing leaves the host' ($relText -like '*Graph answered 404*' -and @($libRel.Log | Where-Object { $_ -notlike 'GET graph.microsoft.com*' }).Count -eq 0) "$relText / $($libRel.Log -join ' | ')"
+    $libRel3 = New-AVDTuneFakeLibrary; [void](Add-AVDTuneFakeLibraryPackage $libRel3 -App 'contoso-tool' -Version '1.0.0'); $libRel3.Store.Redirect = $true; $libRel3.Store.RedirectTo = '//evil.example.com/x'
+    $rel3Text = Get-ThrownText { & $getFile (& $swContext $libRel3) 1MB }
+    Test-Check 'a scheme-relative Location (//host/path) to a foreign host is refused and nothing is requested from it' ($rel3Text -like '*redirect to evil.example.com was refused*' -and @($libRel3.Log | Where-Object { $_ -like '*evil*' }).Count -eq 0) $rel3Text
+    $libRel2 = New-AVDTuneFakeLibrary; [void](Add-AVDTuneFakeLibraryPackage $libRel2 -App 'contoso-tool' -Version '1.0.0'); $libRel2.Store.Redirect = $true; $libRel2.Store.RedirectHops = 2; $libRel2.Store.RedirectRelative = $true
+    $fRel = & $getFile (& $swContext $libRel2) 1MB
+    Test-Check 'a relative Location from the SharePoint host is resolved against it, followed, and carries no token' ((Get-Item $fRel).Length -gt 0 -and @($libRel2.Log | Where-Object { $_ -like 'GET contoso.sharepoint.com auth=False /hop/2' }).Count -eq 1 -and @($libRel2.Log | Where-Object { $_ -like 'GET contoso.sharepoint.com auth=True*' }).Count -eq 0) (($libRel2.Log) -join ' | ')
+    $libEm = New-AVDTuneFakeLibrary; [void](Add-AVDTuneFakeLibraryPackage $libEm -App 'contoso-tool' -Version '1.0.0'); $libEm.Store.Redirect = $true; $libEm.Store.RedirectEmpty = $true
+    $emText = Get-ThrownText { & $getFile (& $swContext $libEm) 1MB }
+    Test-Check 'a 302 with an empty Location is refused at once (no loop on the same address with the token)' ($emText -like '*without an address*' -and @($libEm.Log | Where-Object { $_ -like 'GET graph.microsoft.com auth=True*installer.zip*' }).Count -eq 1) "$emText / $(@($libEm.Log | Where-Object { $_ -like '*installer.zip*' }).Count)"
     $libP = New-AVDTuneFakeLibrary; $libP.Store.PageSize = 2
     foreach ($n in 1..5) { [void](Add-AVDTuneFakeLibraryPackage $libP -App "pkg-$n" -Version '1.0') }
     $anch = & $module { param($c) $script:LibraryContext = $c; try { Get-AVDTuneIntuneAnchors } finally { $script:LibraryContext = $null } } (& $swContext $libP)
@@ -301,6 +324,16 @@ try {
     $xf3 = New-Env
     $rf3 = Invoke-AVDTuneSoftwareRun -Machine $xf3.M -U $xf3.U -Root $tmp -LibraryContext (& $swContext $libF2) -Items @(New-AVDTuneSoftwareItem -Action Install -Source library -Id 'contoso-tool' -Version '1.0.0')
     Test-Check 'a file that is longer than the size in the manifest is stopped while it is read (before the hash check)' ($rf3.Results[0].Status -eq 'Failed' -and $rf3.Results[0].Message -like '*larger than the allowed*' -and (Get-RunLog $xf3.U).Count -eq 0) $rf3.Results[0].Message
+    $libBig = New-AVDTuneFakeLibrary
+    $bigGet = & $module { param($c) $c.Sizes['installer.zip'] = 3GB; $script:LibraryContext = $c; try { Invoke-PackTuneStoreGraph -Path '/drives/drive-1/root:/contoso-tool/1.0.0/installer.zip:/content' -OutFile (Join-Path ([IO.Path]::GetTempPath()) ('big-' + [guid]::NewGuid().ToString('N'))); 'no' } catch { $_.Exception.Message } finally { $script:LibraryContext = $null } } (& $swContext $libBig)
+    Test-Check 'a manifest that names a file of more than 2 GB: the download is refused before any request is made' ($bigGet -like '*more than 2 GB*' -and $libBig.Log.Count -eq 0) $bigGet
+    $slow = New-Object psobject; $slow | Add-Member -MemberType ScriptMethod -Name Read -Value { param($b, $o, $c) Start-Sleep -Milliseconds 120; $b[$o] = 1; 1 }
+    $slowText = & $module { param($s) try { [void](Read-AVDTuneLimited -Stream $s -MaxBytes 1MB -Deadline ([datetime]::UtcNow.AddMilliseconds(400))); 'no' } catch { $_.Exception.Message } } $slow
+    Test-Check 'a download that keeps sending slowly is stopped by the overall time limit (the byte limit alone would let it run for ever)' ($slowText -like '*longer than the allowed time*') $slowText
+    $libTm = New-AVDTuneFakeLibrary; [void](Add-AVDTuneFakeLibraryPackage $libTm -App 'contoso-tool' -Version '1.0.0')
+    $ctxTm = & $swContext $libTm; $ctxTm.DownloadSeconds = 0
+    $tmText = Get-ThrownText { & $getFile $ctxTm 1MB }
+    Test-Check 'the time limit of a download is on the context (default 30 minutes); at 0 seconds no request is made' ($tmText -like '*longer than the allowed time*' -and $libTm.Log.Count -eq 0 -and (& $swContext $libTm).DownloadSeconds -eq 1800) $tmText
     $bigAnswer = & $module { $s = New-Object IO.MemoryStream (, ([byte[]](New-Object byte[] (5MB)))); try { [void](Read-AVDTuneLimited -Stream $s -MaxBytes 4MB); 'no' } catch { 'stopped' } }
     Test-Check 'a JSON answer of more than 4 MB is stopped' ($bigAnswer -eq 'stopped') $null
     # \A..\z: a trailing line feed is no valid value
@@ -308,32 +341,67 @@ try {
     # zip bomb: real bytes are counted
     $bombZip = Join-Path $tmp 'bomb.zip'
     [IO.File]::WriteAllBytes($bombZip, (New-AVDTuneFakeZip @{ 'a.bin' = (New-Object byte[] 2000000); 'b.bin' = (New-Object byte[] 2000000) }))
-    Test-Check 'zip: a total over the limit is stopped while the bytes are copied (limit 3 MB, two entries of 2 MB)' ((Get-ThrownText { Expand-PackTuneZip -Path $bombZip -Destination (Join-Path $tmp 'bomb-out') -MaxBytes 3000000 }) -like '*more data than*' -or (Get-ThrownText { Expand-PackTuneZip -Path $bombZip -Destination (Join-Path $tmp 'bomb-out2') -MaxBytes 3000000 }) -like '*larger than allowed*') $null
+    $bombText = Get-ThrownText { Expand-PackTuneZip -Path $bombZip -Destination (Join-Path $tmp 'bomb-out') -MaxBytes 3000000 }
+    Test-Check 'zip: a total of the declared sizes over the limit is refused before anything is unpacked (limit 3 MB, two entries of 2 MB)' ($bombText -like '*larger than allowed when unpacked*' -and @(Get-ChildItem -LiteralPath (Join-Path $tmp 'bomb-out') -Force).Count -eq 0) $bombText
     Test-Check 'zip: the same archive within the limit unpacks completely' ((Get-ThrownText { Expand-PackTuneZip -Path $bombZip -Destination (Join-Path $tmp 'bomb-ok') -MaxBytes 5000000 }) -eq $null -and (Get-Item (Join-Path $tmp 'bomb-ok\b.bin')).Length -eq 2000000) $null
     $liar = [byte[]](New-AVDTuneFakeZip @{ 'a.bin' = (New-Object byte[] 2000000) })
     $sig = [byte[]]@(0x50, 0x4B, 0x01, 0x02)
     for ($i = 0; $i -lt $liar.Length - 4; $i++) { if ($liar[$i] -eq 0x50 -and $liar[$i + 1] -eq 0x4B -and $liar[$i + 2] -eq 0x01 -and $liar[$i + 3] -eq 0x02) { [BitConverter]::GetBytes([uint32]1000).CopyTo($liar, $i + 24) } }
     $liarZip = Join-Path $tmp 'liar.zip'; [IO.File]::WriteAllBytes($liarZip, $liar)
     $lieText = Get-ThrownText { Expand-PackTuneZip -Path $liarZip -Destination (Join-Path $tmp 'liar-out') -MaxBytes 5000000 }
-    Test-Check 'zip: an entry whose header declares 1000 bytes but holds 2 MB is stopped (the real bytes are counted, not the declared size)' ([bool]$lieText -and (-not (Test-Path (Join-Path $tmp 'liar-out\a.bin')) -or (Get-Item (Join-Path $tmp 'liar-out\a.bin')).Length -le 1000)) $lieText
-    # work folder: explicit ACL, in one step, cleaned at the start
-    & $module { $script:WorkSecurity = { New-AVDTuneStateSecurity } }
-    $wbase = Join-Path $tmp 'wf'; [void][IO.Directory]::CreateDirectory($wbase)
-    $wf = Join-Path $wbase 'software'
-    & $module { param($p, $b) New-AVDTuneWorkFolder -Path $p -Base $b } $wf $wbase
-    $acl = Get-Acl -LiteralPath $wf
-    $sids = @($acl.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier]) | ForEach-Object { $_.IdentityReference.Value })
-    Test-Check 'the work folder has its own protected ACL (Administrators and SYSTEM only, inheritance cut) on every new level' ($acl.AreAccessRulesProtected -and @($sids | Where-Object { $_ -notin 'S-1-5-32-544', 'S-1-5-18' }).Count -eq 0 -and $sids.Count -ge 2 -and (Get-Acl -LiteralPath (Join-Path $wbase 'software')).AreAccessRulesProtected) ($sids -join ',')
-    $ownerAcl = Get-Acl -LiteralPath $wf; $ownerAcl.SetAccessRuleProtection($false, $false); $ownerAcl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule([System.Security.Principal.WindowsIdentity]::GetCurrent().User, 'FullControl', 'ContainerInherit, ObjectInherit', 'None', 'Allow'))); (New-Object IO.DirectoryInfo $wf).SetAccessControl($ownerAcl)   # the creator may change the permissions: lets the check clean up after itself
+    Test-Check 'zip: an entry whose header declares 1000 bytes but holds 2 MB is stopped by the byte counter (the real bytes are counted, not the declared size)' ($lieText -like '*more data than it declares*' -and (-not (Test-Path (Join-Path $tmp 'liar-out\a.bin')) -or (Get-Item (Join-Path $tmp 'liar-out\a.bin')).Length -le 1000)) $lieText
+    # work folder, test mode OFF: the default ACL (Administrators and SYSTEM only, protected) on every level; an override of the checks does not count outside the test mode
+    $grantMe = { param($p) $a = Get-Acl -LiteralPath $p; $a.SetAccessRuleProtection($false, $false); $a.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule([System.Security.Principal.WindowsIdentity]::GetCurrent().User, 'FullControl', 'ContainerInherit, ObjectInherit', 'None', 'Allow'))); (New-Object IO.DirectoryInfo $p).SetAccessControl($a) }   # the creator may change the permissions: lets the check clean up after itself
+    $elevated = Test-AVDTuneElevated
+    $savedFake3 = $env:AVDTUNE_FAKE; $savedRoot3 = $env:AVDTUNE_ROOT; $env:AVDTUNE_FAKE = $null; $env:AVDTUNE_ROOT = $null
+    try {
+        & $module { $script:WorkSecurity = { $sec = New-AVDTuneStateSecurity; $sec.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule([System.Security.Principal.WindowsIdentity]::GetCurrent().User, 'FullControl', 'ContainerInherit, ObjectInherit', 'None', 'Allow'))); $sec } }
+        $wbase = Join-Path $tmp 'wf'; [void][IO.Directory]::CreateDirectory($wbase)
+        $deep = Join-Path $wbase 'software\work\x'
+        $deepText = Get-ThrownText { & $module { param($p, $b) New-AVDTuneWorkFolder -Path $p -Base $b } $deep $wbase }
+        $levels = @('software', 'software\work', 'software\work\x') | Where-Object { Test-Path -LiteralPath (Join-Path $wbase $_) }
+        $levelOk = @($levels | ForEach-Object {
+                $acl = Get-Acl -LiteralPath (Join-Path $wbase $_)
+                $sids = @($acl.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier]) | ForEach-Object { $_.IdentityReference.Value })
+                $acl.AreAccessRulesProtected -and @($sids | Where-Object { $_ -notin 'S-1-5-32-544', 'S-1-5-18' }).Count -eq 0 -and $sids.Count -ge 2 })
+        # elevated: all three levels exist with the default ACL; not elevated: the first level is made (default ACL), the second one cannot be written into by the creator - which is also what shows the user-friendly override was NOT used
+        $acceptLevels = if ($elevated) { $levels.Count -eq 3 -and -not $deepText } else { $levels.Count -eq 1 -and [bool]$deepText }
+        Test-Check 'the work folder has the default protected ACL (Administrators and SYSTEM only) on every level below the state folder (software\work\x), also when a check override is set outside the test mode' ($acceptLevels -and @($levelOk | Where-Object { -not $_ }).Count -eq 0 -and $levelOk.Count -ge 1) "$($levels -join ',') / $deepText / $($levelOk -join ',')"
+        foreach ($l in $levels) { & $grantMe (Join-Path $wbase $l) }
+    }
+    finally { $env:AVDTUNE_FAKE = $savedFake3; $env:AVDTUNE_ROOT = $savedRoot3 }
+    # work folder, test mode ON with the override of the checks (the current user may write into what it creates)
+    & $module { $script:WorkSecurity = { $sec = New-AVDTuneStateSecurity; $sec.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule([System.Security.Principal.WindowsIdentity]::GetCurrent().User, 'FullControl', 'ContainerInherit, ObjectInherit', 'None', 'Allow'))); $sec } }
+    $wbase = Join-Path $tmp 'wfT'; [void][IO.Directory]::CreateDirectory($wbase)
+    & $module { param($p, $b) New-AVDTuneWorkFolder -Path $p -Base $b } (Join-Path $wbase 'software\work\x') $wbase
+    $acl = Get-Acl -LiteralPath (Join-Path $wbase 'software\work\x')
+    Test-Check 'inside the test mode the override works (a developer run without elevation gets three levels it can write into)' ($acl.AreAccessRulesProtected -and (Test-Path (Join-Path $wbase 'software\work\x'))) $null
+    Test-Check 'existing levels made by AVDTune are accepted when the work folder is made again' (-not (Get-ThrownText { & $module { param($p, $b) New-AVDTuneWorkFolder -Path $p -Base $b } (Join-Path $wbase 'software\work\y') $wbase })) $null
+    $wbase = Join-Path $tmp 'wf3'; [void][IO.Directory]::CreateDirectory((Join-Path $wbase 'software'))
+    $inheritText = Get-ThrownText { & $module { param($p, $b) New-AVDTuneWorkFolder -Path $p -Base $b } (Join-Path $wbase 'software\work') $wbase }
+    Test-Check 'an existing level that inherits its rules (prepared by someone else) is refused, not just checked for links' ($inheritText -like '*was not prepared by AVDTune*inherits*') $inheritText
+    $wbase = Join-Path $tmp 'wf4'; [void][IO.Directory]::CreateDirectory($wbase)
+    $foreignSec = New-AVDTuneStateSecurity; $foreignSec.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule((New-Object System.Security.Principal.SecurityIdentifier 'S-1-1-0'), 'Modify', 'ContainerInherit, ObjectInherit', 'None', 'Allow')))
+    (New-Object IO.DirectoryInfo (Join-Path $wbase 'software')).Create($foreignSec)
+    $foreignText = Get-ThrownText { & $module { param($p, $b) New-AVDTuneWorkFolder -Path $p -Base $b } (Join-Path $wbase 'software\work') $wbase }
+    Test-Check 'an existing level with an explicit rule for another account (Everyone) is refused' ($foreignText -like '*was not prepared by AVDTune*access for S-1-1-0*') $foreignText
+    $wbase = Join-Path $tmp 'wf'
     $junction = Join-Path $wbase 'link'; [void](New-Item -ItemType Junction -Path $junction -Target $tmp)
     Test-Check 'a link on the way is refused' ([bool](Get-ThrownText { & $module { param($p, $b) New-AVDTuneWorkFolder -Path $p -Base $b } (Join-Path $junction 'work\x') $wbase })) $null
     [IO.Directory]::Delete($junction)
     $wbase = Join-Path $tmp 'wf2'
     [void][IO.Directory]::CreateDirectory((Join-Path $wbase 'software\work\left1\sub')); [IO.File]::WriteAllText((Join-Path $wbase 'software\work\left1\sub\f.txt'), 'x')
     $cleared = & $module { param($r) Clear-AVDTuneSoftwareWork -Root $r } $wbase
-    Test-Check 'work folders that a crash left behind are removed at the start' ($cleared -ge 1 -and @(Get-ChildItem (Join-Path $wbase 'software\work')).Count -eq 0) $cleared
-    & $module { $script:WorkSecurity = { $sec = New-AVDTuneStateSecurity; $sec.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule([System.Security.Principal.WindowsIdentity]::GetCurrent().User, 'FullControl', 'ContainerInherit, ObjectInherit', 'None', 'Allow'))); $sec } }   # the check runs without elevation: the current user must be able to write into what it creates
-    # the MSI is held and hashed again before msiexec
+    Test-Check 'work folders that a crash left behind are removed at the start of a run' ($cleared -ge 1 -and @(Get-ChildItem (Join-Path $wbase 'software\work')).Count -eq 0) $cleared
+    $wbase = Join-Path $tmp 'wf5'; $linkTarget = Join-Path $tmp 'wf5-target'
+    [void][IO.Directory]::CreateDirectory((Join-Path $linkTarget 'work\left2')); [IO.File]::WriteAllText((Join-Path $linkTarget 'work\left2\keep.txt'), 'x'); [void][IO.Directory]::CreateDirectory($wbase)
+    [void](New-Item -ItemType Junction -Path (Join-Path $wbase 'software') -Target $linkTarget)
+    $clearedLink = & $module { param($r) Clear-AVDTuneSoftwareWork -Root $r } $wbase
+    Test-Check "'software' as a link: only the link is removed, what it points to stays untouched" ($clearedLink -eq 0 -and -not (Test-Path -LiteralPath (Join-Path $wbase 'software')) -and (Test-Path -LiteralPath (Join-Path $linkTarget 'work\left2\keep.txt'))) $clearedLink
+    $swSource = [IO.File]::ReadAllText((Join-Path $repo 'Modules\AVDTune.Software.psm1'))
+    $runBody = $swSource.Substring($swSource.IndexOf('function Invoke-AVDTuneSoftwareRun'))
+    Test-Check 'the work folders are cleaned inside a run after the write gate, and not by the page when it only scans' ($runBody.IndexOf('Test-AVDTuneWriteAllowed') -ge 0 -and $runBody.IndexOf('Test-AVDTuneWriteAllowed') -lt $runBody.IndexOf('Clear-AVDTuneSoftwareWork') -and ([IO.File]::ReadAllText((Join-Path $repo 'AVDTune-Software.ps1'))) -notmatch 'Clear-AVDTuneSoftwareWork') $null
+    # the MSI is hashed after unpacking, held, and compared through the held handle before msiexec
     $xh = New-Env
     $heldInfo = @{}
     $xh.U.Run = { param($File, [string[]]$Arguments, [int]$TimeoutSeconds = 600)
@@ -346,7 +414,12 @@ try {
         [void]$xh.U.Log.Add("Run $File $($Arguments -join ' ')"); [pscustomobject]@{ ExitCode = 0; Output = '' } }.GetNewClosure()
     $libMsi = New-AVDTuneFakeLibrary; [void](Add-AVDTuneFakeLibraryPackage $libMsi -App 'contoso-tool' -Version '1.0.0')
     $rh2 = Invoke-AVDTuneSoftwareRun -Machine $xh.M -U $xh.U -Root $tmp -LibraryContext (& $swContext $libMsi) -Items @(New-AVDTuneSoftwareItem -Action Install -Source library -Id 'contoso-tool' -Version '1.0.0')
-    Test-Check 'the MSI is held without write and delete sharing while msiexec runs: it can be neither deleted nor replaced' ($rh2.Results[0].Status -eq 'Changed' -and $heldInfo.DeleteFailed -and $heldInfo.WriteFailed -and $heldInfo.Text -eq 'MSI stand-in') ($heldInfo | ConvertTo-Json -Compress)
+    Test-Check 'the MSI is hashed after unpacking, held without write and delete sharing and compared through the held handle: while msiexec runs it can be neither deleted nor replaced' ($rh2.Results[0].Status -eq 'Changed' -and $heldInfo.DeleteFailed -and $heldInfo.WriteFailed -and $heldInfo.Text -eq 'MSI stand-in') ($heldInfo | ConvertTo-Json -Compress)
+    $xsw = New-Env
+    & $module { $script:BeforeMsiHold = { param($p) [IO.File]::WriteAllText($p, 'swapped between hash and hold') } }
+    try { $rsw = Invoke-AVDTuneSoftwareRun -Machine $xsw.M -U $xsw.U -Root $tmp -LibraryContext (& $swContext $libMsi) -Items @(New-AVDTuneSoftwareItem -Action Install -Source library -Id 'contoso-tool' -Version '1.0.0') }
+    finally { & $module { $script:BeforeMsiHold = $null } }
+    Test-Check 'an MSI that is replaced between the hash after unpacking and the hold is caught by the comparison through the held handle: msiexec is not started' ($rsw.Results[0].Status -eq 'Failed' -and $rsw.Results[0].Message -like '*changed after unpacking*' -and (Get-RunLog $xsw.U).Count -eq 0) $rsw.Results[0].Message
     Close-AVDTuneWriteGate
 
 
@@ -460,7 +533,7 @@ try {
 }
 finally {
     Close-AVDTuneWriteGate
-    $env:AVDTUNE_ROOT = $null
+    $env:AVDTUNE_ROOT = $null; $env:AVDTUNE_FAKE = $null
     if (Test-Path $tmp) { Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue }
 }
 if ($script:failed -gt 0) { throw "$script:failed check(s) failed." }

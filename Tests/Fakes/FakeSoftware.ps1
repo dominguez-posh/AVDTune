@@ -7,12 +7,13 @@
 #   $ctx = New-AVDTuneLibraryContext -SitesToken $lib.SitesToken -GraphToken $lib.GraphToken -SiteUrl $lib.SiteUrl -Transport $lib.Transport
 # Switches in .Store: Offline, IntuneOffline, Tamper = hashtable 'app/ver/file' -> bytes (the store sends other bytes than the manifest names, also more of them),
 # Redirect (downloads answer 302 to SharePoint, which refuses a bearer token), RedirectTo (url of the first redirect instead, e.g. a foreign host),
+# RedirectEmpty (the first redirect has an empty Location), RedirectRelative (the hops of RedirectHops carry a relative Location),
 # RedirectHops (chain of n redirects before the content), PageSize (Intune answers in pages with @odata.nextLink).
 # All names are made up.
 
 function New-AVDTuneFakeLibrary {
     $s = @{ Files = @{}; Notes = New-Object System.Collections.ArrayList; Offline = $false; IntuneOffline = $false; Tamper = @{}; Log = (New-Object System.Collections.ArrayList)
-        Redirect = $false; RedirectTo = ''; RedirectHops = 0; PageSize = 0; HopKey = '' }
+        Redirect = $false; RedirectTo = ''; RedirectEmpty = $false; RedirectRelative = $false; RedirectHops = 0; PageSize = 0; HopKey = '' }
     $lib = [ordered]@{ Store = $s; Log = $s.Log; SitesToken = 'fake-sites-token-AAA'; GraphToken = 'fake-graph-token-BBB'; SiteUrl = 'https://contoso.sharepoint.com/sites/PackTune'; Library = 'PackTune Packages' }
     $answer = { param($status, $bytes, $location) @{ Status = $status; Headers = @{ Location = $location }; Stream = (New-Object IO.MemoryStream (, [byte[]]$bytes)); Close = { } } }
     $enc = { param($o) , [Text.Encoding]::UTF8.GetBytes(($o | ConvertTo-Json -Depth 8 -Compress)) }
@@ -28,7 +29,7 @@ function New-AVDTuneFakeLibrary {
             if ($hasAuth) { return (& $answer 401 $empty '') }
             if ($uri.AbsolutePath -match '^/hop/(\d+)$') {
                 $n = [int]$Matches[1]
-                if ($n -lt $s.RedirectHops) { return (& $answer 302 $empty "https://$($uri.Host)/hop/$($n + 1)") }
+                if ($n -lt $s.RedirectHops) { return (& $answer 302 $empty $(if ($s.RedirectRelative) { "/hop/$($n + 1)" } else { "https://$($uri.Host)/hop/$($n + 1)" })) }
                 $bytes = $s.Files[[string]$s.HopKey]; return (& $answer 200 $bytes '')
             }
             if ($uri.AbsolutePath -match '^/dl/(.+)$') { $key = [uri]::UnescapeDataString($Matches[1]); $bytes = $s.Files[$key]; if ($s.Tamper.ContainsKey($key)) { $bytes = $s.Tamper[$key] }; return (& $answer 200 $bytes '') }
@@ -61,6 +62,7 @@ function New-AVDTuneFakeLibrary {
             $key = $names -join '/'
             if (-not $s.Files.ContainsKey($key)) { return (& $answer 404 $empty '') }
             if ($s.Redirect -and $key -notlike '*manifest.json') {
+                if ($s.RedirectEmpty) { return (& $answer 302 $empty '') }
                 if ($s.RedirectTo) { return (& $answer 302 $empty $s.RedirectTo) }
                 $s.HopKey = $key
                 $target = if ($s.RedirectHops -gt 0) { 'https://contoso.sharepoint.com/hop/1' } else { "https://contoso.sharepoint.com/dl/$([uri]::EscapeDataString($key))" }

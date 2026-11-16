@@ -67,7 +67,6 @@ try {
     $progress = { param($t) $Sync.Text = $t }
     switch ($Kind) {
         'Scan' {
-            [void](Clear-AVDTuneSoftwareWork -Root $Root)
             $notes = New-Object System.Collections.ArrayList
             $Sync.Text = 'Reading the installed software ...'
             $installed = @(Get-AVDTuneInstalledSoftware -Machine $m)

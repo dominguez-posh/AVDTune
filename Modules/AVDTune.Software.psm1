@@ -91,7 +91,6 @@ function Expand-PackTuneZip {
         $total = [int64]0
         foreach ($e in $zip.Entries) { $total += $e.Length }
         if ($total -gt $MaxBytes) { throw 'The archive is larger than allowed when unpacked.' }
-        $written = [int64]0
         foreach ($e in $zip.Entries) {
             $name = $e.FullName
             if ($name -match '(^|[\\/])\.\.([\\/]|$)' -or $name -match '^[\\/]' -or $name -match '[:*?"<>|]' -or $name -match '(^|[\\/])(CON|PRN|AUX|NUL|COM\d|LPT\d)(\.|[\\/]|$)') { throw "The archive has an entry that is not allowed: $name" }
@@ -105,8 +104,8 @@ function Expand-PackTuneZip {
                 try {
                     $buf = New-Object byte[] 81920; $entryBytes = [int64]0
                     while (($n = $in.Read($buf, 0, $buf.Length)) -gt 0) {
-                        $entryBytes += $n; $written += $n
-                        if ($entryBytes -gt [int64]$e.Length -or $written -gt $MaxBytes) { throw "The archive holds more data than it declares (entry $name): stopped." }   # the declared sizes are not trusted
+                        $entryBytes += $n
+                        if ($entryBytes -gt [int64]$e.Length) { throw "The archive holds more data than it declares (entry $name): stopped." }   # the declared sizes are not trusted
                         $out.Write($buf, 0, $n)
                     }
                 }
@@ -286,7 +285,7 @@ function Test-AVDTuneMsiexecTrust {
     }
     $sO = & $part $Signature.Subject 'O'; $sCN = & $part $Signature.Subject 'CN'
     $iO = & $part (Get-AVDTuneProp $Signature 'Issuer') 'O'; $iCN = & $part (Get-AVDTuneProp $Signature 'Issuer') 'CN'
-    if (-not ($sO -ceq 'Microsoft Corporation' -and $sCN -cin 'Microsoft Corporation', 'Microsoft Windows' -and $iO -ceq 'Microsoft Corporation' -and $iCN -cmatch '^Microsoft (Windows )?(Code Signing|Production) PCA( |$)')) {
+    if (-not ($sO -ceq 'Microsoft Corporation' -and $sCN -cin 'Microsoft Corporation', 'Microsoft Windows' -and $iO -ceq 'Microsoft Corporation' -and $iCN -cmatch '^Microsoft (Windows )?(Code Signing|Production) PCA( [0-9]{4})?\z')) {
         return @{ Ok = $false; Reason = "msiexec.exe is not signed by Microsoft (signer '$($Signature.Subject)')" }
     }
     $orig = ([string](Get-AVDTuneProp $Signature 'OriginalFilename')) -replace '(?i)\.mui$', ''
@@ -441,13 +440,14 @@ function Invoke-AVDTuneHttpRequest {
 
 function Read-AVDTuneLimited {
     # Copies a stream in blocks and counts the real bytes: more than MaxBytes is an error (the declared length is not trusted). To a new file (-OutFile, removed on an error) or into memory (text).
-    param([Parameter(Mandatory)]$Stream, [Parameter(Mandatory)][int64]$MaxBytes, [string]$OutFile)
+    param([Parameter(Mandatory)]$Stream, [Parameter(Mandatory)][int64]$MaxBytes, [string]$OutFile, [datetime]$Deadline = [datetime]::MaxValue)
     $buf = New-Object byte[] 81920
     $total = [int64]0
     $mem = $null; $out = $null
     try {
         if ($OutFile) { $out = [IO.File]::Open($OutFile, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write) } else { $mem = New-Object IO.MemoryStream }
         while (($n = $Stream.Read($buf, 0, $buf.Length)) -gt 0) {
+            if ([datetime]::UtcNow -gt $Deadline) { throw 'The download took longer than the allowed time: stopped.' }
             $total += $n
             if ($total -gt $MaxBytes) { throw "The answer is larger than the allowed $MaxBytes bytes: stopped." }
             if ($out) { $out.Write($buf, 0, $n) } else { $mem.Write($buf, 0, $n) }
@@ -463,10 +463,11 @@ function Invoke-AVDTuneLibraryGet {
         One GET to Microsoft Graph with the token of the audience (Sites for the package store, Graph for the Intune notes). Redirects are never followed
         automatically: this loop follows them by hand, at most 5, every hop checked (graph.microsoft.com, or the SharePoint host of the site and its -my variant);
         the token goes only to graph.microsoft.com, never to SharePoint. -OutFile saves the content into a new file (CreateNew), at most -MaxBytes; otherwise the
-        answer is parsed JSON of at most 4 MB. The request itself is $ctx.Transport (default Invoke-AVDTuneHttpRequest): the checks give it a fake.
+        answer is parsed JSON of at most 4 MB. The whole request (redirects and reading) may take at most $ctx.DownloadSeconds (30 minutes). The request itself is $ctx.Transport (default Invoke-AVDTuneHttpRequest): the checks give it a fake.
     #>
     param([Parameter(Mandatory)][string]$Url, [ValidateSet('Sites', 'Graph')][string]$Audience = 'Sites', [string]$OutFile, [int64]$MaxBytes = 4MB)
     $ctx = $script:LibraryContext
+    $deadline = [datetime]::UtcNow.AddSeconds([double]$ctx.DownloadSeconds)   # one limit for the whole request: redirects and reading together
     if (-not $ctx) { throw 'The package store is not open (internal: no library context).' }
     $check = Test-AVDTuneLibraryUrl $Url
     if (-not $check.Ok) { throw "Refused request to the library: $($check.Reason)." }
@@ -476,6 +477,7 @@ function Invoke-AVDTuneLibraryGet {
     $allowed = Get-AVDTuneRedirectHosts $ctx.SiteUrl
     $current = $Url; $redirects = 0
     while ($true) {
+        if ([datetime]::UtcNow -ge $deadline) { throw 'The download took longer than the allowed time: stopped.' }
         $isGraph = ([Uri]$current).Host -eq 'graph.microsoft.com'
         $headers = @{}; if ($isGraph) { $headers['Authorization'] = "Bearer $token" }
         $resp = & $transport $current $headers
@@ -484,14 +486,15 @@ function Invoke-AVDTuneLibraryGet {
             if ($code -in 301, 302, 303, 307, 308) {
                 if (++$redirects -gt 5) { throw 'Too many redirects.' }
                 $loc = [string]$resp.Headers.Location
+                if (-not $loc.Trim()) { throw 'A redirect without an address was refused.' }
                 $abs = $null; if (-not [Uri]::TryCreate([Uri]$current, $loc, [ref]$abs)) { throw 'A redirect with an address that is not valid was refused.' }
                 if (-not (Test-AVDTuneDownloadUrl $abs.AbsoluteUri -AllowedHost $allowed) -and -not ((Test-AVDTuneLibraryUrl $abs.AbsoluteUri).Ok)) { throw "A redirect to $($abs.Host) was refused (only graph.microsoft.com and the SharePoint host of the site are allowed)." }
                 $current = $abs.AbsoluteUri
                 continue
             }
             if ($code -lt 200 -or $code -gt 299) { throw "Graph answered $code." }
-            if ($OutFile) { Read-AVDTuneLimited -Stream $resp.Stream -MaxBytes $MaxBytes -OutFile $OutFile; return $null }
-            $text = Read-AVDTuneLimited -Stream $resp.Stream -MaxBytes $MaxBytes
+            if ($OutFile) { Read-AVDTuneLimited -Stream $resp.Stream -MaxBytes $MaxBytes -OutFile $OutFile -Deadline $deadline; return $null }
+            $text = Read-AVDTuneLimited -Stream $resp.Stream -MaxBytes $MaxBytes -Deadline $deadline
             if (-not $text.Trim()) { return $null }
             return ($text | ConvertFrom-Json)
         }
@@ -504,7 +507,7 @@ function New-AVDTuneLibraryContext {
     param([string]$SitesToken, [string]$GraphToken, [Parameter(Mandatory)][string]$SiteUrl, [string]$Library = $script:DefaultLibrary, [scriptblock]$Transport)
     if ($SiteUrl -notmatch $script:LibrarySitePattern) { throw 'The address of the SharePoint site is not valid (https://<tenant>.sharepoint.com/sites/<name>).' }
     if ($Library -notmatch $script:LibraryNamePattern) { throw 'The name of the library is not valid.' }
-    [pscustomobject]@{ SitesToken = $SitesToken; GraphToken = $GraphToken; SiteUrl = $SiteUrl.TrimEnd('/'); Library = $Library; Transport = $Transport; Sizes = @{} }
+    [pscustomobject]@{ SitesToken = $SitesToken; GraphToken = $GraphToken; SiteUrl = $SiteUrl.TrimEnd('/'); Library = $Library; Transport = $Transport; Sizes = @{}; DownloadSeconds = 1800 }
 }
 
 function Close-AVDTuneLibraryContext($Context) { if ($Context) { $Context.SitesToken = $null; $Context.GraphToken = $null } }
@@ -531,6 +534,22 @@ function Get-AVDTuneIntuneAnchors {
     $anchors
 }
 
+function Get-AVDTuneStoreVersions {
+    <#
+        The versions of one app in the store, like Get-PackTuneStoreVersions (Complete = has a manifest), but a folder whose name is not a valid version segment
+        is skipped on its own (with a note) before anything is asked about it: the shared function would throw for the name and hide every other version of the app.
+    #>
+    param([Parameter(Mandatory)][string]$AppId, [Parameter(Mandatory)]$Store, $Notes)
+    if (-not $Store.DriveId) { return }
+    try { $folders = @(Get-PackTuneStoreChildren -DriveId $Store.DriveId -Segments @($AppId) | Where-Object { $_.folder }) } catch { return }
+    foreach ($f in $folders) {
+        $name = [string]$f.name
+        if ($name -cnotmatch $script:SegmentPattern -or $name -match '\.\.') { if ($null -ne $Notes) { [void]$Notes.Add("A version folder of $AppId with an invalid name was skipped.") }; continue }
+        $files = @(Get-PackTuneStoreChildren -DriveId $Store.DriveId -Segments @($AppId, $name))
+        [pscustomobject]@{ AppId = $AppId; Version = $name; Complete = [bool](@($files | Where-Object { $_.name -eq 'manifest.json' }).Count); Files = @($files.name) }
+    }
+}
+
 function Get-AVDTuneLibraryItems {
     <#
         The packages of the library: every complete version in the store, with the anchor from Intune. Returns @{ State; Message; Items; Notes }.
@@ -548,7 +567,7 @@ function Get-AVDTuneLibraryItems {
         $items = New-Object System.Collections.ArrayList
         foreach ($app in @(Get-PackTuneStoreApps -Store $state.Store)) {
             if ($app -notmatch $script:SegmentPattern) { continue }
-            foreach ($v in @(Get-PackTuneStoreVersions -AppId $app -Store $state.Store)) {
+            foreach ($v in @(Get-AVDTuneStoreVersions -AppId $app -Store $state.Store -Notes $notes)) {
                 if (-not $v.Complete) { continue }
                 $a = $null; $key = "$app|$($v.Version)"; if ($anchors.ContainsKey($key)) { $a = $anchors[$key] }
                 $why = ''
@@ -575,9 +594,34 @@ function Get-AVDTuneStreamHash($Stream) {
     try { ([BitConverter]::ToString($sha.ComputeHash($Stream)) -replace '-', '').ToLowerInvariant() } finally { $sha.Dispose(); $Stream.Position = 0 }
 }
 
-$script:WorkSecurity = { New-AVDTuneStateSecurity }   # replaceable for the checks (a developer run without elevation cannot write into a folder that only Administrators may write)
+$script:BeforeMsiHold = $null
+$script:WorkSecurity = $null   # a check may set a scriptblock that returns the ACL (a developer run without elevation cannot write into a folder that only Administrators may write); it counts only inside the test mode
+function Get-AVDTuneWorkSecurity {
+    # The ACL for a new work folder level: always the protected admin-only one; the override of the checks only inside the test mode (Test-AVDTuneTestMode)
+    if ($script:WorkSecurity -and (Test-AVDTuneTestMode).Enabled) { return (& $script:WorkSecurity) }
+    New-AVDTuneStateSecurity
+}
+
+function Test-AVDTuneWorkLevelAcl {
+    # An existing level below the state folder must be AVDTune's own: owner Administrators or SYSTEM (or the elevated administrator running AVDTune), protected, allow rules for Administrators and SYSTEM only.
+    # Returns the problem as text, '' when it is fine. Inside the test mode with an override of the ACL the current user counts as trusted too.
+    param([Parameter(Mandatory)][string]$Path)
+    $trusted = @('S-1-5-32-544', 'S-1-5-18')
+    $me = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+    $overridden = [bool]($script:WorkSecurity -and (Test-AVDTuneTestMode).Enabled)
+    $owners = @($trusted); if ((Test-AVDTuneElevated) -or $overridden) { $owners += $me }
+    $rules = @($trusted); if ($overridden) { $rules += $me }
+    try { $acl = Read-AVDTuneAclInfo -Path $Path -IsDirectory $true } catch { return "the ACL cannot be read ($($_.Exception.Message))" }
+    if ($acl.Owner -notin $owners) { return "owner $($acl.Owner)" }
+    if (-not $acl.Protected) { return 'it inherits rules from its parent' }
+    $foreign = @($acl.Rules | Where-Object { $_.Sid -notin $rules -or $_.Inherited } | ForEach-Object { $_.Sid } | Sort-Object -Unique)
+    if ($foreign.Count -gt 0) { return "access for $($foreign -join ', ')" }
+    ''
+}
+
 function New-AVDTuneWorkFolder {
-    # Creates Path below Base level by level; each new folder is created in one step with the protected ACL (Administrators and SYSTEM only). A level that is a link is refused.
+    # Creates Path below Base level by level; each new folder is created in one step with the protected ACL (Administrators and SYSTEM only). A level that is a link is refused,
+    # and so is an existing level whose owner or ACL is not AVDTune's own (someone else prepared it).
     param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][string]$Base)
     $baseFull = [IO.Path]::GetFullPath($Base).TrimEnd('\'); $full = [IO.Path]::GetFullPath($Path).TrimEnd('\')
     if (-not $full.StartsWith($baseFull + '\', [StringComparison]::OrdinalIgnoreCase)) { throw 'The work folder is not below the state folder.' }
@@ -586,15 +630,23 @@ function New-AVDTuneWorkFolder {
     foreach ($p in $parts) {
         $cur = Join-Path $cur $p
         $d = New-Object IO.DirectoryInfo $cur
-        if ($d.Exists) { if (($d.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw "$cur is a link." }; continue }
-        $d.Create((& $script:WorkSecurity))
+        if ($d.Exists) {
+            if (($d.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw "$cur is a link." }
+            $problem = Test-AVDTuneWorkLevelAcl -Path $cur
+            if ($problem) { throw "$cur was not prepared by AVDTune ($problem): not used." }
+            continue
+        }
+        $d.Create((Get-AVDTuneWorkSecurity))
     }
 }
 
 function Clear-AVDTuneSoftwareWork {
-    # At the start of a run and of a scan: work folders that a crash left behind in <root>\software\work are removed (links as links). Returns the number removed.
+    # Only inside a run, after the write gate: work folders that a crash left behind in <root>\software\work are removed (links as links, 'software' and 'work' themselves too). Returns the number removed.
     param([Parameter(Mandatory)][string]$Root)
-    $work = New-Object IO.DirectoryInfo (Join-Path (Join-Path $Root 'software') 'work')
+    $soft = New-Object IO.DirectoryInfo (Join-Path $Root 'software')
+    if (-not $soft.Exists) { return 0 }
+    if (($soft.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { $soft.Delete(); return 0 }
+    $work = New-Object IO.DirectoryInfo (Join-Path $soft.FullName 'work')
     if (-not $work.Exists) { return 0 }
     if (($work.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { $work.Delete(); return 0 }
     $n = 0
@@ -724,13 +776,15 @@ function Invoke-AVDTuneLibraryItem {
         if (-not $saved.InstallerFolder) { return & $new 'Failed' 'The package has no installer.zip.' 'NoInstaller' $false '' }
         $msi = Get-AVDTuneLibraryMsi -InstallerFolder $saved.InstallerFolder -RecipePath (Join-Path $saved.Destination 'recipe.json')
         if (-not $msi) { return & $new 'Failed' 'The installer folder has no single MSI (and the recipe names none): this package cannot be installed here.' 'NoMsi' $false '' }
-        # the MSI is held open (read sharing only: nobody can change or replace it) and hashed again right before msiexec starts; a difference stops the install
+        # the MSI is hashed right after unpacking, then held open (read sharing only: nobody can change or replace it) and compared through the held handle;
+        # a file that was replaced between unpacking and holding stops the install. (Whether msiexec can open a file held like this: issue 17.)
+        $pre = [IO.File]::Open($msi, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+        try { $h1 = Get-AVDTuneStreamHash $pre } finally { $pre.Dispose() }
+        if ($script:BeforeMsiHold -and (Test-AVDTuneTestMode).Enabled) { & $script:BeforeMsiHold $msi }   # a seam for the checks (the gap between hash and hold), only inside the test mode
         $hold = [IO.File]::Open($msi, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
         try {
-            $h1 = Get-AVDTuneStreamHash $hold
+            if ((Get-AVDTuneStreamHash $hold) -ne $h1) { return & $new 'Failed' 'The installer changed after unpacking: not started.' 'Changed' $false '' }
             & $say "Installing $($pkg.Name) $($pkg.Version) ..."
-            $h2 = Get-AVDTuneStreamHash $hold
-            if ($h1 -ne $h2) { return & $new 'Failed' 'The installer changed between the check and the start: not started.' 'Changed' $false '' }
             $r = Invoke-AVDTuneSoftwareTool -U $U -Tool 'msiexec.exe' -Arguments @('/i', $msi, '/qn', '/norestart', '/l*v', $log) -TimeoutSeconds 3600
         }
         finally { $hold.Dispose() }
