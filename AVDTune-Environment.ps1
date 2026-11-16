@@ -41,6 +41,8 @@ $script:EnvFieldList = @(
     @{ Key = 'AllowedIps'; Label = 'Allowed IP ranges'; Hint = 'only with a public endpoint, separated by commas' }
     @{ Key = 'UsersGroupId'; Label = 'User group (object ID)'; Hint = 'gets Storage File Data SMB Share Contributor on the share; empty = you assign it' }
     @{ Key = 'AdminsGroupId'; Label = 'Admin group (object ID)'; Hint = 'gets Elevated Contributor; empty = you assign it' }
+    @{ Key = 'UsersGroupName'; Label = 'User group (name, for display)'; Hint = 'optional: shown in the plan next to the object ID (AVDTune does not look names up)' }
+    @{ Key = 'AdminsGroupName'; Label = 'Admin group (name, for display)'; Hint = 'optional, shown in the plan' }
     @{ Key = 'DomainName'; Label = 'Domain name (hybrid identities)'; Hint = 'optional, Entra Kerberos with synchronized users; goes with the GUID' }
     @{ Key = 'DomainGuid'; Label = 'Domain GUID (hybrid identities)'; Hint = 'optional' }
 )
@@ -69,7 +71,7 @@ function Get-EnvSpec {
     [pscustomobject]@{
         SubscriptionId = $t.SubscriptionId; ResourceGroup = $t.ResourceGroup; Location = $t.Location; AccountName = $t.AccountName; Sku = $t.Sku; ShareName = $t.ShareName; Users = $users; GiBPerUser = $gib
         Endpoint = $(if ($a) { [string]$a.Endpoint } else { 'Private' }); SubnetId = $t.SubnetId; PrivateEndpointName = $t.PrivateEndpointName; DnsZone = $(if ($a) { [string]$a.DnsZone } else { 'Azure' })
-        DnsZoneResourceGroup = $t.DnsZoneResourceGroup; UsersGroupId = $t.UsersGroupId; AdminsGroupId = $t.AdminsGroupId; DomainName = $t.DomainName; DomainGuid = $t.DomainGuid
+        DnsZoneResourceGroup = $t.DnsZoneResourceGroup; UsersGroupId = $t.UsersGroupId; AdminsGroupId = $t.AdminsGroupId; UsersGroupName = $t.UsersGroupName; AdminsGroupName = $t.AdminsGroupName; DomainName = $t.DomainName; DomainGuid = $t.DomainGuid
         AllowedIps = @($t.AllowedIps -split '[,;\s]+' | Where-Object { $_ })
     }
 }
@@ -186,14 +188,21 @@ Add-Click $ui.BtnEnvUndo {
     $ui.BtnEnvUndo.IsEnabled = $false
     Start-OverviewRefresh
 }
+function Get-EnvPlanned {
+    # The master part works from the plan that was made and shown, not from the form (which may have been edited since)
+    if (-not $script:EnvPlan) { throw 'Make the plan first: the settings of the master are taken from the plan you saw, not from the form.' }
+    $script:EnvPlan
+}
 Add-Click $ui.BtnEnvMasterTest {
-    $r = @(Set-AVDTuneEnvMaster -Machine $script:Machine -Spec (Get-EnvSpec) -Identity (Get-EnvIdentity) -Root $script:StateRoot -User (Get-EnvUser) -WhatIf)
+    $pl = Get-EnvPlanned
+    $r = @(Set-AVDTuneEnvMaster -Machine $script:Machine -Spec $pl.Spec -Identity $pl.Identity -Root $script:StateRoot -User (Get-EnvUser) -WhatIf)
     $ui.TxtEnvMaster.Text = (@($r | ForEach-Object { $_.Results } | ForEach-Object { "$($_.Title): $($_.Status)" })) -join '; '
 }
 Add-Click $ui.BtnEnvMasterApply {
     if (-not (Test-AVDTuneWriteAllowed)) { throw 'Read only: confirm a snapshot of today on the Overview first.' }
-    if (-not (Confirm-Action 'Write the FSLogix settings (Enabled, VHDLocations, Kerberos ticket value) for the new share to the registry of this master?' 'Environment')) { return }
-    $r = @(Set-AVDTuneEnvMaster -Machine $script:Machine -Spec (Get-EnvSpec) -Identity (Get-EnvIdentity) -Root $script:StateRoot -User (Get-EnvUser) -SnapshotId (Get-EnvGateSnapshot))
+    $pl = Get-EnvPlanned
+    if (-not (Confirm-Action "Write these FSLogix settings to the registry of this master?`n`nEnabled = 1`nVHDLocations = $(Get-AVDTuneEnvVhdLocation $pl.Spec)$(if ($pl.Identity -eq 'EntraKerberos') { '`nCloudKerberosTicketRetrievalEnabled = 1' })" 'Environment')) { return }
+    $r = @(Set-AVDTuneEnvMaster -Machine $script:Machine -Spec $pl.Spec -Identity $pl.Identity -Root $script:StateRoot -User (Get-EnvUser) -SnapshotId (Get-EnvGateSnapshot))
     foreach ($run in $r) { foreach ($x in @($run.Results)) { Register-StepResult $x } }
     $ui.TxtEnvMaster.Text = (@($r | ForEach-Object { $_.Results } | ForEach-Object { "$($_.Title): $($_.Status)" })) -join '; '
     Start-OverviewRefresh

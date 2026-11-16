@@ -57,6 +57,11 @@ function New-AVDTuneFakeEnvArm {
             $list = @($s.Resources.Keys | Where-Object { $_ -match '/storageaccounts/[a-z0-9]+$' } | ForEach-Object { $o = ConvertTo-EnvJson $s.Resources[$_]; Add-Member -InputObject $o -NotePropertyName id -NotePropertyValue $_ -Force; $o })
             return (& $resp 200 @{ value = $list } $null '')
         }
+        if ($Method -eq 'GET' -and $lower -match '^(.*/storageaccounts/[a-z0-9]+)/fileservices/default/shares$') {
+            $pre = $Matches[1] + '/fileservices/default/shares/'
+            $list = @($s.Resources.Keys | Where-Object { $_.StartsWith($pre) -and $_.Substring($pre.Length) -notmatch '/' } | ForEach-Object { @{ name = $_.Substring($pre.Length); properties = @{ shareQuota = 100 } } })
+            return (& $resp 200 @{ value = $list } $null '')
+        }
         if ($Method -eq 'GET' -and $lower -match '/providers/microsoft\.authorization/roleassignments$') {
             $scope = $lower -replace '/providers/microsoft\.authorization/roleassignments$', ''
             $list = @($s.Roles | Where-Object { ([string]$_.Scope).ToLowerInvariant() -eq $scope } | ForEach-Object { @{ name = $_.Name; properties = @{ roleDefinitionId = "/subscriptions/$($s.Sub)/providers/Microsoft.Authorization/roleDefinitions/$($_.Role)"; principalId = $_.Principal; scope = $_.Scope } } })
@@ -98,7 +103,7 @@ function New-AVDTuneFakeEnvArm {
             $dup = @($s.Roles | Where-Object { ([string]$_.Scope).ToLowerInvariant() -eq $scope -and $_.Principal -eq $b.properties.principalId -and $_.Role -eq $role -and ([string]$_.Name) -ne ($lower -split '/')[-1] })
             if ($dup.Count -gt 0) { return (& $fail 409 'RoleAssignmentExists' 'The role assignment already exists.') }
             $s.Roles = @($s.Roles) + @{ Scope = ($p -replace '/providers/Microsoft\.Authorization/roleAssignments/.*$', ''); Principal = [string]$b.properties.principalId; Role = $role; Name = ($lower -split '/')[-1] }
-            $s.Resources[$lower] = @{ name = ($lower -split '/')[-1]; properties = $b.properties }
+            $s.Seq++; $s.Resources[$lower] = @{ name = ($lower -split '/')[-1]; properties = $b.properties; systemData = @{ createdAt = ('2026-11-15T11:00:00.{0:000}Z' -f $s.Seq) } }
             return (& $resp 201 @{ name = ($lower -split '/')[-1]; properties = $b.properties } $null '')
         }
         # PUT or PATCH of a resource: merge for PATCH, replace for PUT
@@ -116,6 +121,9 @@ function New-AVDTuneFakeEnvArm {
         if (-not $new.PSObject.Properties['properties']) { Add-Member -InputObject $new -NotePropertyName properties -NotePropertyValue ([pscustomobject]@{}) }
         if (-not $new.properties.PSObject.Properties['provisioningState']) { Add-Member -InputObject $new.properties -NotePropertyName provisioningState -NotePropertyValue 'Succeeded' }
         if ($type -eq 'account' -and -not $new.properties.PSObject.Properties['primaryEndpoints']) { Add-Member -InputObject $new.properties -NotePropertyName primaryEndpoints -NotePropertyValue ([pscustomobject]@{ file = "https://$name.file.core.windows.net/" }) }
+        # what identifies the resource over its life: kept on every later PUT or PATCH, new on a create
+        if ($existing -and $existing.PSObject.Properties['systemData']) { Add-Member -InputObject $new -NotePropertyName systemData -NotePropertyValue $existing.systemData -Force }
+        else { $s.Seq++; Add-Member -InputObject $new -NotePropertyName systemData -NotePropertyValue ([pscustomobject]@{ createdAt = "2026-11-15T10:00:{0:00}Z" -f ($s.Seq % 60) + "." + ('{0:000}' -f $s.Seq) }) -Force }
         $s.Resources[$lower] = $new
         $status = if ($existing) { 200 } else { 201 }
         $async = $null

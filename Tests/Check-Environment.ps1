@@ -145,7 +145,7 @@ try {
     $loose = New-AVDTuneFakeEnvArm -Seed @{ Resources = @{ $accKey = @{ name = 'contosoprofiles'; kind = 'FileStorage'; sku = @{ name = 'Premium_LRS' }; location = 'westeurope'; properties = @{ supportsHttpsTrafficOnly = $true; minimumTlsVersion = 'TLS1_0'; allowBlobPublicAccess = $false; publicNetworkAccess = 'Enabled' } } } }
     $lp = Get-AVDTuneEnvPlan -Arm $loose -Token $tok -Spec $good -User 'u'
     $la = Get-Step $lp 'env.account'
-    Test-Check 'existing account that deviates: an update of only the deviating values, the old values kept for undo' ($la.Action -eq 'Update' -and $la.Method -eq 'PATCH' -and $la.Body.properties.minimumTlsVersion -eq 'TLS1_2' -and $la.Body.properties.publicNetworkAccess -eq 'Disabled' -and $la.Before.minimumTlsVersion -eq 'TLS1_0' -and -not $la.Body.properties.Contains('supportsHttpsTrafficOnly')) ($la.Changes -join '|')
+    Test-Check 'existing account that deviates: an update of only the deviating values, the old values kept for undo' ($la.Action -eq 'Update' -and $la.Method -eq 'PATCH' -and $la.Body.properties.minimumTlsVersion -eq 'TLS1_2' -and -not $la.Body.properties.Contains('publicNetworkAccess') -and $la.Before.minimumTlsVersion -eq 'TLS1_0' -and -not $la.Body.properties.Contains('supportsHttpsTrafficOnly')) ($la.Changes -join '|')
     $adx = New-AVDTuneFakeEnvArm -Seed @{ Resources = @{ $accKey = @{ name = 'contosoprofiles'; kind = 'FileStorage'; sku = @{ name = 'Premium_LRS' }; location = 'westeurope'; properties = @{ supportsHttpsTrafficOnly = $true; minimumTlsVersion = 'TLS1_2'; allowBlobPublicAccess = $false; publicNetworkAccess = 'Disabled'; azureFilesIdentityBasedAuthentication = @{ directoryServiceOptions = 'AD' } } } } }
     $xp = Get-AVDTuneEnvPlan -Arm $adx -Token $tok -Spec $good -User 'u'
     Test-Check 'account already uses another identity source: blocked (only one source is possible)' ((Get-Step $xp 'env.identity').Action -eq 'Blocked' -and $xp.Blocked.Count -ge 1 -and ($xp.Blocked -join ' ') -like '*only one*') ($xp.Blocked -join '|')
@@ -332,7 +332,7 @@ try {
     $tlsNow = $arm.Store.Resources[$accKey].properties.minimumTlsVersion
     $up = Get-AVDTuneEnvUndoPlan -Arm $arm -Token $tok -Root $root
     $ur = Invoke-AVDTuneEnvUndo -Arm $arm -Token $tok -Root $root -ConfirmedHash $up.Hash -PollSeconds 0 -MaxPolls 20
-    Test-Check 'an aligned existing account: TLS 1.2 was set, undo restores the recorded TLS 1.0 and public access' ($tlsNow -eq 'TLS1_2' -and $arm.Store.Resources[$accKey].properties.minimumTlsVersion -eq 'TLS1_0' -and $arm.Store.Resources[$accKey].properties.publicNetworkAccess -eq 'Enabled') ($ur.Results | ConvertTo-Json -Compress)
+    Test-Check 'an aligned existing account: TLS 1.2 was set, undo restores the recorded TLS 1.0, public access was never touched' ($tlsNow -eq 'TLS1_2' -and $arm.Store.Resources[$accKey].properties.minimumTlsVersion -eq 'TLS1_0' -and $arm.Store.Resources[$accKey].properties.publicNetworkAccess -eq 'Enabled') ($ur.Results | ConvertTo-Json -Compress)
     # the journal is data: a planted path that is not on the allowlist is never sent
     $root = New-Root; $roots += $root
     $arm = New-AVDTuneFakeEnvArm
@@ -342,6 +342,180 @@ try {
     [IO.File]::WriteAllText($jp, ($evilJournal | ConvertTo-Json -Depth 8))
     $up = Get-AVDTuneEnvUndoPlan -Arm $arm -Token $tok -Root $root
     Test-Check 'a journal entry that points at another resource type produces no step and no request' ($up.Steps.Count -eq 0 -and $arm.Log.Count -eq 0) $null
+
+    # ---------------------------------------------------------------- review findings of #32 (Finn): share empty, per share and account, journal as input, existing accounts, create semantics
+    Close-AVDTuneWriteGate; Open-AVDTuneWriteGate -SnapshotId 'snapB' -ConfirmedBy 'Test User'
+    $peKey2 = "/subscriptions/$sub/resourcegroups/rg-example/providers/microsoft.network/privateendpoints/pe-contosoprofiles"
+    $shareArgs = @{ Account = 'contosoprofiles'; Share = 'profiles'; Token = 'tok-st-SECRET' }
+    # 1: Test-AVDTuneEnvShareEmpty: true only for a clear 2xx answer without entries and without marker
+    $fe = New-AVDTuneFakeFiles -Seed @{ Acls = @{ '' = 'x' } }
+    Test-Check 'share empty: a clear empty answer is $true' ((Test-AVDTuneEnvShareEmpty -Files $fe @shareArgs) -eq $true) $null
+    foreach ($c in @(
+            @{ N = 'a directory in it'; S = @{ Folders = @('alice') }; Not = $true }, @{ N = 'only files in it (no directory)'; S = @{ FileEntries = @('a.vhdx') }; Not = $true },
+            @{ N = '403 (role not active yet)'; S = @{ Forbidden = $true } }, @{ N = 'no connection'; S = @{ Offline = $true } },
+            @{ N = 'a NextMarker (more to list)'; S = @{ NextMarker = 'abc' } }, @{ N = 'XML that does not parse'; S = @{ BadXml = $true } })) {
+        $seed = @{ Acls = @{ '' = 'x' } }; foreach ($k in $c.S.Keys) { $seed[$k] = $c.S[$k] }
+        $v = Test-AVDTuneEnvShareEmpty -Files (New-AVDTuneFakeFiles -Seed $seed) @shareArgs
+        Test-Check "share empty is not `$true: $($c.N)" ($v -ne $true) "$v"
+        if (-not $c.Not) { Test-Check "share empty is `$null (cannot prove it): $($c.N)" ($null -eq $v) "$v" }
+    }
+    Test-Check 'share empty: a bad account or share name is refused, not asked' ($null -eq (Test-AVDTuneEnvShareEmpty -Files $fe -Account 'A/../b' -Share 'profiles' -Token 't')) $null
+    # undo plan: files only, 403, marker keep the share and the account
+    foreach ($c in @(@{ N = 'only files'; S = @{ FileEntries = @('a.vhdx') } }, @{ N = '403'; S = @{ Forbidden = $true } }, @{ N = 'NextMarker'; S = @{ NextMarker = 'm' } }, @{ N = 'offline'; S = @{ Offline = $true } })) {
+        $root = New-Root; $roots += $root; $arm = New-AVDTuneFakeEnvArm; [void](Invoke-Full $arm $good $root)
+        $seed = @{ Acls = @{ '' = 'x' } }; foreach ($k in $c.S.Keys) { $seed[$k] = $c.S[$k] }
+        $up = Get-AVDTuneEnvUndoPlan -Arm $arm -Token $tok -Root $root -Files (New-AVDTuneFakeFiles -Seed $seed) -StorageToken 'tok-st-SECRET'
+        $b = @{}; foreach ($s in $up.Steps) { $b[$s.Id] = $s }
+        Test-Check "undo plan keeps share and account: $($c.N)" ($b['env.share'].Action -eq 'Keep' -and $b['env.account'].Action -eq 'Keep') (($up.Steps | ForEach-Object { "$($_.Id)=$($_.Action)" }) -join ',')
+    }
+    # the check again right before the delete: data that arrives after the plan keeps the share and the account
+    $root = New-Root; $roots += $root; $arm = New-AVDTuneFakeEnvArm; [void](Invoke-Full $arm $good $root)
+    $fl0 = New-AVDTuneFakeFiles -Seed @{ Acls = @{ '' = 'x' } }
+    $flCalls = @{ N = 0 }
+    $fl = [pscustomobject]@{ Kind = 'Fake'; Invoke = { param($m, $u, $t, $h, $b) $flCalls.N++; if ($flCalls.N -ge 3) { $fl0.Store.FileEntries = @('first-profile.vhdx') }; & $fl0.Invoke $m $u $t $h $b }.GetNewClosure() }   # a file arrives after the plan was built and confirmed, before the delete
+    $up = Get-AVDTuneEnvUndoPlan -Arm $arm -Token $tok -Root $root -Files $fl -StorageToken 'tok-st-SECRET'
+    $arm.Store.Writes.Clear()
+    $ur = Invoke-AVDTuneEnvUndo -Arm $arm -Token $tok -Root $root -ConfirmedHash $up.Hash -Files $fl -StorageToken 'tok-st-SECRET' -PollSeconds 0 -MaxPolls 20
+    Test-Check 'a file that arrives after the undo plan: the share and the account are not deleted' ($arm.Store.Resources.ContainsKey($accKey) -and @($arm.Store.Writes | Where-Object { $_ -match 'DELETE .*(storageAccounts/contosoprofiles|/shares/profiles)$' }).Count -eq 0 -and (($ur.Results | Where-Object Id -eq 'env.share').Message -like '*not verified empty*')) (($ur.Results | ForEach-Object { "$($_.Id)=$($_.Status) $($_.Message)" }) -join '|')
+
+    # 2: per share and account, two runs
+    $root = New-Root; $roots += $root; $arm = New-AVDTuneFakeEnvArm
+    $specB = New-Spec @{ AccountName = 'contosoother'; ShareName = 'profilesb'; PrivateEndpointName = 'pe-contosoother' }
+    $rA = Invoke-Full $arm $good $root; $rB = Invoke-Full $arm $specB $root
+    $fa = New-AVDTuneFakeFiles -Seed @{ Acls = @{ '' = 'x' }; Folders = @('S-1-12-1-1-2-3-4_alice') }; $fb = New-AVDTuneFakeFiles -Seed @{ Acls = @{ '' = 'x' } }
+    $two = [pscustomobject]@{ Kind = 'Fake'; Invoke = { param($m, $u, $t, $h, $b) if ($u -like '*contosoprofiles.file*') { & $fa.Invoke $m $u $t $h $b } else { & $fb.Invoke $m $u $t $h $b } }.GetNewClosure() }
+    $up = Get-AVDTuneEnvUndoPlan -Arm $arm -Token $tok -Root $root -Files $two -StorageToken 'tok-st-SECRET'
+    $acts = @($up.Steps | Where-Object { $_.Type -in 'account', 'share' } | ForEach-Object { "$($_.Type):$(($_.Path -split '\?')[0] -replace '.*storageAccounts/','' -replace '/fileServices.*','')=$($_.Action)" })
+    Test-Check 'two runs: the account whose share holds data is kept, the other account with its empty share is deleted (no global flag)' ($rA.Status -eq 'Changed' -and $rB.Status -eq 'Changed' -and ($acts -contains 'share:contosoprofiles=Keep') -and ($acts -contains 'account:contosoprofiles=Keep') -and ($acts -contains 'share:contosoother=Delete') -and ($acts -contains 'account:contosoother=Delete')) ($acts -join ', ')
+    # an account with a share AVDTune did not create is kept, even when its own share is empty
+    $arm.Store.Resources["/subscriptions/$sub/resourcegroups/rg-example/providers/microsoft.storage/storageaccounts/contosoother/fileservices/default/shares/someoneelse"] = [pscustomobject]@{ name = 'someoneelse'; properties = [pscustomobject]@{ shareQuota = 100 } }
+    $up = Get-AVDTuneEnvUndoPlan -Arm $arm -Token $tok -Root $root -Files $two -StorageToken 'tok-st-SECRET'
+    $ao = @($up.Steps | Where-Object { $_.Type -eq 'account' -and $_.Path -like '*contosoother*' })[0]
+    Test-Check 'an account with a share that AVDTune did not create is kept (ARM list is compared with the journal)' ($ao.Action -eq 'Keep' -and $ao.Reason -like '*did not create*') $ao.Reason
+
+    # 3: the journal is input
+    $root = New-Root; $roots += $root; $arm = New-AVDTuneFakeEnvArm; [void](Invoke-Full $arm $good $root)
+    $jp = Join-Path $root 'config\azure-setup.json'
+    $j0 = [IO.File]::ReadAllText($jp) | ConvertFrom-Json
+    $run0 = $j0.Runs[0]
+    $mutate = {
+        param($edit)
+        $jj = [IO.File]::ReadAllText($jp) | ConvertFrom-Json
+        & $edit $jj.Runs[0]
+        [IO.File]::WriteAllText($jp, ($jj | ConvertTo-Json -Depth 10))
+        $arm.Log.Clear()
+        Get-AVDTuneEnvUndoPlan -Arm $arm -Token $tok -Root $root
+    }
+    $orig = [IO.File]::ReadAllText($jp)
+    foreach ($c in @(
+            @{ N = 'another resource group than the run'; E = { param($r) foreach ($s in $r.Steps) { if ($s.Type -eq 'account') { $s.Path = $s.Path -replace 'resourceGroups/rg-example', 'resourceGroups/rg-other' } } }; Type = 'account' }
+            @{ N = 'another account than the run'; E = { param($r) foreach ($s in $r.Steps) { if ($s.Type -eq 'share') { $s.Path = $s.Path -replace 'storageAccounts/contosoprofiles', 'storageAccounts/victimaccount1' } } }; Type = 'share' }
+            @{ N = 'another subscription than the run'; E = { param($r) foreach ($s in $r.Steps) { if ($s.Type -eq 'endpoint') { $s.Path = $s.Path -replace 'subscriptions/aaaaaaaa', 'subscriptions/bbbbbbbb' } } }; Type = 'endpoint' }
+            @{ N = 'another endpoint than the run'; E = { param($r) foreach ($s in $r.Steps) { if ($s.Type -eq 'endpoint') { $s.Path = $s.Path -replace 'pe-contosoprofiles', 'pe-someone-else' } } }; Type = 'endpoint' }
+            @{ N = 'a type that does not match the path'; E = { param($r) foreach ($s in $r.Steps) { if ($s.Type -eq 'share') { $s.Type = 'account' } } }; Type = 'share' })) {
+        [IO.File]::WriteAllText($jp, $orig)
+        $up = & $mutate $c.E
+        $hit = @($up.Steps | Where-Object { $_.Type -eq $c.Type -and $_.Id -like 'env.*' -and $_.Action -in 'Delete', 'Restore' })
+        Test-Check "journal as input: an entry with $($c.N) gives no step and no request for it" ($hit.Count -eq 0 -and @($arm.Log | Where-Object { $_ -like '*victimaccount1*' -or $_ -like '*pe-someone-else*' -or $_ -like '*bbbbbbbb*' }).Count -eq 0) (($up.Steps | ForEach-Object { "$($_.Id)=$($_.Action)" }) -join ',')
+    }
+    [IO.File]::WriteAllText($jp, $orig)
+    $arm.Store.Resources[$peKey2].tags = [pscustomobject]@{ Owner = 'someone' }
+    $up = & $mutate { param($r) foreach ($s in $r.Steps) { if ($s.Type -eq 'endpoint') { $s.Taggable = $false } } }
+    Test-Check 'journal as input: the entry cannot switch the tag check off (Taggable comes from the rule)' (@($up.Steps | Where-Object Id -eq 'env.endpoint')[0].Action -eq 'Keep') $null
+    # the recorded old values: only known keys and values
+    $root = New-Root; $roots += $root
+    $arm = New-AVDTuneFakeEnvArm -Seed @{ Resources = @{ $accKey = @{ name = 'contosoprofiles'; kind = 'FileStorage'; sku = @{ name = 'Premium_LRS' }; location = 'westeurope'; properties = @{ supportsHttpsTrafficOnly = $true; minimumTlsVersion = 'TLS1_0'; allowBlobPublicAccess = $false; publicNetworkAccess = 'Disabled' } } } }
+    [void](Invoke-Full $arm $good $root)
+    $jp = Join-Path $root 'config\azure-setup.json'
+    $jj = [IO.File]::ReadAllText($jp) | ConvertFrom-Json
+    $acEntry = @($jj.Runs[0].Steps | Where-Object { $_.Type -eq 'account' })[0]
+    $acEntry.Before = [pscustomobject]@{ minimumTlsVersion = 'TLS1_0'; publicNetworkAccess = 'Evil'; allowBlobPublicAccess = 'true'; allowSharedKeyAccess = $true; identity = 'x' }
+    [IO.File]::WriteAllText($jp, ($jj | ConvertTo-Json -Depth 10))
+    $up = Get-AVDTuneEnvUndoPlan -Arm $arm -Token $tok -Root $root
+    $rs = @($up.Steps | Where-Object { $_.Id -eq 'env.account' })[0]
+    Test-Check 'journal as input: the recorded old values are reduced to known keys and enum values' ($rs.Action -eq 'Restore' -and (@($rs.Body.properties.Keys) -join ',') -eq 'minimumTlsVersion' -and $rs.Body.properties.minimumTlsVersion -eq 'TLS1_0') ($rs.Body | ConvertTo-Json -Compress)
+    $acEntry.Before = [pscustomobject]@{ minimumTlsVersion = 'x; drop'; publicNetworkAccess = 'Evil' }
+    [IO.File]::WriteAllText($jp, ($jj | ConvertTo-Json -Depth 10))
+    Test-Check 'journal as input: nothing usable left means Keep, not an empty request' (@((Get-AVDTuneEnvUndoPlan -Arm $arm -Token $tok -Root $root).Steps | Where-Object Id -eq 'env.account')[0].Action -eq 'Keep') $null
+
+    # 4: existing accounts are only made stricter
+    $mkAcc = { param($props) New-AVDTuneFakeEnvArm -Seed @{ Resources = @{ $accKey = @{ name = 'contosoprofiles'; kind = 'FileStorage'; sku = @{ name = 'Premium_LRS' }; location = 'westeurope'; properties = $props } } } }
+    $pOpen = Get-AVDTuneEnvPlan -Arm (& $mkAcc @{ supportsHttpsTrafficOnly = $true; minimumTlsVersion = 'TLS1_2'; allowBlobPublicAccess = $false; publicNetworkAccess = 'Enabled' }) -Token $tok -Spec $good -User 'u'
+    Test-Check 'existing account with public access on and a private endpoint: never switched, a manual step and a warning' ((Get-Step $pOpen 'env.account').Action -eq 'None' -and (Get-Step $pOpen 'env.publicaccess').Action -eq 'Manual' -and ($pOpen.Warnings -join ' ') -like '*never switches public access*') (($pOpen.Steps | ForEach-Object { "$($_.Id)=$($_.Action)" }) -join ',')
+    $pTls = Get-AVDTuneEnvPlan -Arm (& $mkAcc @{ supportsHttpsTrafficOnly = $true; minimumTlsVersion = 'TLS1_3'; allowBlobPublicAccess = $false; publicNetworkAccess = 'Disabled' }) -Token $tok -Spec $good -User 'u'
+    Test-Check 'TLS levels are compared in order: TLS 1.3 is not lowered to 1.2' ((Get-Step $pTls 'env.account').Action -eq 'None') $null
+    $pUnk = Get-AVDTuneEnvPlan -Arm (& $mkAcc @{ supportsHttpsTrafficOnly = 'maybe'; minimumTlsVersion = 'TLS9_9'; allowBlobPublicAccess = 'perhaps'; publicNetworkAccess = 'SecuredByPerimeter' }) -Token $tok -Spec $good -User 'u'
+    Test-Check 'values of a kind AVDTune does not know are not touched' ((Get-Step $pUnk 'env.account').Action -eq 'None' -and $null -eq (Get-Step $pUnk 'env.publicaccess')) $null
+    $pLow = Get-AVDTuneEnvPlan -Arm (& $mkAcc @{ supportsHttpsTrafficOnly = $false; minimumTlsVersion = 'TLS1_1'; allowBlobPublicAccess = $true; publicNetworkAccess = 'Disabled' }) -Token $tok -Spec $good -User 'u'
+    $lb = (Get-Step $pLow 'env.account').Body.properties
+    Test-Check 'a looser account is tightened: HTTPS only, TLS 1.2, no blob public access' ($lb.supportsHttpsTrafficOnly -eq $true -and $lb.minimumTlsVersion -eq 'TLS1_2' -and $lb.allowBlobPublicAccess -eq $false -and -not $lb.Contains('publicNetworkAccess')) ($lb | ConvertTo-Json -Compress)
+    $pPub = Get-AVDTuneEnvPlan -Arm (New-AVDTuneFakeEnvArm -Seed @{ Resources = @{ $accKey = @{ name = 'contosoprofiles'; kind = 'FileStorage'; sku = @{ name = 'Premium_LRS' }; location = 'westeurope'; properties = @{ supportsHttpsTrafficOnly = $true; minimumTlsVersion = 'TLS1_2'; allowBlobPublicAccess = $false; publicNetworkAccess = 'Enabled'; networkAcls = @{ defaultAction = 'Allow' } } } } }) -Token $tok -Spec (New-Spec @{ Endpoint = 'Public' }) -User 'u'
+    Test-Check 'existing public account with firewall default Allow: warned, not changed' ((Get-Step $pPub 'env.account').Action -eq 'None' -and ($pPub.Warnings -join ' ') -like '*default action Allow*') ($pPub.Warnings -join '|')
+    $root = New-Root; $roots += $root
+    $arm = & $mkAcc @{ supportsHttpsTrafficOnly = $true; minimumTlsVersion = 'TLS1_0'; allowBlobPublicAccess = $false; publicNetworkAccess = 'Enabled' }
+    [void](Invoke-Full $arm $good $root)
+    Test-Check 'applied to an account with public access on: TLS tightened, public access still on' ($arm.Store.Resources[$accKey].properties.minimumTlsVersion -eq 'TLS1_2' -and $arm.Store.Resources[$accKey].properties.publicNetworkAccess -eq 'Enabled') $null
+
+    # 5: create only with create semantics
+    $root = New-Root; $roots += $root
+    $inner = New-AVDTuneFakeEnvArm
+    $shGets = New-Object System.Collections.ArrayList
+    $race = [pscustomobject]@{ Kind = 'Race'; Store = $inner.Store; Log = $inner.Log; Invoke = {
+            param($Method, $Path, $Token, $Body)
+            if ($Method -eq 'GET' -and $Path -like '*/shares/profiles?*') {
+                [void]$shGets.Add($Path)
+                if ($shGets.Count -eq 1) { [void](& $inner.Invoke 'PUT' ($Path -replace 'api-version=.*$', 'api-version=2024-01-01') $Token @{ properties = @{ shareQuota = 777 } }) }   # someone creates the share between the plan and the create
+            }
+            & $inner.Invoke $Method $Path $Token $Body
+        }.GetNewClosure() }
+    $r = Invoke-Full $race $good $root
+    $sh = $inner.Store.Resources["/subscriptions/$sub/resourcegroups/rg-example/providers/microsoft.storage/storageaccounts/contosoprofiles/fileservices/default/shares/profiles"]
+    Test-Check 'a resource that appears between plan and create: nothing is sent for it, the run stops, the other share is not overwritten' ($r.Status -eq 'Failed' -and (@($r.Results | Where-Object Status -eq 'Failed')[0].Message -like '*exists now*') -and $sh.properties.shareQuota -eq 777 -and @($inner.Store.Writes | Where-Object { $_ -like 'PUT *shares/profiles' }).Count -eq 1) (($r.Results | ForEach-Object { "$($_.Id)=$($_.Status) $($_.Message)" }) -join '|')
+    $root = New-Root; $roots += $root; $arm = New-AVDTuneFakeEnvArm; [void](Invoke-Full $arm $good $root)
+    $jj = [IO.File]::ReadAllText((Join-Path $root 'config\azure-setup.json')) | ConvertFrom-Json
+    $accE = @($jj.Runs[0].Steps | Where-Object { $_.Type -eq 'account' })[0]
+    Test-Check 'the journal records what identifies each created resource (creation time or guid)' ($accE.Identity.createdAt -and @($jj.Runs[0].Steps | Where-Object { $_.Action -eq 'Create' -and -not $_.Identity }).Count -eq 0 -and $accE.Identity.createdAt) ($accE | ConvertTo-Json -Depth 4 -Compress)
+    # a resource deleted and made again by someone else with the same name and the same tag is not deleted
+    $arm.Store.Resources[$peKey2].systemData.createdAt = '2026-11-16T09:00:00.999Z'
+    $up = Get-AVDTuneEnvUndoPlan -Arm $arm -Token $tok -Root $root
+    Test-Check 'a resource made again under the same name (same tag, other creation time) is kept' (@($up.Steps | Where-Object Id -eq 'env.endpoint')[0].Action -eq 'Keep' -and @($up.Steps | Where-Object Id -eq 'env.endpoint')[0].Reason -like '*created again*') (@($up.Steps | Where-Object Id -eq 'env.endpoint')[0].Reason)
+
+    # 6: the VNet link stays with the zone when the zone holds other records
+    $root = New-Root; $roots += $root; $arm = New-AVDTuneFakeEnvArm -Seed @{ ExtraRecords = 3 }; [void](Invoke-Full $arm $good $root)
+    $up = Get-AVDTuneEnvUndoPlan -Arm $arm -Token $tok -Root $root
+    Test-Check 'a zone with other record sets: the zone and its VNet link both stay' (@($up.Steps | Where-Object Id -eq 'env.dnslink')[0].Action -eq 'Keep' -and @($up.Steps | Where-Object Id -eq 'env.dnszone')[0].Action -eq 'Keep') (($up.Steps | ForEach-Object { "$($_.Id)=$($_.Action)" }) -join ',')
+
+    # 8: role assignments are checked in the writer
+    $rolePath = "$acc/fileServices/default/fileshares/profiles/providers/Microsoft.Authorization/roleAssignments/$(Get-AVDTuneEnvRoleName 's' 'p' 'r')?api-version=2022-04-01"
+    $okBody = @{ properties = @{ roleDefinitionId = "/subscriptions/$sub/providers/Microsoft.Authorization/roleDefinitions/0c867c2a-1d8c-454a-a3db-ab2ea1bdc8bb"; principalId = $g1; principalType = 'Group' } }
+    foreach ($c in @(
+            @{ N = 'the Owner role'; B = @{ properties = @{ roleDefinitionId = "/subscriptions/$sub/providers/Microsoft.Authorization/roleDefinitions/8e3af657-a8ff-443c-a75c-2fe8c4bcb635"; principalId = $g1; principalType = 'Group' } } }
+            @{ N = 'a role definition of another subscription'; B = @{ properties = @{ roleDefinitionId = "/subscriptions/bbbbbbbb-bbbb-cccc-dddd-eeeeeeeeeeee/providers/Microsoft.Authorization/roleDefinitions/0c867c2a-1d8c-454a-a3db-ab2ea1bdc8bb"; principalId = $g1; principalType = 'Group' } } }
+            @{ N = 'principal type User'; B = @{ properties = @{ roleDefinitionId = $okBody.properties.roleDefinitionId; principalId = $g1; principalType = 'User' } } }
+            @{ N = 'a principal that is not a GUID'; B = @{ properties = @{ roleDefinitionId = $okBody.properties.roleDefinitionId; principalId = 'everyone'; principalType = 'Group' } } })) {
+        $arm = New-AVDTuneFakeEnvArm
+        $w = Invoke-AVDTuneEnvWrite -Arm $arm -Token $tok -Method PUT -Path $rolePath -Body $c.B -What 'assign' -PollSeconds 0
+        Test-Check "role writer refuses $($c.N), nothing is sent" (-not $w.Ok -and $w.Message -like '*not one of the two share roles*' -and $arm.Log.Count -eq 0) $w.Message
+    }
+    $arm = New-AVDTuneFakeEnvArm
+    Test-Check 'role writer sends the two share roles for a group' ((Invoke-AVDTuneEnvWrite -Arm $arm -Token $tok -Method PUT -Path $rolePath -Body $okBody -What 'assign' -PollSeconds 0).Ok -and (Get-Writes $arm).Count -eq 1) $null
+    $np = Get-AVDTuneEnvPlan -Arm (New-AVDTuneFakeEnvArm) -Token $tok -Spec (New-Spec @{ UsersGroupName = 'FSLogix Users'; AdminsGroupName = 'AVD Admins' }) -User 'u'
+    Test-Check 'the plan shows the typed display name of the group next to its object ID' (((Get-Step $np 'env.role-users').Changes -join ' ') -like "*$g1 (FSLogix Users)*" -and ((Get-Step $np 'env.role-admins').Changes -join ' ') -like '*(AVD Admins)*') ((Get-Step $np 'env.role-users').Changes -join ' ')
+    Test-Check 'a group name with odd characters is refused by the spec' ((Test-AVDTuneEnvSpec (New-Spec @{ UsersGroupName = 'a<script>' })).Count -ge 1) $null
+
+    # 10: shared key off on new accounts
+    $nb = (Get-Step $plan 'env.account').Body.properties
+    Test-Check 'a new account has shared key access off, with the note about the emergency access' ($nb.allowSharedKeyAccess -eq $false -and ($plan.Warnings -join ' ') -like '*Shared key access is switched off*portal*') ($plan.Warnings -join '|')
+
+    # 11: polling links of real Azure URLs
+    $real = "https://management.azure.com/subscriptions/$sub/providers/Microsoft.Network/locations/westeurope/operations/0a1b2c3d-0000-1111-2222-333344445555?api-version=2023-11-01&t=638700000000000000&c=MIIHhzCCBm-gAwIBAgITOgAB%2BQw%2Bx_y%2F%3D&s=abc-DEF_123~x&h=QmFzZTY0LS1oYXNo"
+    Test-Check 'a real looking polling URL (signed values with base64 and percent characters) is accepted' ((Get-AVDTuneEnvPollPath $real) -like "/subscriptions/$sub/providers/Microsoft.Network/locations/westeurope/operations/*&h=QmFzZTY0LS1oYXNo") $null
+    foreach ($bad in @("https://management.azure.com.evil.example/subscriptions/$sub/x?api-version=2023-11-01", "https://evil.example/subscriptions/$sub/x?api-version=2023-11-01", "https://management.azure.com/subscriptions/$sub/%2e%2e/x?api-version=2023-11-01",
+            "https://management.azure.com/subscriptions/$sub/x?api-version=2023-11-01&c=a b", "https://management.azure.com/subscriptions/$sub/x?api-version=2023-11-01&c=<x>", "https://management.azure.com/subscriptions/$sub/x?api-version=2023-11-01#frag", "https://user:pw@management.azure.com/subscriptions/$sub/x?api-version=1")) {
+        Test-Check "polling URL refused: $($bad -replace [regex]::Escape($sub), '<sub>')" (Test-Throws { Get-AVDTuneEnvPollPath $bad }) $null
+    }
+    Test-Check 'the relaxed query is only for polling GETs: a write with it is refused' ((Test-Throws { Assert-AVDTuneEnvArmPath "$acc`?api-version=2024-01-01&c=a%2Bb" 'PUT' -Poll }) -and (Test-Throws { Assert-AVDTuneEnvArmPath "$acc`?api-version=2024-01-01&c=a%2Bb" 'GET' })) $null
+    Close-AVDTuneWriteGate
 
     # ---------------------------------------------------------------- the master, the ACL and the test (existing steps)
     $root = New-Root; $roots += $root
@@ -399,6 +573,8 @@ try {
     $main = [IO.File]::ReadAllText((Join-Path $repo 'Start-AVDTune.ps1'))
     Test-Check 'the hooks in Start-AVDTune.ps1: module, navigation entry, page switch, view and the page file' ($main -match "'Storage', 'Environment'\) \{ Import" -and $main -match "Key = 'Environment'" -and $main -match "Update-EnvView" -and $main -match "AVDTune-Environment\.ps1") $null
     Test-Check 'the page changes nothing without the plan hash: apply and undo pass the hash of the plan that was shown' ($pageScript -match 'ConfirmedHash \$p\.Hash' -and ([regex]::Matches($pageScript, 'ConfirmedHash')).Count -eq 2 -and $pageScript -match "Confirm-Action") $null
+    $masterPart = $pageScript.Substring($pageScript.IndexOf('function Get-EnvPlanned'))
+    Test-Check 'the master part takes the plan that was shown (Spec and Identity), not the form, and names VHDLocations in the confirmation' ($masterPart -notmatch 'Get-EnvSpec' -and ([regex]::Matches($masterPart, '-Spec \$pl\.Spec -Identity \$pl\.Identity')).Count -eq 2 -and $masterPart -match 'VHDLocations = \$\(Get-AVDTuneEnvVhdLocation \$pl\.Spec\)' -and $masterPart -match 'Make the plan first') $null
 }
 finally {
     Close-AVDTuneWriteGate

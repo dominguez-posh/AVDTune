@@ -71,6 +71,7 @@ function Test-AVDTuneEnvSpec {
         $dz = & $p 'DnsZoneResourceGroup'; if ($dz -and -not (Test-AVDTuneEnvSegment $dz)) { [void]$e.Add('The resource group of the DNS zone has characters Azure does not allow.') }
     }
     else { foreach ($ip in @(Get-AVDTuneProp $Spec 'AllowedIps')) { if ($ip -and ([string]$ip) -notmatch '^(\d{1,3}\.){3}\d{1,3}(/(\d|[12]\d|3[0-2]))?$') { [void]$e.Add("'$ip' is not an IPv4 address or range.") } } }
+    foreach ($n in 'UsersGroupName', 'AdminsGroupName') { $v = & $p $n; if ($v -and $v -notmatch '^[\p{L}\p{N} ._()-]{1,64}$') { [void]$e.Add("$n has characters that are not allowed (letters, digits, blank, . _ ( ) -).") } }
     foreach ($n in 'UsersGroupId', 'AdminsGroupId') { $v = & $p $n; if ($v -and -not (Test-AVDTuneEnvGuid $v)) { [void]$e.Add("$n must be the object ID (GUID) of a group.") } }
     $dn = & $p 'DomainName'; $dg = & $p 'DomainGuid'
     if ($dn -and $dn -notmatch '^[A-Za-z0-9][A-Za-z0-9.-]{0,250}\.[A-Za-z]{2,}$') { [void]$e.Add('The domain name is not valid.') }
@@ -134,15 +135,22 @@ function Get-AVDTuneEnvIdentityModel {
 
 # What this module may write: method, shape of the path (after /subscriptions/<id>/resourceGroups/<rg>/providers/ or at the scope of a share) and the api version
 $script:Wr = @(
-    @{ Id = 'account'; Re = "^/subscriptions/$($script:Guid)/resourceGroups/$($script:Seg)/providers/Microsoft\.Storage/storageAccounts/[a-z0-9]{3,24}$"; Methods = 'PUT', 'PATCH', 'DELETE'; Api = $script:StorageApi }
-    @{ Id = 'smb'; Re = "^/subscriptions/$($script:Guid)/resourceGroups/$($script:Seg)/providers/Microsoft\.Storage/storageAccounts/[a-z0-9]{3,24}/fileServices/default$"; Methods = 'PUT'; Api = $script:StorageApi }
-    @{ Id = 'share'; Re = "^/subscriptions/$($script:Guid)/resourceGroups/$($script:Seg)/providers/Microsoft\.Storage/storageAccounts/[a-z0-9]{3,24}/fileServices/default/shares/[a-z0-9-]{3,63}$"; Methods = 'PUT', 'DELETE'; Api = $script:StorageApi }
-    @{ Id = 'endpoint'; Re = "^/subscriptions/$($script:Guid)/resourceGroups/$($script:Seg)/providers/Microsoft\.Network/privateEndpoints/$($script:Seg)$"; Methods = 'PUT', 'DELETE'; Api = $script:NetworkApi }
-    @{ Id = 'dnsgroup'; Re = "^/subscriptions/$($script:Guid)/resourceGroups/$($script:Seg)/providers/Microsoft\.Network/privateEndpoints/$($script:Seg)/privateDnsZoneGroups/default$"; Methods = 'PUT', 'DELETE'; Api = $script:NetworkApi }
-    @{ Id = 'dnszone'; Re = "^/subscriptions/$($script:Guid)/resourceGroups/$($script:Seg)/providers/Microsoft\.Network/privateDnsZones/privatelink\.file\.core\.windows\.net$"; Methods = 'PUT', 'DELETE'; Api = $script:DnsApi }
-    @{ Id = 'dnslink'; Re = "^/subscriptions/$($script:Guid)/resourceGroups/$($script:Seg)/providers/Microsoft\.Network/privateDnsZones/privatelink\.file\.core\.windows\.net/virtualNetworkLinks/$($script:Seg)$"; Methods = 'PUT', 'DELETE'; Api = $script:DnsApi }
-    @{ Id = 'role'; Re = "^/subscriptions/$($script:Guid)/resourceGroups/$($script:Seg)/providers/Microsoft\.Storage/storageAccounts/[a-z0-9]{3,24}/fileServices/default/fileshares/[a-z0-9-]{3,63}/providers/Microsoft\.Authorization/roleAssignments/$($script:Guid)$"; Methods = 'PUT', 'DELETE'; Api = $script:AuthApi }
+    @{ Id = 'account'; Taggable = $true; Re = "^/subscriptions/$($script:Guid)/resourceGroups/$($script:Seg)/providers/Microsoft\.Storage/storageAccounts/[a-z0-9]{3,24}$"; Methods = 'PUT', 'PATCH', 'DELETE'; Api = $script:StorageApi }
+    @{ Id = 'smb'; Taggable = $false; Re = "^/subscriptions/$($script:Guid)/resourceGroups/$($script:Seg)/providers/Microsoft\.Storage/storageAccounts/[a-z0-9]{3,24}/fileServices/default$"; Methods = 'PUT'; Api = $script:StorageApi }
+    @{ Id = 'share'; Taggable = $false; Re = "^/subscriptions/$($script:Guid)/resourceGroups/$($script:Seg)/providers/Microsoft\.Storage/storageAccounts/[a-z0-9]{3,24}/fileServices/default/shares/[a-z0-9-]{3,63}$"; Methods = 'PUT', 'DELETE'; Api = $script:StorageApi }
+    @{ Id = 'endpoint'; Taggable = $true; Re = "^/subscriptions/$($script:Guid)/resourceGroups/$($script:Seg)/providers/Microsoft\.Network/privateEndpoints/$($script:Seg)$"; Methods = 'PUT', 'DELETE'; Api = $script:NetworkApi }
+    @{ Id = 'dnsgroup'; Taggable = $false; Re = "^/subscriptions/$($script:Guid)/resourceGroups/$($script:Seg)/providers/Microsoft\.Network/privateEndpoints/$($script:Seg)/privateDnsZoneGroups/default$"; Methods = 'PUT', 'DELETE'; Api = $script:NetworkApi }
+    @{ Id = 'dnszone'; Taggable = $true; Re = "^/subscriptions/$($script:Guid)/resourceGroups/$($script:Seg)/providers/Microsoft\.Network/privateDnsZones/privatelink\.file\.core\.windows\.net$"; Methods = 'PUT', 'DELETE'; Api = $script:DnsApi }
+    @{ Id = 'dnslink'; Taggable = $true; Re = "^/subscriptions/$($script:Guid)/resourceGroups/$($script:Seg)/providers/Microsoft\.Network/privateDnsZones/privatelink\.file\.core\.windows\.net/virtualNetworkLinks/$($script:Seg)$"; Methods = 'PUT', 'DELETE'; Api = $script:DnsApi }
+    @{ Id = 'role'; Taggable = $false; Re = "^/subscriptions/$($script:Guid)/resourceGroups/$($script:Seg)/providers/Microsoft\.Storage/storageAccounts/[a-z0-9]{3,24}/fileServices/default/fileshares/[a-z0-9-]{3,63}/providers/Microsoft\.Authorization/roleAssignments/$($script:Guid)$"; Methods = 'PUT', 'DELETE'; Api = $script:AuthApi }
 )
+
+function Get-AVDTuneEnvDictProp($Object, [string]$Name) { if ($Object -is [System.Collections.IDictionary]) { if ($Object.Contains($Name)) { $Object[$Name] } else { $null } } else { Get-AVDTuneProp $Object $Name } }
+
+function Get-AVDTuneEnvRuleByPath([string]$Path) {
+    foreach ($r in $script:Wr) { if ($Path -cmatch $r.Re) { return $r } }
+    $null
+}
 
 function Get-AVDTuneEnvWriteRule([string]$Path, [string]$Method) {
     foreach ($r in $script:Wr) { if ($Path -cmatch $r.Re -and $Method -in $r.Methods) { return $r } }
@@ -151,13 +159,15 @@ function Get-AVDTuneEnvWriteRule([string]$Path, [string]$Method) {
 
 function Assert-AVDTuneEnvArmPath {
     <# GET: any resource path of one subscription. PUT, PATCH, DELETE: only the resource types of the allowlist above, with the api version of that type. POST never. #>
-    param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][string]$Method)
+    param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][string]$Method, [switch]$Poll)
     if ($Path -notmatch "^/subscriptions/$($script:Guid)/") { throw 'Not an ARM subscription path.' }
     if ($Path -match '[\s\x00-\x1F#]' -or $Path -match '\.\.' -or [regex]::Matches($Path, '\?').Count -ne 1) { throw 'The ARM path has characters that are not allowed.' }
     if ($Method -notin 'GET', 'PUT', 'PATCH', 'DELETE') { throw "ARM method $Method is not used by the environment setup." }
     $base, $query = $Path -split '\?', 2
     # a GET may carry the extra values of a polling link (monitor=true), nothing else than plain query characters; a write carries only the api-version of its type
-    if ($query -notmatch '^[A-Za-z0-9=&_.-]+$' -or $query -notmatch '(^|&)api-version=[0-9]{4}-[0-9]{2}-[0-9]{2}(-preview)?(&|$)') { throw 'The ARM query must carry the api-version and plain characters only.' }
+    # the query of a polling link (only with -Poll, only GET) carries the signed values of a real Azure URL (t, c, s, h: base64 and percent characters); host and path stay strict
+    $queryOk = if ($Poll) { $Method -eq 'GET' -and $query -match '^[A-Za-z0-9=&_.%+/~:-]{1,2000}$' -and $base -match '^[A-Za-z0-9/._()-]+$' } else { $query -match '^[A-Za-z0-9=&_.-]+$' }
+    if (-not $queryOk -or $query -notmatch '(^|&)api-version=[0-9]{4}-[0-9]{2}-[0-9]{2}(-preview)?(&|$)') { throw 'The ARM query must carry the api-version and plain characters only.' }
     if ($Method -ne 'GET') {
         $rule = Get-AVDTuneEnvWriteRule $base $Method
         if (-not $rule) { throw "The environment setup may not $Method this resource." }
@@ -175,8 +185,8 @@ function Get-AVDTuneEnvHeader($Resp, [string]$Name) {
 
 function Invoke-AVDTuneEnvArmRaw {
     <# One request through the ARM adapter; never throws for a status. Returns Status, Headers, Body, Error text of the adapter, Code and Message of an Azure error body. #>
-    param([Parameter(Mandatory)]$Arm, [Parameter(Mandatory)][string]$Method, [Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][string]$Token, $Body)
-    Assert-AVDTuneEnvArmPath -Path $Path -Method $Method
+    param([Parameter(Mandatory)]$Arm, [Parameter(Mandatory)][string]$Method, [Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][string]$Token, $Body, [switch]$Poll)
+    Assert-AVDTuneEnvArmPath -Path $Path -Method $Method -Poll:$Poll
     $r = & $Arm.Invoke $Method $Path $Token $Body
     $b = Get-AVDTuneProp $r 'Body'
     $err = Get-AVDTuneProp $b 'error'
@@ -220,7 +230,7 @@ function Get-AVDTuneEnvResource {
 function Get-AVDTuneEnvPollPath([string]$Url) {
     # A polling URL is absolute: only the ARM host and a subscription path are followed, nothing else
     $p = ConvertTo-AVDTuneArmPath $Url
-    if ($p -notmatch "^/subscriptions/$($script:Guid)/" -or $p -match '[\s\x00-\x1F#]' -or $p -match '\.\.' -or [regex]::Matches($p, '\?').Count -gt 1) { throw 'Azure returned a polling link that is not followed.' }
+    if ($p -notmatch "^/subscriptions/$($script:Guid)/[A-Za-z0-9/._()-]+(\?[A-Za-z0-9=&_.%+/~:-]{1,2000})?$" -or $p -match '\.\.') { throw 'Azure returned a polling link that is not followed.' }
     $p
 }
 
@@ -239,7 +249,7 @@ function Wait-AVDTuneEnvOperation {
         if ($i -gt 0 -and (Get-Date) -gt $until) { break }
         & $pause $retry
         if ($async) {
-            $r = Invoke-AVDTuneEnvArmRaw -Arm $Arm -Method GET -Path (Get-AVDTuneEnvPollPath $async) -Token $Token
+            $r = Invoke-AVDTuneEnvArmRaw -Arm $Arm -Method GET -Path (Get-AVDTuneEnvPollPath $async) -Token $Token -Poll
             if ($r.Status -ne 200) { return [pscustomobject]@{ Ok = $false; Message = (ConvertTo-AVDTuneEnvArmError -Resp $r -What 'read the state of the operation') } }
             $st = [string](Get-AVDTuneProp $r.Body 'status')
             if ($st -eq 'Succeeded') { return [pscustomobject]@{ Ok = $true; Message = '' } }
@@ -247,7 +257,7 @@ function Wait-AVDTuneEnvOperation {
             $retry = Get-AVDTuneEnvHeader $r 'Retry-After'
         }
         elseif ($loc) {
-            $r = Invoke-AVDTuneEnvArmRaw -Arm $Arm -Method GET -Path (Get-AVDTuneEnvPollPath $loc) -Token $Token
+            $r = Invoke-AVDTuneEnvArmRaw -Arm $Arm -Method GET -Path (Get-AVDTuneEnvPollPath $loc) -Token $Token -Poll
             if ($r.Status -in 200, 201, 204) { return [pscustomobject]@{ Ok = $true; Message = '' } }
             if ($r.Status -ne 202) { return [pscustomobject]@{ Ok = $false; Message = (ConvertTo-AVDTuneEnvArmError -Resp $r -What 'read the state of the operation') } }
             $retry = Get-AVDTuneEnvHeader $r 'Retry-After'
@@ -271,6 +281,13 @@ function Invoke-AVDTuneEnvWrite {
     param([Parameter(Mandatory)]$Arm, [Parameter(Mandatory)][string]$Token, [Parameter(Mandatory)][string]$Method, [Parameter(Mandatory)][string]$Path, $Body, [Parameter(Mandatory)][string]$What, [string]$Role = 'Contributor on the resource group', [int]$PollSeconds = 5, [int]$TimeoutSeconds = 900, [int]$MaxPolls = 400)
     $full = $Path
     try {
+    $base0 = ($Path -split '\?')[0]
+    if ((Get-AVDTuneEnvRuleByPath $base0).Id -eq 'role' -and $Method -eq 'PUT') {
+        # a role assignment is only one of the two share roles for a group in this subscription (the body is checked here, whoever built it)
+        $rp = Get-AVDTuneEnvDictProp $Body 'properties'; $sub0 = if ($base0 -match '^/subscriptions/([^/]+)/') { $Matches[1] } else { '' }
+        $rd = [string](Get-AVDTuneEnvDictProp $rp 'roleDefinitionId')
+        if ($rd -cnotmatch "^/subscriptions/$sub0/providers/Microsoft\.Authorization/roleDefinitions/($($script:RoleSmbContributor)|$($script:RoleSmbElevated))$" -or [string](Get-AVDTuneEnvDictProp $rp 'principalType') -cne 'Group' -or -not (Test-AVDTuneEnvGuid ([string](Get-AVDTuneEnvDictProp $rp 'principalId')))) { throw 'The role assignment is not one of the two share roles for a group in this subscription; it is not sent.' }
+    }
     $r = Invoke-AVDTuneEnvArmRaw -Arm $Arm -Method $Method -Path $full -Token $Token -Body $Body
     $isAsync = [bool](Get-AVDTuneEnvHeader $r 'Azure-AsyncOperation') -or ($r.Status -eq 202) -or ([bool](Get-AVDTuneEnvHeader $r 'Location') -and $r.Status -in 201, 202)
     if ($r.Status -in 200, 201, 202, 204) {
@@ -404,16 +421,24 @@ function Get-AVDTuneEnvPlan {
 
     # 1 storage account
     $cur = Get-AVDTuneEnvResource -Arm $Arm -Token $Token -Path "${accPath}?api-version=$script:StorageApi" -What 'read the storage account'
+    $publicManual = $false
     $wantProps = [ordered]@{ supportsHttpsTrafficOnly = $true; minimumTlsVersion = 'TLS1_2'; allowBlobPublicAccess = $false; publicNetworkAccess = $(if ($private) { 'Disabled' } else { 'Enabled' }) }
     if ($cur.Exists) {
         $props = Get-AVDTuneProp $cur.Body 'properties'
         $kind = [string](Get-AVDTuneProp $cur.Body 'kind'); $sku = [string](Get-AVDTuneProp (Get-AVDTuneProp $cur.Body 'sku') 'name')
         if ($kind -ne 'FileStorage' -or $sku -notlike 'Premium_*') { [void]$warnings.Add("The existing account is ${kind} / ${sku}: not recommended for FSLogix profiles (latency, IOPS). Kind and SKU cannot be changed; create a Premium FileStorage account instead.") }
         $diff = [ordered]@{}; $before = [ordered]@{}; $changes = New-Object System.Collections.ArrayList
-        foreach ($k in $wantProps.Keys) {
+        # an existing account is only made stricter, never looser; a value of a kind AVDTune does not know stays as it is
+        foreach ($k in 'supportsHttpsTrafficOnly', 'allowBlobPublicAccess') {
             $have = Get-AVDTuneProp $props $k
-            if ($null -ne $have -and [string]$have -ne [string]$wantProps[$k]) { $diff[$k] = $wantProps[$k]; $before[$k] = $have; [void]$changes.Add("${k}: $have -> $($wantProps[$k])") }
+            if ($have -is [bool] -and $have -ne $wantProps[$k]) { $diff[$k] = $wantProps[$k]; $before[$k] = $have; [void]$changes.Add("${k}: $have -> $($wantProps[$k])") }
         }
+        $haveTls = [string](Get-AVDTuneProp $props 'minimumTlsVersion'); $tlsIx = [Array]::IndexOf(@('TLS1_0', 'TLS1_1', 'TLS1_2', 'TLS1_3'), $haveTls)
+        if ($tlsIx -ge 0 -and $tlsIx -lt 2) { $diff['minimumTlsVersion'] = 'TLS1_2'; $before['minimumTlsVersion'] = $haveTls; [void]$changes.Add("minimumTlsVersion: $haveTls -> TLS1_2") }
+        $havePublic = [string](Get-AVDTuneProp $props 'publicNetworkAccess')
+        $publicManual = ($private -and $havePublic -eq 'Enabled')
+        if ($publicManual) { [void]$warnings.Add("The existing account $acct has public network access on, but you chose a private endpoint. AVDTune never switches public access on or off for an existing account (it may serve other users): decide that by hand.") }
+        if (-not $private -and [string](Get-AVDTuneProp (Get-AVDTuneProp $props 'networkAcls') 'defaultAction') -eq 'Allow') { [void]$warnings.Add("The existing account $acct has public access from all networks (firewall default action Allow). AVDTune does not change that; restrict it to the IP ranges you need.") }
         if ($diff.Count -gt 0) { [void]$steps.Add((New-AVDTuneEnvStep (++$n) 'env.account' 'account' "Align the settings of the storage account $acct" 'Update' 'PATCH' "${accPath}?api-version=$script:StorageApi" @{ properties = $diff } $before $changes "Secure transfer, TLS 1.2, no public blob access$(if ($private) { ', public network access off (private endpoint)' })." "$script:LearnFiles/storage-files-planning" $true '' $false)) }
         else { [void]$steps.Add((New-AVDTuneEnvStep (++$n) 'env.account' 'account' "Storage account $acct" 'None' '' '' $null $null @() 'Exists and has the recommended settings.')) }
     }
@@ -421,12 +446,14 @@ function Get-AVDTuneEnvPlan {
         $acls = [ordered]@{ defaultAction = 'Deny'; bypass = 'AzureServices' }
         if (-not $private) { $acls['ipRules'] = @(@(Get-AVDTuneProp $Spec 'AllowedIps') | Where-Object { $_ } | ForEach-Object { @{ value = [string]$_; action = 'Allow' } }) }
         $props = [ordered]@{}; foreach ($k in $wantProps.Keys) { $props[$k] = $wantProps[$k] }
-        $props['defaultToOAuthAuthentication'] = $true; $props['networkAcls'] = $acls
+        $props['defaultToOAuthAuthentication'] = $true; $props['allowSharedKeyAccess'] = $false; $props['networkAcls'] = $acls
+        [void]$warnings.Add('Shared key access is switched off on the new account (identity based access only). The account key does not work then, also not as the emergency access or for the key fallback of the storage check: if you need it, switch it on in the portal (Configuration > Allow storage account key access) for as long as you need it.')
         $body = [ordered]@{ location = [string]$Spec.Location; kind = 'FileStorage'; sku = @{ name = [string]$Spec.Sku }; tags = $tags; properties = $props }
-        $ch = @("Premium FileStorage, $($Spec.Sku)", 'secure transfer only, TLS 1.2, no public blob access', $(if ($private) { 'public network access off (private endpoint)' } else { 'public endpoint with firewall, default deny' }), 'OAuth as default authentication')
+        $ch = @("Premium FileStorage, $($Spec.Sku)", 'secure transfer only, TLS 1.2, no public blob access', $(if ($private) { 'public network access off (private endpoint)' } else { 'public endpoint with firewall, default deny' }), 'OAuth as default authentication', 'shared key access off')
         [void]$steps.Add((New-AVDTuneEnvStep (++$n) 'env.account' 'account' "Create storage account $acct in $($Spec.Location)" 'Create' 'PUT' "${accPath}?api-version=$script:StorageApi" $body $null $ch 'Profiles need SSD storage (Premium FileStorage); LRS or ZRS decides what a zone failure does.' "$script:LearnFiles/storage-files-planning" $true '' $true))
         if (-not $private) { [void]$warnings.Add('Public endpoint: the firewall allows only the ranges you listed. A private endpoint is recommended.') }
     }
+    if ($cur.Exists -and $publicManual) { [void]$steps.Add((New-AVDTuneEnvStep (++$n) 'env.publicaccess' 'manual' "Public network access of $acct is on" 'Manual' '' '' $null $null @("publicNetworkAccess: Enabled") 'With a private endpoint the public endpoint should be off. AVDTune does not change it on an existing account: switch it off yourself once the private endpoint works (Networking > Public network access > Disabled).' "$script:LearnFiles/storage-files-networking-endpoints")) }
 
     # 2 SMB settings
     $smbWant = [ordered]@{ versions = 'SMB3.1.1'; authenticationMethods = 'Kerberos'; kerberosTicketEncryption = 'AES-256'; channelEncryption = 'AES-256-GCM' }
@@ -520,11 +547,12 @@ function Get-AVDTuneEnvPlan {
     }
     foreach ($def in @(@{ Id = 'env.role-users'; Prop = 'UsersGroupId'; Role = $script:RoleSmbContributor; Name = 'Storage File Data SMB Share Contributor'; For = 'the user group' }, @{ Id = 'env.role-admins'; Prop = 'AdminsGroupId'; Role = $script:RoleSmbElevated; Name = 'Storage File Data SMB Share Elevated Contributor'; For = 'the admin group' })) {
         $principal = [string](Get-AVDTuneProp $Spec $def.Prop)
+        $gname = [string](Get-AVDTuneProp $Spec ($def.Prop -replace 'Id$', 'Name'))   # shown only: AVDTune has no Graph read to look the name up, so it is what the administrator typed
         if (-not $principal) { [void]$steps.Add((New-AVDTuneEnvStep (++$n) $def.Id 'manual' "Role for $($def.For)" 'Manual' '' '' $null $null @() "No group was entered: assign $($def.Name) on the share to $($def.For) yourself (the groups come from Microsoft Entra ID or the domain)." "$script:LearnFiles/storage-files-identity-assign-share-level-permissions")); continue }
         $has = @($existingRoles | Where-Object { $_.Role -ieq $def.Role -and $_.PrincipalId -ieq $principal }).Count -gt 0
         $name = Get-AVDTuneEnvRoleName $scope $principal $def.Role
         if ($has) { [void]$steps.Add((New-AVDTuneEnvStep (++$n) $def.Id 'role' "$($def.Name) for $($def.For)" 'None' '' '' $null $null @() 'Already assigned.')) }
-        else { [void]$steps.Add((New-AVDTuneEnvStep (++$n) $def.Id 'role' "Assign $($def.Name) on the share to $($def.For)" 'Create' 'PUT' "$scope/providers/Microsoft.Authorization/roleAssignments/${name}?api-version=$script:AuthApi" ([ordered]@{ properties = [ordered]@{ roleDefinitionId = "/subscriptions/$sub/providers/Microsoft.Authorization/roleDefinitions/$($def.Role)"; principalId = $principal; principalType = 'Group' } }) $null @("principal $principal", 'scope: this share only') 'Share level permission; the NTFS permissions on the share decide the rest.' "$script:LearnFiles/storage-files-identity-assign-share-level-permissions" $true '' $false -Role 'User Access Administrator or Role Based Access Control Administrator')) }
+        else { [void]$steps.Add((New-AVDTuneEnvStep (++$n) $def.Id 'role' "Assign $($def.Name) on the share to $($def.For)" 'Create' 'PUT' "$scope/providers/Microsoft.Authorization/roleAssignments/${name}?api-version=$script:AuthApi" ([ordered]@{ properties = [ordered]@{ roleDefinitionId = "/subscriptions/$sub/providers/Microsoft.Authorization/roleDefinitions/$($def.Role)"; principalId = $principal; principalType = 'Group' } }) $null @("principal $principal$(if ($gname) { " ($gname)" })", 'scope: this share only') 'Share level permission; the NTFS permissions on the share decide the rest.' "$script:LearnFiles/storage-files-identity-assign-share-level-permissions" $true '' $false -Role 'User Access Administrator or Role Based Access Control Administrator')) }
     }
     # 10 ntfs, 11 master, 12 test: not ARM steps, shown so the plan is complete
     [void]$steps.Add((New-AVDTuneEnvStep (++$n) 'env.acl' 'deferred' 'NTFS permissions on the share root' 'Deferred' '' '' $null $null @("Microsoft's FSLogix recommendation, shown as a diff first") 'Needs the storage token and the role Storage File Data Privileged Contributor, which can take minutes to become active after the roles above: own button on the page (existing ACL step of the storage check).' "$script:LearnFiles/storage-files-identity-configure-file-level-permissions" $true))
@@ -579,7 +607,7 @@ function Invoke-AVDTuneEnvApply {
     $runId = $started.ToString('yyyyMMdd-HHmmss', [Globalization.CultureInfo]::InvariantCulture) + '-' + [guid]::NewGuid().ToString('N').Substring(0, 4)
     $journal = Get-AVDTuneEnvJournal -Root $Root
     $entries = New-Object System.Collections.ArrayList
-    $run = [pscustomobject][ordered]@{ RunId = $runId; Started = $started.ToString('o'); Ended = $null; User = $User; SnapshotId = $SnapshotId; Account = [string]$Spec.AccountName; ResourceGroup = [string]$Spec.ResourceGroup; Status = 'Running'; Steps = $entries }
+    $run = [pscustomobject][ordered]@{ RunId = $runId; Started = $started.ToString('o'); Ended = $null; User = $User; SnapshotId = $SnapshotId; SubscriptionId = [string]$Spec.SubscriptionId; Account = [string]$Spec.AccountName; ResourceGroup = [string]$Spec.ResourceGroup; DnsZoneResourceGroup = [string](Get-AVDTuneProp $Spec 'DnsZoneResourceGroup'); PrivateEndpointName = [string](Get-AVDTuneProp $Spec 'PrivateEndpointName'); Status = 'Running'; Steps = $entries }
     $journal.Runs = @(@($journal.Runs) | Where-Object { $_ }) + $run
     $results = New-Object System.Collections.ArrayList
     $stopped = $false
@@ -588,8 +616,20 @@ function Invoke-AVDTuneEnvApply {
         $entry = [pscustomobject][ordered]@{ Id = $s.Id; Type = $s.Type; Path = ($s.Path -split '\?')[0]; Action = $s.Action; Taggable = [bool]$s.Taggable; Before = $s.Before; Status = 'Started'; Message = ''; Undone = $false; At = (Get-Date).ToString('o') }
         [void]$entries.Add($entry)
         Save-AVDTuneEnvJournal $Root $journal   # the intent is on disk before the write
-        $w = Invoke-AVDTuneEnvWrite -Arm $Arm -Token $Token -Method $s.Method -Path $s.Path -Body $s.Body -What $s.Title -Role $s.Role -PollSeconds $PollSeconds -TimeoutSeconds $TimeoutSeconds -MaxPolls $MaxPolls
+        $w = $null
+        $ruleNow = Get-AVDTuneEnvRuleByPath (($s.Path -split '\?')[0])
+        if ($s.Action -eq 'Create' -and $s.Type -ne 'smb') {
+            # a create is a create: one more GET right before it; when the resource exists now (someone was faster) nothing is sent and the run stops
+            # (If-None-Match: * would be the server side form of this; the ARM adapter has no request headers yet)
+            try { $now = Get-AVDTuneEnvResource -Arm $Arm -Token $Token -Path "$(($s.Path -split '\?')[0])?api-version=$($ruleNow.Api)" -What 'check that the resource is still missing'; if ($now.Exists) { $w = [pscustomobject]@{ Ok = $false; Benign = $false; Message = "The resource exists now (it was created after the plan was made): nothing was sent. Make the plan again." } } }
+            catch { $w = [pscustomobject]@{ Ok = $false; Benign = $false; Message = $_.Exception.Message } }
+        }
+        if (-not $w) { $w = Invoke-AVDTuneEnvWrite -Arm $Arm -Token $Token -Method $s.Method -Path $s.Path -Body $s.Body -What $s.Title -Role $s.Role -PollSeconds $PollSeconds -TimeoutSeconds $TimeoutSeconds -MaxPolls $MaxPolls }
         if ($w.Ok) {
+            if ($s.Action -eq 'Create' -and -not $w.Benign) {
+                # what identifies this very resource (creation time, guid): undo compares it, so a resource that was deleted and made again by someone else under the same name is not AVDTune's
+                try { $made = Get-AVDTuneEnvResource -Arm $Arm -Token $Token -Path "$(($s.Path -split '\?')[0])?api-version=$($ruleNow.Api)" -What 'read the new resource'; if ($made.Exists) { $entry | Add-Member -NotePropertyName Identity -NotePropertyValue (Get-AVDTuneEnvIdentity $made.Body) -Force; $entry | Add-Member -NotePropertyName Etag -NotePropertyValue ([string](Get-AVDTuneProp $made.Body 'etag')) -Force } } catch { }
+            }
             $entry.Status = $(if ($w.Benign) { 'Exists' } else { 'Done' }); $entry.Message = ''
             if ($w.Benign) { $entry.Action = 'None' }
             [void]$results.Add([pscustomobject]@{ Id = $s.Id; Title = $s.Title; Status = $(if ($w.Benign) { 'Unchanged' } else { 'Changed' }); Message = '' })
@@ -618,67 +658,177 @@ function Invoke-AVDTuneEnvApply {
 
 #region undo
 
+function Get-AVDTuneEnvIdentity {
+    <# What identifies one resource over its life (creation time, guid): recorded at the create, compared at the undo. #>
+    param($Body)
+    $o = [ordered]@{}
+    $sd = Get-AVDTuneProp $Body 'systemData'; $pr = Get-AVDTuneProp $Body 'properties'
+    foreach ($pair in @(@('createdAt', (Get-AVDTuneProp $sd 'createdAt')), @('creationTime', (Get-AVDTuneProp $pr 'creationTime')), @('createdOn', (Get-AVDTuneProp $pr 'createdOn')), @('resourceGuid', (Get-AVDTuneProp $pr 'resourceGuid')), @('internalId', (Get-AVDTuneProp $pr 'internalId')))) {
+        $v = $pair[1]
+        if ($null -ne $v -and "$v") { $o[$pair[0]] = $(if ($v -is [datetime]) { $v.ToUniversalTime().ToString('o') } else { [string]$v }) }
+    }
+    $o
+}
+
+function Test-AVDTuneEnvShareEmpty {
+    <#
+        $true only when the data plane answered 2xx, the XML parsed cleanly, the share root has no directory AND no file entry and the answer has no NextMarker (more to list).
+        $false when it lists an entry (data). $null for everything else (403, no connection, bad XML, a marker): that means "cannot prove it", and the caller keeps the share.
+    #>
+    param([Parameter(Mandatory)]$Files, [Parameter(Mandatory)][string]$Account, [Parameter(Mandatory)][string]$Share, [Parameter(Mandatory)][string]$Token)
+    try {
+        $h = @{ 'x-ms-date' = [DateTime]::UtcNow.ToString('R', [Globalization.CultureInfo]::InvariantCulture) }
+        $r = Invoke-AVDTuneStorageFiles -Files $Files -Method GET -Account $Account -Share $Share -Query 'restype=directory&comp=list&maxresults=5' -Token $Token -Headers $h
+        if ([int]$r.Status -lt 200 -or [int]$r.Status -ge 300 -or -not $r.Body) { return $null }
+        $settings = New-Object System.Xml.XmlReaderSettings; $settings.DtdProcessing = [System.Xml.DtdProcessing]::Prohibit; $settings.XmlResolver = $null
+        $doc = New-Object System.Xml.XmlDocument; $doc.XmlResolver = $null
+        $rd = [System.Xml.XmlReader]::Create((New-Object IO.StringReader ([string]$r.Body).TrimStart([char]0xFEFF)), $settings); try { $doc.Load($rd) } finally { $rd.Close() }
+        if ($doc.DocumentElement.Name -ne 'EnumerationResults' -or $null -eq $doc.SelectSingleNode('/EnumerationResults/Entries')) { return $null }
+        if ($doc.SelectNodes('/EnumerationResults/Entries/Directory').Count -gt 0 -or $doc.SelectNodes('/EnumerationResults/Entries/File').Count -gt 0) { return $false }
+        $marker = $doc.SelectSingleNode('/EnumerationResults/NextMarker')
+        if ($marker -and "$($marker.InnerText)".Trim()) { return $null }
+        $true
+    }
+    catch { $null }
+}
+
+function Get-AVDTuneEnvShareNames {
+    <# Names of all shares of an account from ARM, or $null when the list cannot be read completely (error, more pages). #>
+    param([Parameter(Mandatory)]$Arm, [Parameter(Mandatory)][string]$Token, [Parameter(Mandatory)][string]$AccountPath)
+    try {
+        $r = Invoke-AVDTuneEnvArmRaw -Arm $Arm -Method GET -Path "$AccountPath/fileServices/default/shares?api-version=$script:StorageApi" -Token $Token
+        if ($r.Status -ne 200 -or (Get-AVDTuneProp $r.Body 'nextLink')) { return $null }
+        , @(@(Get-AVDTuneProp $r.Body 'value') | Where-Object { $_ } | ForEach-Object { [string]$_.name })
+    }
+    catch { $null }
+}
+
+$script:EnvTextPattern = '^[A-Za-z0-9.;_ -]{1,80}$'
+function ConvertTo-AVDTuneEnvSafeBefore {
+    <# The recorded old values of an Update step, reduced to the keys and values the setup itself can write: the journal is input. $null when nothing is left. #>
+    param([string]$Type, $Before)
+    if ($null -eq $Before) { return $null }
+    $out = [ordered]@{}
+    $get = { param($k) Get-AVDTuneProp $Before $k }
+    switch ($Type) {
+        'account' {
+            foreach ($k in 'supportsHttpsTrafficOnly', 'allowBlobPublicAccess') { $v = & $get $k; if ($v -is [bool]) { $out[$k] = $v } }
+            $v = [string](& $get 'minimumTlsVersion'); if ($v -in 'TLS1_0', 'TLS1_1', 'TLS1_2', 'TLS1_3') { $out['minimumTlsVersion'] = $v }
+            $v = [string](& $get 'publicNetworkAccess'); if ($v -in 'Enabled', 'Disabled', 'SecuredByPerimeter') { $out['publicNetworkAccess'] = $v }
+        }
+        'smb' { foreach ($k in 'versions', 'authenticationMethods', 'kerberosTicketEncryption', 'channelEncryption') { $v = & $get $k; if ($v -is [string] -and $v -cmatch $script:EnvTextPattern) { $out[$k] = $v } } }
+        'identity' { $v = [string](& $get 'directoryServiceOptions'); if ($v -in 'None', 'AADDS', 'AD', 'AADKERB') { $out['directoryServiceOptions'] = $v } }
+    }
+    if ($out.Count -eq 0) { return $null }
+    $out
+}
+
+function Test-AVDTuneEnvJournalEntry {
+    <# The journal is input, not trust: the entry must name a resource of the type it claims, in the subscription, resource group and account of its own run. Returns the rule or $null. #>
+    param($Run, $E)
+    $path = [string](Get-AVDTuneProp $E 'Path'); $type = [string](Get-AVDTuneProp $E 'Type')
+    if ($path -notmatch '^/subscriptions/([^/]+)/resourceGroups/([^/]+)/') { return $null }
+    $sub = $Matches[1]; $rg = $Matches[2]
+    $rule = Get-AVDTuneEnvRuleByPath $path
+    $expected = if ($type -eq 'identity') { 'account' } else { $type }
+    if (-not $rule -or $rule.Id -cne $expected) { return $null }
+    if ($sub -ine [string](Get-AVDTuneProp $Run 'SubscriptionId')) { return $null }
+    $runRg = [string](Get-AVDTuneProp $Run 'ResourceGroup'); $dnsRg = [string](Get-AVDTuneProp $Run 'DnsZoneResourceGroup')
+    $acct = [string](Get-AVDTuneProp $Run 'Account')
+    switch ($rule.Id) {
+        { $_ -in 'account', 'smb', 'share', 'role' } { if ($rg -ine $runRg -or $path -notmatch '/storageAccounts/([a-z0-9]{3,24})(/|$)' -or $Matches[1] -cne $acct) { return $null } }
+        { $_ -in 'endpoint', 'dnsgroup' } { if ($rg -ine $runRg -or $path -notmatch '/privateEndpoints/([^/]+)' -or $Matches[1] -cne [string](Get-AVDTuneProp $Run 'PrivateEndpointName')) { return $null } }
+        { $_ -in 'dnszone', 'dnslink' } { if ($rg -ine $runRg -and -not ($dnsRg -and $rg -ieq $dnsRg)) { return $null } }
+    }
+    $rule
+}
+
 function Get-AVDTuneEnvUndoPlan {
     <#
-        What can be taken back: the steps AVDTune recorded in the journal that it created (Create) or changed (Update, restored from the recorded Before), newest first. A resource
-        is deleted only when it still exists and carries the tag CreatedWith=AVDTune (where Azure allows tags) or the journal says Done. The share and the storage account only
-        when the share is verified empty over the data plane (-Files and -StorageToken); the private DNS zone only when it holds no other record. Everything else is Keep with the reason.
-        Only GETs here.
+        What can be taken back: the steps AVDTune recorded in the journal that it created (Create) or changed (Update, restored from the recorded Before), newest first.
+        The journal is input: an entry counts only for a resource of its type in the subscription, resource group and account of its run (Test-AVDTuneEnvJournalEntry).
+        A resource is deleted only when it still exists, is the one that was created (creation time and guid recorded at the create) and carries the tag CreatedWith=AVDTune
+        (where Azure allows tags, else the journal says Done). A share only when it is verified empty over the data plane (Test-AVDTuneEnvShareEmpty), per share. A storage
+        account only when ARM lists exactly the shares AVDTune created in the journal and every one of them is verified empty. The private DNS zone and its VNet link stay when the
+        zone holds other record sets. Everything else is Keep with the reason. Only GETs here.
     #>
     [CmdletBinding()]
     param([Parameter(Mandatory)]$Arm, [Parameter(Mandatory)][string]$Token, [string]$Root = (Get-AVDTuneRoot), $Files, [string]$StorageToken)
     $journal = Get-AVDTuneEnvJournal -Root $Root
     $items = New-Object System.Collections.ArrayList
-    foreach ($run in @($journal.Runs)) { if (-not $run) { continue }; foreach ($e in @($run.Steps)) { if ($e -and -not $e.Undone -and $e.Status -in 'Done', 'Failed', 'Started') { [void]$items.Add([pscustomobject]@{ Run = $run; E = $e }) } } }
-    $ordered = @($items | Sort-Object { [datetime]$_.E.At } -Descending)
-    $accountDeleted = $false; $steps = New-Object System.Collections.ArrayList; $n = 0
-    $emptyShare = $null   # $true / $false / $null = not verifiable
-    $acctEntry = @($ordered | Where-Object { $_.E.Type -eq 'account' -and $_.E.Action -eq 'Create' })[0]
-    if ($acctEntry -and $Files -and $StorageToken) {
-        $shEntry = @($ordered | Where-Object { $_.E.Type -eq 'share' -and $_.E.Action -eq 'Create' })[0]
-        if ($shEntry -and ($shEntry.E.Path -match '/storageAccounts/([a-z0-9]{3,24})/fileServices/default/shares/([a-z0-9-]{3,63})$')) {
-            try { $emptyShare = (@(Get-AVDTuneStorageProfileFolders -Files $Files -Account $Matches[1] -Share $Matches[2] -Token $StorageToken -Max 1)).Count -eq 0 } catch { $emptyShare = $null }
+    foreach ($run in @($journal.Runs)) {
+        if (-not $run) { continue }
+        foreach ($e in @($run.Steps)) {
+            if (-not $e -or $e.Undone -or $e.Status -notin 'Done', 'Failed', 'Started') { continue }
+            $rule = Test-AVDTuneEnvJournalEntry -Run $run -E $e
+            if ($rule) { [void]$items.Add([pscustomobject]@{ Run = $run; E = $e; Rule = $rule }) }
         }
     }
+    $ordered = @($items | Sort-Object { [datetime]$_.E.At } -Descending)
+    $deletedAccounts = New-Object System.Collections.ArrayList; $steps = New-Object System.Collections.ArrayList   # base paths of the accounts this plan deletes
+    $shareDelete = @{}   # 'account/share' -> $true when this plan deletes that share (it is verified empty)
     foreach ($it in $ordered) {
-        $e = $it.E; $path = [string]$e.Path
-        $rule = Get-AVDTuneEnvWriteRule $path 'DELETE'
-        $mk = { param($action, $reason, $method, $body, $changes) [pscustomobject]@{ Order = $steps.Count + 1; Id = $e.Id; Type = $e.Type; Title = "$action $($e.Id -replace '^env\.', '')"; Action = $action; Method = $method; Path = $path; Body = $body; Reason = $reason; Changes = @($changes) } }
-        if ($e.Action -eq 'Update' -or ($e.Action -eq 'Create' -and $e.Type -in 'smb', 'identity')) {
-            if ($accountDeleted -and $e.Type -in 'smb', 'identity', 'account', 'share') { [void]$steps.Add((& $mk 'Covered' 'Goes away with the storage account.' '' $null @())); continue }
-            if ($null -eq $e.Before) { [void]$steps.Add((& $mk 'Keep' 'No previous value was recorded, so AVDTune cannot restore it.' '' $null @())); continue }
-            $body = switch ($e.Type) { 'account' { @{ properties = $e.Before } } 'identity' { @{ properties = @{ azureFilesIdentityBasedAuthentication = @{ directoryServiceOptions = [string]$e.Before.directoryServiceOptions } } } } 'smb' { @{ properties = @{ protocolSettings = @{ smb = $e.Before } } } } default { $null } }
+        $e = $it.E; $path = [string]$e.Path; $rule = $it.Rule
+        $mk = { param($action, $reason, $method, $body, $changes) [pscustomobject]@{ Order = $steps.Count + 1; Id = $e.Id; Type = $e.Type; Title = "$action $($e.Id -replace '^env\.', '')"; Action = $action; Method = $method; Path = $path; Body = $body; Reason = $reason; Changes = @($changes); Shares = @() } }
+        $isUpdate = ($e.Action -eq 'Update' -or ($e.Action -eq 'Create' -and $e.Type -in 'smb', 'identity'))
+        if ($isUpdate) {
+            if ($e.Type -in 'smb', 'identity', 'account', 'share' -and @($deletedAccounts | Where-Object { $path.StartsWith($_) }).Count -gt 0) { [void]$steps.Add((& $mk 'Covered' 'Goes away with the storage account.' '' $null @())); continue }
+            $before = ConvertTo-AVDTuneEnvSafeBefore -Type $e.Type -Before (Get-AVDTuneProp $e 'Before')
+            if ($null -eq $before) { [void]$steps.Add((& $mk 'Keep' 'No usable previous value was recorded, so AVDTune cannot restore it.' '' $null @())); continue }
+            $body = switch ($e.Type) { 'account' { @{ properties = $before } } 'identity' { @{ properties = @{ azureFilesIdentityBasedAuthentication = $before } } } 'smb' { @{ properties = @{ protocolSettings = @{ smb = $before } } } } default { $null } }
             if (-not $body) { [void]$steps.Add((& $mk 'Keep' 'This change cannot be undone by AVDTune.' '' $null @())); continue }
-            $method = if ($e.Type -eq 'smb') { 'PUT' } else { 'PATCH' }
-            [void]$steps.Add((& $mk 'Restore' '' $method $body @('back to the recorded values')))
+            [void]$steps.Add((& $mk 'Restore' '' $(if ($e.Type -eq 'smb') { 'PUT' } else { 'PATCH' }) $body @('back to the recorded values')))
             $steps[$steps.Count - 1].Path = "${path}?api-version=$script:StorageApi"
             continue
         }
-        if ($e.Action -ne 'Create' -or -not $rule) { continue }
+        if ($e.Action -ne 'Create') { continue }
         $cur = $null
         try { $cur = Get-AVDTuneEnvResource -Arm $Arm -Token $Token -Path "${path}?api-version=$($rule.Api)" -What 'read the resource' } catch { [void]$steps.Add((& $mk 'Keep' "Cannot be checked: $($_.Exception.Message)" '' $null @())); continue }
-        if (-not $cur.Exists) { [void]$steps.Add((& $mk 'Gone' 'The resource no longer exists.' '' $null @())); if ($e.Type -eq 'account') { $accountDeleted = $true }; continue }
-        if ($e.Taggable) {
+        if (-not $cur.Exists) { [void]$steps.Add((& $mk 'Gone' 'The resource no longer exists.' '' $null @())); if ($e.Type -eq 'account') { [void]$deletedAccounts.Add($path) }; continue }
+        # the same resource as the one that was created: creation time and guid recorded at the create
+        $rec = Get-AVDTuneProp $e 'Identity'; $nowId = Get-AVDTuneEnvIdentity $cur.Body; $other = $false
+        if ($rec) { foreach ($p in $rec.PSObject.Properties) { if ($p.Value -and ($nowId.Contains($p.Name) -and [string]$nowId[$p.Name] -ne [string]$p.Value -or -not $nowId.Contains($p.Name))) { $other = $true } } }
+        if ($other) { [void]$steps.Add((& $mk 'Keep' 'The resource was created again after AVDTune made it (creation time or guid differ): it is not AVDTune''s to delete.' '' $null @())); continue }
+        if ($rule.Taggable) {
             $tag = [string](Get-AVDTuneProp (Get-AVDTuneProp $cur.Body 'tags') 'CreatedWith')
             if ($tag -ne 'AVDTune') { [void]$steps.Add((& $mk 'Keep' 'The resource does not carry the tag CreatedWith=AVDTune: it is not AVDTune''s to delete.' '' $null @())); continue }
         }
         elseif ($e.Status -ne 'Done') { [void]$steps.Add((& $mk 'Keep' 'The creation did not finish cleanly and the resource has no tags to prove it is AVDTune''s.' '' $null @())); continue }
-        if ($e.Type -in 'share', 'account') {
-            if ($null -eq $emptyShare) { [void]$steps.Add((& $mk 'Keep' 'AVDTune cannot verify that the share is empty (no storage token): profile data would be lost. Delete it by hand when you are sure.' '' $null @())); continue }
-            if (-not $emptyShare) { [void]$steps.Add((& $mk 'Keep' 'The share holds data (profile folders): it is not deleted.' '' $null @())); continue }
+        $shares = @()
+        if ($e.Type -eq 'share') {
+            $a = if ($path -match '/storageAccounts/([a-z0-9]{3,24})/') { $Matches[1] } else { '' }; $sh = if ($path -match '/shares/([a-z0-9-]{3,63})$') { $Matches[1] } else { '' }
+            $v = $null; if ($Files -and $StorageToken -and $a -and $sh) { $v = Test-AVDTuneEnvShareEmpty -Files $Files -Account $a -Share $sh -Token $StorageToken }
+            if ($null -eq $v) { [void]$steps.Add((& $mk 'Keep' 'AVDTune cannot verify that the share is empty (no storage token, no access, or an answer that is not clear): profile data would be lost. Delete it by hand when you are sure.' '' $null @())); continue }
+            if (-not $v) { [void]$steps.Add((& $mk 'Keep' 'The share holds data (profile folders or files): it is not deleted.' '' $null @())); continue }
+            $shareDelete["$a/$sh"] = $true
         }
-        if ($e.Type -eq 'dnszone') {
-            $recs = [int](Get-AVDTuneProp (Get-AVDTuneProp $cur.Body 'properties') 'numberOfRecordSets')
+        if ($e.Type -eq 'account') {
+            # the account only with the shares AVDTune made, all verified empty: ARM lists them, no other share may be there
+            $a = if ($path -match '/storageAccounts/([a-z0-9]{3,24})$') { $Matches[1] } else { '' }
+            $made = @($ordered | Where-Object { $_.E.Type -eq 'share' -and $_.E.Action -eq 'Create' -and $_.E.Path -match "/storageAccounts/$a/fileServices/default/shares/([a-z0-9-]{3,63})$" } | ForEach-Object { ($_.E.Path -split '/')[-1] } | Sort-Object -Unique)
+            $listed = Get-AVDTuneEnvShareNames -Arm $Arm -Token $Token -AccountPath $path
+            if ($null -eq $listed) { [void]$steps.Add((& $mk 'Keep' 'The shares of the account cannot be listed completely: it is not deleted.' '' $null @())); continue }
+            $listedSorted = @($listed | Sort-Object -Unique)
+            if (($listedSorted -join '|') -ne ($made -join '|')) { [void]$steps.Add((& $mk 'Keep' "The account holds shares that AVDTune did not create or the journal does not list (account: $($listedSorted -join ', '); AVDTune: $($made -join ', ')): it is not deleted." '' $null @())); continue }
+            if (@($made | Where-Object { -not $shareDelete["$a/$_"] }).Count -gt 0) { [void]$steps.Add((& $mk 'Keep' 'Not every share of the account is verified empty: it is not deleted.' '' $null @())); continue }
+            $shares = $made
+        }
+        if ($e.Type -in 'dnszone', 'dnslink') {
+            $zonePath = $path -replace '/virtualNetworkLinks/[^/]+$', ''
+            $z = $cur
+            if ($e.Type -eq 'dnslink') { try { $z = Get-AVDTuneEnvResource -Arm $Arm -Token $Token -Path "${zonePath}?api-version=$script:DnsApi" -What 'read the DNS zone' } catch { [void]$steps.Add((& $mk 'Keep' "The zone cannot be checked: $($_.Exception.Message)" '' $null @())); continue } }
+            $recs = if ($z.Exists) { [int](Get-AVDTuneProp (Get-AVDTuneProp $z.Body 'properties') 'numberOfRecordSets') } else { 0 }
             $ours = @($ordered | Where-Object { $_.E.Type -eq 'dnsgroup' -and $_.E.Action -eq 'Create' }).Count   # the A record of our own zone group goes away before the zone is looked at again
-            if ($recs -gt 1 + $ours) { [void]$steps.Add((& $mk 'Keep' "The zone holds $recs record sets: other storage accounts may use it." '' $null @())); continue }
+            if ($recs -gt 1 + $ours) { [void]$steps.Add((& $mk 'Keep' "The zone holds $recs record sets: other storage accounts may use it, so the zone and its VNet link stay." '' $null @())); continue }
         }
-        if ($e.Type -eq 'account') { $accountDeleted = $true }
+        if ($e.Type -eq 'account') { [void]$deletedAccounts.Add($path) }
         [void]$steps.Add((& $mk 'Delete' '' 'DELETE' $null @()))
         $steps[$steps.Count - 1].Path = "${path}?api-version=$($rule.Api)"
+        $steps[$steps.Count - 1].Shares = @($shares)
     }
     # settings of an account that is deleted go with it (also those found before the account step in the reverse order)
-    if (@($steps | Where-Object { $_.Type -eq 'account' -and $_.Action -eq 'Delete' }).Count -gt 0) {
-        foreach ($st in @($steps | Where-Object { $_.Type -in 'smb', 'identity', 'account' -and $_.Action -in 'Keep', 'Restore' })) { $st.Action = 'Covered'; $st.Method = ''; $st.Body = $null; $st.Reason = 'Goes away with the storage account.'; $st.Title = "Covered $($st.Id -replace '^env\.', '')" }
+    foreach ($da in @($steps | Where-Object { $_.Type -eq 'account' -and $_.Action -eq 'Delete' } | ForEach-Object { ($_.Path -split '\?')[0] })) {
+        foreach ($st in @($steps | Where-Object { $_.Type -in 'smb', 'identity', 'account' -and $_.Action -in 'Keep', 'Restore' -and ([string]$_.Path).StartsWith($da) })) { $st.Action = 'Covered'; $st.Method = ''; $st.Body = $null; $st.Reason = 'Goes away with the storage account.'; $st.Title = "Covered $($st.Id -replace '^env\.', '')" }
     }
     [pscustomobject]@{ Steps = @($steps); Hash = (Get-AVDTuneEnvHash (ConvertTo-AVDTuneEnvCanonical @($steps | ForEach-Object { @{ Id = $_.Id; Action = $_.Action; Method = $_.Method; Path = $_.Path; Body = $_.Body } }))); Count = @($steps | Where-Object { $_.Action -in 'Delete', 'Restore' }).Count }
 }
@@ -701,6 +851,18 @@ function Invoke-AVDTuneEnvUndo {
         if ($s.Type -eq 'dnszone' -and $s.Action -eq 'Delete') {
             $z = Get-AVDTuneEnvResource -Arm $Arm -Token $Token -Path $s.Path -What 'read the DNS zone'   # the records of the endpoint are gone by now: only SOA may be left
             if ($z.Exists -and [int](Get-AVDTuneProp (Get-AVDTuneProp $z.Body 'properties') 'numberOfRecordSets') -gt 1) { [void]$results.Add([pscustomobject]@{ Id = $s.Id; Title = $s.Title; Status = 'Unchanged'; Message = 'The zone holds other records and stays.' }); continue }
+        }
+        if ($s.Type -eq 'share' -and $s.Action -eq 'Delete') {
+            # the share is looked at again right before the delete: data that came in since the plan keeps it
+            $sa = if ($s.Path -match '/storageAccounts/([a-z0-9]{3,24})/') { $Matches[1] } else { '' }; $ss = if (($s.Path -split '\?')[0] -match '/shares/([a-z0-9-]{3,63})$') { $Matches[1] } else { '' }
+            $v = $null; if ($Files -and $StorageToken -and $sa -and $ss) { $v = Test-AVDTuneEnvShareEmpty -Files $Files -Account $sa -Share $ss -Token $StorageToken }
+            if ($v -ne $true) { [void]$results.Add([pscustomobject]@{ Id = $s.Id; Title = $s.Title; Status = 'Unchanged'; Message = 'The share is not verified empty any more: it stays.' }); continue }
+        }
+        if ($s.Type -eq 'account' -and $s.Action -eq 'Delete') {
+            $ap = ($s.Path -split '\?')[0]; $left = Get-AVDTuneEnvShareNames -Arm $Arm -Token $Token -AccountPath $ap
+            $okAcc = ($null -ne $left) -and (@($left | Where-Object { $_ -cnotin @($s.Shares) }).Count -eq 0)
+            if ($okAcc) { $an = ($ap -split '/')[-1]; foreach ($sn in @($left)) { if ((Test-AVDTuneEnvShareEmpty -Files $Files -Account $an -Share $sn -Token $StorageToken) -ne $true) { $okAcc = $false } } }
+            if (-not $okAcc) { [void]$results.Add([pscustomobject]@{ Id = $s.Id; Title = $s.Title; Status = 'Unchanged'; Message = 'The account holds a share that is not verified empty or not one of AVDTune''s any more: it stays.' }); continue }
         }
         $w = Invoke-AVDTuneEnvWrite -Arm $Arm -Token $Token -Method $s.Method -Path $s.Path -Body $s.Body -What $s.Title -Role $role -PollSeconds $PollSeconds -TimeoutSeconds $TimeoutSeconds -MaxPolls $MaxPolls
         if ($w.Ok) {
@@ -767,4 +929,5 @@ function Invoke-AVDTuneEnvVerify {
 Export-ModuleMember -Function Test-AVDTuneEnvSegment, Test-AVDTuneEnvGuid, Test-AVDTuneEnvSubnetId, Get-AVDTuneEnvVNetId, Get-AVDTuneEnvQuota, Test-AVDTuneEnvSpec, Get-AVDTuneEnvVhdLocation, ConvertTo-AVDTuneEntraSid,
     Get-AVDTuneEnvIdentityModel, Assert-AVDTuneEnvArmPath, Invoke-AVDTuneEnvArmRaw, ConvertTo-AVDTuneEnvArmError, Get-AVDTuneEnvResource, Wait-AVDTuneEnvOperation, Invoke-AVDTuneEnvWrite,
     ConvertTo-AVDTuneEnvCanonical, Get-AVDTuneEnvRoleName, Get-AVDTuneEnvRights, Get-AVDTuneEnvPlan, Get-AVDTuneEnvJournal, Invoke-AVDTuneEnvApply, Get-AVDTuneEnvUndoPlan, Invoke-AVDTuneEnvUndo,
+    Test-AVDTuneEnvShareEmpty, Get-AVDTuneEnvShareNames, Get-AVDTuneEnvIdentity, ConvertTo-AVDTuneEnvSafeBefore, Test-AVDTuneEnvJournalEntry, Get-AVDTuneEnvRuleByPath, Get-AVDTuneEnvPollPath,
     Get-AVDTuneEnvMasterValues, Set-AVDTuneEnvMaster, Get-AVDTuneEnvAclDiff, Invoke-AVDTuneEnvVerify

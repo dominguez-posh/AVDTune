@@ -57,7 +57,7 @@ function New-AVDTuneFakeStorageArm {
 # Seed: Acls (hashtable path ('' = root) -> SDDL), Folders (array of names). Switches in .Store: Offline, Forbidden (403 on the data plane), PutForbidden, ChangeOnRead (the root ACL changes after the first read: tests the confirmed diff), NoKeyHeader
 function New-AVDTuneFakeFiles {
     param([hashtable]$Seed = @{})
-    $s = @{ Offline = $false; Forbidden = $false; PutForbidden = $false; ChangeOnRead = $null; NoKeyHeader = $false; Acls = @{}; Folders = @(); Log = (New-Object System.Collections.ArrayList); Puts = (New-Object System.Collections.ArrayList); Reads = 0 }
+    $s = @{ Offline = $false; Forbidden = $false; FileEntries = @(); NextMarker = ''; BadXml = $false; PutForbidden = $false; ChangeOnRead = $null; NoKeyHeader = $false; Acls = @{}; Folders = @(); Log = (New-Object System.Collections.ArrayList); Puts = (New-Object System.Collections.ArrayList); Reads = 0 }
     foreach ($e in $Seed.GetEnumerator()) { $s[$e.Key] = $e.Value }
     $a = [ordered]@{ Kind = 'Fake'; Store = $s; Log = $s.Log }
     $a.Invoke = {
@@ -84,7 +84,8 @@ function New-AVDTuneFakeFiles {
             return (& $ok (@{ format = 'sddl'; permission = $sddl } | ConvertTo-Json -Compress) @{})
         }
         if ($Method -eq 'GET' -and $query -like 'restype=directory&comp=list*') {
-            $x = '<?xml version="1.0" encoding="utf-8"?><EnumerationResults><Entries>' + ((@($s.Folders) | ForEach-Object { "<Directory><Name>$_</Name></Directory>" }) -join '') + '</Entries></EnumerationResults>'
+            $x = '<?xml version="1.0" encoding="utf-8"?><EnumerationResults><Entries>' + ((@($s.Folders) | ForEach-Object { "<Directory><Name>$_</Name></Directory>" }) -join '') + ((@($s.FileEntries) | ForEach-Object { "<File><Name>$_</Name></File>" }) -join '') + '</Entries>' + $(if ($s.NextMarker) { "<NextMarker>$($s.NextMarker)</NextMarker>" } else { '<NextMarker />' }) + '</EnumerationResults>'
+            if ($s.BadXml) { $x = '<EnumerationResults><Entries>' }
             return (& $ok $x @{})
         }
         if ($Method -eq 'PUT' -and $query -eq 'restype=directory&comp=properties') {
