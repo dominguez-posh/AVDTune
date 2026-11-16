@@ -204,7 +204,7 @@ $script:TrustedWriterSids = @('S-1-5-32-544', 'S-1-5-18', 'S-1-5-80-956008885-34
 function Read-AVDTuneAclReport {
     <#
         What can be said about the ACL of a file or folder, for the checks of the watermark steps: Exists, Link (reparse point), Owner (SID),
-        Protected, Rules = allow rules with Sid, Write (any right that changes content, permissions or owner) and Inherited. A missing path
+        Protected, Rules = allow rules with Sid, Write (any right that changes content, permissions or owner), Inherited and InheritOnly. A missing path
         gives Exists = $false.
     #>
     param([Parameter(Mandatory)][string]$Path)
@@ -218,22 +218,33 @@ function Read-AVDTuneAclReport {
         Exists = $true; Link = (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)
         Owner = [string]$acl.GetOwner([Security.Principal.SecurityIdentifier]).Value; Protected = [bool]$acl.AreAccessRulesProtected
         Rules = @($acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]) | Where-Object { $_.AccessControlType -eq 'Allow' } | ForEach-Object {
-                [pscustomobject]@{ Sid = [string]$_.IdentityReference.Value; Write = ((([int]$_.FileSystemRights) -band $writeMask) -ne 0); Inherited = [bool]$_.IsInherited }
+                [pscustomobject]@{ Sid = [string]$_.IdentityReference.Value; Write = ((([int]$_.FileSystemRights) -band $writeMask) -ne 0); Inherited = [bool]$_.IsInherited; InheritOnly = (([int]$_.PropagationFlags -band 2) -ne 0) }
             })
     }
+}
+
+function Get-AVDTuneAclFindings {
+    <#
+        Problems (stops) and Warnings of an ACL report. By default every write entry counts, also an inherit-only one (IO): in an admin-only folder it makes every new file writable for that SID. -IgnoreInheritOnly (only the Public Desktop check) leaves IO entries out of the question "may users write to the folder itself".
+        -WarnWriteSids: write access of exactly these SIDs is a Warning instead of a Problem (for the Public Desktop, where Windows gives them Modify); any other SID, a foreign owner and a link stay Problems.
+    #>
+    param($Report, [string[]]$ExtraTrusted = @(), [string[]]$WarnWriteSids = @(), [switch]$IgnoreInheritOnly)
+    $p = New-Object System.Collections.ArrayList; $w = New-Object System.Collections.ArrayList
+    if (-not $Report -or -not $Report.Exists) { return [pscustomobject]@{ Problems = @(); Warnings = @() } }
+    $trusted = @($script:TrustedWriterSids) + @($ExtraTrusted)
+    if ($Report.Link) { [void]$p.Add('is a link') }
+    if ($Report.Owner -and $Report.Owner -notin $trusted) { [void]$p.Add("owner is $($Report.Owner)") }
+    $other = @($Report.Rules | Where-Object { $_.Write -and $_.Sid -notin $trusted -and -not ($IgnoreInheritOnly -and (Get-AVDTuneProp $_ 'InheritOnly')) } | ForEach-Object { $_.Sid } | Sort-Object -Unique)
+    $stop = @($other | Where-Object { $_ -notin $WarnWriteSids }); $warn = @($other | Where-Object { $_ -in $WarnWriteSids })
+    if ($stop.Count -gt 0) { [void]$p.Add("write access for $($stop -join ', ')") }
+    if ($warn.Count -gt 0) { [void]$w.Add("write access for $($warn -join ', ')") }
+    [pscustomobject]@{ Problems = @($p); Warnings = @($w) }
 }
 
 function Get-AVDTuneAclProblems {
     # Why a path is not safe for something that users read or run: a link, an owner other than Administrators/SYSTEM/TrustedInstaller, write access for anyone else. Empty = fine.
     param($Report, [string[]]$ExtraTrusted = @())
-    $p = New-Object System.Collections.ArrayList
-    if (-not $Report -or -not $Report.Exists) { return @() }
-    $trusted = @($script:TrustedWriterSids) + @($ExtraTrusted)
-    if ($Report.Link) { [void]$p.Add('is a link') }
-    if ($Report.Owner -and $Report.Owner -notin $trusted) { [void]$p.Add("owner is $($Report.Owner)") }
-    $other = @($Report.Rules | Where-Object { $_.Write -and $_.Sid -notin $trusted } | ForEach-Object { $_.Sid } | Sort-Object -Unique)
-    if ($other.Count -gt 0) { [void]$p.Add("write access for $($other -join ', ')") }
-    @($p)
+    @((Get-AVDTuneAclFindings -Report $Report -ExtraTrusted $ExtraTrusted).Problems)
 }
 
 function New-AVDTuneUsersReadSecurity {
@@ -1671,4 +1682,4 @@ Export-ModuleMember -Function Get-AVDTuneSystemFolder, Get-AVDTuneChocolateyRoot
     Add-AVDTuneChangeLogEntry, Get-AVDTuneChangeLog, Get-AVDTuneChangeLogVersions, ConvertTo-AVDTuneChangeLogDocument, Export-AVDTuneChangeLog,
     Get-AVDTuneWindowsInfo, Get-AVDTuneOfficeInfo, Get-AVDTuneSourceImage, Get-AVDTuneHealth, Get-AVDTuneOverview, Write-AVDTuneFile, Read-AVDTuneJson,
     Open-AVDTuneWriteGate, Close-AVDTuneWriteGate, Set-AVDTuneWriteBlock, Clear-AVDTuneWriteBlock, Get-AVDTuneWriteBlock, Get-AVDTuneWriteGate, Test-AVDTuneWriteAllowed, Remove-AVDTuneControlCharacters, ConvertTo-AVDTuneTestResult,
-    Read-AVDTuneAclReport, Get-AVDTuneAclProblems, New-AVDTuneUsersReadSecurity, New-AVDTuneFileSecurity, Write-AVDTuneAccessFile, Get-AVDTuneTaskInfoFromXml
+    Read-AVDTuneAclReport, Get-AVDTuneAclProblems, Get-AVDTuneAclFindings, New-AVDTuneUsersReadSecurity, New-AVDTuneFileSecurity, Write-AVDTuneAccessFile, Get-AVDTuneTaskInfoFromXml
