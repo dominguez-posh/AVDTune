@@ -747,6 +747,7 @@ function Test-AVDTuneOfficeUpdateBlockOwns {
     $mr = Get-AVDTuneProp (Get-AVDTuneState $Root) 'Maintenance'
     if ($mr -and (Get-AVDTuneProp $mr 'Active')) { return $true }
     # The block is On or Partial when any of its settings is in place. The fix itself sets the block's own Office item (updateblock.office-auto), so that item alone does not count: right after the fix the block reads Partial.
+    if ((Get-AVDTuneProp (Get-AVDTuneState $Root) 'UpdateBlock') -cin 'On', 'Partial', 'Maintenance') { return $true }   # the block was switched on (also when some of its settings failed): the value is its, not the fix's
     $st = Get-AVDTuneUpdateBlockStatus $Machine
     @($st.Items | Where-Object { $_.Applicable -and $_.Compliant -and $_.Id -cne 'updateblock.office-auto' }).Count -gt 0
 }
@@ -792,7 +793,11 @@ function Undo-AVDTuneOfficeFix {
     $prev = Test-AVDTuneOfficeFixPrevious (Get-AVDTuneProp $u 'Previous') $Name
     # an Office install or reconfigure after the fix made the record outdated: its earlier value is not what the ODT left behind
     $applied = Get-AVDTuneOfficeAppliedPath $Root; $at = ConvertTo-AVDTuneUtc (Get-AVDTuneProp $u 'At')
-    if ($at -and (Test-Path -LiteralPath $applied -PathType Leaf) -and (Get-Item -LiteralPath $applied -Force).LastWriteTimeUtc -gt $at) { throw "The undo record of the Office fix $Name is older than the last Office install or reconfigure: its earlier value is outdated. Nothing was changed." }
+    if (-not $at) { throw "The undo record of the Office fix $Name has no readable time (At). Nothing was changed." }
+    if ((Test-Path -LiteralPath $applied -PathType Leaf) -and (Get-Item -LiteralPath $applied -Force).LastWriteTimeUtc -gt $at) { throw "The undo record of the Office fix $Name is older than the last Office install or reconfigure: its earlier value is outdated. Nothing was changed." }
+    # any Office run (install, reconfigure, remove, whatever its status) after the record also makes it outdated
+    $later = @(Get-AVDTuneRun -Root $Root | Where-Object { $_.Plan -cin 'Office install', 'Office remove' -and (ConvertTo-AVDTuneUtc $_.Started) -gt $at })
+    if ($later.Count -gt 0) { throw "The undo record of the Office fix $Name is older than a later Office run ($($later[0].Plan)): its earlier value is outdated. Nothing was changed." }
     if (-not $WhatIf) {
         if (-not (Test-AVDTuneWriteAllowed)) { throw 'The snapshot gate is not confirmed: AVDTune is read only until a snapshot newer than its last change is confirmed on the Overview.' }
     }

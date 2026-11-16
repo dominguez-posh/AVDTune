@@ -540,7 +540,7 @@ try {
     Remove-Item $fixS -Force -ErrorAction SilentlyContinue
     # LastChange before the attempt and also on a failure; the record stays
     $m = New-Master; & $m.RegSet $ctr 'SharedComputerLicensing' '1' 'String'
-    Write-AVDTuneFile $fixS '{"At":"2026-11-15T10:00:00.0000000Z","Previous":{"Value":"0","Type":"String"}}'
+    Write-AVDTuneFile $fixS '{"At":"2999-01-01T10:00:00.0000000Z","Previous":{"Value":"0","Type":"String"}}'
     [void](Set-AVDTuneState -Root $tmp -Values @{ LastChange = $mark }); $m.Store.FailWrites = @('SharedComputerLicensing')
     $ufF = Undo-AVDTuneOfficeFix -Machine $m -Name shared -Root $tmp -User 'admin1' -SnapshotId 'snap-check'
     Test-Check '61 fix undo: a failing step still sets LastChange and keeps the record' (@($ufF.Results | Where-Object Status -eq 'Failed').Count -eq 1 -and (Get-AVDTuneState $tmp).LastChange -ne $mark -and (Test-Path $fixS)) (($ufF.Results | ForEach-Object Status) -join ',')
@@ -608,6 +608,27 @@ try {
     Test-Check '61 undo: a record newer than office-applied.json is accepted' ((Undo-AVDTuneOfficeFix -Machine $m -Name shared -Root $tmp).Results[0].Status -ceq 'Reverted') $null
     Reset-OfficeFiles
 
+    # N1: the block was switched on (state.json says so) but only the fix's own item is in place: the value still belongs to the block
+    $m = New-Master; Reset-OfficeFiles; & $m.RegSet $ctr 'UpdatesEnabled' 'TRUE' 'String'
+    [void](Set-AVDTuneOfficeFix -Machine $m -Name updates -Root $tmp -User 'admin1' -SnapshotId 'snap-check')
+    [void](Set-AVDTuneState -Root $tmp -Values @{ UpdateBlock = 'Partial' })
+    $ubG = Undo-AVDTuneOfficeFix -Machine $m -Name updates -Root $tmp -User 'admin1' -SnapshotId 'snap-check'
+    Test-Check '61 undo updates: block state Partial in state.json with only the fix item in place: Unchanged, policy stays 0, record goes' ((& $polProp $m) -eq 0 -and $ubG.Results[0].Status -ceq 'Unchanged' -and -not (Test-Path $fixU)) (($ubG.Results | ConvertTo-Json -Compress))
+    [void](Set-AVDTuneState -Root $tmp -Values @{ UpdateBlock = 'Off' })
+    # N2: a record without or with an unreadable At is invalid
+    foreach ($atJson in @('{"Previous":{"Value":"0","Type":"String"}}', '{"At":"not a date","Previous":{"Value":"0","Type":"String"}}', '{"At":"","Previous":{"Value":"0","Type":"String"}}')) {
+        $m = New-Master; & $m.RegSet $ctr 'SharedComputerLicensing' '1' 'String'; Write-AVDTuneFile $fixS $atJson; $m.Log.Clear()
+        Test-Check "61 undo: a record without a readable At is refused, nothing written ($atJson)" ((Get-ThrownText { Undo-AVDTuneOfficeFix -Machine $m -Name shared -Root $tmp }) -like '*no readable time*' -and @($m.Log | Where-Object { $_ -like 'Reg*' }).Count -eq 0 -and (Test-Path $fixS)) $null
+    }
+    Reset-OfficeFiles
+    # N3: any Office run after the record (here a failed one) makes it outdated
+    $m = New-Master; & $m.RegSet $ctr 'SharedComputerLicensing' '1' 'String'; $m.Log.Clear()
+    Write-AVDTuneFile $fixS '{"At":"2026-11-10T10:00:00.0000000Z","Previous":{"Value":"0","Type":"String"}}'
+    [void](Add-AVDTuneRun -Root $tmp -Run ([pscustomobject][ordered]@{ Id = $null; Plan = 'Office install'; Started = '2026-11-12T10:00:00.0000000Z'; Ended = '2026-11-12T10:05:00.0000000Z'; User = 'admin1'; SnapshotId = 'snap-check'; WhatIf = $false; ImageVersion = $null; Reboot = $false; Results = @([pscustomobject]@{ Id = 'office.install'; Status = 'Failed' }) }))
+    Test-Check '61 undo: an Office run (even a failed one) after the record makes it outdated: refused, nothing written' ((Get-ThrownText { Undo-AVDTuneOfficeFix -Machine $m -Name shared -Root $tmp }) -like '*later Office run*' -and @($m.Log | Where-Object { $_ -like 'Reg*' }).Count -eq 0 -and (Test-Path $fixS)) $null
+    Write-AVDTuneFile $fixS '{"At":"2999-01-02T10:00:00.0000000Z","Previous":{"Value":"0","Type":"String"}}'
+    Test-Check '61 undo: a record newer than every Office run is accepted' ((Undo-AVDTuneOfficeFix -Machine $m -Name shared -Root $tmp).Results[0].Status -ceq 'Reverted') $null
+    Reset-OfficeFiles
     # 3: the change marker is set while Undo writes (fix and policies) and cleared afterwards, also when the step fails
     $probe = @{ Seen = @() }
     $m = New-Master; & $m.RegSet $ctr 'SharedComputerLicensing' '1' 'String'
@@ -659,7 +680,7 @@ try {
     }
     Reset-OfficeFiles
     $m = New-Master; & $m.RegSet $ctr 'SharedComputerLicensing' '1' 'String'; $m.Log.Clear()
-    Write-AVDTuneFile $fixS '{"Key":"HKLM:/Evil","Name":"Run","Previous":{"Value":"0","Type":"String","Key":"HKLM:/X","Name":"Y"}}'
+    Write-AVDTuneFile $fixS '{"At":"2999-01-01T00:00:00.0000000Z","Key":"HKLM:/Evil","Name":"Run","Previous":{"Value":"0","Type":"String","Key":"HKLM:/X","Name":"Y"}}'
     [void](Undo-AVDTuneOfficeFix -Machine $m -Name shared -Root $tmp -User 'admin1' -SnapshotId 'snap-check')
     $w = @($m.Log | Where-Object { $_ -like 'Reg*' })
     Test-Check '61 fix undo record: foreign Key and Name fields are ignored, only the registry value of the fix is written' ($w.Count -eq 1 -and $w[0] -like '*SharedComputerLicensing=0 (String)' -and @($w | Where-Object { $_ -like '*Evil*' -or $_ -like '*|Run=*' -or $_ -like '*HKLM:/X*' }).Count -eq 0) ($w -join ' | ')
