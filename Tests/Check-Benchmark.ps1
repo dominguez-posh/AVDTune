@@ -346,6 +346,13 @@ public static class StandIn { public static int Main(string[] a) {
         finally { Remove-Item Env:\DOTNET_AVDTUNE_TEST, Env:\COMPlus_AVDTUNE_TEST, Env:\AVDTUNE_KEEP_ME -ErrorAction SilentlyContinue }
         $pv = (& $realAdapter.RunBench 'env' @('PATH')).v; $tv = (& $realAdapter.RunBench 'env' @('TEMP')).v; $tm = (& $realAdapter.RunBench 'env' @('TMP')).v
         Test-Check 'child process: PATH is System32 only, TEMP and TMP are the folder below the state folder' ($pv -ieq (Join-Path $env:SystemRoot 'System32') -and $tv -ieq (Join-Path $tmp 'temp\bench') -and $tm -ieq $tv -and (Test-Path -LiteralPath $tv)) "$pv | $tv | $tm"
+        $keepSys = @{}; foreach ($k in 'windir', 'TEMP', 'TMP', 'ChocolateyInstall') { $keepSys[$k] = [Environment]::GetEnvironmentVariable($k, 'Process') }
+        try {
+            foreach ($k in $keepSys.Keys) { [Environment]::SetEnvironmentVariable($k, 'evil', 'Process') }
+            $sysSeen = @('windir', 'SystemRoot', 'TEMP', 'TMP', 'ChocolateyInstall' | ForEach-Object { "$_=$((& $realAdapter.RunBench 'env' @($_)).v)" })
+        }
+        finally { foreach ($k in $keepSys.Keys) { [Environment]::SetEnvironmentVariable($k, $keepSys[$k], 'Process') } }
+        Test-Check 'child process (#47): windir, TEMP and TMP set to evil in the caller (SystemRoot cannot be: it breaks this process) are the fixed values for the measure program (ChocolateyInstall is gone)' ($sysSeen -contains "windir=$([Environment]::GetFolderPath('Windows'))" -and $sysSeen -contains "SystemRoot=$([Environment]::GetFolderPath('Windows'))" -and $sysSeen -contains "TEMP=$(Join-Path $tmp 'temp\bench')" -and $sysSeen -contains "TMP=$(Join-Path $tmp 'temp\bench')" -and $sysSeen -contains 'ChocolateyInstall=<none>') ($sysSeen -join ' ')
         $evil = @('DOTNET_AVDTUNE_T', 'COREHOST_AVDTUNE_T', 'CORECLR_AVDTUNE_T', 'COMPlus_AVDTUNE_T', 'COR_AVDTUNE_T', '__COMPAT_LAYER', 'AVDTUNE_HKCU_LIKE', 'USERPROFILE_FAKE_AVDTUNE')
         foreach ($k in $evil) { [Environment]::SetEnvironmentVariable($k, 'evil') }
         try {
@@ -394,9 +401,9 @@ public static class StandIn { public static int Main(string[] a) {
         }
         finally { & $mod { $script:Limits.BenchMs = 600000 } }
         Test-Check 'child process: a program that hangs is ended after the timeout with a clear message' ($hm -like '*did not finish in time*' -and $sw.Elapsed.TotalSeconds -lt 30) "$hm $($sw.Elapsed.TotalSeconds)"
-        $hr = & $mod { Invoke-AVDTuneChildProcess -FileName $args[0] -Arguments 'hang' -TimeoutMs 2000 } $exe
+        $hr = & $mod { Invoke-AVDTuneChildProcess -FileName $args[0] -Arguments 'hang' -TimeoutMs 40000 } $exe   # the program starts a child and prints its id first; process starts can take 5 s each on a loaded or scanned machine, so the timeout is generous
         $childId = [int](([regex]::Match($hr.Output, 'child:(\d+)')).Groups[1].Value)
-        Start-Sleep -Milliseconds 500
+        for ($w = 0; $w -lt 150 -and $childId -gt 0 -and (Get-Process -Id $childId -ErrorAction SilentlyContinue); $w++) { Start-Sleep -Milliseconds 100 }   # wait for the end of the process (the job ends it asynchronously), not a fixed time
         Test-Check 'child process: on a timeout the whole tree is ended, also the process it started' ($hr.TimedOut -and $childId -gt 0 -and $null -eq (Get-Process -Id $childId -ErrorAction SilentlyContinue)) ($hr | Out-String)
         $extra = Join-Path $exeDir 'evil.dll'; [IO.File]::WriteAllBytes($extra, [byte[]](1, 2, 3))
         $msg = Get-ThrownText { Open-AVDTuneVerifiedBenchExe -AppRoot $app -InstallRoot $inst -StateRoot $tmp -Manifest $okManifest }

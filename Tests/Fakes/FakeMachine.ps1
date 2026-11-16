@@ -78,7 +78,11 @@ function New-AVDTuneFakeMachine {
     }.GetNewClosure()
     $m.Run = {
         param($File, [string[]]$Arguments, [int]$TimeoutSeconds = 120)
-        $key = (@($File) + @($Arguments)) -join ' '
+        # a program in the system folder is keyed by its file name (the product starts it with the full path)
+        $shown = $File; if ($File -and [IO.Path]::IsPathRooted($File) -and [string]::Equals((Split-Path $File -Parent), [Environment]::GetFolderPath('System'), 'OrdinalIgnoreCase')) { $shown = Split-Path $File -Leaf }
+        $key = (@($shown) + @($Arguments)) -join ' '
+        $fullKey = (@($File) + @($Arguments)) -join ' '
+        if ($shown -ne $File -and $store.Native.ContainsKey($fullKey)) { $key = $fullKey }   # a check may key the full path
         [void]$store.Log.Add("Run $key")
         $hitKey = $null
         if ($store.Native.ContainsKey($key)) { $hitKey = $key } else { foreach ($nk in $store.Native.Keys) { if ($nk.Contains('*') -and $key -like $nk) { $hitKey = $nk; break } } }

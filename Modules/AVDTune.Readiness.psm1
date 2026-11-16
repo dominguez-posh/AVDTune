@@ -576,7 +576,7 @@ function Invoke-AVDTuneReadiness {
     }
     Invoke-Check 'hy.join' $hy {
         $dsreg = $null
-        try { $dsreg = & $Machine.Run 'dsregcmd.exe' @('/status') } catch { }
+        try { $dsreg = & $Machine.Run (Join-Path (Get-AVDTuneSystemFolder System) 'dsregcmd.exe') @('/status') } catch { }
         if (-not ($dsreg -and $dsreg.ExitCode -eq 0 -and $dsreg.Output)) { Add-Row 'hy.join' $hy 'unknown' 'Not checkable: dsregcmd /status gave no answer.'; return }
         $joined = @(); if ($dsreg.Output -match '(?im)^\s*AzureAdJoined\s*:\s*YES') { $joined += 'Microsoft Entra ID' }; if ($dsreg.Output -match '(?im)^\s*DomainJoined\s*:\s*YES') { $joined += 'a domain' }
         if ($joined.Count -gt 0) { Add-Row 'hy.join' $hy 'red' ('The master is joined to ' + ($joined -join ' and ') + '. A master must not be joined (leave before the image is made).') 'Leave the domain or Microsoft Entra ID (local admin sign-in needed).' -Found ($joined -join ', ') }
@@ -584,7 +584,7 @@ function Invoke-AVDTuneReadiness {
     }
     Invoke-Check 'hy.bitlocker' $hy {
         $r = $null
-        try { $r = & $Machine.Run 'manage-bde.exe' @('-status', 'C:') } catch { }
+        try { $r = & $Machine.Run (Join-Path (Get-AVDTuneSystemFolder System) 'manage-bde.exe') @('-status', 'C:') } catch { }
         if (-not ($r -and $r.ExitCode -eq 0 -and $r.Output)) { Add-Row 'hy.bitlocker' $hy 'unknown' 'Not checkable: manage-bde gave no answer.'; return }
         if ($r.Output -match '(?im)Protection Status:\s*Protection On' -or $r.Output -match '(?im)Conversion Status:\s*(Fully Encrypted|Encryption in Progress)') { Add-Row 'hy.bitlocker' $hy 'yellow' 'BitLocker is on for C:. The process asks for it to be off on the master (no Learn page states why; see the note).' 'Turn BitLocker off and wait until the drive is decrypted (manage-bde -off C:).' }
         else { Add-Row 'hy.bitlocker' $hy 'green' 'BitLocker is off for C:.' }
@@ -807,7 +807,7 @@ function Get-AVDTuneReadinessFixes {
     $apply = {
         param($m)
         if (-not (& $m.RegKeyExists 'HKLM:\SYSTEM\CurrentControlSet\Services\stornvme')) { throw 'The stornvme driver is not installed; it cannot be set to boot.' }
-        $r = & $m.Run 'sc.exe' @('config', 'stornvme', 'start=boot')
+        $r = & $m.Run (Join-Path (Get-AVDTuneSystemFolder System) 'sc.exe') @('config', 'stornvme', 'start=boot')
         if ($r.ExitCode -ne 0) { throw "sc.exe config stornvme start=boot failed (exit code $($r.ExitCode)): $([string]$r.Output)" }
     }
     @{

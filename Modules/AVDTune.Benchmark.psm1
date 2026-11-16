@@ -219,56 +219,15 @@ namespace AVDTuneBenchNative {
 }
 
 function Initialize-AVDTuneBenchTemp {
-    <#
-        TEMP of the measure program: <state>\temp\bench, administrators only. An existing folder is trusted only when it is no link (the folder and the ones above it) and has no
-        owner or rule of someone else (Get-AVDTuneStateSecurityProblems); otherwise it is set aside (renamed to bench.untrusted-<stamp>, never repaired or deleted in place) and a new
-        one is created in one step with the protected ACL.
-    #>
+    # TEMP of the measure program: <state>\temp\bench, administrators only (the folder logic is Initialize-AVDTuneToolTemp in AVDTune.psm1, issue #47)
     param([Parameter(Mandatory)][string]$StateRoot)
-    $parent = Join-Path $StateRoot 'temp'
-    $dir = Join-Path $parent 'bench'
-    Assert-AVDTuneNoLinkInPath -Base $StateRoot -Rel 'temp'
-    if (-not (Test-Path -LiteralPath $parent)) { [void][IO.Directory]::CreateDirectory($parent) }
-    $info = New-Object IO.DirectoryInfo $dir
-    $file = New-Object IO.FileInfo $dir
-    if ($info.Exists -or $file.Exists) {
-        $bad = $file.Exists -or (($info.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)
-        if (-not $bad) {
-            $p = @{ Root = $dir }
-            if ($script:Hooks.AclReader) { $p.ReadAcl = $script:Hooks.AclReader; $p.AdminSid = '' }
-            $bad = @(Get-AVDTuneStateSecurityProblems @p).Count -gt 0
-        }
-        if (-not $bad) { return $dir }
-        $stamp = (Get-Date).ToString('yyyyMMdd-HHmmss', [Globalization.CultureInfo]::InvariantCulture)
-        $aside = Join-Path $parent "bench.untrusted-$stamp"
-        for ($n = 2; (Test-Path -LiteralPath $aside); $n++) { $aside = Join-Path $parent "bench.untrusted-$stamp-$n" }
-        if ($file.Exists) { [IO.File]::Move($dir, $aside) } else { [IO.Directory]::Move($dir, $aside) }   # a rename: nothing inside is opened or followed
-    }
-    $elevated = Test-AVDTuneElevated
-    $security = New-AVDTuneStateSecurity -WithOwner:$elevated
-    # AVDTune runs the benchmark elevated only; a non-elevated process (the checks) must not lock itself out of its own folder
-    if (-not $elevated) { $security.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule([Security.Principal.WindowsIdentity]::GetCurrent().User, 'FullControl', 'ContainerInherit, ObjectInherit', 'None', 'Allow'))) }
-    (New-Object IO.DirectoryInfo $dir).Create($security)
-    $dir
-}
-
-function Get-AVDTuneChildEnvironment {
-    # Allowlist of the environment of a child: only what Windows programs need to find the system, plus fixed PATH, TEMP and TMP. Everything else (DOTNET_*, COR*, __COMPAT_LAYER,
-    # variables from the profile of the user) is not passed on.
-    param([Parameter(Mandatory)][string]$TempDir)
-    $names = @('SystemRoot', 'windir', 'ProgramData', 'ProgramFiles', 'ProgramFiles(x86)', 'CommonProgramFiles', 'NUMBER_OF_PROCESSORS', 'OS', 'COMSPEC')
-    $env = [ordered]@{}
-    foreach ($k in @([Environment]::GetEnvironmentVariables().Keys | ForEach-Object { [string]$_ })) {
-        if ($k -in $names -or $k -like 'PROCESSOR_*') { $env[$k] = [Environment]::GetEnvironmentVariable($k) }
-    }
-    $env['PATH'] = [Environment]::GetFolderPath('System'); $env['TEMP'] = $TempDir; $env['TMP'] = $TempDir
-    $env
+    Initialize-AVDTuneToolTemp -Tool bench -StateRoot $StateRoot -ReadAcl $script:Hooks.AclReader
 }
 
 function Invoke-AVDTuneChildProcess {
     <#
         Starts a program and waits for it: no window, output read asynchronously (stdout and stderr, so neither pipe can fill up and block it), a timeout, and the process in a
-        job object (kill on close): on a timeout, or when this function ends, the whole tree is ended. -CleanEnvironment passes only the allowlist of Get-AVDTuneChildEnvironment
+        job object (kill on close): on a timeout, or when this function ends, the whole tree is ended. -CleanEnvironment passes only the allowlist of Get-AVDTuneChildEnvironment (AVDTune.psm1, profile bench)
         and TEMP/TMP in -TempDir (Initialize-AVDTuneBenchTemp). If the process cannot be put into the job it is ended. Returns ExitCode, Output, Error, TimedOut.
     #>
     param([Parameter(Mandatory)][string]$FileName, [string]$Arguments = '', [int]$TimeoutMs = 600000, [switch]$CleanEnvironment, [string]$TempDir)
@@ -279,7 +238,7 @@ function Invoke-AVDTuneChildProcess {
     if ($CleanEnvironment) {
         if (-not $TempDir) { throw 'A clean environment needs a TEMP folder.' }
         $psi.EnvironmentVariables.Clear()
-        $clean = Get-AVDTuneChildEnvironment -TempDir $TempDir
+        $clean = Get-AVDTuneChildEnvironment -Tool bench -TempDir $TempDir
         foreach ($k in $clean.Keys) { $psi.EnvironmentVariables[$k] = [string]$clean[$k] }
     }
     $job = [AVDTuneBenchNative.Job]::Create()
@@ -1204,7 +1163,7 @@ function Get-AVDTuneBenchmarkSummaryText {
 
 #endregion
 
-Export-ModuleMember -Function Get-AVDTuneBenchRound, Get-AVDTuneBenchmarkConfig, Invoke-AVDTuneChildProcess, Initialize-AVDTuneBenchTemp, Get-AVDTuneChildEnvironment, Get-AVDTuneBenchmarkReference, Get-AVDTuneBenchCategoryKey, Get-AVDTuneBenchMedian, Get-AVDTuneBenchCv, Get-AVDTuneBenchIndex,
+Export-ModuleMember -Function Get-AVDTuneBenchRound, Get-AVDTuneBenchmarkConfig, Invoke-AVDTuneChildProcess, Initialize-AVDTuneBenchTemp, Get-AVDTuneBenchmarkReference, Get-AVDTuneBenchCategoryKey, Get-AVDTuneBenchMedian, Get-AVDTuneBenchCv, Get-AVDTuneBenchIndex,
     Get-AVDTuneBenchGeometricMean, Get-AVDTuneBenchWeightedGeometricMean, Get-AVDTuneBenchPercentile, Get-AVDTuneBenchmarkScores, ConvertFrom-AVDTuneDiskspdXml, New-AVDTuneBenchAdapter,
     Get-AVDTuneDiskspd, Test-AVDTuneBenchmarkPreconditions, Wait-AVDTuneUpdateIdle, Get-AVDTuneBenchmarkJournalPath, Get-AVDTuneBenchmarkRestoreScriptPath, New-AVDTuneBenchmarkRestoreScript,
     Start-AVDTuneBenchmarkQuiet, Stop-AVDTuneBenchmarkQuiet, Get-AVDTuneBenchmarkCrash, Repair-AVDTuneBenchmarkCrash, Test-AVDTuneBenchmarkClean, Get-AVDTuneBenchRestoreAction, Remove-AVDTuneDiskspdCache, Invoke-AVDTuneBenchDisk, Invoke-AVDTuneBenchNetwork,
