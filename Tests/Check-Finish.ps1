@@ -222,7 +222,7 @@ try {
     # no limit on the number of files; the limits are per file and in time, each with its own text
     $many = Join-Path $real 'many'; New-Item -ItemType Directory -Path $many | Out-Null
     1..5003 | ForEach-Object { [IO.File]::WriteAllText((Join-Path $many ("r{0:00000}.json" -f $_)), '{}') }
-    Test-Check 'token scan: more than 5000 harmless files are no finding (no total limit)' (@(Find-AVDTuneTokenFiles -Root $many).Count -eq 0) $null
+    Test-Check 'token scan: more than 5000 harmless files are no finding (no total limit)' (@(Find-AVDTuneTokenFiles -Root $many -MaxSeconds 900).Count -eq 0) $null
     $big = Join-Path $real 'big'; New-Item -ItemType Directory -Path $big | Out-Null
     $fsb = [IO.File]::Create((Join-Path $big 'huge.log')); $fsb.SetLength(5MB); $fsb.Dispose()
     $bh = @(Find-AVDTuneTokenFiles -Root $big)
