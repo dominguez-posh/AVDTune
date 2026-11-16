@@ -230,7 +230,7 @@ function Invoke-AVDTuneChildProcess {
         job object (kill on close): on a timeout, or when this function ends, the whole tree is ended. -CleanEnvironment passes only the allowlist of Get-AVDTuneChildEnvironment (AVDTune.psm1, profile bench)
         and TEMP/TMP in -TempDir (Initialize-AVDTuneBenchTemp). If the process cannot be put into the job it is ended. Returns ExitCode, Output, Error, TimedOut.
     #>
-    param([Parameter(Mandatory)][string]$FileName, [string]$Arguments = '', [int]$TimeoutMs = 600000, [switch]$CleanEnvironment, [string]$TempDir)
+    param([Parameter(Mandatory)][string]$FileName, [string]$Arguments = '', [int]$TimeoutMs = 600000, [switch]$CleanEnvironment, [string]$TempDir, [ValidateSet('bench', 'office')][string]$Tool = 'bench')
     Initialize-AVDTuneBenchJob
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName = $FileName; $psi.Arguments = $Arguments
@@ -238,7 +238,7 @@ function Invoke-AVDTuneChildProcess {
     if ($CleanEnvironment) {
         if (-not $TempDir) { throw 'A clean environment needs a TEMP folder.' }
         $psi.EnvironmentVariables.Clear()
-        $clean = Get-AVDTuneChildEnvironment -Tool bench -TempDir $TempDir
+        $clean = Get-AVDTuneChildEnvironment -Tool $Tool -TempDir $TempDir
         foreach ($k in $clean.Keys) { $psi.EnvironmentVariables[$k] = [string]$clean[$k] }
     }
     $job = [AVDTuneBenchNative.Job]::Create()

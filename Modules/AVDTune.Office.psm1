@@ -629,7 +629,7 @@ function New-AVDTuneOfficeAdapter {
     $a.Run = {
         # No shell, no window, a clean allowlist environment (TEMP = the protected work folder of the file), the whole process tree in a job object, timeout ends the tree
         param($File, [string[]]$Arguments, [int]$TimeoutSeconds = 600)
-        $r = Invoke-AVDTuneChildProcess -FileName $File -Arguments (($Arguments | ForEach-Object { ConvertTo-AVDTuneArgument ([string]$_) }) -join ' ') -TimeoutMs ($TimeoutSeconds * 1000) -CleanEnvironment -TempDir (Split-Path $File -Parent)
+        $r = Invoke-AVDTuneChildProcess -FileName $File -Arguments (($Arguments | ForEach-Object { ConvertTo-AVDTuneArgument ([string]$_) }) -join ' ') -TimeoutMs ($TimeoutSeconds * 1000) -CleanEnvironment -Tool office -TempDir (Split-Path $File -Parent)
         [pscustomobject]@{ ExitCode = $r.ExitCode; Output = ([string]$r.Output + [string]$r.Error) }
     }
     $a.FindSetup = {

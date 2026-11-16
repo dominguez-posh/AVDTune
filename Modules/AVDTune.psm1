@@ -673,7 +673,7 @@ function Initialize-AVDTuneToolTemp {
         and has no owner or rule of someone else (Get-AVDTuneStateSecurityProblems on the folder itself); otherwise it is set aside (renamed to <tool>.untrusted-<stamp>, never
         repaired or deleted in place) and a new one is created in one step with the protected ACL. Returns the path.
     #>
-    param([Parameter(Mandatory)][ValidateSet('base', 'winget', 'choco', 'msiexec', 'bench')][string]$Tool, [Parameter(Mandatory)][string]$StateRoot, [scriptblock]$ReadAcl)
+    param([Parameter(Mandatory)][ValidateSet('base', 'winget', 'choco', 'msiexec', 'bench', 'office')][string]$Tool, [Parameter(Mandatory)][string]$StateRoot, [scriptblock]$ReadAcl)
     $parent = Join-Path $StateRoot 'temp'
     $dir = Join-Path $parent $Tool
     foreach ($c in @($StateRoot, $parent)) {
@@ -748,9 +748,9 @@ function Get-AVDTuneChildEnvironment {
         no variable of the user's profile). Every value comes from Windows (GetFolderPath, HKLM, .NET), never from $env: a process of the same administrator that is not elevated can set
         HKCU\Environment, which an elevated process started from his session inherits (ChocolateyInstall, TEMP, windir, SystemRoot, PATH).
         Profiles by -Tool: base (all), winget (+ USERPROFILE, LOCALAPPDATA, APPDATA, HOMEDRIVE/HOMEPATH from the known folders), choco (+ ChocolateyInstall from HKLM, PATH also has the
-        Windows PowerShell folder), msiexec and bench (as base). TEMP and TMP are -TempDir (Initialize-AVDTuneToolTemp).
+        Windows PowerShell folder), msiexec, bench and office (as base; office = the Office Deployment Tool setup.exe, #35). TEMP and TMP are -TempDir (Initialize-AVDTuneToolTemp).
     #>
-    param([Parameter(Mandatory)][ValidateSet('base', 'winget', 'choco', 'msiexec', 'bench')][string]$Tool, [Parameter(Mandatory)][string]$TempDir)
+    param([Parameter(Mandatory)][ValidateSet('base', 'winget', 'choco', 'msiexec', 'bench', 'office')][string]$Tool, [Parameter(Mandatory)][string]$TempDir)
     $windows = Get-AVDTuneSystemFolder Windows; $system = Get-AVDTuneSystemFolder System
     $e = [ordered]@{}
     $e['SystemRoot'] = $windows; $e['windir'] = $windows; $e['SystemDrive'] = [IO.Path]::GetPathRoot($windows).TrimEnd('\')
