@@ -785,7 +785,7 @@ function Get-AVDTuneFinishReadiness {
     if ($unconfirmed.Count -gt 0 -and [int]$rec.Red -eq 0) { [void]$reasons.Add("$($unconfirmed.Count) yellow or not checkable item(s) are not confirmed by name: $($unconfirmed -join ', ').") }
     $at = [datetime]::Parse([string]$rec.At, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind)
     $log = Get-AVDTuneChangeLog -Root $Root
-    $after = @(@($log) | Where-Object { $_ -and $_.Source -eq 'Step' -and $_.Category -ne 'Readiness' -and ([datetime]::Parse([string]$_.At, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind)) -gt $at })
+    $after = @(@($log) | Where-Object { $_ -and $_.Source -eq 'Step' -and $_.Category -notin 'Snapshot', 'Readiness', 'Benchmark' -and ([datetime]::Parse([string]$_.At, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind)) -gt $at })
     if ($after.Count -gt 0) { [void]$reasons.Add("The master was changed after the check ($($after.Count) change log entr$(if ($after.Count -eq 1) { 'y' } else { 'ies' })): run the analysis again.") }
     [pscustomobject]@{ Allowed = ($reasons.Count -eq 0); Reasons = @($reasons); Overall = [string]$rec.Overall; At = [string]$rec.At }
 }

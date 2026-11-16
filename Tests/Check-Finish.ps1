@@ -55,10 +55,11 @@ function New-TokenSession([string]$TempRoot) {
     [void](New-Item -ItemType Directory -Path (Join-Path $TempRoot ('PackTuneSignIn-' + [guid]::NewGuid().ToString('N'))))
     $s
 }
+function Connect-FakeToken($Session) { $Session.Tokens['Arm'] = @{ Access = (ConvertTo-AVDTuneSecure 'x'); ExpiresOn = (Get-Date); Scopes = @(); Audience = 'x' }; $Session.Connected = $true }
 function Get-Fake([string]$Root) {
     @{
         Items = @{
-            'temp' = @('setup.log', 'old.tmp', @{ Name = 'inuse.dat'; Locked = $true }, @{ Name = 'lnk'; Link = $true; Target = 'outside' })
+            'temp' = @('setup.log', 'old.tmp', @{ Name = 'inuse.dat'; Locked = $true }, @{ Name = 'lnk'; Link = $true; Target = 'outside' }, @{ Name = 'subdir'; Dir = $true }, @{ Name = 'ro-hard'; ReadOnly = $true; Links = 2 }, @{ Name = 'ro-single'; ReadOnly = $true; Links = 1 })
             'wer-queue' = @('Report1'); 'wu-download' = @('KB1.cab', 'KB2.cab')
         }
         LinkTargets = @{ outside = @('precious1.txt', 'precious2.txt') }
@@ -131,8 +132,10 @@ try {
     Test-Check 'finish: Finished, seven steps in order, none failed' ($r.Status -eq 'Finished' -and (@($r.Results | ForEach-Object Id) -join ',') -eq 'finish.temp,finish.wer,finish.wu-cache,finish.diskspd,finish.block,finish.tokens,finish.version' -and @($r.Results | Where-Object Status -eq 'Failed').Count -eq 0) ((@($r.Results | ForEach-Object { "$($_.Id)=$($_.Status):$($_.Message)" })) -join '; ')
     Test-Check 'finish: every step ran through the step engine (Section Seal, Mode Apply)' (@($r.Results | Where-Object { $_.Section -ne 'Seal' -or $_.Mode -ne 'Apply' }).Count -eq 0) $null
     $temp = $f.Store.Items['C:\Windows\Temp']
-    Test-Check 'cleanup: the temp folder is empty except the file in use, which stays' ($temp.Count -eq 1 -and $temp[0].Name -eq 'inuse.dat') (@($temp | ForEach-Object Name) -join ',')
-    Test-Check 'cleanup: a link in the temp folder is removed itself, its target is untouched' (($f.Log -contains 'LinkRemoved lnk') -and @($f.Store.LinkTargets['outside']).Count -eq 2) (@($f.Store.LinkTargets['outside']) -join ',')
+    Test-Check 'cleanup: temp is cleared top level only: files go (also a read-only one with one link); the file in use, the link, the sub folder and the read-only file with two links stay' ((@($temp | ForEach-Object Name | Sort-Object) -join ',') -eq 'inuse.dat,lnk,ro-hard,subdir') (@($temp | ForEach-Object Name) -join ',')
+    Test-Check 'cleanup: temp and the error report folders are asked top level only, the update cache is not' (($f.Log -contains 'ClearFolder C:\Windows\Temp top=True') -and ($f.Log -contains 'ClearFolder C:\ProgramData\Microsoft\Windows\WER\ReportQueue top=True') -and ($f.Log -contains 'ClearFolder C:\Windows\SoftwareDistribution\Download top=False')) ($f.Log -join '; ')
+    Test-Check 'cleanup: what was skipped is counted and named in the result and the change log (3 skipped, 1 in use)' ($r.Message -like '*3 item(s) skipped*1 in use*' -and (@(Get-AVDTuneChangeLog -Root $root | Where-Object { $_.Component -eq 'Finish' })[0].Text -like '*3 item(s) skipped*')) $r.Message
+    Test-Check 'cleanup: the link in the temp folder is NOT removed or entered, its target is untouched' ((-not ($f.Log -contains 'LinkRemoved lnk')) -and @($f.Store.LinkTargets['outside']).Count -eq 2) (@($f.Store.LinkTargets['outside']) -join ',')
     Test-Check 'cleanup: error reports, update cache and the diskspd cache are gone' ($f.Store.Items['C:\ProgramData\Microsoft\Windows\WER\ReportQueue'].Count -eq 0 -and $f.Store.Items['C:\Windows\SoftwareDistribution\Download'].Count -eq 0 -and -not (& $f.PathExists (Join-Path (Join-Path $root 'tools') 'diskspd'))) $null
     $stop = $m.Log.IndexOf('ServiceStop wuauserv'); $start = $m.Log.IndexOf('ServiceStart wuauserv')
     Test-Check 'update cache: Windows Update and BITS were stopped for it and run again afterwards' ($stop -ge 0 -and $start -gt $stop -and $m.Log.IndexOf('ServiceStart bits') -gt $m.Log.IndexOf('ServiceStop bits') -and (& $m.ServiceGet 'wuauserv').Status -eq 'Running' -and (& $m.ServiceGet 'bits').Status -eq 'Running') ($m.Log -join '; ')
@@ -192,6 +195,41 @@ try {
     $hits = @(Find-AVDTuneTokenFiles -Root $scan | Sort-Object)
     Test-Check 'real token scan: finds a JWT and a refresh token by name, never shows content, does not follow a junction, no false hit on a clean file' (($hits -join ',') -eq 'config\jwt.json,refresh.log') ($hits -join ',')
 
+    # top level only on real folders (until the delete through handles exists, #48)
+    $top = Join-Path $real 'top'; $topTarget = Join-Path $real 'toptarget'
+    New-Item -ItemType Directory -Path $top, $topTarget, (Join-Path $top 'sub') | Out-Null
+    Set-Content -LiteralPath (Join-Path $topTarget 'keep.txt') -Value 'keep'; Set-Content -LiteralPath (Join-Path $top 'sub\deep.txt') -Value 'deep'
+    Set-Content -LiteralPath (Join-Path $top 'plain.txt') -Value 'p'
+    Set-Content -LiteralPath (Join-Path $top 'ro.txt') -Value 'r'; (Get-Item -LiteralPath (Join-Path $top 'ro.txt')).Attributes = 'ReadOnly'
+    Set-Content -LiteralPath (Join-Path $topTarget 'shared.txt') -Value 's'; (Get-Item -LiteralPath (Join-Path $topTarget 'shared.txt')).Attributes = 'ReadOnly'
+    cmd.exe /c mklink /H "$(Join-Path $top 'hard.txt')" "$(Join-Path $topTarget 'shared.txt')" | Out-Null
+    cmd.exe /c mklink /J "$(Join-Path $top 'lnk')" "$topTarget" | Out-Null
+    Test-Check 'precondition: the hard link count is 2, a plain file has 1' ((Get-AVDTuneFileLinkCount -Path (Join-Path $top 'hard.txt')) -eq 2 -and (Get-AVDTuneFileLinkCount -Path (Join-Path $top 'plain.txt')) -eq 1) $null
+    $tc = Clear-AVDTuneFolderContents -Folder $top -TopLevelOnly
+    Test-Check 'real top level only: files and a read-only file with one link go; the sub folder, its content, the junction and the read-only hard link stay and are counted as skipped' ($tc.Removed -eq 2 -and $tc.Skipped -eq 3 -and (Test-Path -LiteralPath (Join-Path $top 'sub\deep.txt')) -and (Test-Path -LiteralPath (Join-Path $top 'lnk')) -and (Test-Path -LiteralPath (Join-Path $top 'hard.txt')) -and -not (Test-Path -LiteralPath (Join-Path $top 'plain.txt')) -and -not (Test-Path -LiteralPath (Join-Path $top 'ro.txt'))) "$($tc.Removed)/$($tc.Skipped)/$($tc.Left)"
+    Test-Check 'real top level only: the other name of the hard link keeps its read-only mark, the junction target is untouched' (((Get-Item -LiteralPath (Join-Path $topTarget 'shared.txt')).Attributes -band [IO.FileAttributes]::ReadOnly) -ne 0 -and (Test-Path -LiteralPath (Join-Path $topTarget 'keep.txt'))) $null
+
+    # token forms: escaped JSON, form encoding, the 0.A / 1.A prefixes; nothing is shown
+    $forms = Join-Path $real 'forms'; New-Item -ItemType Directory -Path $forms | Out-Null
+    $longA = '0.A' + ('X' * 110)
+    [IO.File]::WriteAllText((Join-Path $forms 'escaped.json'), ([pscustomobject]@{ Message = 'endpoint said: {"refresh_token":"0.AXXXXXXXXXXXXXXXXXXXXXXXXXXX","token_type":"Bearer"}' } | ConvertTo-Json))
+    [IO.File]::WriteAllText((Join-Path $forms 'form.log'), 'grant_type=refresh_token&refresh_token=0.AXXXXXXXXXXXXXXXXXXXXXXXXXXX&client_id=abc')
+    [IO.File]::WriteAllText((Join-Path $forms 'prefix.txt'), "note $longA end")
+    [IO.File]::WriteAllText((Join-Path $forms 'one.txt'), ('value=1.A' + ('Y' * 110)))
+    [IO.File]::WriteAllText((Join-Path $forms 'clean.txt'), 'the refresh_token setting is documented; version 0.1.2 and 1.Alpha are fine')
+    $fh = @(Find-AVDTuneTokenFiles -Root $forms | Sort-Object)
+    Test-Check 'token scan: escaped JSON, form encoding and the 0.A / 1.A prefixes are found; plain words are not' (($fh -join ',') -eq 'escaped.json,form.log,one.txt,prefix.txt') ($fh -join ',')
+    # no limit on the number of files; the limits are per file and in time, each with its own text
+    $many = Join-Path $real 'many'; New-Item -ItemType Directory -Path $many | Out-Null
+    1..5003 | ForEach-Object { [IO.File]::WriteAllText((Join-Path $many ("r{0:00000}.json" -f $_)), '{}') }
+    Test-Check 'token scan: more than 5000 harmless files are no finding (no total limit)' (@(Find-AVDTuneTokenFiles -Root $many).Count -eq 0) $null
+    $big = Join-Path $real 'big'; New-Item -ItemType Directory -Path $big | Out-Null
+    $fsb = [IO.File]::Create((Join-Path $big 'huge.log')); $fsb.SetLength(5MB); $fsb.Dispose()
+    $bh = @(Find-AVDTuneTokenFiles -Root $big)
+    Test-Check 'token scan: a file over the size limit is a finding with its own text (file larger than 4 MB)' ($bh.Count -eq 1 -and $bh[0] -like 'huge.log (not scanned: file larger than 4 MB)') ($bh -join ',')
+    $th = @(Find-AVDTuneTokenFiles -Root $many -MaxSeconds 0)
+    Test-Check 'token scan: the time limit stops the scan with its own text' ($th.Count -eq 1 -and $th[0] -like '(scan stopped: time limit*') ($th -join ',')
+
     # ---------------------------------------------------------------- a protection that is lifted is put back
     # (a) an error in the middle: the finally block restores, the finish is failed and not finished
     $root3 = New-Root; [void](Save-Healthcheck -Root $root3)
@@ -229,7 +267,7 @@ foreach ($mod in 'Session', 'Snapshot', 'UpdateBlock', 'Readiness', 'Finish') { 
 Open-AVDTuneWriteGate -SnapshotId 'snap-check' -ConfirmedBy 'Check Runner'
 $m = New-AVDTuneFakeMachine -Seed @{ Services = @(@{ Name = 'wuauserv'; StartType = 'Manual'; Status = 'Running' }, @{ Name = 'bits'; StartType = 'Manual'; Status = 'Running' }) }
 $f = New-AVDTuneFakeFinish -Seed @{ Items = @{ 'wu-download' = @('a.cab') } }
-$f.ClearFolder = { param($Path) if ($Path -like '*SoftwareDistribution*') { [Environment]::Exit(99) } else { [pscustomobject]@{ Removed = 0; Left = 0 } } }
+$f.ClearFolder = { param($Path, $Top) if ($Path -like '*SoftwareDistribution*') { [Environment]::Exit(99) } else { [pscustomobject]@{ Removed = 0; Left = 0; Skipped = 0 } } }
 Invoke-AVDTuneFinish -Machine $m -Fin $f -Root $Root -User 'admin1'
 exit 0
 '@
@@ -262,6 +300,64 @@ exit 0
     $f7 = New-AVDTuneFakeFinish
     $r7 = Invoke-AVDTuneFinish -Machine $m7 -Fin $f7 -Root $root7 -User 'admin1'
     Test-Check 'a partly lifted block (confirmed yellow) is brought to On by the finish' ($r7.Status -eq 'Finished' -and (Get-AVDTuneUpdateBlockStatus $m7).State -eq 'On' -and @($r7.Results | Where-Object Id -eq 'finish.block')[0].Status -eq 'Changed') ($r7.Message)
+
+    # ---------------------------------------------------------------- the files are looked at again while the finish runs (findings E1, E4, E5)
+    $rootE1 = New-Root; [void](Save-Healthcheck -Root $rootE1)
+    $mE1 = New-Master; $fE1 = New-AVDTuneFakeFinish
+    $v1 = (Get-AVDTuneState $rootE1).ImageVersion
+    $e1 = Invoke-AVDTuneFinish -Machine $mE1 -Fin $fE1 -Root $rootE1 -User 'admin1' -Progress { param($t, $p) if ($t -eq 'Image version closed') { [void](Start-AVDTuneImageVersion -Root $rootE1 -User 'admin1') } }
+    $sE1 = Get-AVDTuneState $rootE1
+    Test-Check 'E1: "Start new version" while the finish runs: the version step fails, the new version is NOT marked finished' ($e1.Status -eq 'Failed' -and $e1.Message -like '*image version changed during the finish*' -and -not $sE1.Sealed -and @(@($sE1.Versions) | Where-Object { $_.PSObject.Properties['Finished'] }).Count -eq 0 -and $sE1.ImageVersion -ne $v1) ($e1.Message)
+    $rootE4 = New-Root; [void](Save-Healthcheck -Root $rootE4)
+    $mE4 = New-Master; $fE4 = New-AVDTuneFakeFinish
+    $e4 = Invoke-AVDTuneFinish -Machine $mE4 -Fin $fE4 -Root $rootE4 -User 'admin1' -Progress { param($t, $p) if ($p -eq 0) { [void](Save-Healthcheck -Root $rootE4 -Red @('hy.x')) } }
+    Test-Check 'E4: a red healthcheck saved while the finish runs blocks the version step (the version stays open)' ($e4.Status -eq 'Failed' -and $e4.Message -like '*new analysis was saved during the finish*' -and -not (Get-AVDTuneState $rootE4).Sealed -and (Get-AVDTuneReadinessRecord -Root $rootE4).Overall -eq 'red') ($e4.Message)
+    $rootE4b = New-Root; [void](Save-Healthcheck -Root $rootE4b)
+    $e4b = Invoke-AVDTuneFinish -Machine (New-Master) -Fin (New-AVDTuneFakeFinish) -Root $rootE4b -User 'admin1' -Progress { param($t, $p) if ($p -eq 0) { [void](Save-Healthcheck -Root $rootE4b) } }
+    Test-Check 'a new green healthcheck during the run does not count either (the finish is bound to the run the gate accepted)' ($e4b.Status -eq 'Failed' -and $e4b.Message -like '*new analysis was saved*') ($e4b.Message)
+    $rootB = New-Root; [void](Save-Healthcheck -Root $rootB)
+    $rb = Invoke-AVDTuneFinish -Machine (New-Master) -Fin (New-AVDTuneFakeFinish) -Root $rootB -User 'admin1'
+    $sB = Get-AVDTuneState $rootB
+    Test-Check 'the closed version carries the healthcheck run it was finished on' ($rb.Status -eq 'Finished' -and $sB.Versions[0].HealthcheckRunId -eq (Get-AVDTuneReadinessRecord -Root $rootB).RunId -and (Get-AVDTuneFinishRecord $rootB).HealthcheckRunId -eq $sB.Versions[0].HealthcheckRunId) $null
+    # the session: the CURRENT one is checked and removed; a sign-in during the run fails the token step
+    $ctx = @{ Session = (New-TokenSession $signTemp) }
+    $rootS = New-Root; [void](Save-Healthcheck -Root $rootS)
+    $rs = Invoke-AVDTuneFinish -Machine (New-Master) -Fin (New-AVDTuneFakeFinish) -Root $rootS -User 'admin1' -SessionProvider { $ctx.Session }
+    Test-Check 'the finish removes the tokens of the session the provider returns (not a copy taken earlier)' ($rs.Status -eq 'Finished' -and (Test-AVDTuneSessionClear -Session $ctx.Session)) $rs.Message
+    $ctx2 = @{ Session = (New-TokenSession $signTemp) }
+    $rootS2 = New-Root; [void](Save-Healthcheck -Root $rootS2)
+    $rs2 = Invoke-AVDTuneFinish -Machine (New-Master) -Fin (New-AVDTuneFakeFinish) -Root $rootS2 -User 'admin1' -SessionProvider { $ctx2.Session } -Progress { param($t, $p) if ($t -like 'Update block on*') { $ctx2.Session = (New-TokenSession $signTemp) } }
+    Test-Check 'a new sign-in during the run fails the token step; the new session keeps its tokens and the version stays open' ($rs2.Status -eq 'Failed' -and $rs2.Message -like '*new sign-in happened*' -and -not (Test-AVDTuneSessionClear -Session $ctx2.Session) -and -not (Get-AVDTuneState $rootS2).Sealed) $rs2.Message
+    $ctx3 = @{ Session = (New-TokenSession $signTemp) }
+    $rootS3 = New-Root; [void](Save-Healthcheck -Root $rootS3)
+    $rs3 = Invoke-AVDTuneFinish -Machine (New-Master) -Fin (New-AVDTuneFakeFinish) -Root $rootS3 -User 'admin1' -SessionProvider { $ctx3.Session } -Progress { param($t, $p) if ($t -eq 'Image version closed') { Connect-FakeToken $ctx3.Session } }
+    Test-Check 'tokens that appear in the same session right before the version is closed block the version step' ($rs3.Status -eq 'Failed' -and -not (Get-AVDTuneState $rootS3).Sealed) $rs3.Message
+    # E5 and the snapshot exception
+    $rootE5 = New-Root; [void](Save-Healthcheck -Root $rootE5)
+    Start-Sleep -Milliseconds 50
+    [void](Set-AVDTuneState -Root $rootE5 -Values @{ LastChange = [DateTime]::UtcNow.ToString('o') })
+    $g5 = Test-AVDTuneFinishGate -Root $rootE5
+    Test-Check 'E5: a LastChange after the healthcheck without a change log entry blocks the gate' (-not $g5.Allowed -and ($g5.Reasons -join ' ') -like '*changed the master after the check*') ($g5.Reasons -join '|')
+    $rootSn = New-Root; [void](Save-Healthcheck -Root $rootSn)
+    Start-Sleep -Milliseconds 50
+    [void](Add-AVDTuneChangeLogEntry -Root $rootSn -Version (Get-AVDTuneState $rootSn).ImageVersion -Category 'Snapshot' -Component 'Confirmation' -ChangeType Note -Text 'Snapshot confirmed' -User 'admin1' -Source Step)
+    $gSn = Test-AVDTuneFinishGate -Root $rootSn
+    Test-Check 'a snapshot confirmation alone does not lock the gate (both places treat it alike)' ($gSn.Allowed) ($gSn.Reasons -join '|')
+    Start-Sleep -Milliseconds 50
+    [void](Add-AVDTuneChangeLogEntry -Root $rootSn -Version (Get-AVDTuneState $rootSn).ImageVersion -Category 'Software' -ChangeType Changed -Text 'Tool installed' -User 'admin1' -Source Step)
+    Test-Check 'a real change after the snapshot confirmation still locks it' (-not (Test-AVDTuneFinishGate -Root $rootSn).Allowed) $null
+
+    # ---------------------------------------------------------------- dependent services (finding 7)
+    $rootD = New-Root; [void](Save-Healthcheck -Root $rootD)
+    $mD = New-Master; $fD = New-AVDTuneFakeFinish -Seed @{ Items = @{ 'wu-download' = @('a.cab') }; Dependents = @{ bits = @('DependentSvc') } }
+    $rd = Invoke-AVDTuneFinish -Machine $mD -Fin $fD -Root $rootD -User 'admin1'
+    Test-Check 'a service with a running dependent is not stopped: the cache step fails naming it, nothing was stopped, nothing to restore' ($rd.Status -eq 'Failed' -and $rd.Message -like '*bits*dependent*DependentSvc*' -and -not ($mD.Log -like 'ServiceStop*') -and (& $mD.ServiceGet 'wuauserv').Status -eq 'Running' -and -not (Get-AVDTuneFinishCrash -Root $rootD) -and $fD.Store.Items['C:\Windows\SoftwareDistribution\Download'].Count -eq 1) ($rd.Message)
+
+    # ---------------------------------------------------------------- the page script (findings 2, 6, 8, 9 and the hint)
+    $page = [IO.File]::ReadAllText((Join-Path $repo 'AVDTune-Seal.ps1'))
+    Test-Check 'page: every known job is checked before the start' ($page -match "'SealJob', 'UpdJob', 'BenchJob', 'ReadyJob', 'OverviewJob', 'FslJob'") $null
+    Test-Check 'page: the run is a background runspace also in test mode (fakes handed in), the write block goes in, the current session is read through the context' ($page -notmatch 'Inline' -and $page -match 'FakeMachineScript' -and $page -match 'Get-AVDTuneWriteBlock' -and $page -match 'Set-AVDTuneWriteBlock \$Block' -and $page -match 'SessionProvider \{ \$Ctx\.Session \}') $null
+    Test-Check 'page: the crash box is not shown while a finish runs; the crash text says a restart starts the services too; the token scan hint names the state folder only' ($page -match 'ConvertTo-Vis \(\[bool\]\$crash -and -not \$script:SealJob\)' -and $page -match 'A restart of the master starts the services as well' -and $page -match 'only the state folder is checked, not export locations you chose yourself') $null
 
     # ---------------------------------------------------------------- the module never writes a secret
     $src = [IO.File]::ReadAllText((Join-Path $repo 'Modules\AVDTune.Finish.psm1'))

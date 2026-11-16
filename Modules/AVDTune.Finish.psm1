@@ -39,10 +39,15 @@ $script:LiftServices = @('wuauserv', 'bits')
 $script:TokenPatterns = @(
     'eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}'
     '"(access_token|refresh_token|id_token)"\s*:\s*"[^"]{12,}"'
+    # escaped JSON (a JSON text inside a JSON string: refresh_token\":\"...) and form encoding (refresh_token=...)
+    '(access_token|refresh_token|id_token)\\?"?\s*[:=]\s*\\?"?[A-Za-z0-9._-]{20,}'
+    # Microsoft tokens by their prefix (0.A... / 1.A...), long
+    '(?<![A-Za-z0-9._-])[01]\.A[A-Za-z0-9._-]{100,}'
 )
 $script:ScanExtensions = @('.json', '.txt', '.log', '.html', '.htm', '.xml', '.md', '.csv', '.ps1')
+# Limits: per file and in time, never a total count (a state folder with many run records must not block the finish for ever)
 $script:ScanMaxBytes = 4MB
-$script:ScanMaxFiles = 5000
+$script:ScanMaxSeconds = 120
 
 #region real adapter
 
@@ -57,55 +62,97 @@ function Test-AVDTuneNoLinkChain {
     $true
 }
 
+if (-not ('AVDTune.Native.FileLinks' -as [type])) {
+    Add-Type -Namespace 'AVDTune.Native' -Name 'FileLinks' -MemberDefinition @"
+[System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+public struct BY_HANDLE_FILE_INFORMATION { public uint FileAttributes; public System.Runtime.InteropServices.ComTypes.FILETIME CreationTime; public System.Runtime.InteropServices.ComTypes.FILETIME LastAccessTime; public System.Runtime.InteropServices.ComTypes.FILETIME LastWriteTime; public uint VolumeSerialNumber; public uint FileSizeHigh; public uint FileSizeLow; public uint NumberOfLinks; public uint FileIndexHigh; public uint FileIndexLow; }
+[System.Runtime.InteropServices.DllImport("kernel32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode, SetLastError = true)] public static extern Microsoft.Win32.SafeHandles.SafeFileHandle CreateFileW(string name, uint access, uint share, System.IntPtr security, uint disposition, uint flags, System.IntPtr template);
+[System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true)] public static extern bool GetFileInformationByHandle(Microsoft.Win32.SafeHandles.SafeFileHandle handle, out BY_HANDLE_FILE_INFORMATION info);
+"@
+}
+
+function Get-AVDTuneFileLinkCount {
+    <# Number of hard links of a file (1 = only this name), $null when it cannot be read. Opens the link itself (no follow), no access to the content. #>
+    param([Parameter(Mandatory)][string]$Path)
+    # FILE_READ_ATTRIBUTES, share all, OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT
+    $h = [AVDTune.Native.FileLinks]::CreateFileW('\\?\' + $Path, 0x80, 7, [IntPtr]::Zero, 3, 0x00200000, [IntPtr]::Zero)
+    try {
+        if ($h.IsInvalid) { return $null }
+        $info = New-Object AVDTune.Native.FileLinks+BY_HANDLE_FILE_INFORMATION
+        if (-not [AVDTune.Native.FileLinks]::GetFileInformationByHandle($h, [ref]$info)) { return $null }
+        [int]$info.NumberOfLinks
+    }
+    finally { $h.Dispose() }
+}
+
 function Clear-AVDTuneFolderContents {
-    <# Removes what is IN the folder (the folder stays). A link is removed itself, never followed. An item that cannot be removed (in use) is counted. #>
-    param([Parameter(Mandatory)][string]$Folder)
+    <#
+        Removes what is IN the folder (the folder stays). Until the delete through handles exists (#48) the folders that users can write to are
+        cleared with -TopLevelOnly: only FILES directly in the folder are deleted; sub folders and links are not entered and not removed, they are
+        counted as Skipped. A read-only mark is removed only from a file with exactly one link (a hard link elsewhere would change that file too);
+        a read-only file with more links, or one whose links cannot be read, is Skipped. A file in use is counted as Left.
+        Without -TopLevelOnly (folders of Windows itself, admin-only) sub folders are removed with Remove-AVDTuneFolderNoFollow, links removed themselves.
+    #>
+    param([Parameter(Mandatory)][string]$Folder, [switch]$TopLevelOnly)
     $dir = New-Object IO.DirectoryInfo $Folder
-    if (-not $dir.Exists) { return [pscustomobject]@{ Removed = 0; Left = 0 } }
+    if (-not $dir.Exists) { return [pscustomobject]@{ Removed = 0; Left = 0; Skipped = 0 } }
     if ($dir.FullName.TrimEnd([char]92).Length -le 3) { throw 'A drive root is never cleared.' }
     if (-not (Test-AVDTuneNoLinkChain -Folder $dir.FullName)) { throw "The path $Folder contains a link: nothing is deleted." }
-    $removed = 0; $left = 0
+    $removed = 0; $left = 0; $skipped = 0
     foreach ($item in $dir.GetFileSystemInfos()) {
         try {
-            if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { $item.Delete() }
-            elseif ($item -is [IO.DirectoryInfo]) { Remove-AVDTuneFolderNoFollow $item.FullName }
-            else { $item.Attributes = [IO.FileAttributes]::Normal; $item.Delete() }
+            $isLink = (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)
+            if ($item -is [IO.DirectoryInfo] -or ($isLink -and $TopLevelOnly)) {
+                if ($TopLevelOnly) { $skipped++; continue }
+                if ($isLink) { $item.Delete() } else { Remove-AVDTuneFolderNoFollow $item.FullName }
+                $removed++; continue
+            }
+            if (($item.Attributes -band [IO.FileAttributes]::ReadOnly) -ne 0) {
+                $links = Get-AVDTuneFileLinkCount -Path $item.FullName
+                if ($links -ne 1) { $skipped++; continue }
+                $item.Attributes = [IO.FileAttributes]::Normal
+            }
+            $item.Delete()
             $removed++
         }
         catch { $left++ }
     }
-    [pscustomobject]@{ Removed = $removed; Left = $left }
+    [pscustomobject]@{ Removed = $removed; Left = $left; Skipped = $skipped }
 }
-
 function Find-AVDTuneTokenFiles {
-    <# Files below $Root (no links followed) with a token pattern. Returns relative names only, never content. A file that cannot be scanned counts as a hit (fail closed). #>
-    param([Parameter(Mandatory)][string]$Root)
+    <#
+        Files below $Root (no links followed) with a token pattern. Returns relative names only, never content. Limits: per file (larger than
+        ScanMaxBytes: named with its own text) and in time (-MaxSeconds: the scan stops and says so); there is NO limit on the number of files. A file that
+        cannot be read, a file that is too large and a stopped scan count as a hit (fail closed), each with its own text. Only $Root is scanned (the state
+        folder), not export locations the administrator chose himself.
+    #>
+    param([Parameter(Mandatory)][string]$Root, [double]$MaxSeconds = $script:ScanMaxSeconds)
     $found = New-Object System.Collections.ArrayList
     if (-not (Test-Path -LiteralPath $Root)) { return @() }
     $rx = @($script:TokenPatterns | ForEach-Object { New-Object Text.RegularExpressions.Regex($_, [Text.RegularExpressions.RegexOptions]::None, [TimeSpan]::FromSeconds(2)) })
     $rootInfo = New-Object IO.DirectoryInfo $Root
     $stack = New-Object System.Collections.Stack
     $stack.Push($rootInfo)
-    $count = 0
+    $clock = [Diagnostics.Stopwatch]::StartNew()
+    $maxMb = [int]($script:ScanMaxBytes / 1MB)
     while ($stack.Count -gt 0) {
         $dir = $stack.Pop()
         foreach ($item in $dir.GetFileSystemInfos()) {
+            if ($clock.Elapsed.TotalSeconds -ge $MaxSeconds) { [void]$found.Add("(scan stopped: time limit of $([int]$MaxSeconds) s reached, not every file was checked)"); return @($found) }
             if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { continue }
             if ($item -is [IO.DirectoryInfo]) { $stack.Push($item); continue }
             if ($item.Extension.ToLowerInvariant() -notin $script:ScanExtensions) { continue }
-            $count++
             $rel = $item.FullName.Substring($rootInfo.FullName.TrimEnd([char]92).Length + 1)
-            if ($count -gt $script:ScanMaxFiles -or $item.Length -gt $script:ScanMaxBytes) { [void]$found.Add("$rel (not scanned: too large)"); continue }
+            if ($item.Length -gt $script:ScanMaxBytes) { [void]$found.Add("$rel (not scanned: file larger than $maxMb MB)"); continue }
             try {
                 $text = [IO.File]::ReadAllText($item.FullName)
                 foreach ($r in $rx) { if ($r.IsMatch($text)) { [void]$found.Add($rel); break } }
             }
-            catch { [void]$found.Add("$rel (not scanned)") }
+            catch { [void]$found.Add("$rel (not scanned: could not be read or checked)") }
         }
     }
     @($found)
 }
-
 function New-AVDTuneFinishAdapter {
     <#
         The real finish adapter. CleanTargets: Id and Path of the folders whose contents are cleared. Known folders come from [Environment], never from
@@ -117,10 +164,10 @@ function New-AVDTuneFinishAdapter {
         $win = [Environment]::GetFolderPath('Windows')
         $data = [Environment]::GetFolderPath('CommonApplicationData')
         @(
-            [pscustomobject]@{ Id = 'temp'; Path = (Join-Path $win 'Temp') }
-            [pscustomobject]@{ Id = 'wer-queue'; Path = (Join-Path $data 'Microsoft\Windows\WER\ReportQueue') }
-            [pscustomobject]@{ Id = 'wer-archive'; Path = (Join-Path $data 'Microsoft\Windows\WER\ReportArchive') }
-            [pscustomobject]@{ Id = 'wu-download'; Path = (Join-Path $win 'SoftwareDistribution\Download') }
+            [pscustomobject]@{ Id = 'temp'; Path = (Join-Path $win 'Temp'); TopLevelOnly = $true }
+            [pscustomobject]@{ Id = 'wer-queue'; Path = (Join-Path $data 'Microsoft\Windows\WER\ReportQueue'); TopLevelOnly = $true }
+            [pscustomobject]@{ Id = 'wer-archive'; Path = (Join-Path $data 'Microsoft\Windows\WER\ReportArchive'); TopLevelOnly = $true }
+            [pscustomobject]@{ Id = 'wu-download'; Path = (Join-Path $win 'SoftwareDistribution\Download'); TopLevelOnly = $false }
         )
     }
     $a.CountItems = {
@@ -128,7 +175,14 @@ function New-AVDTuneFinishAdapter {
         if (-not (Test-Path -LiteralPath $Path -PathType Container)) { return 0 }
         @((New-Object IO.DirectoryInfo $Path).GetFileSystemInfos()).Count
     }
-    $a.ClearFolder = { param($Path) Clear-AVDTuneFolderContents -Folder $Path }
+    $a.ClearFolder = { param($Path, [bool]$TopLevelOnly = $false) Clear-AVDTuneFolderContents -Folder $Path -TopLevelOnly:$TopLevelOnly }
+    $a.RunningDependents = {
+        # Names of the running services that depend on this one (stopping it would stop them too)
+        param($Name)
+        $s = Get-Service -Name $Name -ErrorAction SilentlyContinue
+        if (-not $s) { return @() }
+        @($s.DependentServices | Where-Object { $_.Status -ne 'Stopped' } | ForEach-Object { $_.Name })
+    }
     $a.PathExists = { param($Path) Test-Path -LiteralPath $Path }
     $a.RemoveFolder = {
         param($Path)
@@ -187,7 +241,7 @@ function Start-AVDTuneFinishLift {
         Writes what is lifted into the journal FIRST, then stops the services that run. Returns the names it stopped. A crash after the journal write and
         before or during the stop is repaired at the next start (a service that never stopped is simply running).
     #>
-    param([Parameter(Mandatory)]$Machine, [Parameter(Mandatory)][string]$Root, [Parameter(Mandatory)][string[]]$Names)
+    param([Parameter(Mandatory)]$Machine, [Parameter(Mandatory)][string]$Root, [Parameter(Mandatory)][string[]]$Names, $Fin)
     $record = Get-AVDTuneFinishRecord $Root
     $entries = New-Object System.Collections.ArrayList
     foreach ($n in $Names) {
@@ -195,6 +249,13 @@ function Start-AVDTuneFinishLift {
         if ($s -and [string]$s.Status -eq 'Running') { [void]$entries.Add([pscustomobject]@{ Name = $n; WasRunning = $true; Restored = $false }) }
     }
     if ($entries.Count -eq 0) { return @() }
+    # a service with running dependents is not stopped (stopping it would stop them as well, and the journal would not know them): nothing is stopped
+    if ($Fin -and $Fin.PSObject.Properties['RunningDependents']) {
+        foreach ($e in $entries) {
+            $dep = @(& $Fin.RunningDependents $e.Name | Where-Object { $_ -and $_ -notin $Names })
+            if ($dep.Count -gt 0) { throw "The service $($e.Name) has running dependent services ($($dep -join ', ')): it is not stopped and the cache stays. Nothing was changed." }
+        }
+    }
     $record.Lifted = @(@($record.Lifted) | Where-Object { $_ }) + @($entries)
     $record.Phase = 'lifted'
     Save-AVDTuneFinishRecord -Root $Root -Record $record
@@ -235,7 +296,7 @@ function Repair-AVDTuneFinishCrash {
     if ($ok) { $record.Active = $false; $record.Phase = 'repaired'; $record.Result = 'Interrupted finish repaired: what was stopped runs again.' }
     else { $record.Phase = 'repair-failed'; $record.Result = 'Not back: ' + ($failed -join ', ') }
     Save-AVDTuneFinishRecord -Root $Root -Record $record -Extra @{ LastChange = $record.Ended }
-    $message = "The finish of $($record.Started) (by $($record.User)) did not end properly: AVDTune was closed or stopped in the middle. " + $(if ($ok) { 'What it had stopped runs again. The version is NOT finished: run the finish again.' } else { 'NOT everything could be put back: ' + ($failed -join ', ') })
+    $message = "The finish of $($record.Started) (by $($record.User)) did not end properly: AVDTune was closed or stopped in the middle. " + $(if ($ok) { 'What it had stopped runs again (a restart of the master starts the services as well). The version is NOT finished: run the finish again.' } else { 'NOT everything could be put back: ' + ($failed -join ', ') })
     $state = Get-AVDTuneState $Root
     if ($state.ImageVersion) { [void](Add-AVDTuneChangeLogEntry -Root $Root -Version ([string]$state.ImageVersion) -Category 'Finish' -Component 'Finish' -ChangeType Changed -Text $message -User $User -Source Step) }
     [pscustomobject]@{ Repaired = $ok; Failed = @($failed); Message = $message }
@@ -256,6 +317,7 @@ function Test-AVDTuneFinishGate {
     param([string]$Root = (Get-AVDTuneRoot))
     $reasons = New-Object System.Collections.ArrayList
     $notes = New-Object System.Collections.ArrayList
+    $runId = ''
     if (-not (Test-AVDTuneWriteAllowed)) { [void]$reasons.Add('The snapshot gate is not confirmed: AVDTune is read only until a snapshot of today is confirmed on the Overview.') }
     $state = Get-AVDTuneState $Root
     $version = [string](Get-AVDTuneProp $state 'ImageVersion')
@@ -266,11 +328,15 @@ function Test-AVDTuneFinishGate {
     $ready = Get-AVDTuneFinishReadiness -Root $Root
     foreach ($r in @($ready.Reasons)) { [void]$reasons.Add([string]$r) }
     $rec = Get-AVDTuneReadinessRecord -Root $Root
+    if ($rec) { $runId = [string]$rec.RunId }
     if ($rec -and $version) {
         # the healthcheck must be a run of THIS version, and the append-only run record behind it must say the same
         $at = $null; try { $at = ConvertTo-AVDTuneFinishDate $rec.At } catch { }
         $started = $null
         foreach ($v in @(@($state.Versions) | Where-Object { $_ -and [string]$_.Version -eq $version })) { try { $started = ConvertTo-AVDTuneFinishDate $v.Started } catch { } }
+        # AVDTune's own last change (state.json, run records, change log; a snapshot confirmation, an analysis and a benchmark are no change) must not be newer than the check
+        $lc = Get-AVDTuneLastChange -Root $Root
+        if ($lc -and $at -and $lc.ToUniversalTime() -gt $at.ToUniversalTime() -and -not (@($ready.Reasons) -like '*changed after the check*')) { [void]$reasons.Add("AVDTune changed the master after the check (last change $($lc.ToString('yyyy-MM-dd HH:mm:ss'))): run the analysis again.") }
         if ($at -and $started -and $at.ToUniversalTime() -lt $started.ToUniversalTime()) { [void]$reasons.Add("The healthcheck is from before image version $version was started: run the analysis again.") }
         $run = @(Get-AVDTuneRun -Root $Root -Id ([string]$rec.RunId) | Where-Object { $_ })
         if ($run.Count -eq 0) { [void]$reasons.Add('The run record of the healthcheck is missing: run the analysis again.') }
@@ -278,21 +344,51 @@ function Test-AVDTuneFinishGate {
         elseif ([string](Get-AVDTuneProp $run[0] 'ImageVersion') -ne $version) { [void]$reasons.Add("The healthcheck belongs to another image version: run the analysis again.") }
     }
     if ($version -and -not (Get-AVDTuneProp $state 'LastBenchmark')) { [void]$notes.Add('No benchmark is recorded yet (plan 7a asks for the benchmark of the version).') }
-    [pscustomobject]@{ Allowed = ($reasons.Count -eq 0); Reasons = @($reasons); Notes = @($notes); Version = $version }
+    [pscustomobject]@{ Allowed = ($reasons.Count -eq 0); Reasons = @($reasons); Notes = @($notes); Version = $version; RunId = $runId }
 }
 
 #endregion
+
+function Test-AVDTuneFinishBinding {
+    <#
+        The parts of the gate that can still be checked from the files while the finish runs (called directly before the version is closed): the version and
+        the healthcheck are the ones of the gate at the start, no new healthcheck (a red one saved during the run), no red item, every open item confirmed.
+        Returns the reasons (empty = fine). The change log is NOT looked at here: the steps of the finish write their own entries.
+    #>
+    param([Parameter(Mandatory)][string]$Root, [Parameter(Mandatory)][string]$Version, [Parameter(Mandatory)][string]$RunId)
+    $reasons = New-Object System.Collections.ArrayList
+    if (-not (Test-AVDTuneWriteAllowed)) { [void]$reasons.Add('The snapshot gate is not open any more.') }
+    $state = Get-AVDTuneState $Root
+    if ([string](Get-AVDTuneProp $state 'ImageVersion') -ne $Version) { [void]$reasons.Add("The image version changed during the finish (it started with $Version, it is $([string](Get-AVDTuneProp $state 'ImageVersion')) now).") }
+    if ([bool](Get-AVDTuneProp $state 'Sealed')) { [void]$reasons.Add('The version is already marked finished.') }
+    $rec = Get-AVDTuneReadinessRecord -Root $Root
+    if (-not $rec) { [void]$reasons.Add('The healthcheck record is gone.') }
+    else {
+        if ([string]$rec.RunId -ne $RunId) { [void]$reasons.Add("A new analysis was saved during the finish (run $([string]$rec.RunId), the finish started with run $RunId): run the finish again.") }
+        if ([int]$rec.Red -gt 0) { [void]$reasons.Add("$([int]$rec.Red) red item(s) now: $(@($rec.RedIds) -join ', ').") }
+        $open = @(@($rec.OpenIds) | Where-Object { $_ -notin @($rec.Acknowledged) })
+        if ($open.Count -gt 0) { [void]$reasons.Add("Open items are not confirmed: $($open -join ', ').") }
+    }
+    @($reasons)
+}
 
 #region steps
 
 function Get-AVDTuneFinishSteps {
     <#
         The steps in order, as @{ Step; Lifts } entries. $Fin is the finish adapter, $Machine the machine adapter. Step ids are finish.<name>.
-        -Session is the sign-in session of the window ($null: nothing to remove in memory).
+        -SessionProvider returns the CURRENT sign-in session of the window each time it is called (a sign-in during the run replaces the session object);
+        -Session is a fixed one for callers without a window ($null and no provider: nothing to remove in memory).
+        -Bind (Version, RunId): the image version and the healthcheck run of the gate at the start; finish.version closes exactly this version and only while
+        the files still show that healthcheck. -Report collects what the cleanup skipped.
     #>
     param(
-        [Parameter(Mandatory)]$Machine, [Parameter(Mandatory)]$Fin, [Parameter(Mandatory)][string]$Root, $Session, [string]$User, [string]$SnapshotId
+        [Parameter(Mandatory)]$Machine, [Parameter(Mandatory)]$Fin, [Parameter(Mandatory)][string]$Root, $Session, [scriptblock]$SessionProvider, [string]$User, [string]$SnapshotId,
+        [hashtable]$Bind, [hashtable]$Report = @{ Skipped = 0; Left = 0 }
     )
+    $getSession = { if ($SessionProvider) { & $SessionProvider } else { $Session } }.GetNewClosure()
+    $session0 = & $getSession
+    if (-not $Bind) { $s0 = Get-AVDTuneState $Root; $rc = Get-AVDTuneReadinessRecord -Root $Root; $Bind = @{ Version = [string]$s0.ImageVersion; RunId = $(if ($rc) { [string]$rc.RunId } else { '' }) } }
     $steps = New-Object System.Collections.ArrayList
     $targets = @(& $Fin.CleanTargets)
     $attempted = @{}
@@ -302,7 +398,8 @@ function Get-AVDTuneFinishSteps {
         @{ Id = 'finish.wer'; Ids = @('wer-queue', 'wer-archive'); Title = 'Windows error reports removed'; Why = 'Crash reports of this master are of no use on the session hosts.' }
     )
     foreach ($g in $groups) {
-        $paths = @($targets | Where-Object { $_.Id -in $g.Ids } | ForEach-Object { $_.Path })
+        $tgts = @($targets | Where-Object { $_.Id -in $g.Ids })
+        $paths = @($tgts | ForEach-Object { $_.Path })
         $key = $g.Id
         $test = {
             param($m)
@@ -311,10 +408,8 @@ function Get-AVDTuneFinishSteps {
         }.GetNewClosure()
         $apply = {
             param($m)
-            $left = 0
-            foreach ($p in $paths) { $r = & $Fin.ClearFolder $p; $left += [int]$r.Left }
+            foreach ($x in $tgts) { $r = & $Fin.ClearFolder $x.Path ([bool]$x.TopLevelOnly); $Report.Skipped += [int]$r.Skipped; $Report.Left += [int]$r.Left }
             $attempted[$key] = $true
-            if ($left -gt 0) { Write-Verbose "$left item(s) in use stay." }
         }.GetNewClosure()
         [void]$steps.Add([pscustomobject]@{ Step = (New-AVDTuneStep -Id $g.Id -Section Seal -Title $g.Title -Why $g.Why -Test $test -Apply $apply); Lifts = $false })
     }
@@ -325,8 +420,8 @@ function Get-AVDTuneFinishSteps {
         param($m)
         $stopped = @()
         try {
-            $stopped = @(Start-AVDTuneFinishLift -Machine $m -Root $Root -Names $liftNames)
-            [void](& $Fin.ClearFolder $wuPath)
+            $stopped = @(Start-AVDTuneFinishLift -Machine $m -Root $Root -Names $liftNames -Fin $Fin)
+            $r = & $Fin.ClearFolder $wuPath $false; $Report.Skipped += [int]$r.Skipped; $Report.Left += [int]$r.Left
             $attempted['wu'] = $true
         }
         finally {
@@ -356,7 +451,8 @@ function Get-AVDTuneFinishSteps {
     # tokens
     $tTest = {
         param($m)
-        $clear = $true; if ($Session) { $clear = [bool](Test-AVDTuneSessionClear -Session $Session) }
+        $cur = & $getSession
+        $clear = $true; if ($cur) { $clear = [bool](Test-AVDTuneSessionClear -Session $cur) }
         $files = @(& $Fin.FindTokenFiles $Root)
         @{ Compliant = ($clear -and $files.Count -eq 0); State = "session $(if ($clear) { 'clear' } else { 'holds tokens or sign-in profiles' }); token pattern in $($files.Count) file(s)" }
     }.GetNewClosure()
@@ -364,33 +460,43 @@ function Get-AVDTuneFinishSteps {
         param($m)
         # files first: a finish that stops here keeps the sign-in (it is not finished)
         $files = @(& $Fin.FindTokenFiles $Root)
-        if ($files.Count -gt 0) { throw "A token pattern is in AVDTune's own files (content not shown): $($files -join '; '). Remove or inspect them by hand; AVDTune does not edit its records." }
-        if ($Session) { Disconnect-AVDTuneSession -Session $Session }
-        if ($Session -and -not (Test-AVDTuneSessionClear -Session $Session)) { throw 'The sign-in could not be removed completely (tokens or temporary sign-in profiles are still there).' }
+        if ($files.Count -gt 0) { throw "A token pattern is in AVDTune's own state files, or they could not be checked completely (content not shown): $($files -join '; '). Remove or inspect them by hand; AVDTune does not edit its records. Only the state folder is checked, not export locations you chose yourself." }
+        $cur = & $getSession
+        if (-not [object]::ReferenceEquals($cur, $session0)) { throw 'A new sign-in happened while the finish was running: the token removal is not trusted. Run the finish again.' }
+        if ($cur) { Disconnect-AVDTuneSession -Session $cur }
+        $cur = & $getSession
+        if ($cur -and -not (Test-AVDTuneSessionClear -Session $cur)) { throw 'The sign-in could not be removed completely (tokens or temporary sign-in profiles are still there).' }
     }.GetNewClosure()
     [void]$steps.Add([pscustomobject]@{ Step = (New-AVDTuneStep -Id 'finish.tokens' -Section Seal -Title 'Tokens and sign-in caches removed and checked' -Why 'No access or refresh token, no temporary sign-in profile (Microsoft cookies) and no token in AVDTune files may reach the image.' -Test $tTest -Apply $tApply); Lifts = $false })
     # close the version
+    $bVersion = [string]$Bind.Version; $bRun = [string]$Bind.RunId
     $vTest = {
         param($m)
         $s = Get-AVDTuneState $Root
-        $v = @(@($s.Versions) | Where-Object { $_ -and [string]$_.Version -eq [string]$s.ImageVersion })
-        $done = ([bool](Get-AVDTuneProp $s 'Sealed')) -and $v.Count -gt 0 -and [bool](Get-AVDTuneProp $v[0] 'Finished')
+        $v = @(@($s.Versions) | Where-Object { $_ -and [string]$_.Version -eq $bVersion })
+        $done = ([bool](Get-AVDTuneProp $s 'Sealed')) -and [string]$s.ImageVersion -eq $bVersion -and $v.Count -gt 0 -and [bool](Get-AVDTuneProp $v[0] 'Finished')
         @{ Compliant = $done; State = $(if ($done) { 'finished' } else { 'open' }) }
     }.GetNewClosure()
     $vApply = {
         param($m)
+        # the parts of the gate that live in files, once more directly before the version is closed
+        $reasons = @(Test-AVDTuneFinishBinding -Root $Root -Version $bVersion -RunId $bRun)
+        $cur = & $getSession
+        if ($cur -and -not (Test-AVDTuneSessionClear -Session $cur)) { $reasons += 'A sign-in exists again (tokens or sign-in profiles are held).' }
+        if ($reasons.Count -gt 0) { throw "The version is not closed: $($reasons -join ' ')" }
         $s = Get-AVDTuneState $Root
         $now = (& $m.Now).ToString('o')
         $list = @(@($s.Versions) | Where-Object { $_ })
         foreach ($v in $list) {
-            if ([string]$v.Version -eq [string]$s.ImageVersion) {
+            if ([string]$v.Version -eq $bVersion) {
                 if ($v.PSObject.Properties['Finished']) { $v.Finished = $now } else { Add-Member -InputObject $v -NotePropertyName Finished -NotePropertyValue $now }
                 if ($v.PSObject.Properties['FinishedBy']) { $v.FinishedBy = $User } else { Add-Member -InputObject $v -NotePropertyName FinishedBy -NotePropertyValue $User }
+                if ($v.PSObject.Properties['HealthcheckRunId']) { $v.HealthcheckRunId = $bRun } else { Add-Member -InputObject $v -NotePropertyName HealthcheckRunId -NotePropertyValue $bRun }
             }
         }
         [void](Set-AVDTuneState -Root $Root -Values @{ Sealed = $true; Versions = $list })
     }.GetNewClosure()
-    [void]$steps.Add([pscustomobject]@{ Step = (New-AVDTuneStep -Id 'finish.version' -Section Seal -Title 'Image version closed' -Why 'The version is marked finished in state.json; the change log of the version is complete. The image is made by the imaging tool now.' -Test $vTest -Apply $vApply); Lifts = $false })
+    [void]$steps.Add([pscustomobject]@{ Step = (New-AVDTuneStep -Id 'finish.version' -Section Seal -Title 'Image version closed' -Why 'The version is marked finished in state.json (with the healthcheck it was finished on); the change log of the version is complete. The image is made by the imaging tool now.' -Test $vTest -Apply $vApply); Lifts = $false })
     @($steps)
 }
 
@@ -407,24 +513,26 @@ function Invoke-AVDTuneFinish {
     #>
     [CmdletBinding()]
     param(
-        [Parameter(Mandatory)]$Machine, [Parameter(Mandatory)]$Fin, [string]$Root = (Get-AVDTuneRoot), [string]$User, [string]$SnapshotId, $Session,
+        [Parameter(Mandatory)]$Machine, [Parameter(Mandatory)]$Fin, [string]$Root = (Get-AVDTuneRoot), [string]$User, [string]$SnapshotId, $Session, [scriptblock]$SessionProvider,
         [scriptblock]$Progress, [switch]$WhatIf
     )
     $say = { param($t, $p) if ($Progress) { & $Progress $t $p } }
-    $entries = @(Get-AVDTuneFinishSteps -Machine $Machine -Fin $Fin -Root $Root -Session $Session -User $User -SnapshotId $SnapshotId)
+    $report = @{ Skipped = 0; Left = 0 }
     if ($WhatIf) {
+        $entries = @(Get-AVDTuneFinishSteps -Machine $Machine -Fin $Fin -Root $Root -Session $Session -SessionProvider $SessionProvider -User $User -SnapshotId $SnapshotId -Report $report)
         $r = @($entries | ForEach-Object { Invoke-AVDTuneStep -Step $_.Step -Machine $Machine -Mode Apply -WhatIf })
         return [pscustomobject]@{ Status = 'WhatIf'; Results = $r; Message = 'Would run these steps.'; Reboot = $false; WhatIf = $true }
     }
     # directly before the first write: the gate again, from fresh files
     $gate = Test-AVDTuneFinishGate -Root $Root
     if (-not $gate.Allowed) { throw "The finish is not allowed: $($gate.Reasons -join ' ')" }
-    $state = Get-AVDTuneState $Root
-    $version = [string]$state.ImageVersion
+    # the steps are bound to the version and the healthcheck run that the gate has just accepted
+    $version = [string]$gate.Version
+    $entries = @(Get-AVDTuneFinishSteps -Machine $Machine -Fin $Fin -Root $Root -Session $Session -SessionProvider $SessionProvider -User $User -SnapshotId $SnapshotId -Bind @{ Version = $version; RunId = [string]$gate.RunId } -Report $report)
     $started = & $Machine.Now
     $record = [pscustomobject][ordered]@{
         Active = $true; Id = ($started.ToString('yyyyMMdd-HHmmss', [Globalization.CultureInfo]::InvariantCulture) + '-' + [guid]::NewGuid().ToString('N').Substring(0, 4))
-        Phase = 'running'; Started = $started.ToString('o'); Ended = $null; User = $User; SnapshotId = $SnapshotId; ImageVersion = $version
+        Phase = 'running'; Started = $started.ToString('o'); Ended = $null; User = $User; SnapshotId = $SnapshotId; ImageVersion = $version; HealthcheckRunId = [string]$gate.RunId
         Steps = @(); Lifted = @(); Result = ''
     }
     # journal and LastChange before the first step: a crash in the middle still counts as a change and is found at the next start
@@ -455,7 +563,8 @@ function Invoke-AVDTuneFinish {
     $notBackNow = @(@($record.Lifted) | Where-Object { $_ -and -not $_.Restored })
     $failedStep = @($results | Where-Object { $_.Status -eq 'Failed' })[0]
     if ($failed -and -not $err -and $failedStep) { $err = "$($failedStep.Title): $($failedStep.Message)" }
-    $message = if ($failed) { "The finish stopped: $err" } else { "Image version $version is finished. Now create the image in the imaging tool." }
+    $skipNote = if ($report.Skipped -gt 0 -or $report.Left -gt 0) { " Not removed: $($report.Skipped) item(s) skipped (sub folders, links and read-only files with more than one link are not touched), $($report.Left) in use." } else { '' }
+    $message = if ($failed) { "The finish stopped: $err$skipNote" } else { "Image version $version is finished.$skipNote Now create the image in the imaging tool." }
     if ($notBackNow.Count -gt 0) { $record.Phase = 'restore-failed' }   # stays Active: the next start offers the repair
     else { $record.Active = $false; $record.Phase = $(if ($failed) { 'failed' } else { 'done' }) }
     $record.Ended = $ended.ToString('o'); $record.Result = $message
@@ -478,5 +587,5 @@ function Invoke-AVDTuneFinish {
 
 #endregion
 
-Export-ModuleMember -Function New-AVDTuneFinishAdapter, Clear-AVDTuneFolderContents, Find-AVDTuneTokenFiles, Test-AVDTuneNoLinkChain, Get-AVDTuneFinishRecord, Get-AVDTuneFinishCrash,
-    Start-AVDTuneFinishLift, Restore-AVDTuneFinishLift, Get-AVDTuneFinishConfirmText, Repair-AVDTuneFinishCrash, Test-AVDTuneFinishGate, Get-AVDTuneFinishSteps, Invoke-AVDTuneFinish
+Export-ModuleMember -Function New-AVDTuneFinishAdapter, Clear-AVDTuneFolderContents, Get-AVDTuneFileLinkCount, Find-AVDTuneTokenFiles, Test-AVDTuneNoLinkChain, Get-AVDTuneFinishRecord, Get-AVDTuneFinishCrash,
+    Start-AVDTuneFinishLift, Restore-AVDTuneFinishLift, Test-AVDTuneFinishBinding, Get-AVDTuneFinishConfirmText, Repair-AVDTuneFinishCrash, Test-AVDTuneFinishGate, Get-AVDTuneFinishSteps, Invoke-AVDTuneFinish
