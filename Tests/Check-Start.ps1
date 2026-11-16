@@ -686,6 +686,58 @@ try {
     [void](Start-AVDTuneImageVersion -Root $rk -Date ([datetime]'2026-11-02') -User 'admin1')
     Test-Check 'counter-test: the open gate belongs to another snapshot than state.json says: the new version closes it' (-not (Test-AVDTuneWriteAllowed)) $null
 
+    # ---------------------------------------------------------------- second review of #27: the end is stamped, the marker is tied to its process
+    # the end is stamped by Stop (also after an abort, before any LastChange was written); FirstChange comes from the marker
+    $r2 = Join-Path $tmp 'issue27-stop'; [void](Initialize-AVDTuneState -Root $r2); [void](Start-AVDTuneImageVersion -Root $r2 -Date ([datetime]'2026-11-01') -User 'admin1')
+    $t2 = (Get-Date).AddHours(-2)
+    $o2 = Start-AVDTuneChange -Root $r2 -At $t2
+    Stop-AVDTuneChange -Root $r2 -Owner $o2
+    $st2 = Get-AVDTuneState $r2
+    $w2 = Get-AVDTuneSnapshotWindow -Root $r2
+    Test-Check 'counter-test: start, abort, stop: LastChange is the end (now), FirstChange the start, the marker is gone; a snapshot made mid-change is invalid' ($st2.LastChange -and ([datetime]$st2.LastChange) -gt (Get-Date).AddMinutes(-2) -and ([datetime]$st2.FirstChange).ToUniversalTime() -eq $t2.ToUniversalTime() -and $null -eq $st2.ChangeInProgress -and -not (Test-AVDTuneSnapshotInWindow -Created $t2.AddMinutes(30) -Id 'x' -Window $w2).Valid) ($st2 | ConvertTo-Json -Compress -Depth 3)
+    $r3 = Join-Path $tmp 'issue27-stop2'; [void](Initialize-AVDTuneState -Root $r3); [void](Start-AVDTuneImageVersion -Root $r3 -Date ([datetime]'2026-11-01') -User 'admin1')
+    $o3 = Start-AVDTuneChange -Root $r3 -At $t2
+    [void](Set-AVDTuneState -Root $r3 -Values @{ LastChange = $t2.ToString('o') })   # the Updates pattern: LastChange at the start, then the run
+    Stop-AVDTuneChange -Root $r3 -Owner $o3
+    Test-Check 'counter-test: LastChange at the start and a long run: Stop moves it to the end, so a snapshot from the middle of the run is invalid' (([datetime](Get-AVDTuneState $r3).LastChange) -gt (Get-Date).AddMinutes(-2) -and -not (Test-AVDTuneSnapshotInWindow -Created $t2.AddMinutes(30) -Id 'x' -Window (Get-AVDTuneSnapshotWindow -Root $r3)).Valid) $null
+
+    # the marker is tied to its process (PID, start time, name) and to 12 hours; a foreign live one stops a second writer
+    $child = Start-Process -FilePath (Join-Path ([Environment]::GetFolderPath('System')) 'WindowsPowerShell\v1.0\powershell.exe') -ArgumentList '-NoProfile', '-NonInteractive', '-Command', 'Start-Sleep -Seconds 120' -WindowStyle Hidden -PassThru
+    try {
+        Start-Sleep -Milliseconds 800
+        $r4 = Join-Path $tmp 'issue27-pid'; [void](Initialize-AVDTuneState -Root $r4); [void](Start-AVDTuneImageVersion -Root $r4 -Date ([datetime]'2026-11-01') -User 'admin1')
+        $cs = $child.StartTime.ToUniversalTime().ToString('o'); $cn = $child.ProcessName
+        $setMarker = { param($started, $pidv, $pstart, $pname) [void](Set-AVDTuneState -Root $r4 -Values @{ ChangeInProgress = [ordered]@{ Started = $started; Pid = $pidv; ProcessStart = $pstart; ProcessName = $pname } }) }
+        & $setMarker (Get-Date).AddMinutes(-5).ToUniversalTime().ToString('o') $child.Id $cs $cn
+        Test-Check 'a marker of a live foreign process (PID, start time and name match) is running' ((Get-AVDTuneChangeMarker -Root $r4).Live -and (Test-AVDTuneChangeInProgress -Root $r4)) $null
+        Test-Check 'counter-test: a second writer does not start while a foreign process holds the marker (it throws); the new version is refused too' ((Get-ThrownText { Start-AVDTuneChange -Root $r4 }) -like '*Another AVDTune process*' -and (Get-ThrownText { Start-AVDTuneImageVersion -Root $r4 -Date ([datetime]'2026-11-02') -User 'admin1' }) -like '*changing the master right now*') $null
+        & $setMarker (Get-Date).AddDays(-3).ToUniversalTime().ToString('o') $child.Id (Get-Date).AddDays(-3).ToUniversalTime().ToString('o') $cn
+        Test-Check 'counter-test: a reused PID (same PID and name, other start time) is not the process of the marker' (-not (Get-AVDTuneChangeMarker -Root $r4).Live) $null
+        & $setMarker (Get-Date).AddMinutes(-5).ToUniversalTime().ToString('o') $child.Id $cs 'notepad'
+        Test-Check 'counter-test: another process name is not the process of the marker' (-not (Get-AVDTuneChangeMarker -Root $r4).Live) $null
+        & $setMarker (Get-Date).AddHours(-13).ToUniversalTime().ToString('o') $child.Id $cs $cn
+        Test-Check 'counter-test: a marker older than 12 hours counts as gone even when PID, start time and name match' (-not (Get-AVDTuneChangeMarker -Root $r4).Live) $null
+        & $setMarker (Get-Date).AddMinutes(-5).ToUniversalTime().ToString('o') $child.Id $null $null
+        Test-Check 'a marker without process start (not written by this version) counts as gone' (-not (Get-AVDTuneChangeMarker -Root $r4).Live) $null
+        & $setMarker (Get-Date).AddDays(-3).ToUniversalTime().ToString('o') $child.Id (Get-Date).AddDays(-3).ToUniversalTime().ToString('o') $cn
+        Test-Check 'after a reused PID the new version and the next change are not blocked for ever' ((Start-AVDTuneChange -Root $r4) -and (Test-AVDTuneChangeInProgress -Root $r4)) $null
+        Stop-AVDTuneChange -Root $r4
+    }
+    finally { if ($child -and -not $child.HasExited) { $child.Kill() } }
+
+    # Confirm without Azure (-Arm) only in the test mode (Test-AVDTuneTestMode), not by an environment variable alone
+    $rt = Join-Path $tmp 'issue27-notestmode'; [void](Initialize-AVDTuneState -Root $rt); [void](Start-AVDTuneImageVersion -Root $rt -Date ([datetime]'2026-11-01') -User 'admin1')
+    $snapT = (Get-AVDTuneOsDiskSnapshots -Arm (New-AVDTuneFakeArm -Seed @{ Snapshots = @(@{ Name = 't-snap'; Created = (Get-Date).AddHours(-1) }) }) -Token $armToken -Vm $vm)[0]
+    $savedFake = $env:AVDTUNE_FAKE; $savedRoot = $env:AVDTUNE_ROOT
+    try {
+        $env:AVDTUNE_FAKE = $null; $env:AVDTUNE_ROOT = $null
+        $errT = Get-ThrownText { Confirm-AVDTuneSnapshotGate -Root $rt -Snapshot $snapT -TypedName 'Alex Example' -ImageVersion '2026.11.001' -Machine $machine }
+    }
+    finally { $env:AVDTUNE_FAKE = $savedFake; $env:AVDTUNE_ROOT = $savedRoot }
+    Test-Check 'counter-test: no test mode and no -Arm: Confirm is refused, the gate stays shut' ($errT -like '*only the test mode*' -and -not (Test-AVDTuneWriteAllowed)) $errT
+    Test-Check 'in the test mode Confirm without -Arm still works (the checks above)' ((Test-AVDTuneTestMode).Enabled) $null
+    Close-AVDTuneWriteGate
+
     # 9: a snapshot that is Succeeded but not complete (Premium SSD v2 / Ultra) is not finished
     $armU = New-AVDTuneFakeArm -Seed @{ Snapshots = @(@{ Name = 'u-half'; Created = (Get-Date).AddHours(-1); Percent = 40 }; @{ Name = 'u-full'; Created = (Get-Date).AddHours(-1); Percent = 100; AccessState = 'Available' }; @{ Name = 'u-pending'; Created = (Get-Date).AddHours(-1); AccessState = 'Pending' }; @{ Name = 'u-plain'; Created = (Get-Date).AddHours(-1) }) }
     $lu = @{}; foreach ($s in @(Get-AVDTuneOsDiskSnapshots -Arm $armU -Token $armToken -Vm $vm)) { $lu[$s.Name] = $s }

@@ -312,6 +312,8 @@ function Confirm-AVDTuneSnapshotGate {
         if (-not $Vm -or -not $Token) { throw 'The snapshot cannot be read again: the VM and the token are needed.' }
         $Snapshot = Get-AVDTuneVerifiedSnapshot -Arm $Arm -Token $Token -Vm $Vm -Id ([string]$Snapshot.Id)
     }
+    # without -Arm what the caller says is taken as it is: only the test mode (Test-AVDTuneTestMode, the one decision) may do that
+    elseif (-not (Test-AVDTuneTestMode).Enabled) { throw 'The snapshot gate needs Azure to read the snapshot again (-Arm); without it only the test mode may confirm.' }
     if ([string]$Snapshot.State -ne 'Succeeded' -or -not $Snapshot.Created -or ($Snapshot.PSObject.Properties['Finished'] -and -not $Snapshot.Finished)) { throw 'Only a finished snapshot can be confirmed.' }
     $last = Get-AVDTuneLastChange -Root $Root
     $window = Get-AVDTuneSnapshotWindow -Root $Root

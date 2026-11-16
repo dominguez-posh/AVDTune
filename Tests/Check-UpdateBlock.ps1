@@ -181,14 +181,14 @@ try {
     $moved = { $v = [string](Get-AVDTuneState $tmp).LastChange; $v -and $v -ne $old }
     $lc = New-Master; $lcSeen = [ordered]@{}
     & $mark; [void](Set-AVDTuneUpdateBlock -Machine $lc -Root $tmp -Mode On -User 'admin1'); $lcSeen['block on'] = & $moved
-    & $mark; [void](Set-AVDTuneUpdateBlock -Machine $lc -Root $tmp -Mode On -User 'admin1'); $lcSeen['block on again (nothing changed) keeps it'] = -not (& $moved)
+    & $mark; [void](Set-AVDTuneUpdateBlock -Machine $lc -Root $tmp -Mode On -User 'admin1'); $lcSeen['block on again (nothing changed) stamps the end of the attempt: Stop-AVDTuneChange, #27'] = $moved
     & $mark; $lcCtx = Start-AVDTuneMaintenance -Machine $lc -Root $tmp -User 'admin1'; $lcSeen['maintenance lifts'] = & $moved
     & $mark; [void](Stop-AVDTuneMaintenance -Machine $lc -Root $tmp -Context $lcCtx); $lcSeen['maintenance restores'] = & $moved
     [void](Start-AVDTuneMaintenance -Machine $lc -Root $tmp -User 'admin1')   # ... crash ...
     & $mark; [void](Repair-AVDTuneMaintenanceCrash -Machine $lc -Root $tmp -User 'admin1'); $lcSeen['repair after a crash'] = & $moved
     & $mark; [void](Set-AVDTuneUpdateBlock -Machine $lc -Root $tmp -Mode Off -User 'admin1'); $lcSeen['block off'] = & $moved
     $lcBad = @($lcSeen.Keys | Where-Object { -not $lcSeen[$_] })
-    Test-Check 'LastChange in state.json is set by block on/off, maintenance lift/restore and the repair (not when nothing changed)' ($lcBad.Count -eq 0 -and (Get-AVDTuneLastChange -Root $tmp) -gt (Get-Date).AddMinutes(-5)) ($lcBad -join ', ')
+    Test-Check 'LastChange in state.json is set by block on/off, maintenance lift/restore and the repair; every attempt stamps its end (Stop-AVDTuneChange, #27)' ($lcBad.Count -eq 0 -and (Get-AVDTuneLastChange -Root $tmp) -gt (Get-Date).AddMinutes(-5)) ($lcBad -join ', ')
 
     # ---------------------------------------------------------------- legacy health (no live status): state only
     [void](Set-AVDTuneState -Root $tmp -Values @{ UpdateBlock = 'On'; Maintenance = $null })

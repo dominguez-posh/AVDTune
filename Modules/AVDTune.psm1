@@ -843,8 +843,13 @@ function Get-AVDTuneChangeMarker {
     $started = ConvertTo-AVDTuneUtc (Get-AVDTuneProp $m 'Started')
     if (-not $started) { return $null }
     $pidValue = 0; [void][int]::TryParse([string](Get-AVDTuneProp $m 'Pid'), [ref]$pidValue)
+    # Live only when it is still that process: PID, start time (a few seconds apart at most) and name match (a reused PID is another process), and the marker is
+    # not older than 12 hours (no operation of AVDTune runs that long); a marker without ProcessStart is from nothing we can recognise and counts as gone
     $live = $false
-    if ($pidValue -gt 0) { try { $proc = [Diagnostics.Process]::GetProcessById($pidValue); $live = ($proc -and -not $proc.HasExited) } catch { $live = $false } }
+    $pStart = ConvertTo-AVDTuneUtc (Get-AVDTuneProp $m 'ProcessStart'); $pName = [string](Get-AVDTuneProp $m 'ProcessName')
+    if ($pidValue -gt 0 -and $pStart -and $pName -and ([datetime]::UtcNow - $started) -lt [TimeSpan]::FromHours(12)) {
+        try { $proc = [Diagnostics.Process]::GetProcessById($pidValue); $live = ($proc -and -not $proc.HasExited -and $proc.ProcessName -ieq $pName -and [Math]::Abs(($proc.StartTime.ToUniversalTime() - $pStart).TotalSeconds) -lt 5) } catch { $live = $false }
+    }
     [pscustomobject]@{ Started = $started; Pid = $pidValue; Live = $live }
 }
 
@@ -870,15 +875,20 @@ function Start-AVDTuneChange {
     param([string]$Root = (Get-AVDTuneRoot), [datetime]$At = (Get-Date))
     Resolve-AVDTuneStaleChange -Root $Root
     $m = Get-AVDTuneChangeMarker -Root $Root
-    if ($m -and $m.Live) { return $false }
-    [void](Set-AVDTuneState -Root $Root -Values @{ ChangeInProgress = [ordered]@{ Started = $At.ToUniversalTime().ToString('o'); Pid = $PID } })
+    if ($m -and $m.Live) {
+        if ($m.Pid -eq $PID) { return $false }   # a nested operation of this process: the outer one owns the marker
+        throw "Another AVDTune process (ID $($m.Pid), since $($m.Started.ToLocalTime().ToString('yyyy-MM-dd HH:mm'))) is changing the master. Wait until it has finished."
+    }
+    $me = [Diagnostics.Process]::GetCurrentProcess()
+    [void](Set-AVDTuneState -Root $Root -Values @{ ChangeInProgress = [ordered]@{ Started = $At.ToUniversalTime().ToString('o'); Pid = $PID; ProcessStart = $me.StartTime.ToUniversalTime().ToString('o'); ProcessName = $me.ProcessName } })
     $true
 }
 
 function Stop-AVDTuneChange {
     param([string]$Root = (Get-AVDTuneRoot), [bool]$Owner = $true)
     if (-not $Owner) { return }
-    try { [void](Set-AVDTuneState -Root $Root -Values @{ ChangeInProgress = $null }) } catch { }
+    # the end is stamped here (also after an abort: a change may have been half done), in the same write that clears the marker; FirstChange comes from the marker still in place
+    try { [void](Set-AVDTuneState -Root $Root -Values @{ LastChange = [datetime]::UtcNow.ToString('o'); ChangeInProgress = $null }) } catch { }
 }
 
 function Get-AVDTuneLastChange {
