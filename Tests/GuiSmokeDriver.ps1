@@ -859,6 +859,57 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         $ui.BtnFslAclSet.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
         Test-Smoke 'set the recommended ACL: the confirmation names the diff, the share got it once with attributes preserved, the change log has it' ($script:ConfirmAsked -like '*recommended ACL*diff*' -and $script:FslFake.Files.Store.Puts.Count -eq 1 -and $script:FslFake.Files.Store.Puts[0].Attributes -eq 'preserve' -and @(Get-AVDTuneChangeLog -Root $script:StateRoot | Where-Object Component -eq 'Storage ACL').Count -eq 1) $ui.TxtFslState.Text
         $true } }
+    @{ Name = 'office: content, dropdowns, preselection, fix buttons (#61)'; Do = {
+        if ($script:OverviewJob -or $script:ReadyJob -or $script:ReadyQueued -or $script:FslJob -or $script:OffJob) { return $false }
+        $click = { param($b) $b.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent))) }
+        $fixButtons = { $found = New-Object System.Collections.ArrayList; $walk = $null; $walk = { param($p) for ($i = 0; $i -lt [System.Windows.Media.VisualTreeHelper]::GetChildrenCount($p); $i++) { $c = [System.Windows.Media.VisualTreeHelper]::GetChild($p, $i); if (($c -is [System.Windows.Controls.Button]) -and $c.DataContext) { [void]$found.Add($c) }; & $walk $c } }; & $walk $ui.PanelOffRows; @($found) }
+        $checked = { param($panel) @($panel.Children | Where-Object { $_.IsChecked } | ForEach-Object { [string]$_.Content }) }
+        $m = $script:Machine
+        Show-Page 'Office'; $window.UpdateLayout()
+        Test-Smoke 'Office page: own page (no placeholder), the nav item is checked' ($ui.PageOffice.Visibility -eq 'Visible' -and $ui.PagePlaceholder.Visibility -eq 'Collapsed' -and $ui.NavOffice.IsChecked) $null
+        Test-Smoke 'Office dropdowns: channel (5), 32/64 bit (2), licence (2, in licence terms), Outlook (3)' ($ui.CmbOffChannel.Items.Count -eq 5 -and $ui.CmbOffEdition.Items.Count -eq 2 -and $ui.CmbOffLicense.Items.Count -eq 2 -and $ui.CmbOffLicense.Items[0].Name -like '*E3/E5*Apps for enterprise*' -and $ui.CmbOffLicense.Items[1].Name -like '*Business Premium*Apps for business*' -and $ui.CmbOffOutlook.Items.Count -eq 3) "$($ui.CmbOffLicense.Items.Count) / $($ui.CmbOffOutlook.Items.Count)"
+        Test-Smoke 'Office preselection: licence E3/E5 (O365ProPlusRetail) with its sentence, Outlook both with the Microsoft recommendation, channel Monthly Enterprise, 64 bit' ((Get-OffChoiceKey $ui.CmbOffLicense) -ceq 'O365ProPlusRetail' -and $ui.TxtOffLicenseHint.Text -like '*E3*Click-to-Run*' -and (Get-OffChoiceKey $ui.CmbOffOutlook) -ceq 'both' -and $ui.TxtOffOutlookHint.Text -like '*side by side*' -and $ui.CmbOffChannel.SelectedItem -eq 'MonthlyEnterprise' -and $ui.CmbOffEdition.SelectedItem -eq '64') "$(Get-OffChoiceKey $ui.CmbOffLicense) / $(Get-OffChoiceKey $ui.CmbOffOutlook)"
+        $langOn = @(& $checked $ui.PanelOffLanguages | ForEach-Object { $_ -replace ' \(.*', '' } | Sort-Object)
+        Test-Smoke 'Office languages: the 19 common ones as ticks, preselected exactly MatchOS and en-US' ($ui.PanelOffLanguages.Children.Count -eq 19 -and ($langOn -join ',') -ceq 'en-US,MatchOS' -and @($ui.PanelOffLanguages.Children | Where-Object { [string]$_.Content -like 'de-DE' }).Count -eq 1) ($langOn -join ',')
+        $appsOn = @(& $checked $ui.PanelOffInstall)
+        $appsAll = @($ui.PanelOffInstall.Children | ForEach-Object { [string]$_.Content })
+        Test-Smoke 'Office install list: Word, Excel, PowerPoint, OneNote preselected; Access, Publisher, Groove, Lync, Bing offered and off; no tick for Teams, OneDrive or Outlook, a hint instead' (($appsOn -join ',') -ceq 'Word,Excel,PowerPoint,OneNote' -and (@('Access', 'Publisher', 'Groove', 'Lync', 'Bing') | Where-Object { $_ -cnotin $appsAll }).Count -eq 0 -and -not (@('Teams', 'OneDrive', 'Outlook') | Where-Object { $_ -cin $appsAll }) -and $ui.TxtOffAppsHint.Text -like '*OneDrive and Teams*') ($appsOn -join ',')
+        Test-Smoke 'Office preview: Outlook both leaves both in, the unticked apps and OneDrive/Teams are excluded, Word is not' ($ui.TxtOffPreview.Text -like '*Language ID="en-US"*' -and $ui.TxtOffPreview.Text -like '*Language ID="MatchOS"*' -and $ui.TxtOffPreview.Text -like '*ExcludeApp ID="Access"*' -and $ui.TxtOffPreview.Text -like '*ExcludeApp ID="Teams"*' -and $ui.TxtOffPreview.Text -notlike '*ExcludeApp ID="Word"*' -and $ui.TxtOffPreview.Text -notlike '*ExcludeApp ID="Outlook*') $null
+        Set-OffChoice $ui.CmbOffOutlook 'classic'; $window.UpdateLayout()
+        Test-Smoke 'Office Outlook classic only: the preview excludes OutlookForWindows and keeps Outlook' ($ui.TxtOffPreview.Text -like '*ExcludeApp ID="OutlookForWindows"*' -and $ui.TxtOffPreview.Text -notlike '*ExcludeApp ID="Outlook" *') $null
+        Set-OffChoice $ui.CmbOffOutlook 'new'; $window.UpdateLayout()
+        Test-Smoke 'Office Outlook new only: the preview excludes Outlook and keeps OutlookForWindows' ($ui.TxtOffPreview.Text -like '*ExcludeApp ID="Outlook" *' -and $ui.TxtOffPreview.Text -notlike '*ExcludeApp ID="OutlookForWindows"*') $null
+        Set-OffChoice $ui.CmbOffOutlook 'both'
+        Set-OffChoice $ui.CmbOffLicense 'O365BusinessRetail'; $window.UpdateLayout()
+        Test-Smoke 'Office licence Business Premium: the product in the preview and its own sentence' ($ui.TxtOffPreview.Text -like '*Product ID="O365BusinessRetail"*' -and $ui.TxtOffLicenseHint.Text -like '*Business Premium*') $ui.TxtOffLicenseHint.Text
+        Set-OffChoice $ui.CmbOffLicense 'O365ProPlusRetail'
+        $ui.PanelOffInstall.Children[0].IsChecked = $false; [void]$ui.PanelOffInstall.Children[0].RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent))); $window.UpdateLayout()
+        $wordOff = $ui.TxtOffPreview.Text
+        $ui.PanelOffInstall.Children[0].IsChecked = $true; [void]$ui.PanelOffInstall.Children[0].RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
+        Test-Smoke 'Office: unticking Word makes ExcludeApp Word in the preview (the click reaches the preview)' ($wordOff -like '*ExcludeApp ID="Word"*' -and $ui.TxtOffPreview.Text -notlike '*ExcludeApp ID="Word"*') $null
+        # fix buttons: none on a master that is right, only on red rows, one per fix
+        Update-OffView; $window.UpdateLayout()
+        Test-Smoke 'Office state list: on a master that is right there is no Fix button' (@(& $fixButtons).Count -eq 0 -and $ui.PanelOffRows.Children.Count -ge 7) $ui.PanelOffRows.Children.Count
+        $polKey = 'HKLM:\SOFTWARE\Policies\Microsoft\office\16.0\common\officeupdate'; $polWas = & $m.RegGet $polKey 'enableautomaticupdates'; & $m.RegRemove $polKey 'enableautomaticupdates'   # the update block of an earlier step may have set it
+        & $m.RegSet 'HKLM:\SOFTWARE\Microsoft\Office\ClickToRun\Configuration' 'SharedComputerLicensing' '0' 'String'; & $m.RegSet 'HKLM:\SOFTWARE\Microsoft\Office\ClickToRun\Configuration' 'UpdatesEnabled' 'TRUE' 'String'
+        Update-OffView; $window.UpdateLayout()
+        $fb = @(& $fixButtons)
+        Test-Smoke 'Office state list: two red rows (shared activation, automatic updates) have a Fix button each, no other row has one' ((@($fb | ForEach-Object { [string]$_.DataContext } | Sort-Object) -join ',') -ceq 'shared,updates' -and ($fb | Where-Object { [string]$_.Content -ne 'Fix' }).Count -eq 0) (((@($fb | ForEach-Object { [string]$_.DataContext })) -join ',') + ' policy=' + [string](& $m.RegGet $polKey 'enableautomaticupdates') + ' ' + ((@(Get-AVDTuneOfficeRows -Machine $m -Config (Get-OffFormConfig)) | ForEach-Object { "$($_.Id)=$($_.Status)" }) -join ' '))
+        Save-SmokeShot '60-office-red-fix-light'
+        $script:ConfirmAsked = ''
+        & $click ($fb | Where-Object { [string]$_.DataContext -ceq 'shared' } | Select-Object -First 1); $window.UpdateLayout()
+        Test-Smoke 'Office Fix shared: asks first (value, key, restart, undo limit), writes String 1, the row is green and its button gone, the other stays' ($script:ConfirmAsked -like '*SharedComputerLicensing = 1*ClickToRun\Configuration*restart*' -and (& $m.RegGet 'HKLM:\SOFTWARE\Microsoft\Office\ClickToRun\Configuration' 'SharedComputerLicensing') -ceq '1' -and (@(& $fixButtons | ForEach-Object { [string]$_.DataContext }) -join ',') -ceq 'updates' -and $ui.TxtOffState.Text -like 'Fix done*') "$script:ConfirmAsked | $($ui.TxtOffState.Text)"
+        Test-Smoke 'Office Fix shared: change log entry (category Office) and protocol action' (@(Get-AVDTuneChangeLog -Root $script:StateRoot | Where-Object { $_.Component -eq 'office.fix.shared' -and $_.Category -eq 'Office' }).Count -eq 1) $null
+        & $click (@(& $fixButtons) | Where-Object { [string]$_.DataContext -ceq 'updates' } | Select-Object -First 1); $window.UpdateLayout()
+        Test-Smoke 'Office Fix updates: policy enableautomaticupdates = 0, no Fix button left' ((& $m.RegGet 'HKLM:\SOFTWARE\Policies\Microsoft\office\16.0\common\officeupdate' 'enableautomaticupdates') -eq 0 -and @(& $fixButtons).Count -eq 0 -and $script:ConfirmAsked -like '*enableautomaticupdates = 0*') $script:ConfirmAsked
+        & $click $ui.BtnOffFixUndo; $window.UpdateLayout()
+        Test-Smoke 'Office Undo one-click fixes: both earlier values are back and both rows are red with their Fix button again' ((& $m.RegGet 'HKLM:\SOFTWARE\Microsoft\Office\ClickToRun\Configuration' 'SharedComputerLicensing') -ceq '0' -and $null -eq (& $m.RegGet 'HKLM:\SOFTWARE\Policies\Microsoft\office\16.0\common\officeupdate' 'enableautomaticupdates') -and (@(& $fixButtons | ForEach-Object { [string]$_.DataContext } | Sort-Object) -join ',') -ceq 'shared,updates') ((@(& $fixButtons | ForEach-Object { [string]$_.DataContext })) -join ',')
+        # leave the fake master as it was
+        if ($null -ne $polWas) { & $m.RegSet $polKey 'enableautomaticupdates' $polWas 'DWord' }
+        & $m.RegSet 'HKLM:\SOFTWARE\Microsoft\Office\ClickToRun\Configuration' 'SharedComputerLicensing' '1' 'String'; & $m.RegSet 'HKLM:\SOFTWARE\Microsoft\Office\ClickToRun\Configuration' 'UpdatesEnabled' 'FALSE' 'String'
+        Update-OffView; $window.UpdateLayout()
+        Save-SmokeShot '61-office-config-light'
+        $true } }
     @{ Name = 'start: sign-out and dark'; Do = {
         Open-Stage 'SignIn'; $window.UpdateLayout()
         $ui.BtnStageAction2.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))

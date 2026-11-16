@@ -54,7 +54,7 @@ function New-AVDTuneFakeOffice {
             if ($c.Shared) { & $ms.RegSet $k 'SharedComputerLicensing' $c.Shared 'String' }
             & $ms.RegSet $k 'UpdatesEnabled' $c.UpdatesEnabled 'String'
             & $ms.RegSet $k 'ProductReleaseIds' $c.Product 'String'
-            foreach ($l in $c.Languages) { if ($l -ne 'MatchOS') { & $ms.RegSet "$ctr\ProductReleaseIDs\$($c.Product)\$($l.ToLowerInvariant())" 'Installed' 1 'DWord' } }
+            foreach ($l in $c.Languages) { if ($l -ne 'MatchOS') { & $ms.RegSet "$ctr\ProductReleaseIDs\Active\$($c.Product)\$($l.ToLowerInvariant())" 'Installed' 1 'DWord'; & $ms.RegSet "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\$($c.Product) - $($l.ToLowerInvariant())" 'DisplayName' 'Microsoft 365 Apps' 'String' } }
         }
         [pscustomobject]@{ ExitCode = $s.SetupExit; Output = '' }
     }.GetNewClosure()
