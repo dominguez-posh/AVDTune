@@ -212,13 +212,21 @@ function Save-AVDTuneEnvironment {
         Join = [string]$Answers.Join; Dc = [string]$Answers.Dc; Identities = [string]$Answers.Identities; Profiles = [string]$Answers.Profiles
         AzureFilesAuth = [string]$plan.AzureFilesAuth; Network = [ordered]@{ Endpoint = [string]$Answers.Endpoint; VNet = (& $clean $Answers.VNet 200); Subnet = (& $clean $Answers.Subnet 200); DnsZone = [string]$Answers.DnsZone }
     }
-    $fields['SignIn'] = [ordered]@{ TenantId = (& $clean $tenant 255).Trim(); ClientId = (& $clean $Answers.ClientId 36).Trim() }
+    # the client ID is never taken from the answers: only Set-AVDTuneEnvironmentSignIn sets it (after the sign-in worked); the saved one stays
+    $fields['SignIn'] = [ordered]@{ TenantId = (& $clean $tenant 255).Trim(); ClientId = ([string](Get-AVDTuneProp (Get-AVDTuneProp $file 'SignIn') 'ClientId')).Trim() }
     $fields['Snapshot'] = [ordered]@{ NamePattern = $(if ([string](Get-AVDTuneProp $Answers 'SnapshotNamePattern')) { (& $clean $Answers.SnapshotNamePattern 80).Trim() } else { Get-AVDTuneDefaultSnapshotNamePattern }) }
     if (-not $fields.Contains('Dc') -or -not $fields['Dc']) { $fields['Dc'] = [ordered]@{ Server = ''; User = ''; Pins = [ordered]@{}; Discovery = $null } }
     if (-not $fields.Contains('Gallery')) { $fields['Gallery'] = $null }
     if ($PSBoundParameters.ContainsKey('Sources')) {
         $src = [ordered]@{}
         foreach ($k in @($Sources.Keys | Sort-Object)) { if ([string]$k -match '^[A-Za-z]{1,40}$') { $src[[string]$k] = (& $clean $Sources[$k] 240) } }
+        $fields['Sources'] = $src
+    }
+    elseif ($oldAnswers) {
+        # no -Sources: an answer that changed was typed by the administrator, the earlier source is not kept for it; the others keep theirs
+        $newAnswers = Get-AVDTuneEnvironmentAnswers ((@{ Answers = $fields['Answers']; SignIn = $fields['SignIn']; Snapshot = $fields['Snapshot'] } | ConvertTo-Json -Depth 6) | ConvertFrom-Json)
+        $src = [ordered]@{}; foreach ($kv in (Get-AVDTuneAnswerSources $file).GetEnumerator()) { $src[$kv.Key] = $kv.Value }
+        foreach ($p in $newAnswers.PSObject.Properties) { if ([string]$p.Value -ne [string]$oldAnswers.($p.Name) -and $p.Name -notin 'TenantId', 'ClientId') { $src[$p.Name] = 'Typed by the administrator' } }
         $fields['Sources'] = $src
     }
     Write-AVDTuneEnvironmentFields -Root $Root -Fields $fields -User $User
@@ -378,6 +386,7 @@ function Invoke-AVDTuneStartSignIn {
     $Account = ([string]$Account).Trim()
     if ($Account -and -not (Get-AVDTuneAccountDomain $Account)) { throw 'The account must look like name@domain.' }
     $ClientId = ([string]$ClientId).Trim()
+    if ($Setup -and $ClientId) { throw 'Set up and a typed client ID exclude each other: -Setup creates a new app registration, a typed client ID uses an existing one.' }
     if ($ClientId) {
         if (-not (Test-AVDTuneTenantGuid $ClientId)) { throw 'The client ID must be a GUID.' }
         if ($ClientId -ieq '14d82eec-204b-4c2f-b7e8-296a70dab67e') { throw "That is Microsoft's setup app; AVDTune needs the client ID of its own app registration (leave the field empty and AVDTune creates it at the sign-in)." }
@@ -458,7 +467,7 @@ function Get-AVDTuneAnswerSuggestions {
     $choices = @{}; foreach ($q in $script:Questions) { $choices[$q.Key] = @($q.Choices | ForEach-Object { $_.Value }) }
     $detect = {
         param($key, $value, $source)
-        $ok = if ($choices.ContainsKey($key)) { [string]$value -cin $choices[$key] } else { [string]$value -match '^[A-Za-z0-9_./ -]{1,200}$' }
+        $ok = if ($choices.ContainsKey($key)) { [string]$value -cin $choices[$key] } else { ([string]$value).Length -le 1024 -and [regex]::IsMatch([string]$value, '^[A-Za-z0-9_./ -]{1,200}$', [Text.RegularExpressions.RegexOptions]::None, [TimeSpan]::FromSeconds(2)) }
         if (-not $ok) { [void]$rejected.Add("$key (the value found is not valid)"); return }
         $items[$key] = [pscustomobject]@{ Key = $key; State = 'Detected'; Value = [string]$value; Source = $source; Hint = '' }
     }

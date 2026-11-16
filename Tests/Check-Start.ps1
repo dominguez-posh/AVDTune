@@ -58,6 +58,14 @@ try {
     $clientId = '66666666-7777-8888-9999-000000000000'
     $answers = Get-AVDTuneEnvironmentDefaults; $answers.TenantId = $tenant; $answers.ClientId = $clientId; $answers.VNet = 'vnet-example'; $answers.Subnet = 'snet-avd'
     $saved = Save-AVDTuneEnvironment -Root $tmp -Answers $answers -User 'admin1'
+    Test-Check 'issue #64 finding 2: Save-AVDTuneEnvironment takes no client ID from the answers (only Set-AVDTuneEnvironmentSignIn sets it)' ($saved.Environment.SignIn.ClientId -eq '' -and $saved.Environment.SignIn.TenantId -eq $tenant) ($saved.Environment.SignIn | ConvertTo-Json -Compress)
+    [void](Set-AVDTuneEnvironmentSignIn -Root $tmp -ClientId $clientId -User 'admin1')
+    $saved = [pscustomobject]@{ Environment = (Get-AVDTuneEnvironment $tmp) }
+    $emptyClient = Get-AVDTuneEnvironmentDefaults; $emptyClient.VNet = 'vnet-example'; $emptyClient.Subnet = 'snet-avd'; $emptyClient.ClientId = ''
+    [void](Save-AVDTuneEnvironment -Root $tmp -Answers $emptyClient -User 'admin1')
+    $foreignClient = Get-AVDTuneEnvironmentDefaults; $foreignClient.VNet = 'vnet-example'; $foreignClient.Subnet = 'snet-avd'; $foreignClient.ClientId = '99999999-7777-8888-9999-000000000000'
+    [void](Save-AVDTuneEnvironment -Root $tmp -Answers $foreignClient -User 'admin1')
+    Test-Check 'a save with an empty or another client ID in the answers keeps the saved client ID' ((Get-AVDTuneEnvironment $tmp).SignIn.ClientId -eq $clientId) ((Get-AVDTuneEnvironment $tmp).SignIn | ConvertTo-Json -Compress)
     $envPath = Join-Path $tmp 'environment.json'
     Test-Check 'environment.json is written with the answers and the sign-in target' ((Test-Path $envPath) -and $saved.Environment.Answers.Join -eq 'EntraOnly' -and $saved.Environment.SignIn.ClientId -eq $clientId -and $saved.Environment.Answers.Network.VNet -eq 'vnet-example') $null
     Test-Check 'environment.json has no field for a secret' ((Get-Content $envPath -Raw) -notmatch '(?i)password|secret|token|key') $null
@@ -210,8 +218,9 @@ try {
         param([string]$Tenant, [string]$Client)
         $script:n11++
         $r = Join-Path $tmp "issue11-$script:n11"; [void](Initialize-AVDTuneState -Root $r)
-        $x = Get-AVDTuneEnvironmentDefaults; $x.TenantId = $Tenant; $x.ClientId = $Client
+        $x = Get-AVDTuneEnvironmentDefaults; $x.TenantId = $Tenant
         [void](Save-AVDTuneEnvironment -Root $r -Answers $x -User 'admin1')
+        if ($Client) { [void](Set-AVDTuneEnvironmentSignIn -Root $r -ClientId $Client -User 'admin1') }
         [void](Start-AVDTuneImageVersion -Root $r -Date ([datetime]'2026-11-15') -User 'admin1')
         $r
     }
@@ -301,8 +310,9 @@ try {
     Test-Check "the note on the setup consent says what AVDTune removes and what stays (organization-wide consent)" ($res7.ConsentNote -like "*Microsoft Graph Command Line Tools*takes these two out of your own consent*grant itself stay*whole organization*Update-MgOauth2PermissionGrant*" -and $res7.ConsentNote -notlike '*Remove-MgOauth2PermissionGrant*' -and (@($res7.Notes) -join ' ') -like "*App registration 'AVDTune' created*") $res7.ConsentNote
     Test-Check 'the setup token is nowhere in the log, the notes or environment.json' (($a7.Log -join ' ') -notmatch 'eyJ|fake-refresh' -and (@($res7.Notes) -join ' ') -notmatch 'eyJ' -and [IO.File]::ReadAllText((Join-Path $r7 'environment.json')) -notmatch 'eyJ|refresh') $null
     # no reuse by name: without a saved client ID a new registration is always created, existing ones are only named
-    $again = Get-AVDTuneEnvironmentAnswers (Get-AVDTuneEnvironment $r7); $again.ClientId = ''
-    [void](Save-AVDTuneEnvironment -Root $r7 -Answers $again -User 'admin1')
+    # the saved client ID is removed from the file itself (Save-AVDTuneEnvironment no longer takes it from the answers)
+    $r7File = Get-AVDTuneEnvironmentFile $r7; $r7Path = Join-Path $r7 'environment.json'
+    [IO.File]::WriteAllText($r7Path, (($r7File | ConvertTo-Json -Depth 10) -replace '"ClientId":\s*"[^"]*"', '"ClientId": ""'))
     $a7.Log.Clear()
     $res7b = Invoke-AVDTuneStartSignIn -Root $r7 -Session (New-AVDTuneSession -TempRoot $signTemp -Auth $a7) -User 'admin1' -RetryDelaySeconds 0
     Test-Check "without a saved client ID a registration named 'AVDTune' is never taken over (even the admin's own): a new one, the old one named in a note" ($a7.Store.Apps.Count -eq 2 -and -not $app7.ContainsKey('Patched') -and (Get-AVDTuneEnvironment $r7).SignIn.ClientId -ne $app7.appId -and (@($res7b.Notes) -join ' ') -like "*1 other app registration(s) named 'AVDTune'*$($app7.appId)*not use them*") (@($res7b.Notes) -join ' | ')
@@ -998,6 +1008,8 @@ try {
     $joinCode = $dirCode.Substring($dirCode.IndexOf('#region join state'), $dirCode.IndexOf('#region real adapter') - $dirCode.IndexOf('#region join state'))
     Test-Check 'join detection code: the full system path of dsregcmd, no process start of its own, no write, no Start-Process' ($joinCode -match "Join-Path \(Get-AVDTuneSystemFolder System\) 'dsregcmd\.exe'" -and $joinCode -notmatch '(?i)Start-Process|Process\]::Start|ProcessStartInfo|Set-Item|New-Item|Out-File|Set-Content|WriteAllText|Write-AVDTuneFile|RegSet|RegRemove') $null
     $realMachine = New-AVDTuneMachine
+    $locText = $realMachine.DcLocate.ToString()
+    Test-Check 'issue #64 finding 1: the DcLocate member binds to nothing: no DomainController FindOne, no DirectoryEntry, no DirectoryContext, no DirectoryServices, no ADSI' ($locText -match 'Win32_NTDomain' -and $locText -notmatch '(?i)DomainController\]::FindOne|DirectoryEntry|DirectoryContext|DirectoryServices|\.SiteName|\.IPAddress|\[adsi|LDAP:') $locText
     Test-Check 'the real machine has the two read members of the join detection, the fake has them too' ($realMachine.PSObject.Properties['ComputerSystem'] -and $realMachine.PSObject.Properties['DcLocate'] -and $mj.PSObject.Properties['ComputerSystem'] -and $mj.PSObject.Properties['DcLocate']) $null
 
     # Azure facts: only GET, validated, and the cases without Azure
@@ -1011,6 +1023,9 @@ try {
     $roResults = @(@('PUT', 'POST', 'DELETE', 'PATCH') | ForEach-Object { & $roArm.Invoke $_ "/subscriptions/$script:FakeSubscription/resourceGroups/rg-example/providers/Microsoft.Compute/snapshots/x?api-version=2023-10-02" 'fake-arm-token-value' @{ a = 1 } })
     $roBody = & $roArm.Invoke 'GET' "/subscriptions/$script:FakeSubscription/resourceGroups/rg-example/providers/Microsoft.Compute/snapshots?api-version=2023-10-02" 'fake-arm-token-value' @{ a = 1 }
     Test-Check 'the read-only ARM adapter refuses PUT, POST, DELETE, PATCH and a GET with a body without calling Azure' (@($roResults | Where-Object { $_.Status -ne 0 -or $_.Error -notlike 'Refused*' }).Count -eq 0 -and $roBody.Status -eq 0 -and $armOk.Log.Count -eq 0) ($armOk.Log -join ' | ')
+    $armOk.Log.Clear()
+    $roLower = @(@('get', 'Get', 'gET') | ForEach-Object { & $roArm.Invoke $_ "/subscriptions/$script:FakeSubscription/resourceGroups/rg-example/providers/Microsoft.Compute/snapshots?api-version=2023-10-02" 'fake-arm-token-value' $null })
+    Test-Check 'the read-only ARM adapter compares the method case sensitively: get, Get, gET are refused without calling Azure' (@($roLower | Where-Object { $_.Status -ne 0 -or $_.Error -notlike 'Refused*' }).Count -eq 0 -and $armOk.Log.Count -eq 0) ($armOk.Log -join ' | ')
     $factsSrc = [IO.File]::ReadAllText((Join-Path $repo 'Modules\AVDTune.Snapshot.psm1'))
     $factsCode = $factsSrc.Substring($factsSrc.IndexOf('function Get-AVDTuneAzureFacts'), $factsSrc.IndexOf('#region real adapter') - $factsSrc.IndexOf('function Get-AVDTuneAzureFacts'))
     Test-Check 'Azure facts code: only through the read-only adapter and only GET' ($factsCode -match 'New-AVDTuneReadOnlyArm' -and @([regex]::Matches($factsCode, '-Method (\w+)') | ForEach-Object { $_.Groups[1].Value } | Where-Object { $_ -ne 'GET' }).Count -eq 0 -and $factsCode -notmatch 'Invoke-AVDTuneArm -Arm \$Arm\b') $null
@@ -1104,6 +1119,14 @@ try {
     Test-Check 'a later sign-in change keeps answers, sources, DC and pins' ($afterSignIn.SignIn.ClientId -eq '66666666-7777-8888-9999-000000000000' -and $afterSignIn.Sources.Join -like 'Confirmed: *' -and $afterSignIn.Dc.Pins.'dc1.example.test'.Sha256 -eq ('AB' * 32) -and $afterSignIn.Answers.Join -eq 'Hybrid') ($afterSignIn | ConvertTo-Json -Compress -Depth 4)
     [void](Set-AVDTuneDcPin -Root $o1 -Server 'dc2.example.test' -Certificate ([pscustomobject]@{ Sha256 = ('EF' * 32); Thumbprint = ('01' * 20); Subject = 'CN=dc2.example.test' }) -User 'admin1')
     $afterPin = Get-AVDTuneEnvironment $o1
+    $noSrc = Get-AVDTuneEnvironmentAnswers (Get-AVDTuneEnvironment $o1); $noSrc.VNet = 'vnet-typed-later'
+    [void](Save-AVDTuneEnvironment -Root $o1 -Answers $noSrc -User 'admin1')
+    $afterNoSrc = Get-AVDTuneEnvironment $o1
+    Test-Check 'issue #64 finding 3: a save without -Sources marks the changed answer as typed by the administrator, the others keep their source' ($afterNoSrc.Answers.Network.VNet -eq 'vnet-typed-later' -and $afterNoSrc.Sources.VNet -eq 'Typed by the administrator' -and $afterNoSrc.Sources.Join -like 'Confirmed: *' -and $afterNoSrc.Sources.Profiles -like 'Typed by the administrator (suggested*') ($afterNoSrc.Sources | ConvertTo-Json -Compress)
+    $startPs = [IO.File]::ReadAllText((Join-Path $repo 'AVDTune-Start.ps1'))
+    Test-Check 'issue #64 finding 5: Azure data is matched with a length limit and a timeout (facts, suggestions, site of the RootDSE)' (([IO.File]::ReadAllText((Join-Path $repo 'Modules\AVDTune.Snapshot.psm1')) -notmatch '(?m)(-match|-notmatch) \$script:Facts') -and ([IO.File]::ReadAllText((Join-Path $repo 'Modules\AVDTune.Start.psm1')) -match 'Length -le 1024 -and \[regex\]::IsMatch') -and $dirCode -notmatch "-match '\(\?i\),CN=Servers") $null
+    Test-Check 'issue #64 finding 6: the join detection runs through Invoke-Busy (task of the task bar) and dsregcmd has a 30 s timeout' ($startPs -match "function Read-JoinState[\s\S]{0,400}Invoke-Busy[^\r\n]*-TaskTitle" -and $joinCode -match "'/status'\) 30 ") $null
+    Test-Check 'a client ID typed together with -Setup is refused before any sign-in' ($null -ne ($e4 = Get-ThrownText { Invoke-AVDTuneStartSignIn -Root $tmp -Session (New-AVDTuneSession -TempRoot $tmp -Auth (New-AVDTuneFakeAuth)) -User 'admin1' -Setup -ClientId '66666666-7777-8888-9999-000000000000' }) -and $e4 -like '*exclude each other*') $e4
     Test-Check 'a later DC pin keeps answers, sources and the sign-in' ($afterPin.Answers.Profiles -eq 'OtherSmb' -and $afterPin.Sources.Profiles -like 'Typed by the administrator (suggested*' -and $afterPin.SignIn.TenantId -eq $tenant -and $afterPin.Dc.Pins.'dc2.example.test') $null
 
     # not joined at the master but the questions say there is a domain controller: the domain step opens after the questions

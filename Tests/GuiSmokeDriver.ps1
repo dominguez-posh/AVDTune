@@ -260,6 +260,8 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
     @{ Name = 'start: domain'; Do = {
         Open-Stage 'Domain'; $window.UpdateLayout()
         Test-Smoke 'domain stage after the sign-in: the join state says domain member, the intro names it, the server of the DC locator is suggested with its source' ($script:Form.Server.Text -eq '10.0.0.10' -and $ui.TxtStageTitle.Text -eq '2. Domain controller' -and $ui.TxtStageIntro.Text -like 'This master is joined to the domain example.test.*' -and (Find-Text $ui.PanelStageBody 'Suggested by the DC locator of Windows for the domain example.test (site Default-First-Site-Name). Change it if another controller should be read.')) $script:Form.Server.Text
+        $envLocator = Get-AVDTuneEnvironmentFile $script:StateRoot
+        Test-Smoke 'the DC locator suggestion alone, without a click: no probe, no bind, no search, no pin, no Dc server saved (issue #64, security review)' (@($script:Services.Ldap.Log).Count -eq 0 -and @($script:Services.Ldap.Opened).Count -eq 0 -and @((Get-AVDTuneProp (Get-AVDTuneProp $envLocator 'Dc') 'Pins').PSObject.Properties).Count -eq 0 -and -not [string](Get-AVDTuneProp (Get-AVDTuneProp $envLocator 'Dc') 'Server')) (@($script:Services.Ldap.Log) -join ' | ')
         $script:Form.Server.Text = '10.0.0.10'; $script:Form.User.Text = 'EXAMPLE\svc-avdtune'
         $ui.BtnStageAction.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
         Test-Smoke 'connect without a password is refused with a message' ($ui.TxtStageMessage.Text -like '*password*') $ui.TxtStageMessage.Text

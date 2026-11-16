@@ -208,7 +208,9 @@ function Get-AVDTuneDirectoryInfo {
     $configNc = [string](Get-AVDTuneAttr $r 'configurationNamingContext')
     if (-not $defaultNc) { throw 'The RootDSE has no defaultNamingContext.' }
     $serverName = [string](Get-AVDTuneAttr $r 'serverName')
-    $site = if ($serverName -match '(?i),CN=Servers,CN=([^,]+),CN=Sites,') { $Matches[1] } else { '' }
+    # serverName comes from the server: length limit and a regex with a timeout
+    $site = ''
+    if ($serverName.Length -le 1024) { $sm = [regex]::Match($serverName, '(?i),CN=Servers,CN=([^,]+),CN=Sites,', [Text.RegularExpressions.RegexOptions]::None, $script:RegexTimeout); if ($sm.Success) { $site = $sm.Groups[1].Value } }
 
     $netbios = ''
     if ($configNc) {
@@ -292,7 +294,7 @@ function Get-AVDTuneJoinState {
     else { [void]$problems.Add('Win32_ComputerSystem gave no usable answer.') }
     $aad = $null; $dsDomainJoined = $null
     $dsreg = $null
-    try { $dsreg = & $Machine.Run (Join-Path (Get-AVDTuneSystemFolder System) 'dsregcmd.exe') @('/status') } catch { }
+    try { $dsreg = & $Machine.Run (Join-Path (Get-AVDTuneSystemFolder System) 'dsregcmd.exe') @('/status') 30 } catch { }
     if ($dsreg -and [int](Get-AVDTuneProp $dsreg 'ExitCode') -eq 0 -and [string](Get-AVDTuneProp $dsreg 'Output')) {
         $text = [string]$dsreg.Output; if ($text.Length -gt $script:MaxDsregChars) { $text = $text.Substring(0, $script:MaxDsregChars) }
         try {

@@ -422,13 +422,18 @@ function New-AVDTuneMachine {
         catch { $null }
     }
     $m.DcLocate = {
-        # The DC locator of Windows (DsGetDcName) for a domain name, read only: nothing is sent but the locator's own query. @{ Name; Address; Site } or $null.
+        # The DC the Windows locator (DsGetDcName) found for a domain name, read from Win32_NTDomain (WMI, local, read only). No AD or LDAP object is used here: they
+        # bind to the found server with the administrator's credentials, before anything is pinned (finding of the security review).
+        # @{ Name; Address; Site } or $null. Values are data: length limited, shaped by Get-AVDTuneJoinState before use.
         param($Domain)
         try {
-            Add-Type -AssemblyName System.DirectoryServices -ErrorAction Stop
-            $ctx = New-Object System.DirectoryServices.ActiveDirectory.DirectoryContext([System.DirectoryServices.ActiveDirectory.DirectoryContextType]::Domain, [string]$Domain)
-            $dc = [System.DirectoryServices.ActiveDirectory.DomainController]::FindOne($ctx)
-            [pscustomobject]@{ Name = [string]$dc.Name; Address = [string]$dc.IPAddress; Site = [string]$dc.SiteName }
+            $first = ([string]$Domain).Split('.')[0]
+            $rows = @(Get-CimInstance -ClassName Win32_NTDomain -ErrorAction Stop | Where-Object { $_.DomainControllerName })
+            $row = @($rows | Where-Object { [string]$_.DnsForestName -ieq [string]$Domain -or [string]$_.DomainName -ieq $first }) | Select-Object -First 1
+            if (-not $row) { return $null }
+            $cut = { param($v) $t = ([string]$v).Trim().TrimStart(''); if ($t.Length -gt 255) { $t = $t.Substring(0, 255) }; $t }
+            $site = [string]$row.DcSiteName; if (-not $site) { $site = [string]$row.ClientSiteName }
+            [pscustomobject]@{ Name = (& $cut $row.DomainControllerName); Address = (& $cut $row.DomainControllerAddress); Site = (& $cut $site) }
         }
         catch { $null }
     }

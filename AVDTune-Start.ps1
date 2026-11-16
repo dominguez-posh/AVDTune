@@ -412,7 +412,8 @@ function Invoke-SignIn([switch]$Setup) {
 }
 function Read-JoinState {
     try {
-        $det = Update-AVDTuneStartDetection -Context $script:StartContext -Machine $script:Machine
+        # dsregcmd and the DC locator can take a while: message, wait cursor and a task of the task bar (the process has its own 30 s timeout)
+        $det = Invoke-Busy 'Reading how this master is joined (read only) ...' { Update-AVDTuneStartDetection -Context $script:StartContext -Machine $script:Machine } -TaskTitle 'Reading the join state of this master' -Done 'Read'
         Add-StartProtocol 'Join state of this master read' ($det.Reason + $(if (@($det.Facts).Count -gt 0) { ' (' + (@($det.Facts) -join '; ') + ')' }) + $(if (@($det.Problems).Count -gt 0) { ' Not read: ' + (@($det.Problems) -join '; ') }))
     }
     catch { Add-StartProtocol 'Join state of this master read' $_.Exception.Message 'failed' }

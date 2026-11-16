@@ -361,6 +361,9 @@ function Confirm-AVDTuneSnapshotGate {
 
 #region what Azure says about this VM (issue #64: read only, before the snapshot is confirmed)
 
+$script:FactsRegexTimeout = [TimeSpan]::FromSeconds(2)
+# Azure data is checked with a length limit and a regex with a timeout
+function Test-AVDTuneFactsText([string]$Text, [string]$Pattern) { ($Text.Length -le 1024) -and [regex]::IsMatch($Text, $Pattern, [Text.RegularExpressions.RegexOptions]::IgnoreCase, $script:FactsRegexTimeout) }
 $script:FactsComputeApi = '2024-07-01'
 $script:FactsNetworkApi = '2024-01-01'
 $script:FactsStorageApi = '2023-05-01'
@@ -375,7 +378,7 @@ function New-AVDTuneReadOnlyArm {
     $a = [ordered]@{ Kind = 'ReadOnly'; Inner = $inner }
     $a.Invoke = {
         param($Method, $Path, $Token, $Body)
-        if ([string]$Method -ne 'GET' -or $null -ne $Body) { return [pscustomobject]@{ Status = 0; Body = $null; Error = 'Refused: only GET requests are made before the snapshot gate is open.' } }
+        if ([string]$Method -cne 'GET' -or $null -ne $Body) { return [pscustomobject]@{ Status = 0; Body = $null; Error = 'Refused: only GET requests are made before the snapshot gate is open.' } }
         & $inner.Invoke $Method $Path $Token $Body
     }.GetNewClosure()
     [pscustomobject]$a
@@ -410,14 +413,14 @@ function Get-AVDTuneAzureFacts {
         if ($ref.Count -eq 0 -and $refs.Count -gt 0) { $ref = @($refs[0]) }
         if ($ref.Count -gt 0) {
             $nicId = [string](Get-AVDTuneProp $ref[0] 'id')
-            if ($nicId -notmatch $script:FactsNicPattern) { throw 'The VM names a network interface with an unexpected ID.' }
+            if (-not (Test-AVDTuneFactsText $nicId $script:FactsNicPattern)) { throw 'The VM names a network interface with an unexpected ID.' }
             $nic = Invoke-AVDTuneArm -Arm $ro -Method GET -Path "${nicId}?api-version=$script:FactsNetworkApi" -Token $Token -Action 'Microsoft.Network/networkInterfaces/read' -Scope 'the network interface'
             $cfgs = @(Get-AVDTuneProp (Get-AVDTuneProp $nic 'properties') 'ipConfigurations' | Where-Object { $_ })
             $cfg = @($cfgs | Where-Object { (Get-AVDTuneProp (Get-AVDTuneProp $_ 'properties') 'primary') -eq $true } | Select-Object -First 1)
             if ($cfg.Count -eq 0 -and $cfgs.Count -gt 0) { $cfg = @($cfgs[0]) }
             if ($cfg.Count -gt 0) {
                 $sid = [string](Get-AVDTuneProp (Get-AVDTuneProp (Get-AVDTuneProp $cfg[0] 'properties') 'subnet') 'id')
-                if ($sid -match $script:FactsSubnetPattern) { $r.SubnetId = $sid; $r.VNet = $Matches[1]; $r.Subnet = $Matches[2] }
+                if (Test-AVDTuneFactsText $sid $script:FactsSubnetPattern) { $sm = [regex]::Match($sid, $script:FactsSubnetPattern, [Text.RegularExpressions.RegexOptions]::IgnoreCase, $script:FactsRegexTimeout); $r.SubnetId = $sid; $r.VNet = $sm.Groups[1].Value; $r.Subnet = $sm.Groups[2].Value }
                 elseif ($sid) { [void]$problems.Add('The subnet ID of the network interface has an unexpected form; it is not used.') }
             }
         }
