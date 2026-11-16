@@ -103,7 +103,7 @@ function New-AVDTuneFakeEnvArm {
             $dup = @($s.Roles | Where-Object { ([string]$_.Scope).ToLowerInvariant() -eq $scope -and $_.Principal -eq $b.properties.principalId -and $_.Role -eq $role -and ([string]$_.Name) -ne ($lower -split '/')[-1] })
             if ($dup.Count -gt 0) { return (& $fail 409 'RoleAssignmentExists' 'The role assignment already exists.') }
             $s.Roles = @($s.Roles) + @{ Scope = ($p -replace '/providers/Microsoft\.Authorization/roleAssignments/.*$', ''); Principal = [string]$b.properties.principalId; Role = $role; Name = ($lower -split '/')[-1] }
-            $s.Seq++; $s.Resources[$lower] = @{ name = ($lower -split '/')[-1]; properties = $b.properties; systemData = @{ createdAt = ('2026-11-15T11:00:00.{0:000}Z' -f $s.Seq) } }
+            $s.Seq++; $s.Resources[$lower] = @{ name = ($lower -split '/')[-1]; properties = $b.properties; systemData = @{ createdAt = [DateTime]::UtcNow.ToString('o') } }
             return (& $resp 201 @{ name = ($lower -split '/')[-1]; properties = $b.properties } $null '')
         }
         # PUT or PATCH of a resource: merge for PATCH, replace for PUT
@@ -121,9 +121,9 @@ function New-AVDTuneFakeEnvArm {
         if (-not $new.PSObject.Properties['properties']) { Add-Member -InputObject $new -NotePropertyName properties -NotePropertyValue ([pscustomobject]@{}) }
         if (-not $new.properties.PSObject.Properties['provisioningState']) { Add-Member -InputObject $new.properties -NotePropertyName provisioningState -NotePropertyValue 'Succeeded' }
         if ($type -eq 'account' -and -not $new.properties.PSObject.Properties['primaryEndpoints']) { Add-Member -InputObject $new.properties -NotePropertyName primaryEndpoints -NotePropertyValue ([pscustomobject]@{ file = "https://$name.file.core.windows.net/" }) }
-        # what identifies the resource over its life: kept on every later PUT or PATCH, new on a create
+        # what identifies the resource over its life: kept on every later PUT or PATCH, new on a create (the real time now: the module compares it with the start of its own PUT)
         if ($existing -and $existing.PSObject.Properties['systemData']) { Add-Member -InputObject $new -NotePropertyName systemData -NotePropertyValue $existing.systemData -Force }
-        else { $s.Seq++; Add-Member -InputObject $new -NotePropertyName systemData -NotePropertyValue ([pscustomobject]@{ createdAt = "2026-11-15T10:00:{0:00}Z" -f ($s.Seq % 60) + "." + ('{0:000}' -f $s.Seq) }) -Force }
+        else { $s.Seq++; Add-Member -InputObject $new -NotePropertyName systemData -NotePropertyValue ([pscustomobject]@{ createdAt = [DateTime]::UtcNow.ToString('o') }) -Force }
         $s.Resources[$lower] = $new
         $status = if ($existing) { 200 } else { 201 }
         $async = $null

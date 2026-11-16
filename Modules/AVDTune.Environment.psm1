@@ -542,7 +542,20 @@ function Get-AVDTuneEnvPlan {
     $existingRoles = @()
     if ($cur.Exists) {
         $rr = Invoke-AVDTuneEnvArmRaw -Arm $Arm -Method GET -Path "$scope/providers/Microsoft.Authorization/roleAssignments?api-version=$script:AuthApi" -Token $Token
-        if ($rr.Status -eq 200) { $existingRoles = @(@(Get-AVDTuneProp $rr.Body 'value') | Where-Object { $_ } | ForEach-Object { [pscustomobject]@{ Role = (([string]$_.properties.roleDefinitionId -split '/')[-1]); PrincipalId = [string]$_.properties.principalId } }) }
+        if ($rr.Status -eq 200) {
+            # all pages: a nextLink is followed only on management.azure.com and only as a subscription path (the rules of the polling), at most 20 pages
+            $rows = New-Object System.Collections.ArrayList; $pages = 0
+            while ($rr -and $rr.Status -eq 200) {
+                foreach ($v in @(Get-AVDTuneProp $rr.Body 'value')) { if ($v) { [void]$rows.Add($v) } }
+                $next = [string](Get-AVDTuneProp $rr.Body 'nextLink'); $rr = $null
+                if (-not $next) { break }
+                if (++$pages -ge 20) { [void]$warnings.Add('The role assignments have more than 20 pages; the rest is not read. An assignment that exists but is not listed is answered by Azure at the write (it already exists).'); break }
+                try { $rr = Invoke-AVDTuneEnvArmRaw -Arm $Arm -Method GET -Path (Get-AVDTuneEnvPollPath $next) -Token $Token -Poll }
+                catch { [void]$warnings.Add('The role assignments continue on a link that is not followed (only management.azure.com is); an assignment that exists but is not listed is answered by Azure at the write (it already exists).'); break }
+                if ($rr.Status -ne 200) { [void]$warnings.Add((ConvertTo-AVDTuneEnvArmError -Resp $rr -What 'read the next page of the role assignments' -Role 'Reader on the storage account')); break }
+            }
+            $existingRoles = @($rows | ForEach-Object { [pscustomobject]@{ Role = (([string]$_.properties.roleDefinitionId -split '/')[-1]); PrincipalId = [string]$_.properties.principalId } })
+        }
         elseif ($rr.Status -ne 404) { [void]$warnings.Add((ConvertTo-AVDTuneEnvArmError -Resp $rr -What 'read the role assignments' -Role 'Reader on the storage account')) }
     }
     foreach ($def in @(@{ Id = 'env.role-users'; Prop = 'UsersGroupId'; Role = $script:RoleSmbContributor; Name = 'Storage File Data SMB Share Contributor'; For = 'the user group' }, @{ Id = 'env.role-admins'; Prop = 'AdminsGroupId'; Role = $script:RoleSmbElevated; Name = 'Storage File Data SMB Share Elevated Contributor'; For = 'the admin group' })) {
@@ -624,12 +637,30 @@ function Invoke-AVDTuneEnvApply {
             try { $now = Get-AVDTuneEnvResource -Arm $Arm -Token $Token -Path "$(($s.Path -split '\?')[0])?api-version=$($ruleNow.Api)" -What 'check that the resource is still missing'; if ($now.Exists) { $w = [pscustomobject]@{ Ok = $false; Benign = $false; Message = "The resource exists now (it was created after the plan was made): nothing was sent. Make the plan again." } } }
             catch { $w = [pscustomobject]@{ Ok = $false; Benign = $false; Message = $_.Exception.Message } }
         }
+        $putStart = [DateTimeOffset]::UtcNow
         if (-not $w) { $w = Invoke-AVDTuneEnvWrite -Arm $Arm -Token $Token -Method $s.Method -Path $s.Path -Body $s.Body -What $s.Title -Role $s.Role -PollSeconds $PollSeconds -TimeoutSeconds $TimeoutSeconds -MaxPolls $MaxPolls }
         if ($w.Ok) {
             if ($s.Action -eq 'Create' -and -not $w.Benign) {
-                # what identifies this very resource (creation time, guid): undo compares it, so a resource that was deleted and made again by someone else under the same name is not AVDTune's
-                try { $made = Get-AVDTuneEnvResource -Arm $Arm -Token $Token -Path "$(($s.Path -split '\?')[0])?api-version=$($ruleNow.Api)" -What 'read the new resource'; if ($made.Exists) { $entry | Add-Member -NotePropertyName Identity -NotePropertyValue (Get-AVDTuneEnvIdentity $made.Body) -Force; $entry | Add-Member -NotePropertyName Etag -NotePropertyValue ([string](Get-AVDTuneProp $made.Body 'etag')) -Force } } catch { }
+                # what identifies this very resource (creation time, guid): undo compares it, so a resource that was deleted and made again by someone else under the same name is not AVDTune's.
+                # Is the creation time older than the start of our PUT, the resource existed before it (someone was faster between the last GET and the PUT): it is foreign, never deleted, the run ends with a warning.
+                # A missing identity is written to the journal (IdentityMissing); the undo then keeps the resource.
+                $idErr = ''
+                try {
+                    $made = Get-AVDTuneEnvResource -Arm $Arm -Token $Token -Path "$(($s.Path -split '\?')[0])?api-version=$($ruleNow.Api)" -What 'read the new resource'
+                    if ($made.Exists) {
+                        $idn = Get-AVDTuneEnvIdentity $made.Body
+                        $created = Get-AVDTuneEnvCreated $made.Body
+                        if ($created -and $created -lt $putStart) { $idn['Foreign'] = $true; $w = [pscustomobject]@{ Ok = $false; Benign = $false; Foreign = $true; Message = "Warning: the resource existed before AVDTune's request (creation time $($created.UtcDateTime.ToString('o')) is older than the start of the request $($putStart.UtcDateTime.ToString('o'))). It was created by someone else between the last check and the request, so AVDTune treats it as foreign and never deletes it. The run is stopped: check the resource and make the plan again." } }
+                        if ($idn.Count -gt 0) { $entry | Add-Member -NotePropertyName Identity -NotePropertyValue $idn -Force } else { $idErr = 'The resource carries no creation time or guid.' }
+                        $entry | Add-Member -NotePropertyName Etag -NotePropertyValue ([string](Get-AVDTuneProp $made.Body 'etag')) -Force
+                    }
+                    else { $idErr = 'The resource was not found after the create.' }
+                }
+                catch { $idErr = $_.Exception.Message }
+                if ($idErr) { $entry | Add-Member -NotePropertyName IdentityMissing -NotePropertyValue $idErr -Force }
             }
+        }
+        if ($w.Ok) {
             $entry.Status = $(if ($w.Benign) { 'Exists' } else { 'Done' }); $entry.Message = ''
             if ($w.Benign) { $entry.Action = 'None' }
             [void]$results.Add([pscustomobject]@{ Id = $s.Id; Title = $s.Title; Status = $(if ($w.Benign) { 'Unchanged' } else { 'Changed' }); Message = '' })
@@ -668,6 +699,19 @@ function Get-AVDTuneEnvIdentity {
         if ($null -ne $v -and "$v") { $o[$pair[0]] = $(if ($v -is [datetime]) { $v.ToUniversalTime().ToString('o') } else { [string]$v }) }
     }
     $o
+}
+
+function Get-AVDTuneEnvCreated {
+    <# The creation time of a resource as a DateTimeOffset (systemData.createdAt, properties.creationTime or createdOn), or $null when the answer carries none that can be read. #>
+    param($Body)
+    $sd = Get-AVDTuneProp $Body 'systemData'; $pr = Get-AVDTuneProp $Body 'properties'
+    foreach ($v in @((Get-AVDTuneProp $sd 'createdAt'), (Get-AVDTuneProp $pr 'creationTime'), (Get-AVDTuneProp $pr 'createdOn'))) {
+        if ($null -eq $v -or -not "$v") { continue }
+        if ($v -is [datetime]) { return [DateTimeOffset]::new($v.ToUniversalTime()) }
+        $o = [DateTimeOffset]::MinValue
+        if ([DateTimeOffset]::TryParse([string]$v, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::AssumeUniversal, [ref]$o)) { return $o }
+    }
+    $null
 }
 
 function Test-AVDTuneEnvShareEmpty {
@@ -714,7 +758,6 @@ function ConvertTo-AVDTuneEnvSafeBefore {
         'account' {
             foreach ($k in 'supportsHttpsTrafficOnly', 'allowBlobPublicAccess') { $v = & $get $k; if ($v -is [bool]) { $out[$k] = $v } }
             $v = [string](& $get 'minimumTlsVersion'); if ($v -in 'TLS1_0', 'TLS1_1', 'TLS1_2', 'TLS1_3') { $out['minimumTlsVersion'] = $v }
-            $v = [string](& $get 'publicNetworkAccess'); if ($v -in 'Enabled', 'Disabled', 'SecuredByPerimeter') { $out['publicNetworkAccess'] = $v }
         }
         'smb' { foreach ($k in 'versions', 'authenticationMethods', 'kerberosTicketEncryption', 'channelEncryption') { $v = & $get $k; if ($v -is [string] -and $v -cmatch $script:EnvTextPattern) { $out[$k] = $v } } }
         'identity' { $v = [string](& $get 'directoryServiceOptions'); if ($v -in 'None', 'AADDS', 'AD', 'AADKERB') { $out['directoryServiceOptions'] = $v } }
@@ -775,6 +818,18 @@ function Get-AVDTuneEnvUndoPlan {
             if ($e.Type -in 'smb', 'identity', 'account', 'share' -and @($deletedAccounts | Where-Object { $path.StartsWith($_) }).Count -gt 0) { [void]$steps.Add((& $mk 'Covered' 'Goes away with the storage account.' '' $null @())); continue }
             $before = ConvertTo-AVDTuneEnvSafeBefore -Type $e.Type -Before (Get-AVDTuneProp $e 'Before')
             if ($null -eq $before) { [void]$steps.Add((& $mk 'Keep' 'No usable previous value was recorded, so AVDTune cannot restore it.' '' $null @())); continue }
+            if ($e.Type -eq 'account') {
+                # a restore that would lower security (https off, public blob access on, TLS below 1.2) is shown and not written: the administrator decides that by hand
+                $worse = New-Object System.Collections.ArrayList
+                foreach ($k in @($before.Keys)) {
+                    $isWorse = switch ($k) { 'supportsHttpsTrafficOnly' { $before[$k] -eq $false } 'allowBlobPublicAccess' { $before[$k] -eq $true } 'minimumTlsVersion' { [Array]::IndexOf(@('TLS1_0', 'TLS1_1', 'TLS1_2', 'TLS1_3'), [string]$before[$k]) -lt 2 } default { $false } }
+                    if ($isWorse) { [void]$worse.Add("$k=$($before[$k])"); $before.Remove($k) }
+                }
+                if ($worse.Count -gt 0) {
+                    [void]$steps.Add((& $mk 'Keep' "Restoring the recorded old values would lower the security of the storage account ($($worse -join ', ')): AVDTune does not write them back. Change them by hand if you really want them." '' $null @($worse | ForEach-Object { "stays: $_ (old value, less secure)" })))
+                    if ($before.Count -eq 0) { continue }
+                }
+            }
             $body = switch ($e.Type) { 'account' { @{ properties = $before } } 'identity' { @{ properties = @{ azureFilesIdentityBasedAuthentication = $before } } } 'smb' { @{ properties = @{ protocolSettings = @{ smb = $before } } } } default { $null } }
             if (-not $body) { [void]$steps.Add((& $mk 'Keep' 'This change cannot be undone by AVDTune.' '' $null @())); continue }
             [void]$steps.Add((& $mk 'Restore' '' $(if ($e.Type -eq 'smb') { 'PUT' } else { 'PATCH' }) $body @('back to the recorded values')))
@@ -785,15 +840,20 @@ function Get-AVDTuneEnvUndoPlan {
         $cur = $null
         try { $cur = Get-AVDTuneEnvResource -Arm $Arm -Token $Token -Path "${path}?api-version=$($rule.Api)" -What 'read the resource' } catch { [void]$steps.Add((& $mk 'Keep' "Cannot be checked: $($_.Exception.Message)" '' $null @())); continue }
         if (-not $cur.Exists) { [void]$steps.Add((& $mk 'Gone' 'The resource no longer exists.' '' $null @())); if ($e.Type -eq 'account') { [void]$deletedAccounts.Add($path) }; continue }
+        # only a clean, identified create is deleted: no identity, a failed or unfinished step, or a resource that was foreign when AVDTune wrote to it is only kept (with the reason)
+        $rec = Get-AVDTuneProp $e 'Identity'
+        if ($rec -and (Get-AVDTuneProp $rec 'Foreign') -eq $true) { [void]$steps.Add((& $mk 'Keep' 'The resource existed before AVDTune wrote to it (creation time older than the request): it is foreign and never deleted.' '' $null @())); continue }
+        if ($e.Status -ne 'Done') { [void]$steps.Add((& $mk 'Keep' "The step ended with the status $($e.Status), not Done: AVDTune cannot be sure the resource is its own, so it is not deleted." '' $null @())); continue }
+        $hasId = $false; if ($rec) { foreach ($p in $rec.PSObject.Properties) { if ($p.Name -ne 'Foreign' -and $p.Value) { $hasId = $true } } }
+        if (-not $hasId) { [void]$steps.Add((& $mk 'Keep' "No creation time or guid was recorded for this resource$(if (Get-AVDTuneProp $e 'IdentityMissing') { ' (' + (Remove-AVDTuneControlCharacters ([string](Get-AVDTuneProp $e 'IdentityMissing')) 160) + ')' }): AVDTune cannot prove it is the one it created, so it is not deleted." '' $null @())); continue }
         # the same resource as the one that was created: creation time and guid recorded at the create
-        $rec = Get-AVDTuneProp $e 'Identity'; $nowId = Get-AVDTuneEnvIdentity $cur.Body; $other = $false
+        $nowId = Get-AVDTuneEnvIdentity $cur.Body; $other = $false
         if ($rec) { foreach ($p in $rec.PSObject.Properties) { if ($p.Value -and ($nowId.Contains($p.Name) -and [string]$nowId[$p.Name] -ne [string]$p.Value -or -not $nowId.Contains($p.Name))) { $other = $true } } }
         if ($other) { [void]$steps.Add((& $mk 'Keep' 'The resource was created again after AVDTune made it (creation time or guid differ): it is not AVDTune''s to delete.' '' $null @())); continue }
         if ($rule.Taggable) {
             $tag = [string](Get-AVDTuneProp (Get-AVDTuneProp $cur.Body 'tags') 'CreatedWith')
             if ($tag -ne 'AVDTune') { [void]$steps.Add((& $mk 'Keep' 'The resource does not carry the tag CreatedWith=AVDTune: it is not AVDTune''s to delete.' '' $null @())); continue }
         }
-        elseif ($e.Status -ne 'Done') { [void]$steps.Add((& $mk 'Keep' 'The creation did not finish cleanly and the resource has no tags to prove it is AVDTune''s.' '' $null @())); continue }
         $shares = @()
         if ($e.Type -eq 'share') {
             $a = if ($path -match '/storageAccounts/([a-z0-9]{3,24})/') { $Matches[1] } else { '' }; $sh = if ($path -match '/shares/([a-z0-9-]{3,63})$') { $Matches[1] } else { '' }
@@ -818,7 +878,15 @@ function Get-AVDTuneEnvUndoPlan {
             $z = $cur
             if ($e.Type -eq 'dnslink') { try { $z = Get-AVDTuneEnvResource -Arm $Arm -Token $Token -Path "${zonePath}?api-version=$script:DnsApi" -What 'read the DNS zone' } catch { [void]$steps.Add((& $mk 'Keep' "The zone cannot be checked: $($_.Exception.Message)" '' $null @())); continue } }
             $recs = if ($z.Exists) { [int](Get-AVDTuneProp (Get-AVDTuneProp $z.Body 'properties') 'numberOfRecordSets') } else { 0 }
-            $ours = @($ordered | Where-Object { $_.E.Type -eq 'dnsgroup' -and $_.E.Action -eq 'Create' }).Count   # the A record of our own zone group goes away before the zone is looked at again
+            # the A records of our own zone groups go away before the zone is looked at again: counted by what exists now (a GET per zone group of the journal that names this zone), not by journal entries
+            $ours = 0
+            foreach ($gp in @($ordered | Where-Object { $_.E.Type -eq 'dnsgroup' -and $_.E.Action -eq 'Create' } | ForEach-Object { [string]$_.E.Path } | Sort-Object -Unique)) {
+                try {
+                    $gr = Get-AVDTuneEnvResource -Arm $Arm -Token $Token -Path "${gp}?api-version=$script:NetworkApi" -What 'read the DNS zone group'
+                    if ($gr.Exists -and @(@(Get-AVDTuneProp (Get-AVDTuneProp $gr.Body 'properties') 'privateDnsZoneConfigs') | Where-Object { $_ -and [string](Get-AVDTuneProp (Get-AVDTuneProp $_ 'properties') 'privateDnsZoneId') -ieq $zonePath }).Count -gt 0) { $ours++ }
+                }
+                catch { }   # cannot be read: not counted, so the zone stays when in doubt
+            }
             if ($recs -gt 1 + $ours) { [void]$steps.Add((& $mk 'Keep' "The zone holds $recs record sets: other storage accounts may use it, so the zone and its VNet link stay." '' $null @())); continue }
         }
         if ($e.Type -eq 'account') { [void]$deletedAccounts.Add($path) }
@@ -848,8 +916,9 @@ function Invoke-AVDTuneEnvUndo {
     foreach ($s in $todo) {
         if ($stopped) { [void]$results.Add([pscustomobject]@{ Id = $s.Id; Title = $s.Title; Status = 'Skipped'; Message = 'An earlier step failed.' }); continue }
         $role = if ($s.Type -eq 'role') { 'User Access Administrator or Role Based Access Control Administrator' } else { 'Contributor on the resource group' }
-        if ($s.Type -eq 'dnszone' -and $s.Action -eq 'Delete') {
-            $z = Get-AVDTuneEnvResource -Arm $Arm -Token $Token -Path $s.Path -What 'read the DNS zone'   # the records of the endpoint are gone by now: only SOA may be left
+        if ($s.Type -in 'dnszone', 'dnslink' -and $s.Action -eq 'Delete') {
+            $zp = if ($s.Type -eq 'dnslink') { (($s.Path -split '\?')[0] -replace '/virtualNetworkLinks/[^/]+$', '') + "?api-version=$script:DnsApi" } else { $s.Path }
+            $z = Get-AVDTuneEnvResource -Arm $Arm -Token $Token -Path $zp -What 'read the DNS zone'   # the records of the endpoint are gone by now: only SOA may be left; zone and link stay together
             if ($z.Exists -and [int](Get-AVDTuneProp (Get-AVDTuneProp $z.Body 'properties') 'numberOfRecordSets') -gt 1) { [void]$results.Add([pscustomobject]@{ Id = $s.Id; Title = $s.Title; Status = 'Unchanged'; Message = 'The zone holds other records and stays.' }); continue }
         }
         if ($s.Type -eq 'share' -and $s.Action -eq 'Delete') {

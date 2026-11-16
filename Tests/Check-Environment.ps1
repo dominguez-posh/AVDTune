@@ -332,7 +332,19 @@ try {
     $tlsNow = $arm.Store.Resources[$accKey].properties.minimumTlsVersion
     $up = Get-AVDTuneEnvUndoPlan -Arm $arm -Token $tok -Root $root
     $ur = Invoke-AVDTuneEnvUndo -Arm $arm -Token $tok -Root $root -ConfirmedHash $up.Hash -PollSeconds 0 -MaxPolls 20
-    Test-Check 'an aligned existing account: TLS 1.2 was set, undo restores the recorded TLS 1.0, public access was never touched' ($tlsNow -eq 'TLS1_2' -and $arm.Store.Resources[$accKey].properties.minimumTlsVersion -eq 'TLS1_0' -and $arm.Store.Resources[$accKey].properties.publicNetworkAccess -eq 'Enabled') ($ur.Results | ConvertTo-Json -Compress)
+    $acKeep = @($up.Steps | Where-Object { $_.Type -eq 'account' })[0]
+    Test-Check 'an aligned existing account: TLS 1.2 was set; undo shows the lower recorded TLS 1.0 as kept (reason) and does not write it, public access was never touched' ($tlsNow -eq 'TLS1_2' -and $acKeep.Action -eq 'Keep' -and $acKeep.Reason -like '*lower the security*minimumTlsVersion=TLS1_0*' -and $arm.Store.Resources[$accKey].properties.minimumTlsVersion -eq 'TLS1_2' -and $arm.Store.Resources[$accKey].properties.publicNetworkAccess -eq 'Enabled') (($up.Steps | ForEach-Object { "$($_.Id)=$($_.Action) $($_.Reason)" }) -join '|')
+    # N2: a journal that carries publicNetworkAccess, https off or blob access on is not restored either (journal is input)
+    $root = New-Root; $roots += $root
+    $arm = New-AVDTuneFakeEnvArm -Seed @{ Resources = @{ $accKey = @{ name = 'contosoprofiles'; kind = 'FileStorage'; sku = @{ name = 'Premium_LRS' }; location = 'westeurope'; properties = @{ supportsHttpsTrafficOnly = $true; minimumTlsVersion = 'TLS1_2'; allowBlobPublicAccess = $false; publicNetworkAccess = 'Disabled' } } } }
+    [void](Invoke-Full $arm $good $root)
+    $jp = Join-Path $root 'config\azure-setup.json'; $jj = [IO.File]::ReadAllText($jp) | ConvertFrom-Json
+    $jj.Runs[0].Steps = @($jj.Runs[0].Steps) + [pscustomobject]@{ Id = 'env.account'; Type = 'account'; Path = $acc; Action = 'Update'; Taggable = $true; Before = [pscustomobject]@{ publicNetworkAccess = 'Enabled'; supportsHttpsTrafficOnly = $false; allowBlobPublicAccess = $true; minimumTlsVersion = 'TLS1_1' }; Status = 'Done'; Message = ''; Undone = $false; At = (Get-Date).AddMinutes(5).ToString('o') }
+    [IO.File]::WriteAllText($jp, ($jj | ConvertTo-Json -Depth 10))
+    $up = Get-AVDTuneEnvUndoPlan -Arm $arm -Token $tok -Root $root
+    $pa = @($up.Steps | Where-Object { $_.Type -eq 'account' })
+    Test-Check 'undo plan: a recorded publicNetworkAccess is no longer read; https off, blob access on and TLS 1.1 are shown as kept, nothing for the account is written' ($pa.Count -eq 1 -and $pa[0].Action -eq 'Keep' -and $pa[0].Reason -like '*supportsHttpsTrafficOnly=False*' -and $pa[0].Reason -like '*allowBlobPublicAccess=True*' -and $pa[0].Reason -like '*minimumTlsVersion=TLS1_1*' -and $pa[0].Reason -notlike '*publicNetworkAccess*' -and -not $pa[0].Body) (($up.Steps | ForEach-Object { "$($_.Id)=$($_.Action) $($_.Reason)" }) -join '|')
+    Test-Check 'the before allowlist has no publicNetworkAccess' ((Get-Content -LiteralPath (Join-Path $repo 'Modules\AVDTune.Environment.psm1') -Raw) -notmatch "'publicNetworkAccess'\] = \$v") $null
     # the journal is data: a planted path that is not on the allowlist is never sent
     $root = New-Root; $roots += $root
     $arm = New-AVDTuneFakeEnvArm
@@ -429,11 +441,11 @@ try {
     $jp = Join-Path $root 'config\azure-setup.json'
     $jj = [IO.File]::ReadAllText($jp) | ConvertFrom-Json
     $acEntry = @($jj.Runs[0].Steps | Where-Object { $_.Type -eq 'account' })[0]
-    $acEntry.Before = [pscustomobject]@{ minimumTlsVersion = 'TLS1_0'; publicNetworkAccess = 'Evil'; allowBlobPublicAccess = 'true'; allowSharedKeyAccess = $true; identity = 'x' }
+    $acEntry.Before = [pscustomobject]@{ minimumTlsVersion = 'TLS1_3'; publicNetworkAccess = 'Evil'; allowBlobPublicAccess = 'true'; allowSharedKeyAccess = $true; identity = 'x' }
     [IO.File]::WriteAllText($jp, ($jj | ConvertTo-Json -Depth 10))
     $up = Get-AVDTuneEnvUndoPlan -Arm $arm -Token $tok -Root $root
     $rs = @($up.Steps | Where-Object { $_.Id -eq 'env.account' })[0]
-    Test-Check 'journal as input: the recorded old values are reduced to known keys and enum values' ($rs.Action -eq 'Restore' -and (@($rs.Body.properties.Keys) -join ',') -eq 'minimumTlsVersion' -and $rs.Body.properties.minimumTlsVersion -eq 'TLS1_0') ($rs.Body | ConvertTo-Json -Compress)
+    Test-Check 'journal as input: the recorded old values are reduced to known keys and enum values' ($rs.Action -eq 'Restore' -and (@($rs.Body.properties.Keys) -join ',') -eq 'minimumTlsVersion' -and $rs.Body.properties.minimumTlsVersion -eq 'TLS1_3') ($rs.Body | ConvertTo-Json -Compress)
     $acEntry.Before = [pscustomobject]@{ minimumTlsVersion = 'x; drop'; publicNetworkAccess = 'Evil' }
     [IO.File]::WriteAllText($jp, ($jj | ConvertTo-Json -Depth 10))
     Test-Check 'journal as input: nothing usable left means Keep, not an empty request' (@((Get-AVDTuneEnvUndoPlan -Arm $arm -Token $tok -Root $root).Steps | Where-Object Id -eq 'env.account')[0].Action -eq 'Keep') $null
@@ -479,6 +491,115 @@ try {
     $arm.Store.Resources[$peKey2].systemData.createdAt = '2026-11-16T09:00:00.999Z'
     $up = Get-AVDTuneEnvUndoPlan -Arm $arm -Token $tok -Root $root
     Test-Check 'a resource made again under the same name (same tag, other creation time) is kept' (@($up.Steps | Where-Object Id -eq 'env.endpoint')[0].Action -eq 'Keep' -and @($up.Steps | Where-Object Id -eq 'env.endpoint')[0].Reason -like '*created again*') (@($up.Steps | Where-Object Id -eq 'env.endpoint')[0].Reason)
+
+    # N1: a create entry is deleted only when it is clean (status Done) and identified (creation time or guid); else Keep with the reason
+    $root = New-Root; $roots += $root; $arm = New-AVDTuneFakeEnvArm; [void](Invoke-Full $arm $good $root)
+    $jp = Join-Path $root 'config\azure-setup.json'; $jj = [IO.File]::ReadAllText($jp) | ConvertFrom-Json
+    foreach ($e in @($jj.Runs[0].Steps)) {
+        if ($e.Id -eq 'env.endpoint') { $e.PSObject.Properties.Remove('Identity') }
+        if ($e.Id -eq 'env.role-users') { $e.Status = 'Failed' }
+        if ($e.Id -eq 'env.role-admins') { $e.Status = 'Started' }
+        if ($e.Id -eq 'env.dnslink') { $e.Identity = [pscustomobject]@{} }
+    }
+    [IO.File]::WriteAllText($jp, ($jj | ConvertTo-Json -Depth 10))
+    $up = Get-AVDTuneEnvUndoPlan -Arm $arm -Token $tok -Root $root; $b1 = @{}; foreach ($s in $up.Steps) { $b1[$s.Id] = $s }
+    Test-Check 'N1: a create without a recorded identity (missing or empty) is only kept, with the reason' ($b1['env.endpoint'].Action -eq 'Keep' -and $b1['env.endpoint'].Reason -like '*No creation time or guid*' -and $b1['env.dnslink'].Action -eq 'Keep' -and $b1['env.dnslink'].Reason -like '*No creation time or guid*') (($up.Steps | ForEach-Object { "$($_.Id)=$($_.Action)" }) -join ',')
+    Test-Check 'N1: a create with the status Failed or Started is only kept, with the reason' ($b1['env.role-users'].Action -eq 'Keep' -and $b1['env.role-users'].Reason -like '*Failed*' -and $b1['env.role-admins'].Action -eq 'Keep' -and $b1['env.role-admins'].Reason -like '*Started*') (($up.Steps | ForEach-Object { "$($_.Id)=$($_.Action)" }) -join ',')
+    Test-Check 'N1: counter-check, a clean identified create of the same run is still deleted' ($b1['env.dnsgroup'].Action -eq 'Delete') (($up.Steps | ForEach-Object { "$($_.Id)=$($_.Action)" }) -join ',')
+    Open-AVDTuneWriteGate -SnapshotId 'snapN1' -ConfirmedBy 'Test User'
+    $urN1 = Invoke-AVDTuneEnvUndo -Arm $arm -Token $tok -Root $root -ConfirmedHash $up.Hash -PollSeconds 0 -MaxPolls 20
+    Test-Check 'N1: the undo sends no DELETE for the kept entries' ($arm.Store.Resources.ContainsKey($peKey2) -and @($arm.Store.Writes | Where-Object { $_ -like 'DELETE *roleassignments*' -or $_ -like 'DELETE *virtualnetworklinks*' -or $_ -like 'DELETE *privateendpoints/pe-contosoprofiles' }).Count -eq 0) (($arm.Store.Writes) -join '|')
+
+    # remaining window of finding 5 (GET then PUT without If-None-Match): the creation time after the PUT is older than its start -> foreign
+    $root = New-Root; $roots += $root
+    $inner = New-AVDTuneFakeEnvArm
+    $shKey = "/subscriptions/$sub/resourcegroups/rg-example/providers/microsoft.storage/storageaccounts/contosoprofiles/fileservices/default/shares/profiles"
+    $shGets2 = New-Object System.Collections.ArrayList
+    $race2 = [pscustomobject]@{ Kind = 'Race2'; Store = $inner.Store; Log = $inner.Log; Invoke = {
+            param($Method, $Path, $Token, $Body)
+            $res = & $inner.Invoke $Method $Path $Token $Body
+            if ($Method -eq 'GET' -and $Path -like '*/shares/profiles?*') {
+                [void]$shGets2.Add($Path)
+                if ($shGets2.Count -eq 1) {   # the plans do not read the share (the account is missing); this is the GET right before the create: someone creates the share right after it, long before our request
+                    [void](& $inner.Invoke 'PUT' ($Path -replace 'api-version=.*$', 'api-version=2024-01-01') $Token @{ properties = @{ shareQuota = 777 } })
+                    $inner.Store.Resources[$shKey].systemData.createdAt = '2026-01-01T08:00:00.000Z'
+                }
+            }
+            $res
+        }.GetNewClosure() }
+    $r = Invoke-Full $race2 $good $root
+    $jj = [IO.File]::ReadAllText((Join-Path $root 'config\azure-setup.json')) | ConvertFrom-Json
+    $shE = @($jj.Runs[0].Steps | Where-Object { $_.Type -eq 'share' })[0]
+    $fs = @($r.Results | Where-Object Status -eq 'Failed')[0]
+    Test-Check 'foreign: a share that existed at our PUT (creation time older than the request) ends the run with a warning, marked Foreign in the journal' ($r.Status -eq 'Failed' -and $fs.Id -eq 'env.share' -and $fs.Message -like 'Warning*foreign*never deletes*' -and $shE.Identity.Foreign -eq $true -and $shE.Status -eq 'Failed' -and @($r.Results | Where-Object Status -eq 'Skipped').Count -gt 0) (($r.Results | ForEach-Object { "$($_.Id)=$($_.Status) $($_.Message)" }) -join '|')
+    Open-AVDTuneWriteGate -SnapshotId 'snapN2' -ConfirmedBy 'Test User'
+    $upF = Get-AVDTuneEnvUndoPlan -Arm $inner -Token $tok -Root $root -Files $files -StorageToken 'x'; $bF = @{}; foreach ($s in $upF.Steps) { $bF[$s.Id] = $s }
+    $urF = Invoke-AVDTuneEnvUndo -Arm $inner -Token $tok -Root $root -ConfirmedHash $upF.Hash -Files $files -StorageToken 'x' -PollSeconds 0 -MaxPolls 20
+    Test-Check 'foreign: the undo never deletes it (Keep with the reason), not even with an empty share, and the account stays with it' ($bF['env.share'].Action -eq 'Keep' -and $bF['env.share'].Reason -like '*foreign*' -and $bF['env.account'].Action -ne 'Delete' -and $inner.Store.Resources.ContainsKey($shKey) -and @($inner.Store.Writes | Where-Object { $_ -like 'DELETE *' -and ($_ -like '*shares/profiles' -or $_ -like '*storageaccounts/contosoprofiles') }).Count -eq 0) (($upF.Steps | ForEach-Object { "$($_.Id)=$($_.Action) $($_.Reason)" }) -join '|')
+    Test-Check 'foreign: a clean create is not marked foreign' (@($jj.Runs[0].Steps | Where-Object { $_.Type -eq 'account' -and $_.Identity.Foreign }).Count -eq 0) $null
+
+    # N3: no identity readable after the create: no empty catch, the journal says so, the undo keeps the resource
+    $root = New-Root; $roots += $root
+    $inner = New-AVDTuneFakeEnvArm; $flip = [pscustomobject]@{ On = $false }
+    $deaf = [pscustomobject]@{ Kind = 'Deaf'; Store = $inner.Store; Log = $inner.Log; Invoke = {
+            param($Method, $Path, $Token, $Body)
+            if ($Method -eq 'PUT' -and $Path -like '*/privateEndpoints/pe-contosoprofiles?api-version=*') { $flip.On = $true }
+            if ($Method -eq 'GET' -and $flip.On -and $Path -like '*/privateEndpoints/pe-contosoprofiles?api-version=*') { return [pscustomobject]@{ Status = 500; Headers = @{}; Body = [pscustomobject]@{ error = [pscustomobject]@{ code = 'InternalServerError'; message = 'fake: cannot read' } }; Error = '' } }
+            & $inner.Invoke $Method $Path $Token $Body
+        }.GetNewClosure() }
+    $r = Invoke-Full $deaf $good $root
+    $flip.On = $false
+    $jj = [IO.File]::ReadAllText((Join-Path $root 'config\azure-setup.json')) | ConvertFrom-Json
+    $peE = @($jj.Runs[0].Steps | Where-Object { $_.Type -eq 'endpoint' })[0]
+    Test-Check 'N3: the identity could not be read: the run goes on, the journal names the missing identity' ($r.Status -eq 'Changed' -and -not $peE.Identity -and $peE.IdentityMissing -like '*fake: cannot read*' -and $peE.Status -eq 'Done') ("$($r.Status) $($r.Message) " + ($peE | ConvertTo-Json -Compress))
+    $upM = Get-AVDTuneEnvUndoPlan -Arm $inner -Token $tok -Root $root
+    Test-Check 'N3: undo keeps that resource (no identity, see N1)' (@($upM.Steps | Where-Object Id -eq 'env.endpoint')[0].Action -eq 'Keep' -and @($upM.Steps | Where-Object Id -eq 'env.endpoint')[0].Reason -like '*fake: cannot read*') (@($upM.Steps | Where-Object Id -eq 'env.endpoint')[0].Reason)
+    Test-Check 'N3: no empty catch after reading the identity' ((Get-Content -LiteralPath (Join-Path $repo 'Modules\AVDTune.Environment.psm1') -Raw) -notmatch "read the new resource'[^\r\n]*catch \{ \}") $null
+
+    # N4: the records of the zone are counted by what exists now, and the link is looked at again right before its delete like the zone
+    $root = New-Root; $roots += $root; $arm = New-AVDTuneFakeEnvArm; [void](Invoke-Full $arm $good $root)
+    $gKey = "$peKey2/privatednszonegroups/default"
+    $arm.Store.Resources.Remove($gKey)   # our zone group is gone already (someone deleted it), the zone holds one record of someone else
+    $arm.Store.ExtraRecords = 1
+    $up = Get-AVDTuneEnvUndoPlan -Arm $arm -Token $tok -Root $root; $b4 = @{}; foreach ($s in $up.Steps) { $b4[$s.Id] = $s }
+    Test-Check 'N4: the journal lists our zone group but it is gone and the zone holds another record: zone and link stay (counted by the real stock)' ($b4['env.dnszone'].Action -eq 'Keep' -and $b4['env.dnslink'].Action -eq 'Keep' -and $b4['env.dnszone'].Reason -like '*record sets*') (($up.Steps | ForEach-Object { "$($_.Id)=$($_.Action)" }) -join ',')
+    $root = New-Root; $roots += $root; $arm = New-AVDTuneFakeEnvArm; [void](Invoke-Full $arm $good $root)
+    $up = Get-AVDTuneEnvUndoPlan -Arm $arm -Token $tok -Root $root; $b4 = @{}; foreach ($s in $up.Steps) { $b4[$s.Id] = $s }
+    Test-Check 'N4: counter-check, with our own zone group and no other record the zone and the link are deleted' ($b4['env.dnszone'].Action -eq 'Delete' -and $b4['env.dnslink'].Action -eq 'Delete') (($up.Steps | ForEach-Object { "$($_.Id)=$($_.Action)" }) -join ',')
+    $lateStore = $arm.Store; $lateInner = $arm
+    $late = [pscustomobject]@{ Kind = 'Late'; Store = $arm.Store; Log = $arm.Log; Invoke = {
+            param($Method, $Path, $Token, $Body)
+            if ($Method -eq 'DELETE') { $lateStore.ExtraRecords = 3 }   # records of other accounts arrive after the undo plan, while the undo runs
+            & $lateInner.Invoke $Method $Path $Token $Body
+        }.GetNewClosure() }
+    Open-AVDTuneWriteGate -SnapshotId 'snapN4' -ConfirmedBy 'Test User'
+    $ur4 = Invoke-AVDTuneEnvUndo -Arm $late -Token $tok -Root $root -ConfirmedHash $up.Hash -PollSeconds 0 -MaxPolls 20
+    $zk = "/subscriptions/$sub/resourcegroups/rg-network/providers/microsoft.network/privatednszones/privatelink.file.core.windows.net"
+    $linkKeys = @($arm.Store.Resources.Keys | Where-Object { $_ -like "$zk/virtualnetworklinks/*" })
+    Test-Check 'N4: records that arrive after the undo plan: the link is looked at again like the zone, both stay' ($arm.Store.Resources.ContainsKey($zk) -and $linkKeys.Count -eq 1 -and @($arm.Store.Writes | Where-Object { $_ -like 'DELETE *virtualnetworklinks*' -or $_ -like 'DELETE *privatednszones*' }).Count -eq 0 -and @($ur4.Results | Where-Object { $_.Id -in 'env.dnslink', 'env.dnszone' -and $_.Status -eq 'Unchanged' }).Count -eq 2) (($ur4.Results | ForEach-Object { "$($_.Id)=$($_.Status) $($_.Message)" }) -join '|')
+
+    # N5: the role assignments are read over all pages; a nextLink only on management.azure.com
+    $scope5 = "$acc/fileServices/default/fileshares/profiles"
+    $mkPaged = {
+        param([string]$Next)
+        $in = & $mkAcc @{ supportsHttpsTrafficOnly = $true; minimumTlsVersion = 'TLS1_2'; allowBlobPublicAccess = $false; publicNetworkAccess = 'Disabled' }
+        $in.Store.Roles = @(@{ Scope = $scope5; Principal = $g1; Role = '0c867c2a-1d8c-454a-a3db-ab2ea1bdc8bb'; Name = 'r-one' }, @{ Scope = $scope5; Principal = $g2; Role = 'a7264617-510b-434b-a828-9731dc254ea7'; Name = 'r-two' })
+        [pscustomobject]@{ Kind = 'Paged'; Store = $in.Store; Log = $in.Log; Invoke = {
+                param($Method, $Path, $Token, $Body)
+                if ($Method -eq 'GET' -and $Path -like '*/roleAssignments?*') {
+                    if ($Path -like '*skiptoken*') { [void]$in.Log.Add("GET $Path"); return (& $in.Invoke 'GET' ($Path -replace '&%24skiptoken=[^&]*', '') $Token $null) }
+                    $nl = if ($Next) { $Next } else { "https://management.azure.com$Path&%24skiptoken=abc" }
+                    return [pscustomobject]@{ Status = 200; Headers = @{}; Body = [pscustomobject]@{ value = @(); nextLink = $nl }; Error = '' }
+                }
+                & $in.Invoke $Method $Path $Token $Body
+            }.GetNewClosure() }
+    }
+    $pg = & $mkPaged ''
+    $p5 = Get-AVDTuneEnvPlan -Arm $pg -Token $tok -Spec $good -User 'u'
+    Test-Check 'N5: the assignments on the second page are found (the roles are not planned again)' ((Get-Step $p5 'env.role-users').Action -eq 'None' -and (Get-Step $p5 'env.role-admins').Action -eq 'None' -and @($pg.Log | Where-Object { $_ -like '*skiptoken*' }).Count -eq 1) (($p5.Steps | ForEach-Object { "$($_.Id)=$($_.Action)" }) -join ',')
+    $pg = & $mkPaged "https://evil.example.test/subscriptions/$sub/resourceGroups/x/providers/Microsoft.Authorization/roleAssignments?api-version=2022-04-01&%24skiptoken=abc"
+    $p5 = Get-AVDTuneEnvPlan -Arm $pg -Token $tok -Spec $good -User 'u'
+    Test-Check 'N5: a nextLink to another host is not followed (no request for it, a warning)' (@($pg.Log | Where-Object { $_ -like '*evil*' -or $_ -like '*skiptoken*' }).Count -eq 0 -and ($p5.Warnings -join ' ') -like '*not followed*' -and (Get-Step $p5 'env.role-users').Action -eq 'Create') (($p5.Warnings) -join '|')
 
     # 6: the VNet link stays with the zone when the zone holds other records
     $root = New-Root; $roots += $root; $arm = New-AVDTuneFakeEnvArm -Seed @{ ExtraRecords = 3 }; [void](Invoke-Full $arm $good $root)
