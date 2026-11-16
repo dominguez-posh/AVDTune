@@ -404,7 +404,7 @@ exit 0
     function Set-ShutdownBlock { param($On) }
     function Set-SealBusy { param($Busy) }
     function Update-SealView { }
-    $jobNames = 'SealJob', 'UpdJob', 'BenchJob', 'ReadyJob', 'OverviewJob', 'FslJob'
+    $jobNames = 'SealJob', 'UpdJob', 'BenchJob', 'ReadyJob', 'OverviewJob', 'FslJob', 'OptJob', 'OptRun'
     $blocked = @()
     foreach ($jn in $jobNames) {
         Set-Variable -Scope Script -Name $jn -Value @{ Running = $true }
@@ -412,7 +412,7 @@ exit 0
         Remove-Variable -Scope Script -Name $jn
         if ($t -like 'Another operation is still running.*') { $blocked += $jn }
     }
-    Test-Check 'page behavior: a running finish, update, benchmark, readiness, overview or FSLogix job each blocks the start' ($blocked.Count -eq 6) ($blocked -join ',')
+    Test-Check 'page behavior: a running finish, update, benchmark, readiness, overview, FSLogix, optimization read or optimization run job each blocks the start' ($blocked.Count -eq 8) ($blocked -join ',')
     $rootJ = New-Root; [void](Save-Healthcheck -Root $rootJ)
     $script:StateRoot = $rootJ; $script:AppRoot = $repo; $script:TestMode = $true
     $script:TestInfo = @{ FakeScript = (Join-Path $PSScriptRoot 'Fakes\FakeMachine.ps1') }

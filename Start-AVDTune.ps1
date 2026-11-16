@@ -544,6 +544,7 @@ $window.Add_Closed({
     try { if ($script:StartContext.Session) { Disconnect-AVDTuneSession $script:StartContext.Session } } catch { }   # tokens leave the memory with the window
     if ($script:OverviewJob) { try { [void]$script:OverviewJob.PS.BeginStop($null, $null) } catch { } }
     if ($script:ReadyJob) { try { [void]$script:ReadyJob.PS.BeginStop($null, $null) } catch { } }
+    if ($script:OptJob -and $script:OptJob.PS) { try { [void]$script:OptJob.PS.BeginStop($null, $null) } catch { } }   # a read does not hold the window back
     try { if ($script:MutexOwned) { $script:Mutex.ReleaseMutex() } } catch { }
     [System.Windows.Application]::Current.Shutdown()
 })

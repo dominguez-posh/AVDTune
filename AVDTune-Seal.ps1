@@ -35,7 +35,7 @@ function Update-SealView {
     $ui.TxtSealLater.Text = 'Not part of this step yet: restart first and resume, DISM component cleanup, sending the change log to SharePoint, log off or shut down, the imaging tool and snapshot housekeeping.'
 }
 function Start-SealJob {
-    foreach ($other in 'SealJob', 'UpdJob', 'BenchJob', 'ReadyJob', 'OverviewJob', 'FslJob') { if (Get-Variable -Scope Script -Name $other -ValueOnly -ErrorAction SilentlyContinue) { throw 'Another operation is still running.' } }
+    foreach ($other in 'SealJob', 'UpdJob', 'BenchJob', 'ReadyJob', 'OverviewJob', 'FslJob', 'OptJob', 'OptRun') { if (Get-Variable -Scope Script -Name $other -ValueOnly -ErrorAction SilentlyContinue) { throw 'Another operation is still running.' } }
     # the gate again, directly before the first write, on the UI thread (a change between display and click blocks here)
     $gate = Test-AVDTuneFinishGate -Root $script:StateRoot
     if (-not $gate.Allowed) { Update-SealView; throw "The finish is not allowed: $(@($gate.Reasons) -join ' ')" }

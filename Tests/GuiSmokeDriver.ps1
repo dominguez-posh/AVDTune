@@ -891,6 +891,27 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         $ui.BoxReady.BringIntoView(); $window.UpdateLayout()
         Save-SmokeShot '44-readiness-signed-out-light'
         $true } }
+    @{ Name = 'optimization page: the state is read in the background (#66)'; Do = {
+        if ($script:OverviewJob -or $script:ReadyJob -or $script:ReadyQueued -or $script:OptJob -or $script:OptRun) { return $false }
+        if (-not $script:OptLoadStep) {
+            $script:OptLoadStep = 1
+            Show-Page 'Overview'
+            $script:OptStatus = $null; $ui.PanelOptList.Children.Clear()
+            $sw = [Diagnostics.Stopwatch]::StartNew()
+            Show-Page 'Optimization'
+            $sw.Stop(); $window.UpdateLayout()
+            $t = @(Get-AVDTuneUiTasks | Where-Object { $_.Kind -eq 'optimization-read' } | Select-Object -Last 1)
+            Test-Smoke 'Optimization: the page returns at once, says it reads the state and shows a running task on the bar' ($sw.ElapsedMilliseconds -lt 1500 -and $script:OptJob -and $t.Count -eq 1 -and $t[0].Status -eq 'running' -and $ui.TxtOptSummary.Text -like 'Reading the state of the master*' -and $ui.PanelOptList.Children.Count -eq 0) "$($sw.ElapsedMilliseconds) ms"
+            Test-Smoke 'Optimization: Apply, Undo and Refresh are locked while it reads' (-not $ui.BtnOptApply.IsEnabled -and -not $ui.BtnOptUndo.IsEnabled -and -not $ui.BtnOptRefresh.IsEnabled) $null
+            Show-Page 'Overview'; Show-Page 'Optimization'
+            Test-Smoke 'Optimization: leaving the page and coming back starts no second read' (@(Get-AVDTuneUiTasks | Where-Object { $_.Kind -eq 'optimization-read' -and $_.Status -eq 'running' }).Count -eq 1) $null
+            return $false
+        }
+        $t = @(Get-AVDTuneUiTasks | Where-Object { $_.Kind -eq 'optimization-read' } | Select-Object -Last 1)
+        Test-Smoke 'Optimization: after the read the task ended, the rows are there and Apply is open' ($t[0].Status -eq 'succeeded' -and $script:OptStatus -and $script:OptStatus.DataValid -and $ui.PanelOptList.Children.Count -gt 10 -and $ui.BtnOptApply.IsEnabled -and $ui.BtnOptRefresh.IsEnabled) "$($t[0].Status) rows=$($ui.PanelOptList.Children.Count)"
+        Save-SmokeShot '56-page-optimization'
+        Show-Page 'Overview'
+        $true } }
     @{ Name = 'task bar'; Do = {
         # the flows of the earlier steps went through the one mechanism; wait (at most 30 s) until nothing runs any more
         if (-not $script:TaskStepStart) { $script:TaskStepStart = Get-Date }

@@ -37,6 +37,7 @@ function Start-UpdJob([string]$Kind, $Argument) {
     # Kind: Scan | Run | Repair-Dism | Repair-Sfc
     if ($script:UpdJob) { throw 'Another update operation is still running.' }
     if ($script:BenchJob) { throw 'A benchmark is running. Wait until it is done.' }
+    if ($script:OptRun) { throw 'An optimization run is going. Wait until it is done.' }
     $sync = [hashtable]::Synchronized(@{ Text = ''; Done = $false })
     $gate = Get-AVDTuneWriteGate
     $ps = [powershell]::Create()
