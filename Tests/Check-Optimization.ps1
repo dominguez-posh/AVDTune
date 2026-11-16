@@ -625,6 +625,29 @@ try {
     Test-Check 'shipped data: the status reads all entries from the fake machine without error' ($st.DataValid -and $st.Rows.Count -eq $entries.Count -and @($st.Rows | Where-Object Failed).Count -eq 0) (@($st.Rows | Where-Object Failed | Select-Object -First 2 | ForEach-Object { "$($_.Id): $($_.Message)" }) -join '; ')
     Close-AVDTuneWriteGate
 
+    # ---------------------------------------------------------------- the runspaces of the page (#66, like #67): exactly the imports of the page, the REAL machine, read only
+    $pageSrc = Get-Content -Raw (Join-Path $repo 'AVDTune-Optimization.ps1')
+    $pageImports = @([regex]::Matches($pageSrc, "Import-Module \(Join-Path \`$AppRoot '([^']+)'\)") | ForEach-Object { $_.Groups[1].Value } | Select-Object -Unique)
+    $oneReg = Join-Path $tmp 'one-reg.json'
+    $oneEntry = [ordered]@{}; foreach ($pr in @($real.Entries | Where-Object { $_.Kind -eq 'Registry' } | Select-Object -First 1)[0].PSObject.Properties) { if ($null -ne $pr.Value) { $oneEntry[$pr.Name] = $pr.Value } }   # the first shipped registry entry
+    [IO.File]::WriteAllText($oneReg, ([ordered]@{ SchemaVersion = 1; Sources = @($real.Sources); Entries = @($oneEntry) } | ConvertTo-Json -Depth 6))
+    $rs = [powershell]::Create()
+    try {
+        [void]$rs.AddScript({
+                param($Repo, $Imports, $State, $Data)
+                $ErrorActionPreference = 'Stop'
+                foreach ($i in $Imports) { Import-Module (Join-Path $Repo $i) -Force }
+                $st = Get-AVDTuneOptimizationStatus -Machine (New-AVDTuneMachine) -Root $State -DataPath $Data   # the read of Start-OptRead, one registry entry, nothing written
+                $cmds = @('Invoke-AVDTuneOptimization', 'Open-AVDTuneWriteGate', 'New-AVDTuneMachine', 'Get-AVDTuneOptimizationStatus' | Where-Object { -not (Get-Command $_ -ErrorAction SilentlyContinue) })   # what the run of Start-OptRun calls
+                [pscustomobject]@{ Status = $st; Missing = @($cmds) }
+            }).AddArgument($repo).AddArgument($pageImports).AddArgument($state).AddArgument($oneReg)
+        $res = $rs.Invoke() | Select-Object -Last 1
+        $rsErr = @($rs.Streams.Error | ForEach-Object { $_.ToString() }) -join '; '
+    }
+    catch { $res = $null; $rsErr = $_.Exception.Message }
+    finally { $rs.Dispose() }
+    Test-Check 'page runspaces (#66): with exactly the imports of the page the real machine reads a registry entry and the commands of the run are known (no unknown command, no error)' ($res -and $pageImports.Count -ge 2 -and $res.Status.DataValid -and @($res.Status.Rows).Count -eq 1 -and -not $res.Status.Rows[0].Failed -and @($res.Missing).Count -eq 0 -and $rsErr -notmatch 'is not recognized|nicht erkannt' -and -not $rsErr) "imports=$($pageImports -join ","); missing=$(@($res.Missing) -join ","); err=$rsErr; valid=$($res.Status.DataValid) rows=$(@($res.Status.Rows).Count) failed=$($res.Status.Rows[0].Failed) msg=$($res.Status.Rows[0].Message) errs=$($res.Status.DataErrors -join ";")"
+
     # ---------------------------------------------------------------- the page (built in code, off-screen; the window is never shown; stubs for the helpers of Start-AVDTune.ps1)
     Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase
     $window = New-Object System.Windows.Window
