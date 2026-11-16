@@ -14,6 +14,8 @@ $script:OptChecked = @{}        # id -> $true / $false; filled from the defaults
 $script:OptInitDone = $false
 $script:OptOnlyOpen = $false
 $script:OptBuilding = $false
+$script:OptRun = $null           # the background Apply or Undo (one at a time)
+$script:OptJob = $null           # the background read of the state (one at a time)
 
 function New-OptPill([string]$Text, [string]$Back, [string]$Fore) {
     $pill = New-Object System.Windows.Controls.Border
@@ -78,15 +80,69 @@ function Initialize-OptPage {
 }
 Initialize-OptPage
 
-function Read-OptStatus {
-    $window.Cursor = [System.Windows.Input.Cursors]::Wait
-    try { $script:OptStatus = Get-AVDTuneOptimizationStatus -Machine $script:Machine -Root $script:StateRoot }
-    finally { $window.Cursor = $null }
-    if ($script:OptStatus.DataValid -and -not $script:OptInitDone) {
-        foreach ($r in $script:OptStatus.Rows) { $script:OptChecked[$r.Id] = [bool]$r.Default }
-        $script:OptInitDone = $true
+function Set-OptBusy([bool]$Busy) {
+    # while the state is read: no Apply, no Undo, no second read (the buttons follow the data again in Show-OptList)
+    $ui.BtnOptRefresh.IsEnabled = -not $Busy
+    if ($Busy) { $ui.BtnOptApply.IsEnabled = $false; $ui.BtnOptUndo.IsEnabled = $false }
+}
+function Start-OptRead {
+    # Reads the state of the list in the background (services, tasks, Defender and AppX of all users take long on a real master; on the window thread the
+    # page looked frozen). Read only. One read at a time: a new request while one runs does nothing. The window does not wait for it when it closes.
+    if ($script:OptJob -or $script:OptRun) { return }
+    $task = Start-AVDTuneUiTask -Kind 'optimization-read' -Title 'Reading the optimization state' -Step 'Reading services, tasks, Defender, AppX and registry values of the master' -Retry @{ Command = 'Start-OptRead'; Arguments = @() }
+    if ($script:TestMode) {
+        # Test mode runs on the window thread at the next timer tick: the fake machine is a closure of this runspace and must not run on a second thread while this one executes script
+        $script:OptJob = @{ Inline = $true; Task = $task }
+    }
+    else {
+        $ps = [powershell]::Create()
+        [void]$ps.AddScript({
+                param($AppRoot, $Root)
+                $ErrorActionPreference = 'Stop'
+                Import-Module (Join-Path $AppRoot 'Modules\AVDTune.psm1') -Force
+                Import-Module (Join-Path $AppRoot 'Modules\AVDTune.Optimization.psm1') -Force
+                Get-AVDTuneOptimizationStatus -Machine (New-AVDTuneMachine) -Root $Root
+            }).AddArgument($script:AppRoot).AddArgument($script:StateRoot)
+        $script:OptJob = @{ PS = $ps; Handle = $ps.BeginInvoke(); Task = $task }
+    }
+    Set-OptBusy $true
+    if ($script:CurrentPage -eq 'Optimization') { Show-OptList }
+}
+function Complete-OptRead {
+    $job = $script:OptJob
+    if (-not $job) { return }
+    if ($job.Inline) { if ($script:OverviewJob) { return } }   # test mode: not while the overview reads the same fake machine on its own thread
+    elseif (-not $job.Handle.IsCompleted) { return }
+    $script:OptJob = $null
+    $status = $null; $err = ''
+    if ($job.Inline) {
+        try { $status = Get-AVDTuneOptimizationStatus -Machine $script:Machine -Root $script:StateRoot } catch { $err = $_.Exception.Message }
+    }
+    else {
+        try {
+            $status = @($job.PS.EndInvoke($job.Handle)) | Select-Object -Last 1
+            if ($job.PS.Streams.Error.Count -gt 0) { $err = $job.PS.Streams.Error[0].Exception.Message }
+        }
+        catch { $err = $_.Exception.Message }
+        finally { $job.PS.Dispose() }
+    }
+    if (-not $err -and -not $status) { $err = 'No result.' }
+    if (-not $err) {
+        $script:OptStatus = $status
+        if ($status.DataValid -and -not $script:OptInitDone) {
+            foreach ($r in $status.Rows) { $script:OptChecked[$r.Id] = [bool]$r.Default }
+            $script:OptInitDone = $true
+        }
+        Complete-AVDTuneUiTask $job.Task -Summary $(if ($status.DataValid) { "$($status.Rows.Count) entries read" } else { 'The optimization data is not valid' })
+    }
+    else { Complete-AVDTuneUiTask $job.Task -Failed -Summary "The state could not be read: $err" }
+    Set-OptBusy $false
+    if ($script:CurrentPage -eq 'Optimization') {
+        Show-OptList
+        if ($err) { $ui.TxtOptSummary.Text = "The state could not be read: $err Press Refresh state to try again."; Show-Error "The optimization state could not be read: $err" }
     }
 }
+$script:Timer.Add_Tick({ try { Complete-OptRead } catch { Show-Error $_.Exception.Message } })
 
 function Set-OptPreset([string]$Name) {
     if (-not $script:OptStatus -or -not $script:OptStatus.DataValid) { return }
@@ -106,13 +162,13 @@ function Show-OptList {
     try {
         $ui.PanelOptList.Children.Clear()
         $ui.BoxOptErrors.Visibility = ConvertTo-Vis ($st -and -not $st.DataValid)
-        if (-not $st) { return }
+        if (-not $st) { $ui.TxtOptSummary.Text = $(if ($script:OptJob) { 'Reading the state of the master ...' } else { '' }); $ui.BtnOptApply.IsEnabled = $false; $ui.BtnOptUndo.IsEnabled = $false; return }
         if (-not $st.DataValid) {
             $ui.TxtOptErrors.Text = "The optimization data is not valid, so nothing can be applied. " + (@($st.DataErrors | Select-Object -First 6) -join "`r`n")
             $ui.TxtOptSummary.Text = ''; $ui.BtnOptApply.IsEnabled = $false; $ui.BtnOptUndo.IsEnabled = $false
             return
         }
-        $ui.BtnOptApply.IsEnabled = $true; $ui.BtnOptUndo.IsEnabled = $true
+        $ui.BtnOptApply.IsEnabled = -not ($script:OptJob -or $script:OptRun); $ui.BtnOptUndo.IsEnabled = -not ($script:OptJob -or $script:OptRun)
         $pillStyle = @{ Low = @('SuccessBg', 'Success'); Medium = @('WarningBg', 'Warning'); High = @('ErrorBg', 'Danger') }
         foreach ($cat in (Get-AVDTuneOptimizationCategoryOrder)) {
             $rows = @($st.Rows | Where-Object { $_.Category -eq $cat })
@@ -160,6 +216,7 @@ function Show-OptList {
 function Update-OptSummary {
     $st = $script:OptStatus
     if (-not $st -or -not $st.DataValid) { return }
+    if ($script:OptJob -or $script:OptRun) { $ui.TxtOptSummary.Text = $(if ($script:OptRun) { 'Running ...' } else { 'Reading the state of the master ...' }); return }
     $sel = @(Get-OptSelectedRows)
     $open = @($sel | Where-Object { -not $_.Compliant })
     $irr = @($open | Where-Object { $_.Irreversible })
@@ -169,12 +226,15 @@ function Update-OptSummary {
 }
 
 function Update-OptView {
-    if (-not $script:OptStatus) { Read-OptStatus }
     $ui.ChkOptOnlyOpen.IsChecked = $script:OptOnlyOpen
+    if (-not $script:OptStatus -and -not $script:OptJob) { Start-OptRead }   # the page is there at once; the rows follow when the read is done
     Show-OptList
 }
 
 function Start-OptChange([string]$Mode) {
+    if ($script:OptJob) { throw 'The state of the master is still being read. Wait until it is done.' }
+    if ($script:OptRun) { throw 'Another optimization run is still running.' }
+    foreach ($other in 'UpdJob', 'BenchJob', 'SealJob', 'SwJob', 'FslJob', 'OffJob') { if (Get-Variable -Scope Script -Name $other -ValueOnly -ErrorAction SilentlyContinue) { throw 'Another operation is still running. Wait until it is done.' } }
     if (-not (Test-AVDTuneWriteAllowed)) { throw 'Read only: confirm a snapshot of today on the Overview first.' }
     $st = $script:OptStatus
     if (-not $st -or -not $st.DataValid) { throw 'The optimization data is not valid; nothing can be applied.' }
@@ -203,25 +263,83 @@ function Start-OptChange([string]$Mode) {
     $ids = @($sel | ForEach-Object { $_.Id })
     $user = [string]$env:USERNAME
     $gate = Get-AVDTuneWriteGate
-    $window.Cursor = [System.Windows.Input.Cursors]::Wait
-    try {
-        $label = if ($Mode -eq 'Undo') { 'Undoing optimizations' } else { 'Applying optimizations' }
-        $result = Invoke-UiTaskInline -Kind 'optimization' -Title $label -Step "$($ids.Count) entries" -Block { Invoke-AVDTuneOptimization -Machine $script:Machine -Root $script:StateRoot -Ids $ids -Mode $Mode -ConfirmIrreversible:$confirmIrr -User $user -SnapshotId $gate.SnapshotId }
-    }
-    finally { $window.Cursor = $null }
-    foreach ($r in $result.Results) { Register-StepResult $r }
-    $text = "Optimization $($Mode.ToLowerInvariant()): $($result.Changed) change(s)$(if ($result.Failed -gt 0) { ", $($result.Failed) failed" })$(if ($result.Skipped -gt 0) { ", $($result.Skipped) not on this host" })$(if ($result.Reboot) { '; restart needed' })."
-    Show-Toast $text
-    [void](Add-AVDTuneProtocolNote -Protocol $script:Protocol -Group 'optimization' -Subject $text)
-    Save-Protocol
-    Read-OptStatus; Show-OptList; Start-OverviewRefresh
+    Start-OptRun $Mode $ids $confirmIrr $user $gate
 }
+
+function Start-OptRun([string]$Mode, [string[]]$Ids, [bool]$ConfirmIrr, [string]$User, $Gate) {
+    # Apply or Undo as a task in the background (the work of an entry, Defender and AppX removal included, no longer blocks the window). The confirmations are
+    # done before. The window stays open until the run is done (closing handler below), like for the other operations that change the master.
+    if ($script:OptRun) { throw 'Another optimization run is still running.' }
+    $label = if ($Mode -eq 'Undo') { 'Undoing optimizations' } else { 'Applying optimizations' }
+    $task = Start-AVDTuneUiTask -Kind 'optimization' -Title $label -Step "$($Ids.Count) entries"   # no Retry: it changes the master and starts only after its confirmation
+    if ($script:TestMode) { $script:OptRun = @{ Inline = $true; Task = $task; Mode = $Mode; Ids = $Ids; ConfirmIrr = $ConfirmIrr; User = $User; Gate = $Gate } }
+    else {
+        $ps = [powershell]::Create()
+        [void]$ps.AddScript({
+                param($AppRoot, $Root, $Ids, $Mode, $ConfirmIrr, $User, $Gate)
+                $ErrorActionPreference = 'Stop'
+                Import-Module (Join-Path $AppRoot 'Modules\AVDTune.psm1') -Force
+                Import-Module (Join-Path $AppRoot 'Modules\AVDTune.Optimization.psm1') -Force
+                if ($Gate) { Open-AVDTuneWriteGate -SnapshotId $Gate.SnapshotId -ConfirmedBy $Gate.ConfirmedBy }
+                Invoke-AVDTuneOptimization -Machine (New-AVDTuneMachine) -Root $Root -Ids $Ids -Mode $Mode -ConfirmIrreversible:$ConfirmIrr -User $User -SnapshotId $Gate.SnapshotId
+            }).AddArgument($script:AppRoot).AddArgument($script:StateRoot).AddArgument($Ids).AddArgument($Mode).AddArgument($ConfirmIrr).AddArgument($User).AddArgument($Gate)
+        $script:OptRun = @{ PS = $ps; Handle = $ps.BeginInvoke(); Task = $task; Mode = $Mode }
+    }
+    Set-OptBusy $true
+    Show-OptList
+}
+function Complete-OptRun {
+    $job = $script:OptRun
+    if (-not $job) { return }
+    if ($job.Inline) { if ($script:OverviewJob) { return } }
+    elseif (-not $job.Handle.IsCompleted) { return }
+    $script:OptRun = $null
+    $result = $null; $err = ''
+    if ($job.Inline) {
+        try { $result = Invoke-AVDTuneOptimization -Machine $script:Machine -Root $script:StateRoot -Ids $job.Ids -Mode $job.Mode -ConfirmIrreversible:$job.ConfirmIrr -User $job.User -SnapshotId $job.Gate.SnapshotId } catch { $err = $_.Exception.Message }
+    }
+    else {
+        try {
+            $result = @($job.PS.EndInvoke($job.Handle)) | Select-Object -Last 1
+            if ($job.PS.Streams.Error.Count -gt 0) { $err = $job.PS.Streams.Error[0].Exception.Message }
+        }
+        catch { $err = $_.Exception.Message }
+        finally { $job.PS.Dispose() }
+    }
+    if (-not $err -and -not $result) { $err = 'No result.' }
+    Set-OptBusy $false
+    if ($err) {
+        Complete-AVDTuneUiTask $job.Task -Failed -Summary "Optimization $($job.Mode.ToLowerInvariant()) failed: $err"
+        Show-Error "Optimization $($job.Mode.ToLowerInvariant()) failed: $err"
+    }
+    else {
+        foreach ($r in $result.Results) { Register-StepResult $r }
+        $text = "Optimization $($job.Mode.ToLowerInvariant()): $($result.Changed) change(s)$(if ($result.Failed -gt 0) { ", $($result.Failed) failed" })$(if ($result.Skipped -gt 0) { ", $($result.Skipped) not on this host" })$(if ($result.Reboot) { '; restart needed' })."
+        Complete-AVDTuneUiTask $job.Task -Failed:([bool]($result.Failed -gt 0)) -Summary $text
+        Show-Toast $text
+        [void](Add-AVDTuneProtocolNote -Protocol $script:Protocol -Group 'optimization' -Subject $text)
+        Save-Protocol
+        Start-OverviewRefresh
+    }
+    if ($script:CloseWhenDone -and -not $script:UpdJob -and -not $script:BenchJob -and -not $script:SealJob -and -not $script:SwJob) { if ($err) { $script:CloseWhenDone = $false } else { $window.Close(); return } }
+    Start-OptRead   # the state after the run (also after a failed one); Apply stays locked until it is read
+}
+$script:Timer.Add_Tick({ try { Complete-OptRun } catch { Show-Error $_.Exception.Message } })
+# Closing and signing out during a run would end it in the middle of a change: the window waits and closes by itself when it is done
+$window.Add_Closing({
+        param($src, $e)
+        if (-not $script:OptRun) { return }
+        $e.Cancel = $true; $script:CloseWhenDone = $true
+        Show-Toast 'An optimization run is still going. AVDTune closes by itself when it is done.'
+    })
+$script:OptSessionEnding = [System.Windows.SessionEndingCancelEventHandler]{ param($src, $e) if ($script:OptRun) { $e.Cancel = $true; Show-Toast 'Log off or shut down was held back: an optimization run is still going. Try again when it is done.' } }
+if ([System.Windows.Application]::Current) { [System.Windows.Application]::Current.add_SessionEnding($script:OptSessionEnding) }
 
 Add-Click $ui.OptPresets['recommended'] { Set-OptPreset 'recommended' }
 Add-Click $ui.OptPresets['conservative'] { Set-OptPreset 'conservative' }
 Add-Click $ui.OptPresets['all'] { Set-OptPreset 'all' }
 Add-Click $ui.OptPresets['none'] { Set-OptPreset 'none' }
-Add-Click $ui.BtnOptRefresh { Read-OptStatus; Show-OptList }
+Add-Click $ui.BtnOptRefresh { Start-OptRead; Show-OptList }
 Add-Click $ui.BtnOptApply { Start-OptChange 'Apply' }
 Add-Click $ui.BtnOptUndo { Start-OptChange 'Undo' }
 $ui.ChkOptOnlyOpen.Add_Click({ $script:OptOnlyOpen = [bool]$ui.ChkOptOnlyOpen.IsChecked; Show-OptList })

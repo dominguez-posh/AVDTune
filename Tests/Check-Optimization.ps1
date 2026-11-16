@@ -645,12 +645,27 @@ try {
     function Add-AVDTuneProtocolNote { param($Protocol, $Group, $Subject, $Note) }
     function Save-Protocol { }
     function Start-OverviewRefresh { }
+    function Show-Error([string]$Text) { [void]$script:Errors.Add($Text) }
+    $script:Errors = New-Object System.Collections.ArrayList; $script:Tasks = New-Object System.Collections.ArrayList
+    function Start-AVDTuneUiTask { param($Kind, $Title, $Step, $Percent, $Retry) $t = @{ Kind = $Kind; Title = $Title; Status = 'running'; Retry = $Retry }; [void]$script:Tasks.Add($t); $t }
+    function Complete-AVDTuneUiTask { param($Task, [switch]$Failed, $Summary) $Task.Status = $(if ($Failed) { 'failed' } else { 'succeeded' }); $Task.Summary = $Summary }
+    $script:Timer = New-Object System.Windows.Threading.DispatcherTimer; $script:CurrentPage = 'Optimization'; $script:OverviewJob = $null
     function Invoke-UiTaskInline { param($Kind, $Title, [scriptblock]$Block, $Step, $Done, $Retry) & $Block }
-    . (Join-Path $repo 'AVDTune-Optimization.ps1')
+    . (Join-Path $repo 'AVDTune-Optimization.ps1'); $script:TestMode = $true   # after loading: the page script would load the fakes of the window test mode
     Test-Check 'page: it is added next to the other pages and starts hidden' ($ui.PageOptimization -and $root.Children.Contains($ui.PageOptimization) -and $ui.PageOptimization.Visibility -eq 'Collapsed') $null
     $script:Machine = New-AVDTuneFakeMachine -Seed @{ Now = [datetime]'2026-11-15T12:00:00'; Services = @(@{ Name = 'MapsBroker'; Status = 'Running'; StartType = 'Automatic' }) }
     [void](Add-AVDTuneOptimizationFakeMembers $script:Machine -Appx @('Microsoft.BingNews') -Defender @{ PUAProtection = [byte]0 })
     Update-OptView
+    # the page does not read the master on the window thread (#66): it is there at once, the read runs as a task and the rows follow
+    Test-Check 'page load: Update-OptView returns at once with a running read, a task with Retry, no rows yet and the text "Reading the state of the master"' ($script:OptJob -and $script:Tasks.Count -eq 1 -and $script:Tasks[0].Status -eq 'running' -and $script:Tasks[0].Retry.Command -eq 'Start-OptRead' -and $null -eq $script:OptStatus -and $ui.PanelOptList.Children.Count -eq 0 -and $ui.TxtOptSummary.Text -like 'Reading the state of the master*') "tasks=$($script:Tasks.Count)"
+    Test-Check 'page load: Apply, Undo and Refresh are locked while the read runs' (-not $ui.BtnOptApply.IsEnabled -and -not $ui.BtnOptUndo.IsEnabled -and -not $ui.BtnOptRefresh.IsEnabled) $null
+    Update-OptView; Start-OptRead
+    Test-Check 'page load: opening the page again or pressing read again starts no second read' ($script:Tasks.Count -eq 1) "tasks=$($script:Tasks.Count)"
+    Open-AVDTuneWriteGate -SnapshotId 'snap-1' -ConfirmedBy 'admin1'
+    Test-Check 'page load: Apply and Undo refuse while the read runs, even with the write gate open, and ask nothing' ((Test-Throws { Start-OptChange 'Apply' }) -and (Test-Throws { Start-OptChange 'Undo' }) -and $script:Asked.Count -eq 0 -and @($script:Machine.Log).Count -eq 0) $null
+    Close-AVDTuneWriteGate
+    Complete-OptRead
+    Test-Check 'page load: after the read the task is succeeded, the status is there and Apply, Undo and Refresh are open' (-not $script:OptJob -and $script:Tasks[0].Status -eq 'succeeded' -and $script:OptStatus.DataValid -and $ui.BtnOptApply.IsEnabled -and $ui.BtnOptUndo.IsEnabled -and $ui.BtnOptRefresh.IsEnabled) $null
     $rowsShown = @($ui.PanelOptList.Children | Where-Object { $_ -is [System.Windows.Controls.Grid] })
     Test-Check 'page: the list shows a row per entry with a checkbox, reason, source and state' ($rowsShown.Count -eq $entries.Count -and ($rowsShown[0].Children[0] -is [System.Windows.Controls.CheckBox]) -and ($rowsShown[0].Children[1].Children.Count -ge 3)) "$($rowsShown.Count) rows"
     $selectedBefore = @(Get-OptSelectedRows)
@@ -678,10 +693,23 @@ try {
     Test-Check 'page: AppX removal asks a second time, says it cannot be undone, and answering No there changes nothing at all (not even the other entries)' ($script:Asked.Count -eq 2 -and $script:Asked[1] -like '*cannot be undone*' -and $script:Asked[1] -like '*News*' -and $script:Machine.Store.Appx.ContainsKey('microsoft.bingnews') -and @($script:Machine.Log).Count -eq 0) ($script:Asked -join ' | ')
     $script:Asked.Clear(); $script:Answers.Enqueue($true); $script:Answers.Enqueue($true)
     Start-OptChange 'Apply'
+    Test-Check 'run: the click returns at once with a running task and without a change; Apply, Undo and a second run are locked' ($script:OptRun -and $script:Tasks[-1].Kind -eq 'optimization' -and $script:Tasks[-1].Status -eq 'running' -and -not $script:Tasks[-1].Retry -and $script:Machine.Store.Appx.ContainsKey('microsoft.bingnews') -and -not $ui.BtnOptApply.IsEnabled -and -not $ui.BtnOptUndo.IsEnabled -and (Test-Throws { Start-OptChange 'Apply' }) -and (Test-Throws { Start-OptRead }) -eq $false -and $script:OptJob -eq $null) $null
+    $script:CloseWhenDone = $false
+    Complete-OptRun
+    Test-Check 'run: the task ends as succeeded with the summary' (@($script:Tasks | Where-Object { $_.Kind -eq 'optimization' -and $_.Status -eq 'succeeded' -and $_.Summary -like 'Optimization apply*' }).Count -eq 1) $null
     Test-Check 'page: after both confirmations the entries are applied, the AppX is gone and the toast reports it' (-not $script:Machine.Store.Appx.ContainsKey('microsoft.bingnews') -and (& $script:Machine.ServiceGet 'MapsBroker').StartType -eq 'Disabled' -and $script:Toasts[-1] -like 'Optimization apply: *change(s)*') $script:Toasts[-1]
+    Test-Check 'page load: after Apply the state is read again in the background and Apply stays locked until it is done' ($script:OptJob -and -not $ui.BtnOptApply.IsEnabled) $null
+    Complete-OptRead
     $script:Asked.Clear(); $script:Answers.Enqueue($true)
     Start-OptChange 'Undo'
+    Complete-OptRun
     Test-Check 'page: Undo asks once (the AppX is left out and named as such), restores the service and does not bring the AppX back' ($script:Asked.Count -eq 1 -and $script:Asked[0] -like '*cannot be undone and are left out*' -and (& $script:Machine.ServiceGet 'MapsBroker').StartType -eq 'Automatic' -and -not $script:Machine.Store.Appx.ContainsKey('microsoft.bingnews')) ($script:Asked -join ' | ')
+    Complete-OptRead
+    # a failing read: the task fails with the cause and Retry, the page says so, nothing can be applied, and the next read can start
+    $keepMachine = $script:Machine; $keepStatus = $script:OptStatus; $script:OptStatus = $null; $script:Machine = $null; $script:Errors.Clear(); $nTasks = $script:Tasks.Count
+    Start-OptRead; Complete-OptRead
+    Test-Check 'page load: a failing read ends the task as failed with the cause and Retry, shows the problem and keeps Apply and Undo locked' (-not $script:OptJob -and $script:Tasks.Count -eq $nTasks + 1 -and $script:Tasks[-1].Status -eq 'failed' -and $script:Tasks[-1].Summary -like 'The state could not be read*' -and $script:Tasks[-1].Retry -and $ui.TxtOptSummary.Text -like 'The state could not be read*' -and $script:Errors.Count -eq 1 -and -not $ui.BtnOptApply.IsEnabled -and -not $ui.BtnOptUndo.IsEnabled -and $ui.BtnOptRefresh.IsEnabled) $script:Tasks[-1].Summary
+    $script:Machine = $keepMachine; $script:OptStatus = $keepStatus
     $script:OptStatus = [pscustomobject]@{ DataValid = $false; DataErrors = @('broken'); Sources = @(); Rows = @(); BackupError = $null }
     Show-OptList
     Test-Check 'page: invalid data shows the error and disables Apply and Undo' ($ui.BoxOptErrors.Visibility -eq 'Visible' -and -not $ui.BtnOptApply.IsEnabled -and -not $ui.BtnOptUndo.IsEnabled) $null
