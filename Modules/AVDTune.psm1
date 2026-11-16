@@ -413,6 +413,25 @@ function New-AVDTuneMachine {
         }
         catch { $null }
     }
+    $m.ComputerSystem = {
+        # Win32_ComputerSystem, read only (start sequence, issue #64): PartOfDomain, Domain (the domain, or the workgroup name when not part of one), DomainRole. $null when it cannot be read.
+        try {
+            $cs = Get-CimInstance -ClassName Win32_ComputerSystem -ErrorAction Stop
+            [pscustomobject]@{ PartOfDomain = [bool]$cs.PartOfDomain; Domain = [string]$cs.Domain; DomainRole = [int]$cs.DomainRole }
+        }
+        catch { $null }
+    }
+    $m.DcLocate = {
+        # The DC locator of Windows (DsGetDcName) for a domain name, read only: nothing is sent but the locator's own query. @{ Name; Address; Site } or $null.
+        param($Domain)
+        try {
+            Add-Type -AssemblyName System.DirectoryServices -ErrorAction Stop
+            $ctx = New-Object System.DirectoryServices.ActiveDirectory.DirectoryContext([System.DirectoryServices.ActiveDirectory.DirectoryContextType]::Domain, [string]$Domain)
+            $dc = [System.DirectoryServices.ActiveDirectory.DomainController]::FindOne($ctx)
+            [pscustomobject]@{ Name = [string]$dc.Name; Address = [string]$dc.IPAddress; Site = [string]$dc.SiteName }
+        }
+        catch { $null }
+    }
     # Read-only members of the readiness analysis (docs\plans\avdtune.md, section 2a)
     $m.RegSubKeys = {
         param($Path)

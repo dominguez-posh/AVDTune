@@ -1,6 +1,7 @@
 # The start sequence in the window (dot-sourced by Start-AVDTune.ps1 after the Overview and the protocol are set up).
-# Four stages on the Overview, each with a status and a form that opens below the list: first-run questions, Microsoft sign-in,
-# domain controller (only with a DC), snapshot gate. The logic is in Modules\AVDTune.Start/Session/Snapshot/Directory.psm1; this file only
+# Four stages on the Overview, each with a status and a form that opens below the list, in this order (issue #64): Microsoft sign-in (needs no answer),
+# domain controller (the master's join state is read first; a DC step only for a domain member), first-run questions (suggested from the sign-in, Azure and the
+# domain with the source of every value, valid after the confirmation), snapshot gate. The logic is in Modules\AVDTune.Start/Session/Snapshot/Directory.psm1; this file only
 # builds the forms, calls the engine and writes the protocol. External services come from $script:Services (real adapters, or the fakes
 # of Tests\Fakes\FakeServices.ps1 in test mode). Secrets: the password stays in the PasswordBox / a SecureString and is cleared after use.
 
@@ -165,40 +166,69 @@ function Open-Stage([string]$Id) {
     switch ($Id) {
         'Environment' { Build-EnvironmentForm }
         'SignIn' { Build-SignInForm }
-        'Domain' { Build-DomainForm }
+        'Domain' { if (-not $script:StartContext.Detection) { Read-JoinState }; Build-DomainForm }
         'Snapshot' { Build-SnapshotForm }
     }
     $ui.BoxStage.BringIntoView()
 }
 
-# ---------------------------------------------------------------- 1. first-run questions
+# ---------------------------------------------------------------- 3. first-run questions
+# Asked after the sign-in and the domain step (issue #64). What the sign-in, Azure (GET only) and the domain showed is suggested with its source and is only a
+# suggestion: nothing is saved and nothing counts as an answer until the administrator presses the confirm button. A question that is missing or ambiguous stays empty.
 function Build-EnvironmentForm {
-    $ui.TxtStageTitle.Text = '1. First-run questions: the planned AVD environment'
-    $ui.TxtStageIntro.Text = 'The answers decide which steps and pages exist (for example no domain step with Microsoft Entra ID only). They are saved in environment.json without secrets and can be changed later; a change goes into the change log.'
+    $ui.TxtStageTitle.Text = '3. First-run questions: the planned AVD environment'
+    $ui.TxtStageIntro.Text = 'Only what is missing or ambiguous has to be answered. Values that the sign-in, Azure (read only) and the domain showed are suggested with their source; they count as answers when you confirm them, and you can change every one. The answers decide which steps and pages exist (for example no domain step with Microsoft Entra ID only). They are saved in environment.json without secrets with the source of each answer and can be changed later; a change goes into the change log.'
     $existing = Get-AVDTuneEnvironment $script:StateRoot
-    $answers = Get-AVDTuneEnvironmentAnswers $existing
-    $f = $script:Form; $f.Combos = @{}; $f.Texts = @{}
+    $file = Get-AVDTuneEnvironmentFile $script:StateRoot
+    $answers = Get-AVDTuneEnvironmentAnswers $(if ($existing) { $existing } else { $file })
+    $f = $script:Form; $f.Combos = @{}; $f.Texts = @{}; $f.SourceLabels = @{}
+    $f.KeepClient = [string]$answers.ClientId; $f.KeepTenant = [string]$answers.TenantId
+    $f.PrevAnswers = $(if ($existing) { $answers } else { $null }); $f.PrevSources = $(if ($existing) { Get-AVDTuneAnswerSources $existing } else { $null })
+    # What the sign-in and Azure showed, once per start of the questions (the Region and the notes are information only)
+    $f.Suggestions = $null
+    if (-not $existing) {
+        if (-not $script:StartContext.Detection) { Read-JoinState }
+        try {
+            $sg = Invoke-Busy 'Reading what Azure says about this VM (read only) ...' { Update-AVDTuneStartSuggestions -Context $script:StartContext -Machine $script:Machine -Arm (Get-StartArm) } -TaskTitle 'Reading the VM from Azure' -Done 'Read'
+            $f.Suggestions = $sg
+        }
+        catch { Add-StartProtocol 'Suggestions for the first-run questions' $_.Exception.Message 'failed' }
+        if ($f.Suggestions) {
+            $count = @($f.Suggestions.Items.Values | Where-Object { $_.State -eq 'Detected' }).Count
+            Add-StartProtocol 'Suggestions for the first-run questions' ("$count value(s) suggested (read only: Win32_ComputerSystem, dsregcmd /status, Azure Resource Manager GET)" + $(if (@($f.Suggestions.Notes).Count -gt 0) { '. ' + (@($f.Suggestions.Notes) -join '; ') }) + $(if (@($f.Suggestions.Rejected).Count -gt 0) { '. Not suggested, not valid: ' + (@($f.Suggestions.Rejected) -join '; ') }))
+        }
+        $facts = $script:StartContext.AzureFacts
+        if ($f.Suggestions -and $f.Suggestions.Region) { [void]$ui.PanelStageBody.Children.Add((New-InfoRow 'Region of this VM' "$($f.Suggestions.Region) (Azure Resource Manager)")) }
+        if ($facts -and -not $facts.Reachable) { $ui.PanelStageBody.Children.Add((New-Text "Azure could not be read ($($facts.Problem)). The questions below have no suggestion from Azure; answer them yourself." 'Hint' '0,0,0,6')) | Out-Null }
+    }
     foreach ($q in (Get-AVDTuneQuestions)) {
         $cmb = New-Object System.Windows.Controls.ComboBox
         $cmb.Width = 430
         $cmb.ItemsSource = @($q.Choices | ForEach-Object { $_.Text })
-        $current = @($q.Choices | Where-Object { $_.Value -eq $answers.($q.Key) })[0]
-        $cmb.SelectedItem = $current.Text
+        $current = $null
+        if ($existing) { $current = @($q.Choices | Where-Object { $_.Value -eq $answers.($q.Key) })[0] }
+        elseif ($f.Suggestions -and $f.Suggestions.Items.Contains($q.Key) -and $f.Suggestions.Items[$q.Key].State -eq 'Detected') { $current = @($q.Choices | Where-Object { $_.Value -ceq $f.Suggestions.Items[$q.Key].Value })[0] }
+        if ($current) { $cmb.SelectedItem = $current.Text }   # no suggestion and no saved answer: nothing selected, the question is open
         $cmb.Name = "Q$($q.Key)"
         $f.Combos[$q.Key] = @{ Control = $cmb; Question = $q }
         $cmb.Add_SelectionChanged({ try { Update-EnvironmentPreview } catch { } })
         [void]$ui.PanelStageBody.Children.Add((New-FormRow $q.Title $cmb))
+        $f.SourceLabels[$q.Key] = New-Text '' 'Hint' '250,0,0,4'
+        [void]$ui.PanelStageBody.Children.Add($f.SourceLabels[$q.Key])
     }
     $auth = New-Object System.Windows.Controls.ComboBox; $auth.Width = 430; $auth.Name = 'QAzureFilesAuth'
     $auth.Add_SelectionChanged({ try { Update-EnvironmentPreview } catch { } })
     $f.AuthCombo = $auth; $f.AuthWanted = [string]$answers.AzureFilesAuth
     [void]$ui.PanelStageBody.Children.Add((New-FormRow 'Azure Files authentication' $auth))
-    # No tenant field: the tenant comes from the sign-in (issue #11). The client ID is optional: empty means AVDTune creates its own app registration.
-    foreach ($t in @(@('VNet', 'Network: virtual network of the session hosts'), @('Subnet', 'Network: subnet of the session hosts'), @('ClientId', 'Client ID of the app registration (optional)'), @('SnapshotNamePattern', 'Snapshot name: {OsDisk} {VM} {ImageVersion} {DD} {MM} {YYYY}, {N} = number of the day'))) {
+    # No tenant field: the tenant comes from the sign-in (issue #11). The client ID is entered in the sign-in form (#64).
+    foreach ($t in @(@('VNet', 'Network: virtual network of the session hosts'), @('Subnet', 'Network: subnet of the session hosts'), @('SnapshotNamePattern', 'Snapshot name: {OsDisk} {VM} {ImageVersion} {DD} {MM} {YYYY}, {N} = number of the day'))) {
         $tb = New-Object System.Windows.Controls.TextBox; $tb.Width = 430; $tb.Text = [string]$answers.($t[0]); $tb.MaxLength = 255; $tb.Name = "T$($t[0])"
+        if (-not $existing -and $t[0] -in 'VNet', 'Subnet') { $tb.Text = $(if ($f.Suggestions -and $f.Suggestions.Items.Contains($t[0]) -and $f.Suggestions.Items[$t[0]].State -eq 'Detected') { [string]$f.Suggestions.Items[$t[0]].Value } else { '' }) }
         $tb.Add_TextChanged({ try { Update-EnvironmentPreview } catch { } })
         $f.Texts[$t[0]] = $tb
         [void]$ui.PanelStageBody.Children.Add((New-FormRow $t[1] $tb))
+        $f.SourceLabels[$t[0]] = New-Text '' 'Hint' '250,0,0,4'
+        [void]$ui.PanelStageBody.Children.Add($f.SourceLabels[$t[0]])
     }
     $f.ForgetTenant = $null
     if ([string]$answers.TenantId) {
@@ -210,7 +240,7 @@ function Build-EnvironmentForm {
     }
     $f.Preview = New-Text '' 'Hint' '0,10,0,0'
     [void]$ui.PanelStageBody.Children.Add($f.Preview)
-    $ui.BtnStageAction.Content = 'Save the answers'
+    $ui.BtnStageAction.Content = 'Confirm the answers'
     $script:StageAction = { Save-EnvironmentForm }
     Update-EnvironmentPreview
 }
@@ -220,13 +250,32 @@ function Get-EnvironmentFormAnswers {
     foreach ($key in $f.Combos.Keys) {
         $q = $f.Combos[$key].Question
         $text = [string]$f.Combos[$key].Control.SelectedItem
-        $a.$key = [string](@($q.Choices | Where-Object { $_.Text -eq $text })[0]).Value
+        $a.$key = [string](@($q.Choices | Where-Object { $_.Text -eq $text })[0]).Value   # nothing selected: '' (the question is missing)
     }
     foreach ($key in $f.Texts.Keys) { $a.$key = [string]$f.Texts[$key].Text }
+    $a.ClientId = [string]$f.KeepClient; $a.TenantId = [string]$f.KeepTenant
     $choices = @(Get-AVDTuneAzureFilesAuthChoices $a)
     $sel = [string]$f.AuthCombo.SelectedItem
     $a.AzureFilesAuth = if ($sel -and $sel -notlike 'Automatic*' -and $sel -in $choices) { $sel } else { 'Auto' }
     $a
+}
+function Update-EnvironmentSourceLabels($Answers) {
+    # The source next to every answer: a suggestion that is kept, a changed one, an open question (with the reason it is ambiguous), a saved answer
+    $f = $script:Form
+    $sources = Resolve-AVDTuneAnswerSources -Answers $Answers -Suggestions $f.Suggestions -PreviousAnswers $f.PrevAnswers -PreviousSources $f.PrevSources
+    foreach ($key in $f.SourceLabels.Keys) {
+        $value = [string](Get-AVDTuneProp $Answers $key)
+        $sg = $null; if ($f.Suggestions -and $f.Suggestions.Items.Contains($key)) { $sg = $f.Suggestions.Items[$key] }
+        $text = if ($f.Combos.ContainsKey($key) -and -not $value) { $(if ($sg -and $sg.Hint) { "Please answer: $($sg.Hint)" } else { 'Please answer.' }) }
+        elseif ($sg -and $sg.State -eq 'Detected' -and $sg.Value -ceq $value) { "Suggested, counts after you confirm: $($sg.Source)" }
+        elseif ($f.PrevAnswers -and $f.PrevSources -and [string](Get-AVDTuneProp $f.PrevAnswers $key) -ceq $value -and $f.PrevSources.Contains($key)) { "Saved: $($f.PrevSources[$key])" }
+        elseif ($f.PrevAnswers -and [string](Get-AVDTuneProp $f.PrevAnswers $key) -ceq $value) { 'Saved answer (from an earlier version, no source recorded)' }
+        elseif ($sg -and $sg.State -eq 'Detected') { "Changed by you (suggested $($sg.Value): $($sg.Source))" }
+        elseif (-not $value) { 'Not set (optional).' }
+        else { 'Typed by you.' }
+        $f.SourceLabels[$key].Text = $text
+    }
+    $sources
 }
 function Update-EnvironmentPreview {
     $f = $script:Form
@@ -244,22 +293,28 @@ function Update-EnvironmentPreview {
         $a = Get-EnvironmentFormAnswers
         $check = Test-AVDTuneEnvironmentAnswers $a
         $plan = Resolve-AVDTuneEnvironmentPlan $a
-        $lines = @($plan.Notes) + @($check.Warnings | ForEach-Object { "Note: $_" }) + @($check.Errors | ForEach-Object { "Problem: $_" })
-        if (-not ([string]$a.ClientId).Trim()) { $lines += "No client ID: at the sign-in AVDTune creates (or finds) its own app registration 'AVDTune' with admin consent; an administrator signs in for that once." }
-        $lines += 'The tenant is not asked: it comes from the sign-in and is saved.'
+        [void](Update-EnvironmentSourceLabels $a)
+        $open = @($f.Combos.Keys | Where-Object { -not [string](Get-AVDTuneProp $a $_) } | ForEach-Object { $f.Combos[$_].Question.Title })
+        $errors = @($check.Errors | Where-Object { $_ -notlike '*is missing or unknown.' })
+        $lines = @(); if ($open.Count -gt 0) { $lines += "Still to answer: $($open -join '; ')." } else { $lines += @($plan.Notes) }
+        $lines += @($check.Warnings | ForEach-Object { "Note: $_" }) + @($errors | ForEach-Object { "Problem: $_" })
+        $lines += 'The tenant is not asked: it comes from the sign-in and is saved. Nothing is saved before you confirm.'
         $f.Preview.Text = $lines -join "`n"
-        Set-Brush $f.Preview ([System.Windows.Controls.TextBlock]::ForegroundProperty) $(if ($check.Errors.Count -gt 0) { 'Danger' } else { 'MutedText' })
+        Set-Brush $f.Preview ([System.Windows.Controls.TextBlock]::ForegroundProperty) $(if ($errors.Count -gt 0) { 'Danger' } else { 'MutedText' })
         $ui.BtnStageAction.IsEnabled = ($check.Errors.Count -eq 0)
     }
     finally { $f.Updating = $false }
 }
 function Save-EnvironmentForm {
+    $f = $script:Form
     $a = Get-EnvironmentFormAnswers
     $firstRun = -not (Get-AVDTuneEnvironment $script:StateRoot)
-    $forget = [bool]($script:Form.ForgetTenant -and $script:Form.ForgetTenant.IsChecked)
-    $result = Save-AVDTuneEnvironment -Root $script:StateRoot -Answers $a -User ([string]$env:USERNAME) -ForgetTenant:$forget
+    $forget = [bool]($f.ForgetTenant -and $f.ForgetTenant.IsChecked)
+    $sources = Resolve-AVDTuneAnswerSources -Answers $a -Suggestions $f.Suggestions -PreviousAnswers $f.PrevAnswers -PreviousSources $f.PrevSources
+    $result = Save-AVDTuneEnvironment -Root $script:StateRoot -Answers $a -User ([string]$env:USERNAME) -ForgetTenant:$forget -Sources $sources
     if ($forget -and $script:StartContext.Session) { Disconnect-AVDTuneSession $script:StartContext.Session }   # a session of the old tenant does not stay
-    $note = if ($result.Changes.Count -gt 0) { 'changed: ' + ($result.Changes -join '; ') } else { 'saved' }
+    $confirmed = @($sources.Values | Where-Object { $_ -like 'Confirmed: *' }).Count
+    $note = $(if ($result.Changes.Count -gt 0) { 'changed: ' + ($result.Changes -join '; ') } else { 'saved' }) + $(if ($confirmed -gt 0) { "; $confirmed suggestion(s) confirmed" })
     Add-StartProtocol 'First-run questions answered (identity model)' $note
     Show-Toast 'The answers are saved.'
     Close-Stage
@@ -269,24 +324,29 @@ function Save-EnvironmentForm {
     if ($firstRun -and -not (Show-ShortcutQuestion) -and (Get-AVDTuneShortcutOffer -Root $script:StateRoot -Mode (Get-ShortcutMode)) -eq 'Install') { Show-Toast 'The answers are saved. A desktop shortcut can be created once AVDTune is installed (Integrity and updates).' }
 }
 
-# ---------------------------------------------------------------- 2. sign-in
+# ---------------------------------------------------------------- 1. sign-in
 function Build-SignInForm {
-    $ui.TxtStageTitle.Text = '2. Microsoft 365 and Azure sign-in'
+    $ui.TxtStageTitle.Text = '1. Microsoft 365 and Azure sign-in'
     $ui.TxtStageIntro.Text = 'One normal Microsoft sign-in in an embedded window: you sign in yourself. AVDTune gets four tokens from it, one for Microsoft Graph, one for the SharePoint site, one for Azure Resource Manager and one for Azure Storage (the NTFS rows of the FSLogix check; optional, an older app registration without it signs in without that token and says so). Microsoft puts every consented permission of a resource into its token, so both Graph tokens carry all Graph permissions listed here; extra permissions are reported as a warning. The tokens live in memory only and are removed on closing, on sign out and by Finish.'
     $session = $script:StartContext.Session
     foreach ($key in (Get-AVDTuneAudience).Keys) {
         $a = (Get-AVDTuneAudience)[$key]
         [void]$ui.PanelStageBody.Children.Add((New-InfoRow $key ("$($a.Purpose): " + ($a.Scopes -join ', '))))
     }
-    $e = Get-AVDTuneEnvironment $script:StateRoot
-    $tenant = if ($e) { [string]$e.SignIn.TenantId } else { '' }
-    $client = if ($e) { [string]$e.SignIn.ClientId } else { '' }
+    $e = Get-AVDTuneEnvironmentFile $script:StateRoot   # the sign-in needs no answer of the first-run questions: the file may not exist yet
+    $tenant = if ($e) { [string](Get-AVDTuneProp (Get-AVDTuneProp $e 'SignIn') 'TenantId') } else { '' }
+    $client = if ($e) { [string](Get-AVDTuneProp (Get-AVDTuneProp $e 'SignIn') 'ClientId') } else { '' }
     [void]$ui.PanelStageBody.Children.Add((New-InfoRow 'Tenant' $(if ($tenant) { $tenant } else { 'Taken from the sign-in (tid of the token) and saved' })))
     [void]$ui.PanelStageBody.Children.Add((New-InfoRow 'App registration' $(if ($client) { $client } else { "None yet: AVDTune creates its own app registration 'AVDTune' first" })))
     $f = $script:Form
     $f.Account = New-Object System.Windows.Controls.TextBox; $f.Account.Width = 320; $f.Account.MaxLength = 254; $f.Account.Name = 'TxtSignInAccount'
     $f.Account.Text = if ($session -and $session.Account) { [string]$session.Account } else { '' }
     [void]$ui.PanelStageBody.Children.Add((New-FormRow 'Account (name@domain, optional)' $f.Account 'Account for the sign-in'))
+    if (-not $client) {
+        # An existing app registration of AVDTune can be entered here (moved from the first-run questions: the sign-in comes first and needs no answer)
+        $f.ClientId = New-Object System.Windows.Controls.TextBox; $f.ClientId.Width = 320; $f.ClientId.MaxLength = 36; $f.ClientId.Name = 'TxtSignInClientId'
+        [void]$ui.PanelStageBody.Children.Add((New-FormRow 'Client ID of an existing app registration (optional)' $f.ClientId 'Client ID of an existing app registration'))
+    }
     $hint = if (-not $client) {
         "First sign-in: you sign in with an administrator account through Microsoft's app 'Microsoft Graph Command Line Tools' (Application.ReadWrite.All, DelegatedPermissionGrant.ReadWrite.All). AVDTune creates its own app registration 'AVDTune' (or reuses the one it created and saved before, after checking it) (public client, http://localhost, no secret), grants the admin consent for the permissions above and then signs you in with it. Needs Application Administrator or Cloud Application Administrator, and Privileged Role Administrator (or Global Administrator) for the consent."
     }
@@ -312,16 +372,19 @@ function Build-SignInForm {
     $script:StageAction = { Invoke-SignIn }
 }
 function Invoke-SignIn([switch]$Setup) {
-    $e = Get-AVDTuneEnvironment $script:StateRoot
-    if (-not $e) { throw 'Answer the first-run questions first.' }
+    $e = Get-AVDTuneEnvironmentFile $script:StateRoot
+    $savedClient = if ($e) { [string](Get-AVDTuneProp (Get-AVDTuneProp $e 'SignIn') 'ClientId') } else { '' }
     $account = if ($script:Form.Account) { ([string]$script:Form.Account.Text).Trim() } else { '' }
     if ($account -and -not (Get-AVDTuneAccountDomain $account)) { Set-StageMessage 'The account must look like name@domain (or leave it empty).' 'error'; return }
-    $setup = $Setup -or -not [string]$e.SignIn.ClientId
-    if ($setup -and -not (Confirm-Action "An administrator signs in with Microsoft's app 'Microsoft Graph Command Line Tools' and the permissions Application.ReadWrite.All and DelegatedPermissionGrant.ReadWrite.All. The setup adds the permissions of AVDTune's registration, among them Azure Service Management user_impersonation and Azure Storage user_impersonation (NTFS rows of the FSLogix check), and creates the service principals of Microsoft's apps Azure Service Management and Azure Storage in your tenant when they are missing. AVDTune uses the setup permissions only to $(if ($e.SignIn.ClientId) { "check its saved app registration $($e.SignIn.ClientId) (a new one replaces it when it is not safe)" } else { "create its own app registration 'AVDTune'" }), to assign your account to it and to grant the consent for your account only.`n`n$(Get-AVDTuneSetupConsentNote)`n`nContinue?" 'Set up the AVDTune app registration')) { return }
+    $typedClient = if ($script:Form.ClientId) { ([string]$script:Form.ClientId.Text).Trim() } else { '' }
+    if ($typedClient -and -not (Test-AVDTuneTenantGuid $typedClient)) { Set-StageMessage 'The client ID must be a GUID (or leave it empty).' 'error'; return }
+    if ($typedClient -ieq '14d82eec-204b-4c2f-b7e8-296a70dab67e') { Set-StageMessage "That is Microsoft's setup app; AVDTune needs the client ID of its own app registration (leave the field empty and AVDTune creates it at the sign-in)." 'error'; return }
+    $setup = $Setup -or (-not $savedClient -and -not $typedClient)
+    if ($setup -and -not (Confirm-Action "An administrator signs in with Microsoft's app 'Microsoft Graph Command Line Tools' and the permissions Application.ReadWrite.All and DelegatedPermissionGrant.ReadWrite.All. The setup adds the permissions of AVDTune's registration, among them Azure Service Management user_impersonation and Azure Storage user_impersonation (NTFS rows of the FSLogix check), and creates the service principals of Microsoft's apps Azure Service Management and Azure Storage in your tenant when they are missing. AVDTune uses the setup permissions only to $(if ($savedClient) { "check its saved app registration $savedClient (a new one replaces it when it is not safe)" } else { "create its own app registration 'AVDTune'" }), to assign your account to it and to grant the consent for your account only.`n`n$(Get-AVDTuneSetupConsentNote)`n`nContinue?" 'Set up the AVDTune app registration')) { return }
     $session = New-AVDTuneSession -Auth (Get-StartAuth) -TempRoot (Get-StartTempRoot)
     try {
         $result = Invoke-Busy $(if ($setup) { 'The setup sign-in window is open: sign in with an administrator account ...' } else { 'The sign-in window is open: sign in with the account that manages this master ...' }) {
-            Invoke-AVDTuneStartSignIn -Root $script:StateRoot -Session $session -Account $account -User ([string]$env:USERNAME) -RetryDelaySeconds $(if ($script:TestMode) { 0 } else { 5 }) -Setup:$setup } -TaskTitle 'Signing in to Microsoft 365 and Azure' -Done 'Signed in'
+            Invoke-AVDTuneStartSignIn -Root $script:StateRoot -Session $session -Account $account -User ([string]$env:USERNAME) -RetryDelaySeconds $(if ($script:TestMode) { 0 } else { 5 }) -Setup:$setup -ClientId $typedClient } -TaskTitle 'Signing in to Microsoft 365 and Azure' -Done 'Signed in'
         $info = $result.Info
         foreach ($n in @($result.Notes)) { Add-StartProtocol $(if ($n -like 'Warning:*' -or $n -like 'Note:*') { 'Warning: app registration' } else { 'Sign-in: tenant and app registration' }) $n }
         # The full text was in the confirmation; the protocol keeps the short form (notes are cut at 200 characters)
@@ -340,10 +403,19 @@ function Invoke-SignIn([switch]$Setup) {
     Add-StartProtocol 'Microsoft 365 and Azure sign-in' ("Signed in as $($info.Account): " + (($info.Audiences | ForEach-Object { "$($_.Audience) ($($_.Scopes -join ', '))" }) -join '; '))
     $missing = @($info.Unavailable | ForEach-Object { $_.Reason })
     foreach ($w in @($info.Warnings)) { Add-StartProtocol $(if ($w -in $missing) { 'Warning: sign-in without the Storage token' } else { 'Warning: sign-in token with extra permissions' }) $w }
+    # Step 2 follows the sign-in at once: what this master says about its join (read only; nothing is asked, nothing is changed)
+    Read-JoinState
     Show-Toast "Signed in as $($info.Account)."
     Close-Stage
     Update-StartView
     Start-ReadyJob 'Start' ''   # the Azure checks of the readiness analysis can read now
+}
+function Read-JoinState {
+    try {
+        $det = Update-AVDTuneStartDetection -Context $script:StartContext -Machine $script:Machine
+        Add-StartProtocol 'Join state of this master read' ($det.Reason + $(if (@($det.Facts).Count -gt 0) { ' (' + (@($det.Facts) -join '; ') + ')' }) + $(if (@($det.Problems).Count -gt 0) { ' Not read: ' + (@($det.Problems) -join '; ') }))
+    }
+    catch { Add-StartProtocol 'Join state of this master read' $_.Exception.Message 'failed' }
 }
 function Invoke-SignOut {
     if ($script:StartContext.Session) { Disconnect-AVDTuneSession $script:StartContext.Session }
@@ -354,19 +426,25 @@ function Invoke-SignOut {
     Update-StartView
 }
 
-# ---------------------------------------------------------------- 3. domain controller
+# ---------------------------------------------------------------- 2. domain controller
 function Build-DomainForm {
-    $ui.TxtStageTitle.Text = '3. Domain controller'
-    $ui.TxtStageIntro.Text = 'This master is not domain joined, so enter a domain controller and a domain account. AVDTune connects over LDAPS (certificate pinned) and reads the domain, OUs, groups with their SIDs and the site. The password is only kept in memory while you work here.'
+    $ui.TxtStageTitle.Text = '2. Domain controller'
+    $det = $script:StartContext.Detection
+    $ui.TxtStageIntro.Text = "$(if ($det) { "$($det.Reason) " })Enter a domain controller and a domain account. AVDTune connects over LDAPS (certificate pinned) and reads the domain, OUs, groups with their SIDs and the site. The password is only kept in memory while you work here."
     $f = $script:Form
-    $e = Get-AVDTuneEnvironment $script:StateRoot
+    $e = Get-AVDTuneEnvironmentFile $script:StateRoot
     $dc = Get-AVDTuneProp $e 'Dc'
     $f.Server = New-Object System.Windows.Controls.TextBox; $f.Server.Width = 320; $f.Server.Text = [string](Get-AVDTuneProp $dc 'Server'); $f.Server.Name = 'TxtDcServer'
+    # No server saved yet: the one the DC locator of Windows found (validated, read only) is suggested; it is only used when the administrator connects
+    $suggested = ''
+    if (-not $f.Server.Text -and $det -and $det.Dc) { $suggested = $(if ($det.Dc.Name) { $det.Dc.Name } else { $det.Dc.Address }); $f.Server.Text = $suggested }
     # A pending confirmation (LDAP 389, pin) belongs to the server it was shown for: a changed name drops it
     $f.Server.Add_TextChanged({ try { Clear-DomainPending } catch { } })
     $f.User = New-Object System.Windows.Controls.TextBox; $f.User.Width = 320; $f.User.Text = [string](Get-AVDTuneProp $dc 'User'); $f.User.Name = 'TxtDcUser'
+    $f.SuggestedServer = $suggested
     $f.PasswordBox = New-Object System.Windows.Controls.PasswordBox; $f.PasswordBox.Width = 320; $f.PasswordBox.Name = 'PwdDc'; $f.PasswordBox.MaxLength = 256
     [void]$ui.PanelStageBody.Children.Add((New-FormRow 'Domain controller (IP or name)' $f.Server))
+    if ($suggested) { $ui.PanelStageBody.Children.Add((New-Text "Suggested by the DC locator of Windows for the domain $($det.DomainName)$(if ($det.Dc.Site) { " (site $($det.Dc.Site))" }). Change it if another controller should be read." 'Hint' '250,0,0,4')) | Out-Null }
     [void]$ui.PanelStageBody.Children.Add((New-FormRow 'Domain account (DOMAIN\user or UPN)' $f.User))
     [void]$ui.PanelStageBody.Children.Add((New-FormRow 'Password' $f.PasswordBox))
     $ui.PanelStageBody.Children.Add((New-Text 'The account needs the right to read the directory and, in phase 3, to create groups in an OU. A simple bind in clear text is never used.' 'Hint' '0,6,0,0')) | Out-Null
@@ -405,7 +483,7 @@ function Invoke-DomainConnect {
     param([string]$ConfirmedServer)
     $f = $script:Form
     if ($f.PasswordBox.SecurePassword.Length -eq 0) { Set-StageMessage 'Enter the password of the domain account.' 'error'; return }
-    $e = Get-AVDTuneEnvironment $script:StateRoot
+    $e = Get-AVDTuneEnvironmentFile $script:StateRoot
     $server = $f.Server.Text.Trim(); $user = $f.User.Text.Trim()
     $f.Secure = $f.PasswordBox.SecurePassword
     $ldap = Get-StartLdap

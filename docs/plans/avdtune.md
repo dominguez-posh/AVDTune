@@ -14,7 +14,7 @@ Not in scope: customer specific software and shortcuts (they come as packages fr
 
 ## 1a. Start: sign-in, domain, snapshot gate (added 2026-11-15)
 
-Nothing changes the master before these three steps are done; the Overview shows them as a short start sequence.
+Nothing changes the master before these steps are done; the Overview shows them as a short start sequence. Order since 2026-11-17 (issue #64, details in `docs/start-sequence.md`): 1 sign-in (needs no answer), 2 domain (AVDTune reads the join state of the master first, read only; a domain member gets the DC step with the DC locator's server suggested, Entra only or not joined is shown as not needed with the reason), 3 the first-run questions of section 1b (only what is missing or ambiguous; suggested from the sign-in, Azure through GET only and the domain, every value with its source, valid after the confirmation), 4 snapshot gate. The numbering of the list below is the older one.
 
 1. **Microsoft 365 / Azure sign-in.** A normal interactive Microsoft sign-in, without Keevault (user decision 2026-11-15: AVDTune never uses the Keevault password manager or its fill-in). One sign-in with four token audiences (the fourth, Azure Storage for the NTFS rows of the FSLogix check, is optional, issue 18): Microsoft Graph (SharePoint site of the environment, read of Intune app notes for the package trust anchor), Azure Resource Manager (snapshot of the OS disk, VM size and region for the benchmark), and the PackTune package store (Sites.Selected). The app registration needs `user_impersonation` on Azure Service Management in addition to PackTune's permissions; the setup assistant adds it. Tokens live in memory only and are removed and checked before seal.
 2. **Domain** (only for the identity models with a domain controller, section 1b; with Entra only this step is skipped and groups come from Entra ID through Graph). The master is not domain joined (it must not be, because of sysprep), so the user enters the IP (or name) of a domain controller and a domain account with the rights to create groups in an OU. AVDTune reads everything else itself from the DC: RootDSE (domain DNS name, NetBIOS name, naming contexts, functional level), the OU tree, existing groups and their SIDs, the site, optionally the DNS servers. Connection: LDAPS 636 first; fallback LDAP 389 only with Negotiate signing and sealing; never a simple bind in clear text. The certificate of the DC is shown on first contact (thumbprint) and pinned per environment. The password stays in a SecureString in memory, never on disk, never in the protocol.
@@ -22,7 +22,7 @@ Nothing changes the master before these three steps are done; the Overview shows
 
 ## 1b. First run: environment wizard and automatic FSLogix setup (added 2026-11-15)
 
-On the first start (no `environment.json` yet) a wizard asks how the AVD environment is planned. The answers decide which pages, checks and steps exist; they can be changed later (with a change log entry).
+After the sign-in and the domain step of the first start (no confirmed answers in `environment.json` yet) a wizard asks how the AVD environment is planned, with what the sign-in, Azure and the domain showed already suggested (issue #64). The answers decide which pages, checks and steps exist; they can be changed later (with a change log entry).
 
 | Question | Choices |
 |---|---|

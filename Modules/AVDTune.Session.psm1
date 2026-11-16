@@ -123,7 +123,7 @@ function ConvertTo-AVDTuneAuthError {
         return "The app registration has no consent for this permission$need. An administrator must grant it: docs\start-sequence.md lists the permissions."
     }
     if ($m -match 'AADSTS50076|AADSTS50079|AADSTS53003|AADSTS50158') { return 'Conditional Access or multi-factor authentication blocks this sign-in. Sign in again and complete the request.' }
-    if ($m -match 'AADSTS700016|AADSTS70001') { return 'The app registration (client ID) was not found in this tenant. Check the client ID in the first-run questions; a registration that was just created can take a minute until the sign-in finds it.' }
+    if ($m -match 'AADSTS700016|AADSTS70001') { return 'The app registration (client ID) was not found in this tenant. Check the client ID (the field of the sign-in form, or the saved one in environment.json); a registration that was just created can take a minute until the sign-in finds it.' }
     if ($m -match 'AADSTS50105') { return "Your account is not assigned to AVDTune's app registration (only assigned accounts can sign in). With the roles for the setup, use 'Set up again (authorize this administrator)' in the sign-in step yourself; otherwise an administrator assigns you in the Entra admin center (Enterprise applications > AVDTune > Users and groups) and grants your consent (docs\start-sequence.md)." }
     if ($m -match 'AADSTS50194') { return "The app registration is limited to its own tenant, so AVDTune cannot sign in through 'organizations'. Enter your account (name@domain) in the sign-in step so AVDTune finds the tenant, or leave the client ID in the first-run questions empty so AVDTune creates its own app registration." }
     if ($m -match 'AADSTS90002|AADSTS50128|AADSTS50059') { return 'Microsoft knows no tenant for this account or domain. Check the account (name@domain).' }
@@ -223,7 +223,7 @@ function Connect-AVDTuneSession {
     param([Parameter(Mandatory)]$Session, [string]$TenantId, [Parameter(Mandatory)][string]$ClientId, [string]$LoginHint)
     $TenantId = ([string]$TenantId).Trim()
     if ($TenantId -and -not (Test-AVDTuneTenantGuid $TenantId) -and -not (Test-AVDTuneDomainName $TenantId.ToLowerInvariant())) { throw 'The saved tenant is neither a tenant ID nor a domain name (first-run questions).' }
-    if (-not (Test-AVDTuneTenantGuid $ClientId)) { throw 'The client ID of the app registration is not set or not a GUID (first-run questions).' }
+    if (-not (Test-AVDTuneTenantGuid $ClientId)) { throw 'The client ID of the app registration is not set or not a GUID (enter it in the sign-in form, or leave it empty so AVDTune creates its own).' }
     if ($ClientId -ieq $script:SetupClientId) { throw "Microsoft's setup app is not allowed for AVDTune. Use the client ID of AVDTune's own app registration." }
     if ($LoginHint -and -not (Get-AVDTuneAccountDomain $LoginHint)) { throw 'The account must look like name@domain.' }
     Disconnect-AVDTuneSession $Session
@@ -448,7 +448,7 @@ function Install-AVDTuneAppRegistration {
     $TenantId = ([string]$TenantId).Trim()
     # The saved client ID goes into an OData filter: only a real GUID, checked before any sign-in
     $ExistingClientId = ([string]$ExistingClientId).Trim()
-    if ($ExistingClientId -and -not (Test-AVDTuneTenantGuid $ExistingClientId)) { throw 'The saved client ID is not a GUID; correct it in the first-run questions (or leave it empty).' }
+    if ($ExistingClientId -and -not (Test-AVDTuneTenantGuid $ExistingClientId)) { throw 'The saved client ID is not a GUID; correct SignIn.ClientId in environment.json (or remove it so AVDTune creates its own).' }
     if ($LoginHint -and -not (Get-AVDTuneAccountDomain $LoginHint)) { throw 'The account must look like name@domain.' }
     $notes = New-Object System.Collections.ArrayList
     $setupUrls = @($script:SetupScopes | ForEach-Object { "$script:GraphResource/$_" })

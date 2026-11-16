@@ -53,7 +53,7 @@ try {
     Test-Check 'no environment.json before the first run' ($null -eq (Get-AVDTuneEnvironment $tmp)) $null
     $ctx = New-AVDTuneStartContext
     $stages = Get-AVDTuneStartStages -Context $ctx -Root $tmp
-    Test-Check 'stages before the first run: questions pending, the rest locked' (($stages | ForEach-Object { $_.Status }) -join ',' -eq 'Pending,Locked,Locked,Locked') (($stages | ForEach-Object { $_.Status }) -join ',')
+    Test-Check 'stages before the first run (#64: sign-in, domain, questions, snapshot): the sign-in is pending and needs no answer, the rest waits' (($stages | ForEach-Object { $_.Status }) -join ',' -eq 'Pending,Locked,Locked,Locked' -and ($stages | ForEach-Object { $_.Id }) -join ',' -eq 'SignIn,Domain,Environment,Snapshot') (($stages | ForEach-Object { $_.Status }) -join ',')
     $tenant = '11111111-2222-3333-4444-555555555555'
     $clientId = '66666666-7777-8888-9999-000000000000'
     $answers = Get-AVDTuneEnvironmentDefaults; $answers.TenantId = $tenant; $answers.ClientId = $clientId; $answers.VNet = 'vnet-example'; $answers.Subnet = 'snet-avd'
@@ -64,7 +64,7 @@ try {
     Test-Check 'invalid answers are not saved' ($null -ne (Get-ThrownText { $x = Get-AVDTuneEnvironmentDefaults; $x.Join = 'AdDs'; Save-AVDTuneEnvironment -Root $tmp -Answers $x })) $null
     Test-Check 'the saved file was not changed by the refused save' ((Get-AVDTuneEnvironment $tmp).Answers.Join -eq 'EntraOnly') $null
     $stages = Get-AVDTuneStartStages -Context $ctx -Root $tmp
-    Test-Check 'with the answers: questions done, sign-in pending, domain skipped (Entra only)' (($stages | ForEach-Object { $_.Status }) -join ',' -eq 'Done,Pending,Skipped,Locked') (($stages | ForEach-Object { $_.Status }) -join ',')
+    Test-Check 'with the answers of an earlier version: sign-in pending, domain skipped (Entra only), questions done (not asked again), snapshot locked' (($stages | ForEach-Object { $_.Status }) -join ',' -eq 'Pending,Skipped,Done,Locked') (($stages | ForEach-Object { $_.Status }) -join ',')
     [void](Start-AVDTuneImageVersion -Root $tmp -Date ([datetime]'2026-11-15') -User 'admin1')
     $answers2 = Get-AVDTuneEnvironmentAnswers (Get-AVDTuneEnvironment $tmp); $answers2.Profiles = 'OtherSmb'
     $changed = Save-AVDTuneEnvironment -Root $tmp -Answers $answers2 -User 'admin1'
@@ -266,7 +266,7 @@ try {
     # an environment.json of the version before #11 (tenant typed in as a domain)
     [IO.File]::WriteAllText((Join-Path $r6 'environment.json'), (@{ Schema = 1; Answers = @{ Join = 'EntraOnly'; Dc = 'None'; Identities = 'CloudOnly'; Profiles = 'AzureFiles'; AzureFilesAuth = 'EntraKerberos'; Network = @{ Endpoint = 'Private'; VNet = ''; Subnet = ''; DnsZone = 'Azure' } }; SignIn = @{ TenantId = 'contoso.example'; ClientId = $clientId }; Snapshot = @{ NamePattern = '{OsDisk}-{DD}.{MM}.{YYYY}-{N}' }; Dc = @{ Server = ''; User = ''; Pins = @{}; Discovery = $null }; Updated = '2026-11-01T00:00:00Z'; UpdatedBy = 'admin1' } | ConvertTo-Json -Depth 6))
     $old6 = Get-AVDTuneEnvironmentAnswers (Get-AVDTuneEnvironment $r6)
-    Test-Check 'an environment.json with a typed-in tenant stays valid' ((Test-AVDTuneEnvironmentAnswers $old6).Errors.Count -eq 0 -and $old6.TenantId -eq 'contoso.example' -and (Get-AVDTuneStartStages -Context (New-AVDTuneStartContext) -Root $r6)[0].Status -eq 'Done') $null
+    Test-Check 'an environment.json with a typed-in tenant stays valid' ((Test-AVDTuneEnvironmentAnswers $old6).Errors.Count -eq 0 -and $old6.TenantId -eq 'contoso.example' -and (Get-AVDTuneStartStages -Context (New-AVDTuneStartContext) -Root $r6)[2].Status -eq 'Done') $null
     $a6 = New-AVDTuneFakeAuth
     [void](Invoke-AVDTuneStartSignIn -Root $r6 -Session (New-AVDTuneSession -TempRoot $signTemp -Auth $a6) -User 'admin1')
     Test-Check 'a saved domain: sign-in at that domain, then the tenant GUID of the token is saved (change log old -> new)' (@($a6.Log | Where-Object { $_ -like 'SignIn tenant=contoso.example *' }).Count -eq 1 -and (Get-AVDTuneEnvironment $r6).SignIn.TenantId -eq $tenant -and @(Get-AVDTuneChangeLog -Root $r6 | Where-Object { $_.Text -like "Tenant taken from the sign-in: contoso.example -> $tenant*" }).Count -eq 1) ($a6.Log -join ' | ')
@@ -883,13 +883,13 @@ try {
     [void](Save-AVDTuneEnvironment -Root $tmp -Answers $hy -User 'admin1')
     $ctx2 = New-AVDTuneStartContext
     $st = Get-AVDTuneStartStages -Context $ctx2 -Root $tmp
-    Test-Check 'with a DC: questions done, sign-in pending, domain and snapshot locked' (($st | ForEach-Object Status) -join ',' -eq 'Done,Pending,Locked,Locked') (($st | ForEach-Object Status) -join ',')
+    Test-Check 'with a DC: sign-in pending, domain locked, questions done, snapshot locked' (($st | ForEach-Object Status) -join ',' -eq 'Pending,Locked,Done,Locked') (($st | ForEach-Object Status) -join ',')
     $s7 = New-AVDTuneSession -TempRoot $signTemp -Auth (New-AVDTuneFakeAuth); [void](Connect-AVDTuneSession -Session $s7 -TenantId $tenant -ClientId $clientId); $ctx2.Session = $s7
     $st = Get-AVDTuneStartStages -Context $ctx2 -Root $tmp
-    Test-Check 'after the sign-in the domain stage is pending' (($st | ForEach-Object Status) -join ',' -eq 'Done,Done,Pending,Locked') (($st | ForEach-Object Status) -join ',')
+    Test-Check 'after the sign-in the domain stage is pending' (($st | ForEach-Object Status) -join ',' -eq 'Done,Pending,Done,Locked') (($st | ForEach-Object Status) -join ',')
     $ctx2.Directory = $info; $ctx2.DirectorySecurity = 'LDAPS 636, certificate pinned'
     $st2 = Get-AVDTuneStartStages -Context $ctx2 -Root $tmp
-    Test-Check 'after the domain is read: done with the facts, snapshot pending' ((($st2 | ForEach-Object Status) -join ',' -eq 'Done,Done,Done,Pending') -and ($st2[2].Detail -like '*example.test*EXAMPLE*4 OUs*3 groups*Default-First-Site-Name*pinned*')) $st2[2].Detail
+    Test-Check 'after the domain is read: done with the facts, snapshot pending' ((($st2 | ForEach-Object Status) -join ',' -eq 'Done,Done,Done,Pending') -and ($st2[1].Detail -like '*example.test*EXAMPLE*4 OUs*3 groups*Default-First-Site-Name*pinned*')) $st2[1].Detail
     $ctx2.Failures['Snapshot'] = 'No connection to Azure Resource Manager.'
     $st = Get-AVDTuneStartStages -Context $ctx2 -Root $tmp
     Test-Check 'a failure of a stage is shown on that stage' ($st[3].Status -eq 'Failed' -and $st[3].Detail -like 'No connection*' -and (Get-AVDTuneNextStage $st).Id -eq 'Snapshot') $null
@@ -954,6 +954,207 @@ try {
     Test-Check 'no AVDTune code outside Shared\ calls a Keevault function' ($own.Count -gt 10 -and $kvHits.Count -eq 0) ($kvHits -join ', ')
     $sessCode = [IO.File]::ReadAllText((Join-Path $repo 'Modules\AVDTune.Session.psm1'))
     Test-Check 'the sign-in imports only the normal sign-in functions of the shared module and fills in nothing' ($sessCode -match 'Import-Module \$shared -Force -Function Invoke-PackTuneBrowserSignIn, Request-PackTuneToken, Set-PackTuneSignInLog\r?\n' -and $sessCode -match 'Invoke-PackTuneBrowserSignIn @params' -and $sessCode -match '\$params = @\{ TenantID = \$TenantId; ClientID = \$ClientId; CacheFolder' -and $sessCode -notmatch '(?i)-Fill\b|-Passkey\b|-HasOtp\b|\b(Fill|Passkey|HasOtp)\s*=|params\.(Fill|Passkey|HasOtp)') $null
+
+    # ---------------------------------------------------------------- start order (#64): sign-in, domain, questions (suggested, confirmed), snapshot
+    $seedJoined = { param([bool]$Domain, [bool]$Entra, [string]$Name = 'Example.Test', $Dc = $null)
+        New-AVDTuneFakeMachine -Seed @{
+            ComputerSystem = [pscustomobject]@{ PartOfDomain = $Domain; Domain = $(if ($Domain) { $Name } else { 'WORKGROUP' }); DomainRole = $(if ($Domain) { 3 } else { 2 }) }
+            DcLocate = $Dc
+            Native = @{ 'dsregcmd.exe /status' = @{ ExitCode = 0; Output = "| Device State |`r`n    AzureAdJoined : $(if ($Entra) { 'YES' } else { 'NO' })`r`n  EnterpriseJoined : NO`r`n    DomainJoined : $(if ($Domain) { 'YES' } else { 'NO' })`r`n" } } } }
+    $dcFound = [pscustomobject]@{ Name = 'DC1.Example.Test.'; Address = '10.0.0.10'; Site = 'Default-First-Site-Name' }
+
+    # join detection: joined, Entra only, not joined, unreadable
+    $mj = & $seedJoined $true $true 'Example.Test' $dcFound
+    $jHybrid = Get-AVDTuneJoinState -Machine $mj
+    Test-Check 'join state, domain member (hybrid): Hybrid, the domain, the DC from the locator, a DC step is needed' ($jHybrid.Kind -eq 'Hybrid' -and $jHybrid.NeedsDc -and $jHybrid.DomainName -eq 'example.test' -and $jHybrid.Dc.Name -eq 'dc1.example.test' -and $jHybrid.Dc.Address -eq '10.0.0.10' -and $jHybrid.Dc.Site -eq 'Default-First-Site-Name' -and @($mj.Log) -contains 'DcLocate example.test') ($jHybrid | ConvertTo-Json -Compress -Depth 3)
+    $jAd = Get-AVDTuneJoinState -Machine (& $seedJoined $true $false 'Example.Test' $dcFound)
+    Test-Check 'join state, domain member without Entra: AdDs' ($jAd.Kind -eq 'AdDs' -and $jAd.NeedsDc -and -not $jAd.EntraJoined) $jAd.Kind
+    $mE = & $seedJoined $false $true
+    $jEntra = Get-AVDTuneJoinState -Machine $mE
+    Test-Check 'join state, Entra only: no DC step, the reason says so, the DC locator is not asked' ($jEntra.Kind -eq 'EntraOnly' -and -not $jEntra.NeedsDc -and $jEntra.Reason -like '*Microsoft Entra ID only*' -and $null -eq $jEntra.Dc -and @($mE.Log | Where-Object { $_ -like 'DcLocate*' }).Count -eq 0) $jEntra.Reason
+    $jNone = Get-AVDTuneJoinState -Machine (& $seedJoined $false $false)
+    Test-Check 'join state, not joined: no DC step, the reason says so' ($jNone.Kind -eq 'NotJoined' -and -not $jNone.NeedsDc -and $jNone.Reason -like '*not joined*') $jNone.Reason
+    $mU = New-AVDTuneFakeMachine -Seed @{ ComputerSystem = $null; Native = @{ 'dsregcmd.exe /status' = @{ ExitCode = 1; Output = '' } } }
+    $jUnk = Get-AVDTuneJoinState -Machine $mU
+    Test-Check 'join state, nothing readable: Unknown, no DC step, the problems are named' ($jUnk.Kind -eq 'Unknown' -and -not $jUnk.NeedsDc -and @($jUnk.Problems).Count -ge 2) ($jUnk.Problems -join ' | ')
+    $jNoLoc = Get-AVDTuneJoinState -Machine (& $seedJoined $true $false 'Example.Test' $null)
+    Test-Check 'join state, domain member but the DC locator finds nothing: a DC step without a suggested server, the problem is named' ($jNoLoc.NeedsDc -and $null -eq $jNoLoc.Dc -and (@($jNoLoc.Problems) -join ' ') -like '*DC locator found no domain controller*') ($jNoLoc.Problems -join ' | ')
+    # detected values are data: a name that is no DNS name, an address that is no IPv4 address are dropped
+    $badDomainM = & $seedJoined $true $false 'ex ample;calc' $dcFound
+    $jBadDomain = Get-AVDTuneJoinState -Machine $badDomainM
+    Test-Check 'a detected domain name that is not a DNS name is dropped (no DC locator call with it)' ($jBadDomain.DomainName -eq '' -and $null -eq $jBadDomain.Dc -and @($badDomainM.Log | Where-Object { $_ -like 'DcLocate*' }).Count -eq 0 -and (@($jBadDomain.Problems) -join ' ') -like '*not a valid DNS name*') ($jBadDomain.Problems -join ' | ')
+    $jBadDc = Get-AVDTuneJoinState -Machine (& $seedJoined $true $false 'Example.Test' ([pscustomobject]@{ Name = 'dc1 example;x'; Address = '999.1.1.1'; Site = 'Site;x' }))
+    Test-Check 'a DC name and an address from the locator that are not valid are dropped' ($null -eq $jBadDc.Dc -and (@($jBadDc.Problems) -join ' ') -like '*name of the DC locator is not valid*address of the DC locator is not valid*') ($jBadDc.Problems -join ' | ')
+    $jIpDomain = Get-AVDTuneJoinState -Machine (& $seedJoined $true $false '10.1.2.3' $dcFound)
+    Test-Check 'an IP address is not accepted as a domain name' ($jIpDomain.DomainName -eq '') $jIpDomain.DomainName
+    # read only: dsregcmd through the central start path with its full path; nothing else is touched
+    $mSeen = New-AVDTuneFakeMachine -Seed @{ ComputerSystem = [pscustomobject]@{ PartOfDomain = $false; Domain = 'WORKGROUP'; DomainRole = 2 } }
+    $script:dsregFile = $null; $script:dsregArgs = $null
+    $mSeen.Run = { param($File, [string[]]$Arguments, [int]$TimeoutSeconds = 120) $script:dsregFile = $File; $script:dsregArgs = @($Arguments); [pscustomobject]@{ ExitCode = 0; Output = '    AzureAdJoined : NO' } }
+    [void](Get-AVDTuneJoinState -Machine $mSeen)
+    Test-Check 'dsregcmd /status is started with the full path in the system folder (through the machine, i.e. New-AVDTuneChildStartInfo), never by name' ($script:dsregFile -eq (Join-Path ([Environment]::GetFolderPath('System')) 'dsregcmd.exe') -and ($script:dsregArgs -join ' ') -eq '/status') $script:dsregFile
+    Test-Check 'the join detection writes nothing: no registry value, service or task change, no file in the state folder' (@($mj.Log | Where-Object { $_ -match '^(RegSet|RegRemove|ServiceSetStartup|ServiceStop|ServiceStart|TaskSetEnabled|WriteFile)' }).Count -eq 0 -and -not (Test-Path (Join-Path $tmp 'start64-probe'))) ($mj.Log -join ' | ')
+    $dirCode = [IO.File]::ReadAllText((Join-Path $repo 'Modules\AVDTune.Directory.psm1'))
+    $joinCode = $dirCode.Substring($dirCode.IndexOf('#region join state'), $dirCode.IndexOf('#region real adapter') - $dirCode.IndexOf('#region join state'))
+    Test-Check 'join detection code: the full system path of dsregcmd, no process start of its own, no write, no Start-Process' ($joinCode -match "Join-Path \(Get-AVDTuneSystemFolder System\) 'dsregcmd\.exe'" -and $joinCode -notmatch '(?i)Start-Process|Process\]::Start|ProcessStartInfo|Set-Item|New-Item|Out-File|Set-Content|WriteAllText|Write-AVDTuneFile|RegSet|RegRemove') $null
+    $realMachine = New-AVDTuneMachine
+    Test-Check 'the real machine has the two read members of the join detection, the fake has them too' ($realMachine.PSObject.Properties['ComputerSystem'] -and $realMachine.PSObject.Properties['DcLocate'] -and $mj.PSObject.Properties['ComputerSystem'] -and $mj.PSObject.Properties['DcLocate']) $null
+
+    # Azure facts: only GET, validated, and the cases without Azure
+    $factsVm = Get-AVDTuneVmIdentity (New-AVDTuneFakeMachine)
+    $armOk = New-AVDTuneFakeArm -Seed @{ Net = @{ VNet = 'vnet-corp'; Subnet = 'snet-avd' }; StorageAccounts = @(@{ Name = 'stprofilesexample'; Kind = 'FileStorage'; Public = 'Disabled'; PrivateEndpoints = 1 }); DnsZones = @('privatelink.file.core.windows.net') }
+    $facts = Get-AVDTuneAzureFacts -Arm $armOk -Token 'fake-arm-token-value' -Vm $factsVm
+    Test-Check 'Azure facts: region, virtual network and subnet of the primary NIC, the storage account, the private DNS zone' ($facts.Reachable -and $facts.Region -eq 'westeurope' -and $facts.VNet -eq 'vnet-corp' -and $facts.Subnet -eq 'snet-avd' -and $facts.StorageAccounts.Count -eq 1 -and $facts.StorageAccounts[0].Name -eq 'stprofilesexample' -and $facts.StorageAccounts[0].PrivateEndpoints -eq 1 -and $facts.DnsZone -eq $true -and @($facts.Problems).Count -eq 0) ($facts | ConvertTo-Json -Compress -Depth 4)
+    Test-Check 'Azure facts: every request is a GET (nothing is written to Azure before the snapshot is confirmed)' (@($armOk.Log).Count -ge 4 -and @($armOk.Log | Where-Object { $_ -notlike 'GET *' }).Count -eq 0) ($armOk.Log -join ' | ')
+    $roArm = New-AVDTuneReadOnlyArm -Arm $armOk
+    $armOk.Log.Clear()
+    $roResults = @(@('PUT', 'POST', 'DELETE', 'PATCH') | ForEach-Object { & $roArm.Invoke $_ "/subscriptions/$script:FakeSubscription/resourceGroups/rg-example/providers/Microsoft.Compute/snapshots/x?api-version=2023-10-02" 'fake-arm-token-value' @{ a = 1 } })
+    $roBody = & $roArm.Invoke 'GET' "/subscriptions/$script:FakeSubscription/resourceGroups/rg-example/providers/Microsoft.Compute/snapshots?api-version=2023-10-02" 'fake-arm-token-value' @{ a = 1 }
+    Test-Check 'the read-only ARM adapter refuses PUT, POST, DELETE, PATCH and a GET with a body without calling Azure' (@($roResults | Where-Object { $_.Status -ne 0 -or $_.Error -notlike 'Refused*' }).Count -eq 0 -and $roBody.Status -eq 0 -and $armOk.Log.Count -eq 0) ($armOk.Log -join ' | ')
+    $factsSrc = [IO.File]::ReadAllText((Join-Path $repo 'Modules\AVDTune.Snapshot.psm1'))
+    $factsCode = $factsSrc.Substring($factsSrc.IndexOf('function Get-AVDTuneAzureFacts'), $factsSrc.IndexOf('#region real adapter') - $factsSrc.IndexOf('function Get-AVDTuneAzureFacts'))
+    Test-Check 'Azure facts code: only through the read-only adapter and only GET' ($factsCode -match 'New-AVDTuneReadOnlyArm' -and @([regex]::Matches($factsCode, '-Method (\w+)') | ForEach-Object { $_.Groups[1].Value } | Where-Object { $_ -ne 'GET' }).Count -eq 0 -and $factsCode -notmatch 'Invoke-AVDTuneArm -Arm \$Arm\b') $null
+    $armOff = New-AVDTuneFakeArm; $armOff.Store.Offline = $true
+    $factsOff = Get-AVDTuneAzureFacts -Arm $armOff -Token 'fake-arm-token-value' -Vm $factsVm
+    Test-Check 'Azure facts: Azure not reachable: Reachable is false, nothing is known, the reason is readable' (-not $factsOff.Reachable -and $factsOff.Problem -like 'No connection to Azure Resource Manager*' -and $factsOff.VNet -eq '' -and @($factsOff.StorageAccounts).Count -eq 0) $factsOff.Problem
+    $armNoStorage = New-AVDTuneFakeArm; $armNoStorage.Store.StorageForbidden = $true; $armNoStorage.Store.DnsForbidden = $true
+    $factsPart = Get-AVDTuneAzureFacts -Arm $armNoStorage -Token 'fake-arm-token-value' -Vm $factsVm
+    Test-Check 'Azure facts: a part that is forbidden (storage accounts, DNS zones) stays empty and is named, the network is still known' ($factsPart.Reachable -and $factsPart.VNet -eq 'vnet-example' -and @($factsPart.StorageAccounts).Count -eq 0 -and $null -eq $factsPart.DnsZone -and (@($factsPart.Problems) -join ' ') -like '*Storage accounts*403*Private DNS zones*') ($factsPart.Problems -join ' | ')
+    $armEvil = New-AVDTuneFakeArm -Seed @{ Net = @{ VNet = 'vnet;evil'; Subnet = 'snet-avd' } }
+    $factsEvil = Get-AVDTuneAzureFacts -Arm $armEvil -Token 'fake-arm-token-value' -Vm $factsVm
+    Test-Check 'Azure facts: a subnet ID with characters that are not allowed in a name is not used' ($factsEvil.VNet -eq '' -and $factsEvil.Subnet -eq '' -and (@($factsEvil.Problems) -join ' ') -like '*unexpected form*') ($factsEvil.Problems -join ' | ')
+    $factsNoVm = Get-AVDTuneAzureFacts -Arm $armOk -Token 'fake-arm-token-value' -Vm (Get-AVDTuneVmIdentity (New-AVDTuneFakeMachine -Seed @{ Imds = $null }))
+    Test-Check 'Azure facts: outside Azure (no instance metadata) nothing is known' (-not $factsNoVm.Reachable -and $factsNoVm.Problem -like '*not an Azure VM*') $factsNoVm.Problem
+
+    # suggestions: values with their source, ambiguous questions stay open, nothing without Azure from Azure
+    $sgHybrid = Get-AVDTuneAnswerSuggestions -Detection $jHybrid -AzureFacts $facts
+    $it = $sgHybrid.Items
+    Test-Check 'suggestions, domain member with Azure: join, identities, network, profiles, endpoint, DNS zone with a source each; the DC question stays open (Azure or on premises)' ($it.Join.Value -eq 'Hybrid' -and $it.Identities.Value -eq 'Synced' -and $it.VNet.Value -eq 'vnet-corp' -and $it.Subnet.Value -eq 'snet-avd' -and $it.Profiles.Value -eq 'AzureFiles' -and $it.Endpoint.Value -eq 'Private' -and $it.DnsZone.Value -eq 'Azure' -and $it.Dc.State -eq 'Ambiguous' -and $it.Dc.Value -eq '' -and $it.Dc.Hint -like '*dc1.example.test*Azure or on premises*' -and @($it.Values | Where-Object { $_.State -eq 'Detected' -and -not $_.Source }).Count -eq 0) ($it.Keys -join ',')
+    Test-Check 'suggestions: the source names where the value came from' ($it.Join.Source -like '*Win32_ComputerSystem*dsregcmd*example.test*' -and $it.VNet.Source -like '*Azure Resource Manager*' -and $it.Profiles.Source -like '*stprofilesexample*') ($it.Join.Source + ' | ' + $it.VNet.Source)
+    $sgEntra = Get-AVDTuneAnswerSuggestions -Detection $jEntra -AzureFacts $facts
+    Test-Check 'suggestions, Entra only: join Entra only, no domain controller, the identities stay open' ($sgEntra.Items.Join.Value -eq 'EntraOnly' -and $sgEntra.Items.Dc.Value -eq 'None' -and $sgEntra.Items.Identities.State -eq 'Ambiguous') ($sgEntra.Items.Keys -join ',')
+    $sgNone = Get-AVDTuneAnswerSuggestions -Detection $jNone -AzureFacts $facts
+    Test-Check 'suggestions, not joined: join and domain controller stay open (the master says nothing about the session hosts)' ($sgNone.Items.Join.State -eq 'Ambiguous' -and $sgNone.Items.Join.Value -eq '' -and $sgNone.Items.Dc.State -eq 'Ambiguous') ($sgNone.Items.Keys -join ',')
+    $sgOff = Get-AVDTuneAnswerSuggestions -Detection $jHybrid -AzureFacts $factsOff
+    Test-Check 'suggestions, Azure not reachable: no value from Azure (network, profiles, endpoint, DNS zone are asked), the note says why; the join stays known from the master' (-not $sgOff.Items.Contains('VNet') -and -not $sgOff.Items.Contains('Subnet') -and -not $sgOff.Items.Contains('Profiles') -and -not $sgOff.Items.Contains('Endpoint') -and -not $sgOff.Items.Contains('DnsZone') -and (@($sgOff.Notes) -join ' ') -like '*Azure: nothing could be read*No connection*' -and $sgOff.Items.Join.Value -eq 'Hybrid') (@($sgOff.Notes) -join ' | ')
+    $sgNoDetect = Get-AVDTuneAnswerSuggestions -Detection $null -AzureFacts $factsOff
+    Test-Check 'suggestions, neither join state nor Azure: nothing is suggested, every question is asked' ($sgNoDetect.Items.Count -eq 0) ($sgNoDetect.Items.Keys -join ',')
+    $armTwo = New-AVDTuneFakeArm -Seed @{ StorageAccounts = @(@{ Name = 'stone'; PrivateEndpoints = 0 }, @{ Name = 'sttwo'; PrivateEndpoints = 1 }) }
+    $sgTwo = Get-AVDTuneAnswerSuggestions -Detection $jEntra -AzureFacts (Get-AVDTuneAzureFacts -Arm $armTwo -Token 'fake-arm-token-value' -Vm $factsVm)
+    Test-Check 'suggestions: more than one storage account is ambiguous (asked, the accounts named), no endpoint is guessed' ($sgTwo.Items.Profiles.State -eq 'Ambiguous' -and $sgTwo.Items.Profiles.Hint -like '*stone*sttwo*' -and -not $sgTwo.Items.Contains('Endpoint')) ($sgTwo.Items.Keys -join ',')
+    $armPub = New-AVDTuneFakeArm -Seed @{ StorageAccounts = @(@{ Name = 'stpublic'; Public = 'Enabled'; PrivateEndpoints = 0 }) }
+    $sgPub = Get-AVDTuneAnswerSuggestions -Detection $jEntra -AzureFacts (Get-AVDTuneAzureFacts -Arm $armPub -Token 'fake-arm-token-value' -Vm $factsVm)
+    Test-Check 'suggestions: a storage account without a private endpoint and with public access suggests the public endpoint; no DNS zone found suggests nothing for it' ($sgPub.Items.Endpoint.Value -eq 'Public' -and -not $sgPub.Items.Contains('DnsZone')) ($sgPub.Items.Keys -join ',')
+    $armParen = New-AVDTuneFakeArm -Seed @{ Net = @{ VNet = 'vnet(x)'; Subnet = 'snet-avd' } }
+    $sgParen = Get-AVDTuneAnswerSuggestions -Detection $jEntra -AzureFacts (Get-AVDTuneAzureFacts -Arm $armParen -Token 'fake-arm-token-value' -Vm $factsVm)
+    Test-Check 'suggestions: a detected network name that does not pass the answer rule is not suggested and named as rejected' (-not $sgParen.Items.Contains('VNet') -and $sgParen.Items.Subnet.Value -eq 'snet-avd' -and (@($sgParen.Rejected) -join ' ') -like 'VNet*') (@($sgParen.Rejected) -join ' | ')
+    $allChoices = @{}; foreach ($q in (Get-AVDTuneQuestions)) { $allChoices[$q.Key] = @($q.Choices | ForEach-Object { $_.Value }) }
+    $badChoice = @($sgHybrid.Items.Values + $sgEntra.Items.Values + $sgPub.Items.Values | Where-Object { $_.State -eq 'Detected' -and $allChoices.ContainsKey($_.Key) -and $_.Value -cnotin $allChoices[$_.Key] })
+    Test-Check 'every suggested choice is one of the choices of its question' ($badChoice.Count -eq 0) ($badChoice | ForEach-Object { "$($_.Key)=$($_.Value)" })
+
+    # the whole order in one root: sign-in without any answer, domain, suggestions, confirmation
+    $o1 = Join-Path $tmp 'order1'; [void](Initialize-AVDTuneState -Root $o1)
+    $ctxO = New-AVDTuneStartContext
+    $stO = Get-AVDTuneStartStages -Context $ctxO -Root $o1
+    Test-Check 'order: nothing is asked before the sign-in (no environment.json, no answers)' (-not (Test-Path (Join-Path $o1 'environment.json')) -and ($stO | ForEach-Object Status) -join ',' -eq 'Pending,Locked,Locked,Locked' -and ($stO | ForEach-Object Id) -join ',' -eq 'SignIn,Domain,Environment,Snapshot') (($stO | ForEach-Object Status) -join ',')
+    $aO = New-AVDTuneFakeAuth
+    $sO = New-AVDTuneSession -TempRoot $signTemp -Auth $aO
+    $resO = Invoke-AVDTuneStartSignIn -Root $o1 -Session $sO -User 'admin1' -RetryDelaySeconds 0
+    $fileO = Get-AVDTuneEnvironmentFile $o1
+    Test-Check 'order: the sign-in works without an answer: its own app registration is made, tenant and client ID are saved, but no answer exists' ($resO.Info.Connected -and $fileO.SignIn.TenantId -eq $tenant -and $fileO.SignIn.ClientId -eq @($aO.Store.Apps)[0].appId -and $null -eq (Get-AVDTuneEnvironment $o1) -and $null -eq (Get-AVDTuneProp $fileO 'Answers')) ($fileO | ConvertTo-Json -Compress -Depth 3)
+    $ctxO.Session = $sO
+    $stO = Get-AVDTuneStartStages -Context $ctxO -Root $o1
+    Test-Check 'order: after the sign-in the domain stage waits for the join detection, the questions and the snapshot wait' (($stO | ForEach-Object Status) -join ',' -eq 'Done,Pending,Locked,Locked') (($stO | ForEach-Object Status) -join ',')
+    # Entra only: the domain step is not needed, with the reason; the questions open
+    [void](Update-AVDTuneStartDetection -Context $ctxO -Machine $mE)
+    $stO = Get-AVDTuneStartStages -Context $ctxO -Root $o1
+    Test-Check 'order: Entra only: the domain step is skipped with the reason, the questions are next, the snapshot waits' (($stO | ForEach-Object Status) -join ',' -eq 'Done,Skipped,Pending,Locked' -and $stO[1].Detail -like 'Not needed: This master is joined to Microsoft Entra ID only*' -and (Get-AVDTuneNextStage $stO).Id -eq 'Environment') (($stO | ForEach-Object Status) -join ',' + ' ' + $stO[1].Detail)
+    # a domain member: the DC step opens first, the questions wait for it
+    $ctxJ = New-AVDTuneStartContext; $ctxJ.Session = $sO
+    [void](Update-AVDTuneStartDetection -Context $ctxJ -Machine $mj)
+    $stJ = Get-AVDTuneStartStages -Context $ctxJ -Root $o1
+    Test-Check 'order: domain member: the DC step is pending (the locator found the DC), the questions and the snapshot wait' (($stJ | ForEach-Object Status) -join ',' -eq 'Done,Pending,Locked,Locked' -and $stJ[1].Detail -like '*dc1.example.test*' -and (Get-AVDTuneNextStage $stJ).Id -eq 'Domain') (($stJ | ForEach-Object Status) -join ',' + ' ' + $stJ[1].Detail)
+    # the domain step before any answer: pin and discovery go into the file next to the sign-in, nothing is lost
+    [void](Set-AVDTuneDcPin -Root $o1 -Server 'dc1.example.test' -Certificate ([pscustomobject]@{ Sha256 = ('AB' * 32); Thumbprint = ('CD' * 20); Subject = 'CN=dc1.example.test' }) -User 'admin1')
+    Save-AVDTuneDcDiscovery -Root $o1 -Server 'dc1.example.test' -User 'EXAMPLE\svc' -Info $info
+    $fileD = Get-AVDTuneEnvironmentFile $o1
+    Test-Check 'order: the DC pin and what was read are saved before the questions; the sign-in part stays; still no answers' ($fileD.Dc.Server -eq 'dc1.example.test' -and $fileD.Dc.Pins.'dc1.example.test'.Sha256 -eq ('AB' * 32) -and $fileD.Dc.Discovery.NetBiosName -eq 'EXAMPLE' -and $fileD.SignIn.TenantId -eq $tenant -and $null -eq (Get-AVDTuneEnvironment $o1)) ($fileD | ConvertTo-Json -Compress -Depth 4)
+    $ctxJ.Directory = $info; $ctxJ.DirectorySecurity = 'LDAPS 636, certificate pinned'
+    $stJ = Get-AVDTuneStartStages -Context $ctxJ -Root $o1
+    Test-Check 'order: after the DC is read the questions are pending (the snapshot waits)' (($stJ | ForEach-Object Status) -join ',' -eq 'Done,Done,Pending,Locked') (($stJ | ForEach-Object Status) -join ',')
+
+    # a suggestion is no answer until the administrator confirms
+    $ctxJ.AzureFacts = $facts; $ctxJ.Suggestions = Get-AVDTuneAnswerSuggestions -Detection $ctxJ.Detection -AzureFacts $facts
+    $stJ = Get-AVDTuneStartStages -Context $ctxJ -Root $o1
+    Test-Check 'a suggestion is not an answer: with all suggestions known there is still no environment, the questions are pending, environment.json has no answers' ($null -eq (Get-AVDTuneEnvironment $o1) -and $stJ[2].Status -eq 'Pending' -and $null -eq (Get-AVDTuneProp (Get-AVDTuneEnvironmentFile $o1) 'Answers') -and -not (Test-AVDTuneWriteAllowed)) ($stJ | ForEach-Object Status)
+    $confirm = Get-AVDTuneEnvironmentAnswers (Get-AVDTuneEnvironmentFile $o1)
+    foreach ($k in 'Join', 'Identities', 'VNet', 'Subnet', 'Profiles', 'Endpoint', 'DnsZone') { $confirm.$k = [string]$ctxJ.Suggestions.Items[$k].Value }
+    $confirm.Dc = 'AdDsOnPrem'   # the question the administrator had to answer himself
+    $confirm.Profiles = 'OtherSmb'   # and a suggestion he changed
+    $srcO = Resolve-AVDTuneAnswerSources -Answers $confirm -Suggestions $ctxJ.Suggestions
+    Test-Check 'sources: a kept suggestion is confirmed with its source, a changed one and a typed one say so' ($srcO.Join -like 'Confirmed: *Win32_ComputerSystem*' -and $srcO.VNet -like 'Confirmed: Azure Resource Manager*' -and $srcO.Profiles -like 'Typed by the administrator (suggested AzureFiles: *' -and $srcO.Dc -eq 'Typed by the administrator' -and $srcO.SnapshotNamePattern -eq 'Default of AVDTune') ($srcO | ConvertTo-Json -Compress)
+    $savedO = Save-AVDTuneEnvironment -Root $o1 -Answers $confirm -User 'admin1' -Sources $srcO
+    $stJ = Get-AVDTuneStartStages -Context $ctxJ -Root $o1
+    $envO = Get-AVDTuneEnvironment $o1
+    Test-Check 'after the confirmation the suggestion values are the answers; the file keeps the sign-in, the DC pin and the sources' ($envO.Answers.Join -eq 'Hybrid' -and $envO.Answers.Network.VNet -eq 'vnet-corp' -and $envO.Answers.Profiles -eq 'OtherSmb' -and $envO.SignIn.TenantId -eq $tenant -and $envO.SignIn.ClientId -eq $fileO.SignIn.ClientId -and $envO.Dc.Pins.'dc1.example.test'.Sha256 -eq ('AB' * 32) -and $envO.Sources.Join -like 'Confirmed: *' -and $envO.Sources.Dc -eq 'Typed by the administrator' -and ($stJ | ForEach-Object Status) -join ',' -eq 'Done,Done,Done,Pending') ($envO | ConvertTo-Json -Compress -Depth 4)
+    Test-Check 'the sources in environment.json hold no secret and are read back' ((Get-Content (Join-Path $o1 'environment.json') -Raw) -notmatch '(?i)password|secret|token|key|eyJ' -and (Get-AVDTuneAnswerSources $envO).Contains('Join')) $null
+    # the other writers keep the sources and the rest of the file
+    [void](Set-AVDTuneEnvironmentSignIn -Root $o1 -TenantId $tenant -ClientId '66666666-7777-8888-9999-000000000000' -User 'admin1')
+    $afterSignIn = Get-AVDTuneEnvironment $o1
+    Test-Check 'a later sign-in change keeps answers, sources, DC and pins' ($afterSignIn.SignIn.ClientId -eq '66666666-7777-8888-9999-000000000000' -and $afterSignIn.Sources.Join -like 'Confirmed: *' -and $afterSignIn.Dc.Pins.'dc1.example.test'.Sha256 -eq ('AB' * 32) -and $afterSignIn.Answers.Join -eq 'Hybrid') ($afterSignIn | ConvertTo-Json -Compress -Depth 4)
+    [void](Set-AVDTuneDcPin -Root $o1 -Server 'dc2.example.test' -Certificate ([pscustomobject]@{ Sha256 = ('EF' * 32); Thumbprint = ('01' * 20); Subject = 'CN=dc2.example.test' }) -User 'admin1')
+    $afterPin = Get-AVDTuneEnvironment $o1
+    Test-Check 'a later DC pin keeps answers, sources and the sign-in' ($afterPin.Answers.Profiles -eq 'OtherSmb' -and $afterPin.Sources.Profiles -like 'Typed by the administrator (suggested*' -and $afterPin.SignIn.TenantId -eq $tenant -and $afterPin.Dc.Pins.'dc2.example.test') $null
+
+    # not joined at the master but the questions say there is a domain controller: the domain step opens after the questions
+    $ctxN = New-AVDTuneStartContext; $ctxN.Session = $sO
+    $o2 = Join-Path $tmp 'order2'; [void](Initialize-AVDTuneState -Root $o2)
+    [void](Set-AVDTuneEnvironmentSignIn -Root $o2 -TenantId $tenant -User 'admin1')
+    [void](Update-AVDTuneStartDetection -Context $ctxN -Machine (& $seedJoined $false $false))
+    $stN = Get-AVDTuneStartStages -Context $ctxN -Root $o2
+    Test-Check 'order: not joined: the domain step is skipped with the reason and points to the questions' (($stN | ForEach-Object Status) -join ',' -eq 'Done,Skipped,Pending,Locked' -and $stN[1].Detail -like '*not joined*if the session hosts use one, say so in the questions*') $stN[1].Detail
+    $ansN = Get-AVDTuneEnvironmentDefaults; $ansN.Join = 'AdDs'; $ansN.Dc = 'AdDsOnPrem'; $ansN.Identities = 'Synced'
+    [void](Save-AVDTuneEnvironment -Root $o2 -Answers $ansN -User 'admin1')
+    $stN = Get-AVDTuneStartStages -Context $ctxN -Root $o2
+    Test-Check 'order: the confirmed answer "domain controller on premises" opens the domain step after the questions and keeps the snapshot locked' (($stN | ForEach-Object Status) -join ',' -eq 'Done,Pending,Done,Locked') (($stN | ForEach-Object Status) -join ',')
+    # Azure not reachable: the questions are asked without suggestion from Azure, the answers can still be given and saved
+    $ctxA = New-AVDTuneStartContext; $ctxA.Session = $sO
+    [void](Update-AVDTuneStartDetection -Context $ctxA -Machine $mE)
+    $armDown = New-AVDTuneFakeArm; $armDown.Store.Offline = $true
+    $sgDown = Update-AVDTuneStartSuggestions -Context $ctxA -Machine $mE -Arm $armDown
+    Test-Check 'Azure not reachable: the suggestions have nothing from Azure, the facts say so, only GET was tried' ($ctxA.AzureFacts.Reachable -eq $false -and -not $sgDown.Items.Contains('VNet') -and -not $sgDown.Items.Contains('Profiles') -and $sgDown.Items.Join.Value -eq 'EntraOnly' -and @($armDown.Log | Where-Object { $_ -notlike 'GET *' }).Count -eq 0) (@($armDown.Log) -join ' | ')
+    $ctxNo = New-AVDTuneStartContext
+    $sgNoSession = Update-AVDTuneStartSuggestions -Context $ctxNo -Machine $mE -Arm $armOk
+    Test-Check 'without a sign-in no Azure request is made and nothing is suggested from Azure' ($ctxNo.AzureFacts.Reachable -eq $false -and $ctxNo.AzureFacts.Problem -like 'Not signed in*' -and -not $sgNoSession.Items.Contains('VNet')) $ctxNo.AzureFacts.Problem
+    $armOk.Log.Clear()
+    $sgWith = Update-AVDTuneStartSuggestions -Context $ctxA -Machine $mE -Arm $armOk
+    Test-Check 'with the sign-in the ARM token comes from the session and Azure is read with GET only' ($ctxA.AzureFacts.Reachable -and $sgWith.Items.VNet.Value -eq 'vnet-corp' -and @($armOk.Log).Count -ge 3 -and @($armOk.Log | Where-Object { $_ -notlike 'GET *' }).Count -eq 0) (@($armOk.Log) -join ' | ')
+    # a client ID typed in the sign-in form: validated, saved only after it worked
+    $o3 = Join-Path $tmp 'order3'; [void](Initialize-AVDTuneState -Root $o3)
+    $e3a = Get-ThrownText { Invoke-AVDTuneStartSignIn -Root $o3 -Session (New-AVDTuneSession -TempRoot $signTemp -Auth (New-AVDTuneFakeAuth)) -ClientId '14d82eec-204b-4c2f-b7e8-296a70dab67e' }
+    $e3b = Get-ThrownText { Invoke-AVDTuneStartSignIn -Root $o3 -Session (New-AVDTuneSession -TempRoot $signTemp -Auth (New-AVDTuneFakeAuth)) -ClientId 'not-a-guid' }
+    $a3c = New-AVDTuneFakeAuth -Seed @{ Offline = $true }
+    $e3c = Get-ThrownText { Invoke-AVDTuneStartSignIn -Root $o3 -Session (New-AVDTuneSession -TempRoot $signTemp -Auth $a3c) -ClientId $clientId -Account 'admin.example@contoso.example' }
+    Test-Check 'sign-in form client ID: the setup app and a non-GUID are refused, a failed sign-in saves nothing' ($e3a -like '*setup app*' -and $e3b -like '*must be a GUID*' -and $e3c -like 'No connection*' -and -not (Test-Path (Join-Path $o3 'environment.json'))) "$e3a | $e3b | $e3c"
+    $a3d = New-AVDTuneFakeAuth
+    $res3d = Invoke-AVDTuneStartSignIn -Root $o3 -Session (New-AVDTuneSession -TempRoot $signTemp -Auth $a3d) -ClientId $clientId -Account 'admin.example@contoso.example' -User 'admin1'
+    Test-Check 'sign-in form client ID: used for the sign-in (no app registration is made), saved after it worked, still no answers' ($res3d.Info.Connected -and @($a3d.Log | Where-Object { $_ -like "SignIn tenant=$tenant client=$clientId*" }).Count -eq 1 -and $a3d.Store.Apps.Count -eq 0 -and (Get-AVDTuneEnvironmentFile $o3).SignIn.ClientId -eq $clientId -and $null -eq (Get-AVDTuneEnvironment $o3)) ($a3d.Log -join ' | ')
+    # an environment.json of an earlier version: confirmed as it is, not asked again, nothing rewritten by reading, saving keeps what it has
+    $oldFile = Join-Path $tmp 'order-old'; [void](Initialize-AVDTuneState -Root $oldFile)
+    $oldJson = (@{ Schema = 1; Answers = @{ Join = 'Hybrid'; Dc = 'AdDsOnPrem'; Identities = 'Synced'; Profiles = 'AzureFiles'; AzureFilesAuth = 'AdDs'; Network = @{ Endpoint = 'Private'; VNet = 'vnet-old'; Subnet = 'snet-old'; DnsZone = 'Azure' } }; SignIn = @{ TenantId = $tenant; ClientId = $clientId }; Snapshot = @{ NamePattern = '{OsDisk}-{N}' }; Dc = @{ Server = '10.0.0.10'; User = 'EXAMPLE\svc'; Pins = @{ '10.0.0.10' = @{ Sha256 = ('AB' * 32) } }; Discovery = $null }; Gallery = $null; Updated = '2026-11-01T00:00:00Z'; UpdatedBy = 'admin1' } | ConvertTo-Json -Depth 6)
+    [IO.File]::WriteAllText((Join-Path $oldFile 'environment.json'), $oldJson)
+    $ctxOld = New-AVDTuneStartContext
+    $stOld = Get-AVDTuneStartStages -Context $ctxOld -Root $oldFile
+    $oldBefore = Get-Content (Join-Path $oldFile 'environment.json') -Raw
+    Test-Check 'an earlier environment.json: the questions are Done at once (not asked again), the sign-in and the DC step (its own answer) follow, no source recorded' ((Get-AVDTuneEnvironment $oldFile).Answers.Join -eq 'Hybrid' -and ($stOld | ForEach-Object Status) -join ',' -eq 'Pending,Locked,Done,Locked' -and (Get-AVDTuneAnswerSources (Get-AVDTuneEnvironment $oldFile)).Count -eq 0 -and $oldBefore -eq (Get-Content (Join-Path $oldFile 'environment.json') -Raw)) (($stOld | ForEach-Object Status) -join ',')
+    $oldCtxSigned = New-AVDTuneStartContext; $oldCtxSigned.Session = $sO; [void](Update-AVDTuneStartDetection -Context $oldCtxSigned -Machine $mE)
+    Test-Check 'an earlier environment.json: the join detection does not override its answer (a DC step stays because the saved answer says so)' (((Get-AVDTuneStartStages -Context $oldCtxSigned -Root $oldFile) | ForEach-Object Status) -join ',' -eq 'Done,Pending,Done,Locked') $null
+    $oldAns = Get-AVDTuneEnvironmentAnswers (Get-AVDTuneEnvironment $oldFile); $oldAns.VNet = 'vnet-new'
+    $oldSaved = Save-AVDTuneEnvironment -Root $oldFile -Answers $oldAns -User 'admin1'
+    Test-Check 'an earlier environment.json: saving a change keeps the DC, its pin and the client ID' ($oldSaved.Environment.Dc.Server -eq '10.0.0.10' -and $oldSaved.Environment.Dc.Pins.'10.0.0.10'.Sha256 -eq ('AB' * 32) -and $oldSaved.Environment.SignIn.ClientId -eq $clientId -and $oldSaved.Environment.Answers.Network.VNet -eq 'vnet-new') ($oldSaved.Environment | ConvertTo-Json -Compress -Depth 4)
+
+    # read only until the snapshot: no change record, no write gate, no Azure write from the whole detection and suggestion path
+    Test-Check 'nothing before the snapshot gate changed the master: the write gate is closed and no state.json change was recorded' (-not (Test-AVDTuneWriteAllowed) -and -not (Get-AVDTuneProp (Get-AVDTuneState $o1) 'LastChange')) $null
 
     # ---------------------------------------------------------------- nothing secret on disk, source rules
     $allText = (Get-ChildItem $tmp -Recurse -File | ForEach-Object { [IO.File]::ReadAllText($_.FullName) }) -join "`n"

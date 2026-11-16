@@ -177,7 +177,8 @@ function New-AVDTuneFakeAuth {
 #   and Search for the gallery search: @{ Subscriptions = array of @{ Id; Name; State; Forbidden }; Galleries = array of @{ Sub; Rg; Name; Images = array of
 #   @{ Name; Features; Architecture; HyperV; OsType; Versions = array of @{ Name; SourceVm; SourceId; OsDiskSourceId; Published } } }; ManagedImages = hashtable
 #   image id -> source VM id; Paging = $true (every list comes in two pages) }. Without Search only this subscription and no gallery are listed.
-# Switches in .Store: Offline, ReadForbidden, WriteForbidden, DiskMissing, PollsUntilReady (GETs of a new snapshot that say Creating), CreateFails, Unauthorized, VmForbidden, NicForbidden, GalleryForbidden
+# Issue #64 (what Azure knows about the VM): Net (@{ VNet; Subnet }, the subnet of the NICs; default vnet-example/snet-avd), StorageAccounts (array of @{ Name; Kind; Public; PrivateEndpoints; Auth }), DnsZones (array of zone names).
+# Switches in .Store: Offline, ReadForbidden, WriteForbidden, DiskMissing, PollsUntilReady (GETs of a new snapshot that say Creating), CreateFails, Unauthorized, VmForbidden, NicForbidden, GalleryForbidden, StorageForbidden, DnsForbidden
 function New-AVDTuneFakeArm {
     param([hashtable]$Seed = @{})
     $rg = if ($Seed.ResourceGroup) { $Seed.ResourceGroup } else { 'rg-example' }
@@ -186,7 +187,8 @@ function New-AVDTuneFakeArm {
     $diskId = "/subscriptions/$script:FakeSubscription/resourceGroups/$rg/providers/Microsoft.Compute/disks/$vm`_osdisk"
     $store = @{ Offline = $false; ReadForbidden = $false; WriteForbidden = $false; DiskMissing = $false; PollsUntilReady = 1; CreateFails = $false; Unauthorized = $false
         DiskId = $diskId; ResourceGroup = $rg; Snapshots = @{}; Polls = @{}; Log = (New-Object System.Collections.ArrayList); LastPut = $null; Location = 'westeurope'; NextLinkPage = $false; EvilLink = $false
-        DiskUniqueId = $(if ($Seed.DiskUniqueId) { $Seed.DiskUniqueId } else { '' }); VmForbidden = $false; NicForbidden = $false; GalleryForbidden = $false; VmSeed = $(if ($Seed.Vm) { $Seed.Vm } else { @{} }); Galleries = $(if ($Seed.Galleries) { $Seed.Galleries } else { @{} })
+        DiskUniqueId = $(if ($Seed.DiskUniqueId) { $Seed.DiskUniqueId } else { '' }); VmForbidden = $false; NicForbidden = $false; GalleryForbidden = $false; StorageForbidden = $false; DnsForbidden = $false
+        Net = $(if ($Seed.Net) { $Seed.Net } else { @{ VNet = 'vnet-example'; Subnet = 'snet-avd' } }); StorageAccounts = @(@($Seed.StorageAccounts) | Where-Object { $_ }); DnsZones = @(@($Seed.DnsZones) | Where-Object { $_ }); VmSeed = $(if ($Seed.Vm) { $Seed.Vm } else { @{} }); Galleries = $(if ($Seed.Galleries) { $Seed.Galleries } else { @{} })
         Search = $(if ($Seed.Search) { $Seed.Search } else { @{ Subscriptions = @(@{ Id = $script:FakeSubscription; Name = 'Example subscription' }); Galleries = @() } }) }
     foreach ($s in @($Seed.Snapshots)) {
         if (-not $s) { continue }
@@ -236,7 +238,21 @@ function New-AVDTuneFakeArm {
             $nics = @(if ($s.Nics) { $s.Nics } else { @(@{ Name = 'nic1'; AccelNet = $true }) })
             $hit = @($nics | Where-Object { $_.Name -eq $nicName })
             if ($hit.Count -eq 0) { return [pscustomobject]@{ Status = 404; Body = $null; Error = 'not found' } }
-            return [pscustomobject]@{ Status = 200; Body = (ConvertTo-FakeJson @{ id = $p; name = $nicName; properties = @{ enableAcceleratedNetworking = [bool]$hit[0].AccelNet } }); Error = '' }
+            $subnetId = "/subscriptions/$subId/resourceGroups/$rg/providers/Microsoft.Network/virtualNetworks/$($store.Net.VNet)/subnets/$($store.Net.Subnet)"
+            return [pscustomobject]@{ Status = 200; Body = (ConvertTo-FakeJson @{ id = $p; name = $nicName; properties = @{ enableAcceleratedNetworking = [bool]$hit[0].AccelNet; ipConfigurations = @(@{ name = 'ipconfig1'; properties = @{ primary = $true; subnet = @{ id = $subnetId } } }) } }); Error = '' }
+        }
+        if ($Method -eq 'GET' -and $lower -eq "/subscriptions/$subId/resourcegroups/$rg/providers/microsoft.storage/storageaccounts") {
+            if ($store.ReadForbidden -or $store.StorageForbidden) { return [pscustomobject]@{ Status = 403; Body = (ConvertTo-FakeJson @{ error = @{ code = 'AuthorizationFailed'; message = 'does not have authorization to perform action Microsoft.Storage/storageAccounts/read' } }); Error = '' } }
+            $items = @(foreach ($acct in $store.StorageAccounts) {
+                    $pecs = @(for ($i = 0; $i -lt [int]$acct.PrivateEndpoints; $i++) { @{ id = "pec$i" } })
+                    $props = @{ publicNetworkAccess = $(if ($acct.Public) { $acct.Public } else { 'Enabled' }); privateEndpointConnections = $pecs }
+                    if ($acct.Auth) { $props.azureFilesIdentityBasedAuthentication = @{ directoryServiceOptions = $acct.Auth } }
+                    @{ id = "$p/$($acct.Name)"; name = $acct.Name; kind = $(if ($acct.Kind) { $acct.Kind } else { 'FileStorage' }); properties = $props } })
+            return [pscustomobject]@{ Status = 200; Body = (ConvertTo-FakeJson @{ value = $items }); Error = '' }
+        }
+        if ($Method -eq 'GET' -and $lower -eq "/subscriptions/$subId/resourcegroups/$rg/providers/microsoft.network/privatednszones") {
+            if ($store.ReadForbidden -or $store.DnsForbidden) { return [pscustomobject]@{ Status = 403; Body = $null; Error = 'forbidden' } }
+            return [pscustomobject]@{ Status = 200; Body = (ConvertTo-FakeJson @{ value = @($store.DnsZones | ForEach-Object { @{ id = "$p/$_"; name = $_ } }) }); Error = '' }
         }
         # ---- gallery search (Search seed): subscriptions, galleries, image definitions, versions, managed images; Paging splits every list in two pages
         $search = $store.Search

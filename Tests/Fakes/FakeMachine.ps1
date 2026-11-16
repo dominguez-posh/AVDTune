@@ -36,6 +36,9 @@ function New-AVDTuneFakeMachine {
                     osDisk = [pscustomobject]@{ name = 'gm-test01_osdisk'; managedDisk = [pscustomobject]@{ id = '/subscriptions/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee/resourceGroups/rg-example/providers/Microsoft.Compute/disks/gm-test01_osdisk' } }
                 } } }
     }
+    # Win32_ComputerSystem and the DC locator (issue #64): by default a master in a workgroup, no DC found. Seed: ComputerSystem (@{ PartOfDomain; Domain; DomainRole }, $null = not readable), DcLocate (@{ Name; Address; Site } or $null)
+    $store.ComputerSystem = if ($Seed.ContainsKey('ComputerSystem')) { $Seed.ComputerSystem } else { [pscustomobject]@{ PartOfDomain = $false; Domain = 'WORKGROUP'; DomainRole = 2 } }
+    $store.DcLocate = if ($Seed.ContainsKey('DcLocate')) { $Seed.DcLocate } else { $null }
     $store.Native['dsregcmd.exe /status'] = if ($Seed.Native -and $Seed.Native['dsregcmd.exe /status']) { $Seed.Native['dsregcmd.exe /status'] } else {
         @{ ExitCode = 0; Output = "| Device State |`r`n    AzureAdJoined : NO`r`n  EnterpriseJoined : NO`r`n    DomainJoined : NO`r`n" }
     }
@@ -102,6 +105,8 @@ function New-AVDTuneFakeMachine {
         } else { [pscustomobject]@{ ExitCode = 1; Output = "fake: no answer for $key" } }
     }.GetNewClosure()
     $m.Imds = { $store.Imds }.GetNewClosure()
+    $m.ComputerSystem = { $store.ComputerSystem }.GetNewClosure()
+    $m.DcLocate = { param($Domain) [void]$store.Log.Add("DcLocate $Domain"); $store.DcLocate }.GetNewClosure()
     $m.RegSubKeys = {
         param($Path)
         $prefix = (([string]$Path).ToLowerInvariant().TrimEnd('\') + '\')

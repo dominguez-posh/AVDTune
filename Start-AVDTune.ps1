@@ -559,8 +559,8 @@ if ($stateRepair -and @($stateRepair.Quarantined).Count -gt 0) {
 }
 Update-Chip
 Show-Page 'Overview'
-# First run: the questions open by themselves
-if (-not (Get-AVDTuneEnvironment $script:StateRoot)) { try { Open-Stage 'Environment' } catch { Show-Error $_.Exception.Message } }
+# First start: the sign-in opens by itself (it needs no answer; the domain step and the questions follow, issue #64)
+if (-not (Get-AVDTuneEnvironment $script:StateRoot)) { try { Open-Stage 'SignIn' } catch { Show-Error $_.Exception.Message } }
 $script:Timer.Start()
 Start-OverviewRefresh
 Update-ReleaseView; Start-RelJob 'Start'   # integrity of the tool against its release and the update check, at every start (AVDTune-Release.ps1)
