@@ -24,6 +24,8 @@ function Start-BenchJob([string]$Mode, [string]$Kind) {
             $ErrorActionPreference = 'Stop'
             Import-Module (Join-Path $AppRoot 'Modules\AVDTune.psm1') -Force
             Import-Module (Join-Path $AppRoot 'Modules\AVDTune.Benchmark.psm1') -Force
+            # the real adapter calls Open-AVDTuneVerifiedBenchExe from closures, which only see globally imported functions (#67)
+            Import-Module (Join-Path $AppRoot 'Modules\AVDTune.Release.psm1') -Force
             $skipIdle = $false
             if ($Fake) {
                 . $Fake; . $FakeBench

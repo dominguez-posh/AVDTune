@@ -680,6 +680,29 @@ public static class StandIn { public static int Main(string[] a) {
     $direct = @(Get-ChildItem -LiteralPath $repo -Recurse -Include *.ps1, *.psm1, *.cs, *.xaml -File | Where-Object { $_.FullName -notlike (Join-Path $repo 'Tests\*') -and $_.FullName -notlike '*\Bench\*in\*' -and $_.FullName -notlike '*\Bench\*\obj\*' } | Select-String -Pattern 'env:AVDTUNE_(FAKE|ROOT|SMOKE)|GetEnvironmentVariable\(.AVDTUNE_(FAKE|ROOT|SMOKE)' | Where-Object { $_.Line -notmatch '^\s*#' -and $_.Line -notmatch '\$fake = \[string\]\$env:AVDTUNE_FAKE' })
     Test-Check 'no code outside Tests reads AVDTUNE_FAKE/ROOT/SMOKE directly (only Test-AVDTuneTestMode)' ($direct.Count -eq 0) (($direct | ForEach-Object { "$($_.Path):$($_.LineNumber)" }) -join '; ')
 
+    # Real finding on the test VM (#67): the real adapter ran in the page's background runspace without AVDTune.Release.psm1 ("Open-AVDTuneVerifiedBenchExe is not recognized").
+    # A fresh runspace with exactly the imports of the page's script block builds the REAL adapter and asks EngineInfo: any reason is fine, an unknown command is not.
+    $pageSrc = Get-Content -Raw (Join-Path $repo 'AVDTune-Benchmark.ps1')
+    $pageImports = @([regex]::Matches($pageSrc, "Import-Module \(Join-Path \`$AppRoot '([^']+)'\)") | ForEach-Object { $_.Groups[1].Value } | Select-Object -Unique)
+    $rs = [powershell]::Create()
+    $keepFake = $env:AVDTUNE_FAKE; $keepRoot = $env:AVDTUNE_ROOT
+    $env:AVDTUNE_FAKE = $fakeScript; $env:AVDTUNE_ROOT = $tmp   # test mode only for -StateRoot (the adapter itself is the real one)
+    try {
+        [void]$rs.AddScript({
+                param($Repo, $Imports, $State)
+                $ErrorActionPreference = 'Stop'
+                foreach ($i in $Imports) { Import-Module (Join-Path $Repo $i) -Force }
+                $b = New-AVDTuneBenchAdapter -StateRoot $State
+                $info = & $b.EngineInfo
+                [pscustomobject]@{ Info = $info; Problem = [string](& $b.EngineProblem) }
+            }).AddArgument($repo).AddArgument($pageImports).AddArgument($tmp)
+        $engine = $rs.Invoke() | Select-Object -Last 1
+        $rsErr = @($rs.Streams.Error | ForEach-Object { $_.ToString() }) -join '; '
+    }
+    catch { $engine = $null; $rsErr = $_.Exception.Message }
+    finally { $rs.Dispose(); $env:AVDTUNE_FAKE = $keepFake; $env:AVDTUNE_ROOT = $keepRoot }
+    Test-Check 'benchmark page (#67): the real adapter works in a runspace with exactly the page''s imports (EngineInfo gives a reason, never an unknown command)' ($engine -and $pageImports.Count -ge 3 -and $engine.Problem -notmatch 'is not recognized|nicht erkannt' -and -not $rsErr) "imports=$($pageImports -join ','); problem=$($engine.Problem); err=$rsErr"
+
     Test-Check 'no file of the check run touched the real state folder' ($tmp -ne (Join-Path ([Environment]::GetFolderPath('CommonApplicationData')) 'AVDTune')) $tmp
 }
 finally {
