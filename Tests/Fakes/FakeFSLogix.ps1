@@ -13,7 +13,7 @@ function New-AVDTuneFakeFSLogix {
         DownloadFails = $false; ExpandFails = $false; NoInstaller = $false; Protected = $true; InstallerVersion = '3.26.826.17182'; Signatures = @{}; Files = @{}; FailWrite = @()
         Dns = @{}; Tcp = @{}; Probe = @{}; WriteFail = ''; Acl = @{}; Tickets = @(); Defender = @{ Paths = @(); Processes = @() }
         Groups = @{ 'FSLogix Profile Include List' = @('S-1-1-0'); 'FSLogix Profile Exclude List' = @() }; FrxMissing = $false; MasterDomainSid = ''; LocalGroupAddFails = @(); KeyMapFails = $false; Mapped = $false; KeySeen = $null; AsUser = $null
-        Log = (New-Object System.Collections.ArrayList); Folders = @()
+        Log = (New-Object System.Collections.ArrayList); Folders = @(); FolderKinds = @{}; Created = @()
     }
     foreach ($e in $Seed.GetEnumerator()) { $s[$e.Key] = $e.Value }
     $a = [ordered]@{ Kind = 'Fake'; Store = $s; Log = $s.Log }
@@ -33,6 +33,19 @@ function New-AVDTuneFakeFSLogix {
         [pscustomobject]@{ Valid = [bool]$sig.Valid; Status = $(if ($sig.Valid) { 'Valid' } else { 'NotSigned' }); Subject = [string]$sig.Subject; Issuer = [string]$sig['Issuer']; OriginalFilename = $(if ($sig.ContainsKey('OriginalFilename')) { [string]$sig.OriginalFilename } else { $leaf }) }
     }.GetNewClosure()
     $a.RemoveFolder = { param($Dir) [void]$s.Log.Add("RemoveFolder $Dir") }.GetNewClosure()
+    $a.FolderState = {
+        param($Path)
+        [void]$s.Log.Add("FolderState $Path")
+        if ($Path -like '\\*') { return [pscustomobject]@{ Kind = 'Share'; Reason = '' } }
+        $k = if ($s.FolderKinds.ContainsKey($Path)) { $s.FolderKinds[$Path] } else { 'Missing' }
+        [pscustomobject]@{ Kind = $k; Reason = $(if ($k -eq 'Unsafe') { "The folder $Path is not safe (write access for S-1-5-32-545)." } else { '' }) }
+    }.GetNewClosure()
+    $a.EnsureFolder = {
+        param($Path)
+        [void]$s.Log.Add("EnsureFolder $Path")
+        if ($s.FolderKinds.ContainsKey($Path) -and $s.FolderKinds[$Path] -eq 'Unsafe') { throw "The folder $Path is not safe." }
+        $s.FolderKinds[$Path] = 'Safe'; $s.Created += $Path
+    }.GetNewClosure()
     $a.ReadText = { param($Path) if ($s.Files.ContainsKey($Path)) { $s.Files[$Path] } else { $null } }.GetNewClosure()
     $a.WriteText = { param($Path, $Text) [void]$s.Log.Add("WriteText $Path"); if ($Path -in @($s.FailWrite)) { throw 'fake: the share refuses the write' }; $s.Files[$Path] = $Text }.GetNewClosure()
     $a.DeleteFile = { param($Path) [void]$s.Log.Add("DeleteFile $Path"); $s.Files.Remove($Path) }.GetNewClosure()

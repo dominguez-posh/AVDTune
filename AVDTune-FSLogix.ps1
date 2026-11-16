@@ -300,7 +300,8 @@ function Build-FslTemplate {
     }
 }
 function Update-FslRedirections {
-    if (-not $ui.TxtFslRedirFolder.IsKeyboardFocused) { $cur = [string](& $script:Machine.RegGet 'HKLM:\SOFTWARE\FSLogix\Profiles' 'RedirXMLSourceFolder'); if ($cur -and -not $ui.TxtFslRedirFolder.Text) { $ui.TxtFslRedirFolder.Text = $cur } }
+    # prefilled: the folder set in the registry, otherwise <ProgramData>\FSLogix\Redirections; only the groups are left to pick (the folder is created protected on save)
+    if (-not $ui.TxtFslRedirFolder.IsKeyboardFocused -and -not $ui.TxtFslRedirFolder.Text) { $ui.TxtFslRedirFolder.Text = Get-AVDTuneRedirectionsDefaultFolder $script:Machine }
     if (-not $ui.TxtFslRedirXml.Text) {
         $target = Get-AVDTuneRedirectionsTarget $script:Machine
         if ($target) { $text = & (Get-FslAdapter).ReadText $target; if ($null -ne $text) { $ui.TxtFslRedirXml.Text = $text; $ui.TxtFslRedirState.Text = "Read from $target." } }

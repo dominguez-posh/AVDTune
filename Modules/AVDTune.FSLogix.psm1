@@ -552,14 +552,57 @@ function Write-AVDTuneUndoFile {
     Write-AVDTuneFile $Path $Text
 }
 
+function Get-AVDTuneRedirectionsFolderState {
+    <#
+        Whether a folder may hold redirections.xml. Kind: Share (UNC, the administrator's choice), Missing (local, can be created: the nearest existing folder above passes),
+        Safe (local, exists, passes), Unsafe (Reason says why: '..', not a local drive path, a link, a foreign owner, write access for anyone but Administrators/SYSTEM).
+        Under ProgramData (the system folder, never an environment variable) the folder itself is checked with the ACL report of the watermark steps and no folder up to
+        ProgramData may be a link (Windows lets users create, not rename or delete, folders there); everywhere else every folder up to the drive root must be admin-only (rule of issue 10).
+        -DataRoot and -ExtraTrusted are for the checks only.
+    #>
+    param([Parameter(Mandatory)][string]$Folder, [string]$DataRoot, [string[]]$ExtraTrusted = @())
+    $r = { param($k, $why) [pscustomobject]@{ Kind = $k; Reason = $why } }
+    if (@($Folder -split '[\\/]') -contains '..') { return & $r 'Unsafe' "The path $Folder contains '..'." }
+    if ($Folder -like '\\*') { return & $r 'Share' '' }
+    if ($Folder -notmatch '^[A-Za-z]:\\') { return & $r 'Unsafe' "The path $Folder is neither a UNC nor a local drive path." }
+    $full = [IO.Path]::GetFullPath($Folder).TrimEnd('\')
+    $pd = [IO.Path]::GetFullPath($(if ($DataRoot) { $DataRoot } else { Get-AVDTuneSystemFolder ProgramData })).TrimEnd('\')
+    $existing = $full
+    while ($existing -and -not (Test-Path -LiteralPath $existing)) { $parent = [IO.Path]::GetDirectoryName($existing); if (-not $parent -or $parent -eq $existing) { $existing = $null } else { $existing = $parent } }
+    if (-not $existing) { return & $r 'Unsafe' "The drive of $Folder is not readable." }
+    $missing = ($existing -ine $full)
+    $under = $full.StartsWith($pd + '\', [StringComparison]::OrdinalIgnoreCase)
+    $item = $existing
+    while ($item -and -not ($under -and $item -ieq $pd) -and $item -ne [IO.Path]::GetPathRoot($item)) {
+        if ((Read-AVDTuneAclReport $item).Link) { return & $r 'Unsafe' "The folder $item is a link: redirections.xml is not written through links." }
+        $item = [IO.Path]::GetDirectoryName($item)
+    }
+    if ($under) {
+        if (-not $missing) {
+            $problems = @(Get-AVDTuneAclProblems (Read-AVDTuneAclReport $full) -ExtraTrusted $ExtraTrusted)
+            if ($problems.Count -gt 0) { return & $r 'Unsafe' "The folder $full is not safe ($($problems -join '; ')): redirections.xml is only written to a folder that only administrators can change." }
+        }
+    }
+    elseif (-not (Test-AVDTuneAdminOnlyPath -Path $existing -Base ([IO.Path]::GetPathRoot($existing)))) { return & $r 'Unsafe' "The local folder $existing can be changed by users (or is not readable): redirections.xml is only written to a folder that only administrators can change." }
+    & $r $(if ($missing) { 'Missing' } else { 'Safe' }) ''
+}
+
 function Assert-AVDTuneRedirectionsPath {
-    <# A redirections.xml path: no '..', and a local path only where the file and every folder above it are admin-only (a share is the administrator's choice). #>
+    <# A redirections.xml path: no '..', and a local path only where the folder passes Get-AVDTuneRedirectionsFolderState (a share is the administrator's choice). A folder that is not there yet is no problem here. #>
     param([Parameter(Mandatory)][string]$Path)
     if (@($Path -split '[\\/]') -contains '..') { throw "The path $Path contains '..'." }
     if ($Path -like '\\*') { return }
     if ($Path -notmatch '^[A-Za-z]:\\') { throw "The path $Path is neither a UNC nor a local drive path." }
-    $dir = Split-Path $Path -Parent
-    if (-not (Test-AVDTuneAdminOnlyPath -Path $dir -Base ([IO.Path]::GetPathRoot($dir)))) { throw "The local folder $dir can be changed by users (or is not readable): redirections.xml is only written to a folder that only administrators can change." }
+    $st = Get-AVDTuneRedirectionsFolderState -Folder (Split-Path $Path -Parent)
+    if ($st.Kind -eq 'Unsafe') { throw $st.Reason }
+}
+
+function Get-AVDTuneRedirectionsDefaultFolder {
+    <# The folder the redirections.xml field starts with: the value of RedirXMLSourceFolder when it is set, otherwise <ProgramData>\FSLogix\Redirections (system folder, not hard coded). #>
+    param([Parameter(Mandatory)]$Machine)
+    $cur = [string](& $Machine.RegGet $script:ProfilesKey 'RedirXMLSourceFolder')
+    if ($cur) { return $cur }
+    Join-Path (Get-AVDTuneSystemFolder ProgramData) 'FSLogix\Redirections'
 }
 
 function Get-AVDTuneRedirectionsTarget {
@@ -582,8 +625,17 @@ function Save-AVDTuneRedirections {
     if ($Folder) { $why = Test-AVDTuneFSLogixValue -Setting (@(Get-AVDTuneFSLogixSettingCatalog | Where-Object Name -eq 'RedirXMLSourceFolder')[0]) -Value $Folder; if ($why) { throw $why } }
     $target = if ($Folder) { $Folder.TrimEnd('\') + '\redirections.xml' } else { Get-AVDTuneRedirectionsTarget $Machine }
     if (-not $target) { throw 'No target folder: set RedirXMLSourceFolder or enter a folder.' }
+    $tfolder = Split-Path $target -Parent
+    $fst = & $F.FolderState $tfolder
+    if ($fst.Kind -eq 'Unsafe') { throw "The folder is not used: $($fst.Reason)" }
     $before = & $F.ReadText $target
     $steps = New-Object System.Collections.ArrayList
+    if ($fst.Kind -eq 'Missing') {
+        # one step: the folder is created with its protected ACL from the start (Administrators and SYSTEM full control, Users read only)
+        $ftest = { param($m) $k = (& $F.FolderState $tfolder).Kind; @{ Compliant = ($k -eq 'Safe'); State = $k } }.GetNewClosure()
+        $fapply = { param($m) & $F.EnsureFolder $tfolder }.GetNewClosure()
+        [void]$steps.Add((New-AVDTuneStep -Id 'fslogix.redirections.folder' -Section FSLogix -Title "Folder $tfolder (created protected: Administrators and SYSTEM full control, Users read only)" -Why 'FSLogix copies redirections.xml from this folder at sign-in as the signing-in user, so users need read access; only administrators may change it.' -SourceUrl "$script:Learn/tutorial-redirections-xml" -Test $ftest -Apply $fapply))
+    }
     if ($Folder) { [void]$steps.Add((New-AVDTuneFSLogixRegStep -Id 'fslogix.profile.redirxmlsourcefolder' -Path $script:ProfilesKey -Name 'RedirXMLSourceFolder' -Value $Folder.TrimEnd('\') -Type String -Title 'FSLogix profile setting RedirXMLSourceFolder' -SourceUrl "$script:Learn/tutorial-redirections-xml")) }
     $test = { param($m) $cur = & $F.ReadText $target; @{ Compliant = ($null -ne $cur -and $cur -ceq $Xml); State = $(if ($null -eq $cur) { 'absent' } else { "$($cur.Length) characters" }) } }.GetNewClosure()
     $apply = { param($m) & $F.WriteText $target $Xml }.GetNewClosure()
@@ -1181,6 +1233,16 @@ function New-AVDTuneFSLogixAdapter {
         [pscustomobject]@{ Valid = ($s.Status -eq 'Valid'); Status = [string]$s.Status; Subject = $(if ($s.SignerCertificate) { [string]$s.SignerCertificate.Subject } else { '' }); Issuer = $(if ($s.SignerCertificate) { [string]$s.SignerCertificate.Issuer } else { '' }); OriginalFilename = $orig }
     }
     $a.RemoveFolder = { param($Dir) Remove-AVDTuneFolderNoFollowSafe $Dir }
+    $a.FolderState = { param($Path, $DataRoot, $ExtraTrusted) Get-AVDTuneRedirectionsFolderState -Folder $Path -DataRoot $DataRoot -ExtraTrusted @($ExtraTrusted) }
+    $a.EnsureFolder = {
+        param($Path, $DataRoot, $ExtraTrusted)
+        $st = Get-AVDTuneRedirectionsFolderState -Folder $Path -DataRoot $DataRoot -ExtraTrusted @($ExtraTrusted)
+        if ($st.Kind -eq 'Unsafe') { throw $st.Reason }
+        if ($st.Kind -ne 'Missing') { return }
+        (New-Object IO.DirectoryInfo $Path).Create((New-AVDTuneUsersReadSecurity))   # one step, protected ACL from the start (parents it has to create get it too)
+        $after = Get-AVDTuneRedirectionsFolderState -Folder $Path -DataRoot $DataRoot -ExtraTrusted @($ExtraTrusted)
+        if ($after.Kind -ne 'Safe') { try { [IO.Directory]::Delete($Path) } catch { }; throw "The folder $Path was created but is not safe ($($after.Reason)) and was removed again." }
+    }
     $a.ReadText = { param($Path) Assert-AVDTuneRedirectionsPath $Path; if (Test-Path -LiteralPath $Path -PathType Leaf) { [IO.File]::ReadAllText($Path) } else { $null } }
     $a.WriteText = {
         param($Path, $Text)
@@ -1287,7 +1349,7 @@ function Remove-AVDTuneFolderNoFollowSafe([string]$Dir) { Remove-AVDTuneFolderNo
 Export-ModuleMember -Function Get-AVDTuneFSLogixSettingCatalog, Test-AVDTuneFSLogixUncPath, Test-AVDTuneFSLogixValue, Get-AVDTuneFSLogixInfo, Get-AVDTuneFSLogixSettingsState,
     New-AVDTuneFSLogixRegStep, Get-AVDTuneFSLogixGroupMembers, Get-AVDTuneFSLogixUndoPath, Set-AVDTuneFSLogixSettings, Undo-AVDTuneFSLogixSettings, Get-AVDTuneFSLogixLastChange, Test-AVDTuneSid, Test-AVDTuneDomainSid, New-AVDTuneFSLogixGroupStep, Get-AVDTuneFSLogixRecommendedLists, Get-AVDTuneFSLogixListPlan, Format-AVDTuneFSLogixListChanges, Set-AVDTuneFSLogixListsUndoClaim, Set-AVDTuneFSLogixRecommendedLists, Undo-AVDTuneFSLogixRecommendedLists, Get-AVDTuneFSLogixListsUndoPath, Get-AVDTuneFSLogixGroups, Get-AVDTuneFSLogixVersionState,
     Get-AVDTuneFSLogixGroupChoices, Set-AVDTuneFSLogixGroupMember, Get-AVDTuneRedirectionTemplate, Test-AVDTuneRedirectionPath, New-AVDTuneRedirectionsXml,
-    Test-AVDTuneRedirectionsXml, Get-AVDTuneRedirectionsTarget, Assert-AVDTuneRedirectionsPath, Write-AVDTuneUndoFile, Split-AVDTuneLogonName, Save-AVDTuneRedirections, Undo-AVDTuneRedirections, Get-AVDTuneFSLogixDefenderList,
+    Test-AVDTuneRedirectionsXml, Get-AVDTuneRedirectionsTarget, Get-AVDTuneRedirectionsDefaultFolder, Get-AVDTuneRedirectionsFolderState, Assert-AVDTuneRedirectionsPath, Write-AVDTuneUndoFile, Split-AVDTuneLogonName, Save-AVDTuneRedirections, Undo-AVDTuneRedirections, Get-AVDTuneFSLogixDefenderList,
     Get-AVDTuneFSLogixDefenderState, Set-AVDTuneFSLogixDefender, Undo-AVDTuneFSLogixDefender, Get-AVDTuneFSLogixLatest, Invoke-AVDTuneFSLogixInstall, Invoke-AVDTuneFSLogixInstallRecorded,
     ConvertFrom-AVDTuneSddl, New-AVDTuneFSLogixRecommendedSddl, Compare-AVDTuneFSLogixAcl, Get-AVDTuneFSLogixLocations, Format-AVDTuneAce, Invoke-AVDTuneFSLogixTest,
     Invoke-AVDTuneFSLogixVhdxTest, Save-AVDTuneFSLogixTestRun, Get-AVDTuneFSLogixTestRecord, New-AVDTuneFSLogixAdapter

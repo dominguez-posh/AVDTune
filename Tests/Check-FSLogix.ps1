@@ -274,6 +274,44 @@ try {
     Test-Check 'RedirXMLSourceFolder with .. is refused by the validation (counter-test L4)' ((Test-AVDTuneFSLogixValue $by['Profile:RedirXMLSourceFolder'] 'C:\Windows\..\Users\x') -like '*..*' -and (Test-AVDTuneFSLogixValue $by['Profile:RedirXMLSourceFolder'] "$share\..\other") -like '*..*')
     Test-Check 'the real adapter refuses .. and a local folder that users can change, for read, write and delete (counter-test L4)' ((Get-ThrownText { & $real.WriteText 'C:\Windows\..\Users\x\redirections.xml' 'x' }) -like "*'..'*" -and (Get-ThrownText { & $real.WriteText (Join-Path $userDir 'redirections.xml') 'x' }) -like '*users*' -and (Get-ThrownText { & $real.ReadText (Join-Path $userDir 'redirections.xml') }) -like '*users*' -and (Get-ThrownText { & $real.DeleteFile (Join-Path $userDir 'redirections.xml') }) -like '*users*' -and -not (Test-Path -LiteralPath (Join-Path $userDir 'redirections.xml'))) $null
     Test-Check 'a UNC target is not blocked by that check (the share is the administrator''s choice)' ($null -eq (Get-ThrownText { Assert-AVDTuneRedirectionsPath "$share\redirections.xml" })) $null
+    # issue 68: the folder field is prefilled, the folder is created protected, a foreign folder is refused
+    $pdDir = [Environment]::GetFolderPath('CommonApplicationData')
+    $defFolder = Join-Path $pdDir 'FSLogix\Redirections'
+    Test-Check 'prefill: the value set in the registry wins (68)' ((Get-AVDTuneRedirectionsDefaultFolder (New-Master -Reg @{ "$pk|RedirXMLSourceFolder" = $share })) -eq $share) $null
+    Test-Check 'prefill: without a registry value it is <ProgramData>\FSLogix\Redirections from the system folder, not hard coded (68)' ((Get-AVDTuneRedirectionsDefaultFolder (New-Master)) -eq $defFolder -and $defFolder -like '*\FSLogix\Redirections' -and ((Get-Content -LiteralPath (Join-Path $repo 'Modules\AVDTune.FSLogix.psm1') -Raw) -notmatch "'C:\\ProgramData\\FSLogix\\Redirections")) $defFolder
+    $r68 = New-AVDTuneFakeFSLogix; $m68 = New-Master
+    $s68 = Save-AVDTuneRedirections -Machine $m68 -F $r68 -Root $tmp -Xml $xml -Folder $defFolder -User 'admin1' -SnapshotId 'snap-check'
+    $ix = [array]::IndexOf(@($r68.Log), "EnsureFolder $defFolder"); $iw = [array]::IndexOf(@($r68.Log), "WriteText $defFolder\redirections.xml")
+    Test-Check 'save: a missing local folder is created first, then the file is written, the folder is in the registry (68)' ($ix -ge 0 -and $iw -gt $ix -and $r68.Store.Files["$defFolder\redirections.xml"] -ceq $xml -and (& $m68.RegGet $pk 'RedirXMLSourceFolder') -eq $defFolder -and @($s68.Results | Where-Object Status -eq 'Changed').Count -eq 3) (($s68.Results | ForEach-Object Status) -join ',')
+    $r68b = New-AVDTuneFakeFSLogix -Seed @{ FolderKinds = @{ $defFolder = 'Safe' } }
+    [void](Save-AVDTuneRedirections -Machine (New-Master) -F $r68b -Root $tmp -Xml $xml -Folder $defFolder -User 'admin1' -SnapshotId 'snap-check')
+    Test-Check 'save: a folder that is there and safe is used as it is, not created again (68)' (@($r68b.Log | Where-Object { $_ -like 'EnsureFolder*' }).Count -eq 0 -and $r68b.Store.Files.ContainsKey("$defFolder\redirections.xml")) $null
+    $r68c = New-AVDTuneFakeFSLogix -Seed @{ FolderKinds = @{ $defFolder = 'Unsafe' } }; $m68c = New-Master
+    $why68 = Get-ThrownText { Save-AVDTuneRedirections -Machine $m68c -F $r68c -Root $tmp -Xml $xml -Folder $defFolder -User 'admin1' -SnapshotId 'snap-check' }
+    Test-Check 'save: a folder with foreign rights is refused with the reason, nothing written, nothing set (68, counter-test)' ($why68 -like '*not used*not safe*' -and $r68c.Store.Files.Count -eq 0 -and $null -eq (& $m68c.RegGet $pk 'RedirXMLSourceFolder') -and @($r68c.Log | Where-Object { $_ -like 'EnsureFolder*' -or $_ -like 'WriteText*' }).Count -eq 0) $why68
+    $dryM = Save-AVDTuneRedirections -Machine (New-Master) -F (New-AVDTuneFakeFSLogix) -Root $tmp -Xml $xml -Folder $defFolder -WhatIf
+    Test-Check 'dry run lists the folder step and creates nothing (68)' ($dryM.WhatIf -and @($dryM.Results | Where-Object { $_.Id -eq 'fslogix.redirections.folder' }).Count -eq 1) (($dryM.Results | ForEach-Object Id) -join ',')
+    # the real rule (68): foreign folders and links are refused, a folder made by the real adapter is protected
+    $fakePd = Join-Path $tmp 'fakeprogramdata'; [void](New-Item -ItemType Directory -Path "$fakePd\FSLogix\Foreign" -Force)
+    $me = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+    $stF = Get-AVDTuneRedirectionsFolderState -Folder "$fakePd\FSLogix\Foreign" -DataRoot $fakePd
+    Test-Check 'real rule: an existing folder with a foreign owner or foreign write rights is Unsafe, the reason names it (68)' ($stF.Kind -eq 'Unsafe' -and $stF.Reason -match 'owner|write access') $stF.Reason
+    Test-Check 'real rule: a local folder outside ProgramData that users can change, a path with .. are Unsafe (issue 10 rule kept), a share is not judged (68)' ((Get-AVDTuneRedirectionsFolderState -Folder $userDir).Kind -eq 'Unsafe' -and (Get-AVDTuneRedirectionsFolderState -Folder 'C:\Windows\..\x').Kind -eq 'Unsafe' -and (Get-AVDTuneRedirectionsFolderState -Folder $share).Kind -eq 'Share') $null
+    $jTarget = Join-Path $tmp 'jtarget'; [void](New-Item -ItemType Directory -Path $jTarget -Force); $jLink = "$fakePd\FSLogix\Link"
+    & cmd.exe /c mklink /J "$jLink" "$jTarget" | Out-Null
+    $stL = Get-AVDTuneRedirectionsFolderState -Folder "$jLink\Redirections" -DataRoot $fakePd -ExtraTrusted @($me)
+    Test-Check 'real rule: a link above the folder is Unsafe, also for a folder that does not exist yet (68)' ($stL.Kind -eq 'Unsafe' -and $stL.Reason -like '*link*') $stL.Reason
+    $newDir = "$fakePd\FSLogix\Redirections"
+    $stM = Get-AVDTuneRedirectionsFolderState -Folder $newDir -DataRoot $fakePd -ExtraTrusted @($me)
+    $made = $null; try { & $real.EnsureFolder $newDir $fakePd @($me); $made = 'ok' } catch { $made = $_.Exception.Message }
+    if ($made -eq 'ok') {
+        $sd = Get-Acl -LiteralPath $newDir
+        $rl = @($sd.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]))
+        $uOk = @($rl | Where-Object { $_.IdentityReference.Value -eq 'S-1-5-32-545' -and $_.FileSystemRights -eq 'ReadAndExecute, Synchronize' }).Count -eq 1
+        $aOk = @($rl | Where-Object { $_.IdentityReference.Value -in 'S-1-5-32-544', 'S-1-5-18' -and $_.FileSystemRights -eq 'FullControl' }).Count -eq 2
+        Test-Check 'real adapter: the missing folder is created in one step, protected, Administrators and SYSTEM full control, Users read only, nobody else (68)' ($stM.Kind -eq 'Missing' -and $sd.AreAccessRulesProtected -and $uOk -and $aOk -and $rl.Count -eq 3 -and (Get-AVDTuneRedirectionsFolderState -Folder $newDir -DataRoot $fakePd -ExtraTrusted @($me)).Kind -eq 'Safe') (($rl | ForEach-Object { "$($_.IdentityReference.Value)=$($_.FileSystemRights)" }) -join ' ')
+    }
+    else { Test-Check 'real adapter: not elevated, the owner Administrators cannot be set: the folder is refused or removed, never left unsafe (68)' ($stM.Kind -eq 'Missing' -and (-not (Test-Path -LiteralPath $newDir) -or (Get-AVDTuneRedirectionsFolderState -Folder $newDir -DataRoot $fakePd).Kind -eq 'Unsafe')) $made }
     # M3: DOMAIN\user with the real parser
     $ln1 = Split-AVDTuneLogonName 'EXAMPLE\alice'; $ln2 = Split-AVDTuneLogonName 'alice@example.test'; $ln3 = Split-AVDTuneLogonName 'alice'
     Test-Check 'DOMAIN\user, user@domain and a plain name are split by the real parser (counter-test M3)' ($ln1.Domain -eq 'EXAMPLE' -and $ln1.Name -eq 'alice' -and $ln2.Domain -eq 'example.test' -and $ln2.Name -eq 'alice' -and $ln3.Domain -eq '' -and $ln3.Name -eq 'alice') "$($ln1.Domain)|$($ln1.Name)"
