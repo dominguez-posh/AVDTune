@@ -42,13 +42,14 @@ On the FSLogix page, "Apply recommended lists" (and "Apply" of the settings, whi
 
 | List | Members (by SID, never by name) |
 |---|---|
-| Include | Everyone `S-1-1-0` (the default; set again when it is missing) |
+| Include | Everyone `S-1-1-0`, only while the include list is empty (or already has Everyone). A list restricted to other members is left alone and a notice names them ("Include list is restricted to ...; Everyone not added") |
 | Exclude | BUILTIN\Administrators `S-1-5-32-544` and, with a domain, Domain Admins = domain SID + `-512` |
 
-- The domain SID comes only from the domain controller information (`config\directory.json`, field `DomainSid`, the `objectSid` of the domain object read over LDAPS in the start sequence). It must have exactly the form `S-1-5-21-x-y-z` (`\A...\z` pattern); anything else is not used. It is never derived from a group SID or guessed.
+- The domain SID comes only from the domain controller information (`config\directory.json`, field `DomainSid`, the `objectSid` of the domain object read over LDAPS in the start sequence). It must have exactly the form `S-1-5-21-x-y-z` (`\A...\z` pattern); anything else is not used (ASCII digits `[0-9]` only, never `\d`). It is never derived from a group SID or guessed. It is checked against the domain of the master (the SID Windows resolves for `<NetBIOS>\Domain Admins`): a different domain SID is not used, no Domain Admins exclude, a notice. A master that is not domain joined cannot resolve it: the SID of the pinned domain controller is used and the notice says it could not be checked.
 - Without a domain (Entra only) or without a known domain SID only the local administrators are excluded, and the page says so (notice under the buttons, in the confirmation).
+- The "Apply" of the settings names the list changes in its own confirmation ("Also: Include + Everyone; Exclude + BUILTIN\Administrators (S-1-5-32-544), + <DnsName>\Domain Admins (<SID>)"); when the lists stay as they are, nothing is said. "Apply recommended lists" uses the same text.
 - Members that are already there stay; foreign entries stay and are shown in the list text. More exclude groups stay optional (pick a group or type a SID).
-- Test (WhatIf), Apply and Undo run through `Invoke-AVDTune` (write gate, change log, `LastChange`). "Undo recommended lists" removes exactly the members the last Apply added (a stack in `config\fslogix-lists-undo.json`: older entries are never overwritten); members that were there before and foreign members stay.
+- Test (WhatIf), Apply and Undo run through `Invoke-AVDTune` (write gate, change log, `LastChange`). "Undo recommended lists" removes exactly the members the last Apply really changed (a stack in `config\fslogix-lists-undo.json`, written after the run from the steps with the status Changed: older entries are never overwritten); members that were there before, members added by hand after the Apply, and foreign members stay, and Undo reports them.
 - Source: the include/exclude groups concept page above (exclude groups, the include list for Everyone, why administrators are excluded) and the well-known SID table. Not verified offline: the exact wording of the Learn recommendation to exclude administrators (the page names the groups but not their names, see "Not verified"); the group names and adding a domain SID through the WinNT provider are tried on the VM (F3, F9).
 
 ## Status pill of the installation (issue 63)

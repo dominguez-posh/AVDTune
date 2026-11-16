@@ -3,7 +3,8 @@
 #   Latest (@{ Ok; Url; Error }), DownloadFails, ExpandFails, NoInstaller, Protected ($false = download folder not protected), InstallerVersion,
 #   Signatures (hashtable file name -> @{ Valid; Subject; Issuer; OriginalFilename }), Files (hashtable path -> text), FailWrite (paths that cannot be written),
 #   Dns (host -> @{ Ok; Addresses; Error }), Tcp (host -> $true/$false), Probe (unc -> 'Ok' | 'Denied' | 'Failed'), WriteFail (name of the step that fails), Acl (unc -> SDDL),
-#   Tickets (strings), Defender (@{ Paths; Processes } or $null = not readable), Groups (name -> array of SIDs; a missing name = group not there), FrxMissing.
+#   Tickets (strings), Defender (@{ Paths; Processes } or $null = not readable), Groups (name -> array of SIDs; a missing name = group not there), FrxMissing,
+#   MasterDomainSid (domain SID the master resolves for <NetBIOS>\Domain Admins; '' = cannot be resolved), LocalGroupAddFails (SIDs whose LocalGroupAdd throws).
 # All names and addresses are made up (example.test, contoso).
 function New-AVDTuneFakeFSLogix {
     param([hashtable]$Seed = @{})
@@ -11,7 +12,7 @@ function New-AVDTuneFakeFSLogix {
         Latest = @{ Ok = $true; Url = 'https://download.microsoft.com/download/00000000-0000-0000-0000-000000000000/FSLogix_26.08.zip'; Error = '' }
         DownloadFails = $false; ExpandFails = $false; NoInstaller = $false; Protected = $true; InstallerVersion = '3.26.826.17182'; Signatures = @{}; Files = @{}; FailWrite = @()
         Dns = @{}; Tcp = @{}; Probe = @{}; WriteFail = ''; Acl = @{}; Tickets = @(); Defender = @{ Paths = @(); Processes = @() }
-        Groups = @{ 'FSLogix Profile Include List' = @('S-1-1-0'); 'FSLogix Profile Exclude List' = @() }; FrxMissing = $false; KeyMapFails = $false; Mapped = $false; KeySeen = $null; AsUser = $null
+        Groups = @{ 'FSLogix Profile Include List' = @('S-1-1-0'); 'FSLogix Profile Exclude List' = @() }; FrxMissing = $false; MasterDomainSid = ''; LocalGroupAddFails = @(); KeyMapFails = $false; Mapped = $false; KeySeen = $null; AsUser = $null
         Log = (New-Object System.Collections.ArrayList); Folders = @()
     }
     foreach ($e in $Seed.GetEnumerator()) { $s[$e.Key] = $e.Value }
@@ -57,7 +58,8 @@ function New-AVDTuneFakeFSLogix {
     $a.DefenderAdd = { param($Kind, $Value) [void]$s.Log.Add("DefenderAdd $Kind $Value"); if ($Kind -eq 'Process') { $s.Defender.Processes = @($s.Defender.Processes) + $Value } else { $s.Defender.Paths = @($s.Defender.Paths) + $Value } }.GetNewClosure()
     $a.DefenderRemove = { param($Kind, $Value) [void]$s.Log.Add("DefenderRemove $Kind $Value"); if ($Kind -eq 'Process') { $s.Defender.Processes = @($s.Defender.Processes | Where-Object { $_ -ne $Value }) } else { $s.Defender.Paths = @($s.Defender.Paths | Where-Object { $_ -ne $Value }) } }.GetNewClosure()
     $a.LocalGroupMembers = { param($Name) if ($s.Groups.ContainsKey($Name)) { @{ Exists = $true; Members = @($s.Groups[$Name]) } } else { @{ Exists = $false; Members = @() } } }.GetNewClosure()
-    $a.LocalGroupAdd = { param($Name, $Sid) [void]$s.Log.Add("LocalGroupAdd $Name $Sid"); $s.Groups[$Name] = @($s.Groups[$Name]) + $Sid }.GetNewClosure()
+    $a.MasterDomainSid = { param($NetBios) [void]$s.Log.Add("MasterDomainSid $NetBios"); [string]$s.MasterDomainSid }.GetNewClosure()
+    $a.LocalGroupAdd = { param($Name, $Sid) [void]$s.Log.Add("LocalGroupAdd $Name $Sid"); if ($Sid -in @($s.LocalGroupAddFails)) { throw "fake: the group refuses $Sid" }; $s.Groups[$Name] = @($s.Groups[$Name]) + $Sid }.GetNewClosure()
     $a.LocalGroupRemove = { param($Name, $Sid) [void]$s.Log.Add("LocalGroupRemove $Name $Sid"); $s.Groups[$Name] = @($s.Groups[$Name] | Where-Object { $_ -ne $Sid }) }.GetNewClosure()
     [pscustomobject]$a
 }

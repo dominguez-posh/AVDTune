@@ -153,6 +153,55 @@ try {
     $noGate = Get-ThrownText { Set-AVDTuneFSLogixRecommendedLists -Machine $m -F $fl -Root $tmp -Answers $ansDom -User a -SnapshotId 'x' }
     Open-AVDTuneWriteGate -SnapshotId 'snap-check' -ConfirmedBy 'Check Runner'
     Test-Check 'without the write gate the lists are not written (counter-test)' (@($fl.Store.Groups['FSLogix Profile Exclude List']).Count -eq 1 -and (@($fl.Store.Groups['FSLogix Profile Exclude List']) -notcontains 'S-1-5-32-544')) $noGate
+
+    # ---------------------------------------------------------------- review findings of the lists (issue 62): dialog text, Everyone only for an empty include list, undo stack after the run, [0-9], domain SID of the master
+    $dnsN = 'example.test'
+    & $setDir @{ DomainSid = $dom; DnsName = $dnsN; NetBiosName = 'EXAMPLE'; Groups = @() }
+    $fp = New-AVDTuneFakeFSLogix -Seed @{ MasterDomainSid = $dom; Groups = @{ 'FSLogix Profile Include List' = @(); 'FSLogix Profile Exclude List' = @('S-1-5-21-9-9-9-1234') } }
+    $plan = Get-AVDTuneFSLogixListPlan -F $fp -Root $tmp -Answers $ansDom
+    $want = "Include + Everyone; Exclude + BUILTIN\Administrators (S-1-5-32-544), + $dnsN\Domain Admins ($dom-512)"
+    Test-Check 'dialog text: the planned list changes are named with labels and SIDs, the Domain Admins with the DNS name of directory.json' ((Format-AVDTuneFSLogixListChanges $plan) -eq $want -and $plan.Notice -eq '') (Format-AVDTuneFSLogixListChanges $plan)
+    $null = Set-AVDTuneFSLogixRecommendedLists -Machine $m -F $fp -Root $tmp -Answers $ansDom -User a -SnapshotId 'snap-check'
+    $plan2 = Get-AVDTuneFSLogixListPlan -F $fp -Root $tmp -Answers $ansDom
+    Test-Check 'nothing to change in the lists: the dialog text is empty (nothing is mentioned)' ((Format-AVDTuneFSLogixListChanges $plan2) -eq '' -and @($plan2.Entries | Where-Object Change).Count -eq 0) (Format-AVDTuneFSLogixListChanges $plan2)
+    Remove-Item -LiteralPath (Get-AVDTuneFSLogixListsUndoPath $tmp) -Force -ErrorAction SilentlyContinue
+    $fr = New-AVDTuneFakeFSLogix -Seed @{ MasterDomainSid = $dom; Groups = @{ 'FSLogix Profile Include List' = @('S-1-5-21-5-5-5-1100'); 'FSLogix Profile Exclude List' = @() } }
+    $planR = Get-AVDTuneFSLogixListPlan -F $fr -Root $tmp -Answers $ansDom
+    $apR = Set-AVDTuneFSLogixRecommendedLists -Machine $m -F $fr -Root $tmp -Answers $ansDom -User a -SnapshotId 'snap-check'
+    Test-Check 'Include = {AVD-Users}: unchanged after Apply (Everyone not added), a notice names the restriction, the dialog text has no Include part' (@($fr.Store.Groups['FSLogix Profile Include List']).Count -eq 1 -and $fr.Store.Groups['FSLogix Profile Include List'][0] -eq 'S-1-5-21-5-5-5-1100' -and $planR.Notice -like '*Include list is restricted to S-1-5-21-5-5-5-1100; Everyone not added*' -and (Format-AVDTuneFSLogixListChanges $planR) -notlike '*Include*' -and $apR.Notice -like '*Everyone not added*') $planR.Notice
+    Remove-Item -LiteralPath (Get-AVDTuneFSLogixListsUndoPath $tmp) -Force -ErrorAction SilentlyContinue
+    $ff = New-AVDTuneFakeFSLogix -Seed @{ MasterDomainSid = $dom; LocalGroupAddFails = @('S-1-1-0'); Groups = @{ 'FSLogix Profile Include List' = @(); 'FSLogix Profile Exclude List' = @() } }
+    $null = Set-AVDTuneFSLogixRecommendedLists -Machine $m -F $ff -Root $tmp -Answers $ansDom -User a -SnapshotId 'snap-check'
+    Test-Check 'the first step throws: nothing was changed, so no undo entry is written' (-not (Test-Path -LiteralPath (Get-AVDTuneFSLogixListsUndoPath $tmp))) $null
+    $ff2 = New-AVDTuneFakeFSLogix -Seed @{ MasterDomainSid = $dom; LocalGroupAddFails = @('S-1-5-32-544'); Groups = @{ 'FSLogix Profile Include List' = @(); 'FSLogix Profile Exclude List' = @() } }
+    $run2 = Set-AVDTuneFSLogixRecommendedLists -Machine $m -F $ff2 -Root $tmp -Answers $ansDom -User a -SnapshotId 'snap-check'
+    $stk = Read-AVDTuneJson (Get-AVDTuneFSLogixListsUndoPath $tmp)
+    Test-Check 'a later step throws: the undo stack has only the SIDs that were really changed (Everyone), not the ones that failed or were skipped' (@($run2.Results | Where-Object Status -eq 'Failed').Count -eq 1 -and @($stk.Entries).Count -eq 1 -and @($stk.Entries[0].Added).Count -eq 1 -and $stk.Entries[0].Added[0].Sid -eq 'S-1-1-0' -and $stk.Entries[0].Added[0].List -eq 'Include') (ConvertTo-Json $stk -Depth 6 -Compress)
+    Remove-Item -LiteralPath (Get-AVDTuneFSLogixListsUndoPath $tmp) -Force -ErrorAction SilentlyContinue
+    $fh = New-AVDTuneFakeFSLogix -Seed @{ MasterDomainSid = $dom; Groups = @{ 'FSLogix Profile Include List' = @('S-1-1-0'); 'FSLogix Profile Exclude List' = @() } }
+    $null = Set-AVDTuneFSLogixRecommendedLists -Machine $m -F $fh -Root $tmp -Answers $ansDom -User a -SnapshotId 'snap-check'
+    $hand = Set-AVDTuneFSLogixGroupMember -Machine $m -F $fh -Root $tmp -List Exclude -Action Add -Sid 'S-1-5-32-544' -User a -SnapshotId 'snap-check'
+    $unH = Undo-AVDTuneFSLogixRecommendedLists -Machine $m -F $fh -Root $tmp -User a -SnapshotId 'snap-check'
+    $exH = @($fh.Store.Groups['FSLogix Profile Exclude List'])
+    Test-Check 'Exclude admins by hand after the Apply, then Undo: the admins stay (reported), what Apply added alone is removed' ($hand.Results[0].Status -eq 'Unchanged' -and $exH -contains 'S-1-5-32-544' -and $exH -notcontains "$dom-512" -and $unH.Notice -like '*S-1-5-32-544*added by hand*' -and -not (Test-Path -LiteralPath (Get-AVDTuneFSLogixListsUndoPath $tmp))) "$($exH -join ',') / $($unH.Notice)"
+    $fp2 = New-AVDTuneFakeFSLogix -Seed @{ MasterDomainSid = $dom; Groups = @{ 'FSLogix Profile Include List' = @('S-1-1-0'); 'FSLogix Profile Exclude List' = @('S-1-5-32-544') } }
+    Write-AVDTuneFile (Get-AVDTuneFSLogixListsUndoPath $tmp) (([ordered]@{ Entries = @([ordered]@{ At = '2026-11-17T10:00:00.0000000+00:00'; Added = @([ordered]@{ List = 'Exclude'; Sid = 'S-1-5-32-544' }); Previous = [ordered]@{ Include = @('S-1-1-0'); Exclude = @('S-1-5-32-544') } }) }) | ConvertTo-Json -Depth 8)
+    $unP = Undo-AVDTuneFSLogixRecommendedLists -Machine $m -F $fp2 -Root $tmp -User a -SnapshotId 'snap-check'
+    Test-Check 'Undo does not remove a SID that was in the list before the Apply (Previous), it reports it' (@($fp2.Store.Groups['FSLogix Profile Exclude List']) -contains 'S-1-5-32-544' -and $unP.Notice -like '*before the Apply*') $unP.Notice
+    $ar = ([string][char]0x0665) + [char]0x0664 + [char]0x0664
+    Test-Check 'SID regexes take ASCII digits only: an Arabic-Indic digit is no SID digit (counter-test), also in the domain SID' (-not (Test-AVDTuneSid "S-1-5-32-$ar") -and (Test-AVDTuneSid 'S-1-5-32-544') -and -not (Test-AVDTuneDomainSid "S-1-5-21-1-2-$ar") -and (Test-AVDTuneDomainSid 'S-1-5-21-1-2-3')) $null
+    $srcRx = @(foreach ($f in 'Modules\AVDTune.FSLogix.psm1', 'Modules\AVDTune.Directory.psm1') { Get-Content -LiteralPath (Join-Path $PSScriptRoot "..\$f") | Where-Object { $_ -match 'AS-1-' -and $_ -match '\\d' } })
+    Test-Check 'the SID patterns in FSLogix.psm1 and Directory.psm1 use [0-9], never \d' ($srcRx.Count -eq 0) ($srcRx -join ' | ')
+    $fbad = New-AVDTuneFakeFSLogix -Seed @{ MasterDomainSid = 'S-1-5-21-4-4-4'; Groups = @{ 'FSLogix Profile Include List' = @('S-1-1-0'); 'FSLogix Profile Exclude List' = @() } }
+    $pBad = Get-AVDTuneFSLogixListPlan -F $fbad -Root $tmp -Answers $ansDom
+    $apBad = Set-AVDTuneFSLogixRecommendedLists -Machine $m -F $fbad -Root $tmp -Answers $ansDom -User a -SnapshotId 'snap-check'
+    Test-Check 'domain SID of the DC information differs from the domain of the master: no Domain Admins exclude, a notice with both SIDs, the local Administrators are still excluded' (@($fbad.Store.Groups['FSLogix Profile Exclude List']).Count -eq 1 -and $fbad.Store.Groups['FSLogix Profile Exclude List'][0] -eq 'S-1-5-32-544' -and $pBad.Notice -like "*$dnsN*not the domain SID of this master (S-1-5-21-4-4-4)*" -and (Format-AVDTuneFSLogixListChanges $pBad) -notlike '*Domain Admins*' -and $apBad.Notice -eq $pBad.Notice) $pBad.Notice
+    Remove-Item -LiteralPath (Get-AVDTuneFSLogixListsUndoPath $tmp) -Force -ErrorAction SilentlyContinue
+    $fnr = New-AVDTuneFakeFSLogix -Seed @{ MasterDomainSid = ''; Groups = @{ 'FSLogix Profile Include List' = @('S-1-1-0'); 'FSLogix Profile Exclude List' = @() } }
+    $pNr = Get-AVDTuneFSLogixListPlan -F $fnr -Root $tmp -Answers $ansDom
+    Test-Check 'master cannot resolve the domain (not domain joined): the SID of the pinned DC is used, the notice says it could not be checked' ((Format-AVDTuneFSLogixListChanges $pNr) -like "*+ $dnsN\Domain Admins ($dom-512)" -and $pNr.Notice -like '*could not be checked*' -and @($fnr.Log | Where-Object { $_ -like 'MasterDomainSid EXAMPLE' }).Count -eq 1) $pNr.Notice
+    $formSrc = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\AVDTune-FSLogix.ps1') -Raw
+    Test-Check 'form: the lookup is stopped with BeginStop (no Stop() on the window thread), disposed after it has stopped, discarded when the window closes; the settings Apply names the list changes in its own confirmation' ($formSrc -notmatch '\.PS\.Stop\(\)' -and $formSrc -match 'BeginStop\(\$null, \$null\)' -and $formSrc -match 'EndStop' -and $formSrc -match 'function Close-FslLatestLookup' -and (Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\Start-AVDTune.ps1') -Raw) -match 'Close-FslLatestLookup' -and $formSrc -match 'Format-AVDTuneFSLogixListChanges \$listPlan' -and $formSrc -match 'Invoke-FslRecommendedLists -Confirmed') $null
     [IO.File]::WriteAllText($dirFile, $dirKeep)
 
     # ---------------------------------------------------------------- version state of the installation (issue 63)

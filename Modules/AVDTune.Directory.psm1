@@ -222,7 +222,7 @@ function Get-AVDTuneDirectoryInfo {
     $domainSid = ''
     try {
         $dom = @(& $Ldap.Search $Connection $defaultNc '(objectClass=*)' 'Base' @('objectSid'))
-        if ($dom.Count -gt 0) { $cand = ConvertTo-AVDTuneSid (Get-AVDTuneAttr $dom[0] 'objectSid'); if ($cand -match '\AS-1-5-21-\d{1,10}-\d{1,10}-\d{1,10}\z') { $domainSid = $cand } else { [void]$warnings.Add('The domain SID has an unexpected format and is not used.') } }
+        if ($dom.Count -gt 0) { $cand = ConvertTo-AVDTuneSid (Get-AVDTuneAttr $dom[0] 'objectSid'); if ($cand -match '\AS-1-5-21-[0-9]{1,10}-[0-9]{1,10}-[0-9]{1,10}\z') { $domainSid = $cand } else { [void]$warnings.Add('The domain SID has an unexpected format and is not used.') } }
         else { [void]$warnings.Add('The domain SID was not returned.') }
     }
     catch { [void]$warnings.Add("Domain SID not read: $($_.Exception.Message)") }

@@ -17,6 +17,7 @@ $script:FslTest = $null
 $script:FslStorage = $null
 $script:FslTemplateBoxes = @{}
 $script:FslLatest = $null
+$script:FslStopping = @()   # lookups that BeginStop was called for, disposed when they have stopped
 $script:FslLatestLookup = $null   # the running read-only lookup of the newest release (issue 63)
 $script:FslLatestResult = $null   # @{ Result (Get-AVDTuneFSLogixLatest); At }: cached, 60 minutes when it worked, 5 minutes when it did not
 $script:FslSharedGate = $null
@@ -77,7 +78,27 @@ function Start-FslLatestLookup {
         }).AddArgument($script:AppRoot)
     $script:FslLatestLookup = @{ PS = $ps; Handle = $ps.BeginInvoke(); Started = (Get-Date) }
 }
+function Stop-FslLookupAsync($Job) {
+    # never Stop() on the window thread (it waits for the runspace): BeginStop, and the tick that follows disposes it when it has stopped (the UI never blocks)
+    try { $script:FslStopping += @(@{ PS = $Job.PS; Handle = $Job.PS.BeginStop($null, $null) }) } catch { try { $Job.PS.Dispose() } catch { } }
+}
+function Clear-FslStopped {
+    $keep = @()
+    foreach ($j in @($script:FslStopping)) {
+        if (-not $j) { continue }
+        if ($j.Handle.IsCompleted) { try { $j.PS.EndStop($j.Handle) } catch { }; try { $j.PS.Dispose() } catch { } } else { $keep += $j }
+    }
+    $script:FslStopping = @($keep)
+}
+function Close-FslLatestLookup {
+    # the window is closing: a lookup that still runs is stopped without waiting (the process ends right after); its runspace is discarded
+    $job = $script:FslLatestLookup; $script:FslLatestLookup = $null
+    if ($job) { try { [void]$job.PS.BeginStop($null, $null) } catch { } }
+    foreach ($j in @($script:FslStopping)) { if ($j) { try { $j.PS.Dispose() } catch { } } }
+    $script:FslStopping = @()
+}
 function Complete-FslLatestLookup {
+    Clear-FslStopped
     $job = $script:FslLatestLookup
     if (-not $job) { return }
     $late = ((Get-Date) - $job.Started).TotalSeconds -gt 45
@@ -89,7 +110,7 @@ function Complete-FslLatestLookup {
         catch { $res = [pscustomobject]@{ Ok = $false; Error = $_.Exception.Message } }
         finally { $job.PS.Dispose() }
     }
-    else { try { $job.PS.Stop() } catch { }; $job.PS.Dispose(); $res = [pscustomobject]@{ Ok = $false; Error = 'The lookup took longer than 45 seconds.' } }
+    else { Stop-FslLookupAsync $job; $res = [pscustomobject]@{ Ok = $false; Error = 'The lookup took longer than 45 seconds.' } }
     if (-not $res) { $res = [pscustomobject]@{ Ok = $false; Error = 'The lookup returned nothing.' } }
     $script:FslLatestResult = @{ Result = $res; At = (Get-Date) }
     if ($script:CurrentPage -eq 'FSLogix') { Update-FslInstall }
@@ -191,10 +212,14 @@ Add-Click $ui.BtnFslSettingsApply {
     Assert-FslWrite
     $vals = Get-FslFormValues
     if ($vals.Count -eq 0) { throw 'Nothing to change: every filled value equals the current one.' }
-    if (-not (Confirm-Action "Write $($vals.Count) FSLogix setting(s) to the registry of this master?" 'FSLogix settings')) { return }
+    # the same Apply also sets the recommended lists: what it would change there is worked out first and named in this one confirmation (nothing is said when the lists stay as they are)
+    $listPlan = Get-AVDTuneFSLogixListPlan -F (Get-FslAdapter) -Root $script:StateRoot -Answers (Get-FslAnswers)
+    $listText = Format-AVDTuneFSLogixListChanges $listPlan
+    $askText = "Write $($vals.Count) FSLogix setting(s) to the registry of this master?$(if ($listText) { " Also: $listText.$(if ($listPlan.Notice) { ' ' + $listPlan.Notice })" })"
+    if (-not (Confirm-Action $askText 'FSLogix settings')) { return }
     $run = Invoke-FslChange -Kind 'fslogix-settings' -Title 'Applying FSLogix settings' -Step "Writing $($vals.Count) setting(s) to the registry" -Block { Set-AVDTuneFSLogixSettings -Machine $script:Machine -Root $script:StateRoot -Values $vals -User (Get-FslUser) -SnapshotId (Get-FslGateSnapshot) }
     Show-FslRun $run 'FSLogix settings'
-    if (@($run.Results | Where-Object { $_.Status -eq 'Failed' }).Count -eq 0) { Invoke-FslRecommendedLists -Quiet }
+    if (@($run.Results | Where-Object { $_.Status -eq 'Failed' }).Count -eq 0) { Invoke-FslRecommendedLists -Confirmed }
     Update-FslView
 }
 Add-Click $ui.BtnFslSettingsUndo {
@@ -219,8 +244,9 @@ function Update-FslGroups {
     $ui.TxtFslGroups.Text = "Include list ($($g.IncludeName)):`r`n  $(& $fmt $g.Include)`r`nExclude list ($($g.ExcludeName)):`r`n  $(& $fmt $g.Exclude)"
     $ch = Get-FslGroupChoices
     foreach ($cmb in $ui.CmbFslGroup, $ui.CmbFslUsersGroup, $ui.CmbFslAdminsGroup) { $keepText = $cmb.Text; $cmb.ItemsSource = @($ch.Groups | ForEach-Object { $_.Name }); $cmb.Text = $keepText }
-    $rec = Get-AVDTuneFSLogixRecommendedLists -Root $script:StateRoot -Answers (Get-FslAnswers)
-    $ui.TxtFslListsNotice.Text = "Recommended: include $(@($rec.Include) -join ', '); exclude $(@($rec.Exclude) -join ', ').$(if ($rec.Notice) { ' ' + $rec.Notice })"
+    $plan = Get-AVDTuneFSLogixListPlan -F (Get-FslAdapter) -Root $script:StateRoot -Answers (Get-FslAnswers)
+    $want = @(foreach ($l in 'Include', 'Exclude') { $x = @($plan.Entries | Where-Object { $_.List -eq $l }); if ($x.Count -gt 0) { "$($l.ToLowerInvariant()) $((@($x | ForEach-Object { $_.Label })) -join ', ')" } }) -join '; '
+    $ui.TxtFslListsNotice.Text = "Recommended: $want.$(if ($plan.Notice) { ' ' + $plan.Notice })"
     $ui.TxtFslGroupHint.Text = $(if ($ch.Source -eq 'Directory') { "$(@($ch.Groups).Count) groups from the domain controller. Pick one or type a SID." } else { $ch.Hint })
 }
 function Invoke-FslGroupChange([string]$Action, [string]$Text) {
@@ -232,19 +258,29 @@ function Invoke-FslGroupChange([string]$Action, [string]$Text) {
     $run = Set-AVDTuneFSLogixGroupMember -Machine $script:Machine -F (Get-FslAdapter) -Root $script:StateRoot -List $list -Action $Action -Sid $sid -User (Get-FslUser) -SnapshotId (Get-FslGateSnapshot)
     Show-FslRun $run "FSLogix $list list"; Update-FslGroups
 }
-function Invoke-FslRecommendedLists([switch]$Quiet) {
-    # Include = Everyone, Exclude = local Administrators (+ Domain Admins with a known domain SID); the settings Apply calls this too (no second confirmation)
-    $rec = Get-AVDTuneFSLogixRecommendedLists -Root $script:StateRoot -Answers (Get-FslAnswers)
-    if (-not $Quiet -and -not (Confirm-Action "Set the recommended lists? Include: Everyone. Exclude: $(@($rec.Exclude) -join ', ').$(if ($rec.Notice) { ' ' + $rec.Notice })" 'FSLogix lists')) { return }
+function Invoke-FslRecommendedLists([switch]$Confirmed) {
+    # Include = Everyone (only while the list is empty), Exclude = local Administrators (+ Domain Admins of a domain SID that was checked); the settings Apply asks for this in its own
+    # confirmation and calls this with -Confirmed. Nothing to change = nothing asked, nothing written.
+    $plan = Get-AVDTuneFSLogixListPlan -F (Get-FslAdapter) -Root $script:StateRoot -Answers (Get-FslAnswers)
+    $text = Format-AVDTuneFSLogixListChanges $plan
+    if (-not $Confirmed) {
+        if (-not $text) { $ui.TxtFslState.Text = "The recommended lists are already set.$(if ($plan.Notice) { ' ' + $plan.Notice })"; Show-Toast $ui.TxtFslState.Text; return }
+        if (-not (Confirm-Action "Set the recommended lists? $text.$(if ($plan.Notice) { ' ' + $plan.Notice })" 'FSLogix lists')) { return }
+    }
+    elseif (-not $text) { return }
     $run = Invoke-FslChange -Kind 'fslogix-lists' -Title 'Applying the recommended FSLogix lists' -Step 'Setting the include and exclude lists' -Block { Set-AVDTuneFSLogixRecommendedLists -Machine $script:Machine -F (Get-FslAdapter) -Root $script:StateRoot -Answers (Get-FslAnswers) -User (Get-FslUser) -SnapshotId (Get-FslGateSnapshot) }
-    Show-FslRun $run 'FSLogix lists'; Update-FslGroups
+    Show-FslRun $run 'FSLogix lists'
+    if ($run.Notice) { $ui.TxtFslState.Text = "$($ui.TxtFslState.Text) $($run.Notice)" }
+    Update-FslGroups
 }
 Add-Click $ui.BtnFslListsApply { Assert-FslWrite; Invoke-FslRecommendedLists }
 Add-Click $ui.BtnFslListsUndo {
     Assert-FslWrite
     if (-not (Confirm-Action 'Remove the members that the last Apply recommended lists added? Entries that were there before stay.' 'Undo')) { return }
     $run = Invoke-FslChange -Kind 'fslogix-lists' -Title 'Undo of the recommended FSLogix lists' -Step 'Removing the members that were added' -Block { Undo-AVDTuneFSLogixRecommendedLists -Machine $script:Machine -F (Get-FslAdapter) -Root $script:StateRoot -User (Get-FslUser) -SnapshotId (Get-FslGateSnapshot) }
-    Show-FslRun $run 'Undo of the FSLogix lists'; Update-FslGroups
+    Show-FslRun $run 'Undo of the FSLogix lists'
+    if ($run.Notice) { $ui.TxtFslState.Text = "$($ui.TxtFslState.Text) $($run.Notice)"; Show-Toast $ui.TxtFslState.Text }
+    Update-FslGroups
 }
 $ui.CmbFslList.ItemsSource = @('Exclude', 'Include'); $ui.CmbFslList.SelectedIndex = 0
 Add-Click $ui.BtnFslGroupAdd { Invoke-FslGroupChange 'Add' ([string]$ui.CmbFslGroup.Text) }

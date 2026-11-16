@@ -741,19 +741,24 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         Test-Smoke 'status pill (#63): older = yellow with the new version, newer = green, newest not readable = grey with the reason; no download ran' ($pillYellow -and $pillGreen -and $pillGrey -and $ui.TxtFslInstallPill.Text -eq 'Update available: 26.08' -and @($script:FslFake.F.Log | Where-Object { $_ -like 'Download*' }).Count -eq 0) "$pillYellow $pillGreen $pillGrey"
         Test-Smoke 'settings: every setting of the plan as a row with its recommendation and reason, differing values marked' ($script:FslInputs.Count -ge 19 -and (Find-Text $ui.PanelFslSettings 'LockedRetryCount') -and (Find-Text $ui.PanelFslSettings 'Differs') -and (Find-Text $ui.PanelFslSettings 'Office container (ODFC), optional')) $script:FslInputs.Count
         Save-SmokeShot '50-fslogix-top-light'
+        $domSidSmoke = 'S-1-5-21-1111111111-2222222222-333333333'
+        $script:FslFake.F.Store.MasterDomainSid = $domSidSmoke   # the domain SID this (fake) master resolves for <NetBIOS>\Domain Admins
         # fill in the recommendation, dry run first, then write behind the gate
         $ui.BtnFslFill.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
         $ui.BtnFslSettingsTest.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
         Test-Smoke 'Test: shows what would change and writes nothing' ($ui.TxtFslSettingsState.Text -like 'Test (nothing written)*lockedretrycount*' -and (& $script:Machine.RegGet 'HKLM:\SOFTWARE\FSLogix\Profiles' 'LockedRetryCount') -eq 12 -and @(Get-AVDTuneRun -Root $script:StateRoot | Where-Object Plan -like 'FSLogix*').Count -eq 0) $ui.TxtFslSettingsState.Text
         $ui.BtnFslSettingsApply.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
         Test-Smoke 'Apply: the confirmation names the count, the registry has the recommended values, LastChange shown, change log written' ($script:ConfirmAsked -like 'Write * FSLogix setting*' -and (& $script:Machine.RegGet 'HKLM:\SOFTWARE\FSLogix\Profiles' 'LockedRetryCount') -eq 3 -and (& $script:Machine.RegGet 'HKLM:\SOFTWARE\FSLogix\Profiles' 'VolumeType') -eq 'vhdx' -and $ui.TxtFslSettingsState.Text -like 'LastChange:*' -and @(Get-AVDTuneChangeLog -Root $script:StateRoot | Where-Object Category -eq 'FSLogix').Count -ge 3) "$($script:ConfirmAsked) / $($ui.TxtFslSettingsState.Text)"
+        Test-Smoke 'Apply (#62): the same confirmation names the list changes (exclude local Administrators and Domain Admins with DNS name and SID; include already has Everyone and is not mentioned)' ($script:ConfirmAsked -like 'Write * FSLogix setting*Also: Exclude + BUILTIN\Administrators (S-1-5-32-544), + *\Domain Admins (' + $domSidSmoke + '-512)*' -and $script:ConfirmAsked -notlike '*Include*' -and $script:FslFake.F.Store.Groups['FSLogix Profile Exclude List'] -contains ($domSidSmoke + '-512')) $script:ConfirmAsked
         Test-Smoke 'the change is in the protocol (category FSLogix)' (@($script:Protocol.Actions | Where-Object { $_.Category -eq 'fslogix' }).Count -ge 1) $null
         $tk = @(Get-AVDTuneUiTasks | Where-Object { $_.Kind -eq 'fslogix-settings' })
         Test-Smoke 'task bar: applying the settings is a task, ended as succeeded, no Retry (a change of the master)' ($tk.Count -eq 1 -and $tk[0].Status -eq 'succeeded' -and -not $tk[0].Retry -and $tk[0].Title -like '*FSLogix settings*') ($tk | ForEach-Object { $_.Status })
         $ui.BtnFslSettingsUndo.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
         Test-Smoke 'Undo: the previous values are back' ((& $script:Machine.RegGet 'HKLM:\SOFTWARE\FSLogix\Profiles' 'LockedRetryCount') -eq 12 -and (& $script:Machine.RegGet 'HKLM:\SOFTWARE\FSLogix\Profiles' 'VolumeType') -eq 'vhd') $null
         $ui.BtnFslFill.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
+        $script:ConfirmAsked = ''
         $ui.BtnFslSettingsApply.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
+        Test-Smoke 'Apply (#62): the lists are already as recommended, the confirmation does not mention them' ($script:ConfirmAsked -like 'Write * FSLogix setting*' -and $script:ConfirmAsked -notlike '*Also:*') $script:ConfirmAsked
         # groups
         $ui.CmbFslList.SelectedItem = 'Exclude'
         $ui.BtnFslExcludeAdmins.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
@@ -764,10 +769,18 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         $script:FslFake.F.Store.Groups['FSLogix Profile Include List'] = @()
         $ui.BtnFslListsApply.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
         $exl = @($script:FslFake.F.Store.Groups['FSLogix Profile Exclude List']); $inl = @($script:FslFake.F.Store.Groups['FSLogix Profile Include List'])
-        Test-Smoke 'Apply recommended lists: include = Everyone; exclude = local Administrators + Domain Admins (domain SID from the DC information) + the foreign entry; the lists text shows them' ($inl.Count -eq 1 -and $inl[0] -eq 'S-1-1-0' -and $exl -contains 'S-1-5-32-544' -and $exl -contains $domAdmins -and $exl -contains 'S-1-5-21-9-9-9-1234' -and $exl.Count -eq 3 -and $ui.TxtFslGroups.Text -like "*$domAdmins*" -and $ui.TxtFslGroups.Text -like '*S-1-5-21-9-9-9-1234*' -and $script:ConfirmAsked -like '*Everyone*') "$($exl -join ',') / $($inl -join ',') / $($script:ConfirmAsked)"
+        Test-Smoke 'Apply recommended lists: include = Everyone; exclude = local Administrators + Domain Admins (domain SID from the DC information) + the foreign entry; the lists text shows them' ($inl.Count -eq 1 -and $inl[0] -eq 'S-1-1-0' -and $exl -contains 'S-1-5-32-544' -and $exl -contains $domAdmins -and $exl -contains 'S-1-5-21-9-9-9-1234' -and $exl.Count -eq 3 -and $ui.TxtFslGroups.Text -like "*$domAdmins*" -and $ui.TxtFslGroups.Text -like '*S-1-5-21-9-9-9-1234*' -and $script:ConfirmAsked -like '*Include + Everyone*' -and $script:ConfirmAsked -like "*Domain Admins ($domAdmins)*") "$($exl -join ',') / $($inl -join ',') / $($script:ConfirmAsked)"
         $ui.BtnFslListsUndo.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
         $exl2 = @($script:FslFake.F.Store.Groups['FSLogix Profile Exclude List'])
         Test-Smoke 'Undo recommended lists: what was added is gone, the foreign entry stays' ($exl2.Count -eq 1 -and $exl2[0] -eq 'S-1-5-21-9-9-9-1234' -and @($script:FslFake.F.Store.Groups['FSLogix Profile Include List']).Count -eq 0) ($exl2 -join ',')
+        $script:FslFake.F.Store.MasterDomainSid = 'S-1-5-21-4-4-4'
+        $script:FslFake.F.Store.Groups['FSLogix Profile Exclude List'] = @(); $script:FslFake.F.Store.Groups['FSLogix Profile Include List'] = @()
+        $script:ConfirmAsked = ''
+        $ui.BtnFslListsApply.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
+        $exm = @($script:FslFake.F.Store.Groups['FSLogix Profile Exclude List'])
+        Test-Smoke 'Apply recommended lists, master of another domain (#62): no Domain Admins exclude, the dialog and the hint say why' ($exm.Count -eq 1 -and $exm[0] -eq 'S-1-5-32-544' -and $script:ConfirmAsked -notlike '*Domain Admins (*' -and $script:ConfirmAsked -like '*not the domain SID of this master (S-1-5-21-4-4-4)*' -and $ui.TxtFslState.Text -like '*not the domain SID of this master*') "$($exm -join ',') / $($script:ConfirmAsked)"
+        $ui.BtnFslListsUndo.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
+        $script:FslFake.F.Store.MasterDomainSid = $domSidSmoke
         $ui.BtnFslListsApply.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
         $ui.CmbFslGroup.Text = 'not-a-group'
         $ui.BtnFslGroupAdd.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))

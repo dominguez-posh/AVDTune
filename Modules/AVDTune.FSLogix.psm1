@@ -215,7 +215,7 @@ function Get-AVDTuneFSLogixLastChange {
 
 #region include and exclude groups
 
-function Test-AVDTuneSid([string]$Sid) { $Sid -match '\AS-1-\d{1,3}(-\d{1,10}){1,15}\z' }
+function Test-AVDTuneSid([string]$Sid) { $Sid -match '\AS-1-[0-9]{1,3}(-[0-9]{1,10}){1,15}\z' }
 
 function Get-AVDTuneFSLogixGroupMembers($F, [string]$Name) { $r = & $F.LocalGroupMembers $Name; if (-not $r.Exists) { return $null }; , @(@($r.Members) | Where-Object { $_ }) }
 
@@ -256,10 +256,13 @@ function Set-AVDTuneFSLogixGroupMember {
     $test = { param($m) $mem = Get-AVDTuneFSLogixGroupMembers $F $group; if ($null -eq $mem) { throw "The local group '$group' does not exist: FSLogix is not installed." }; @{ Compliant = (([bool](@($mem) -contains $Sid)) -eq $want); State = (@($mem) -join ', ') } }.GetNewClosure()
     $apply = { param($m) if ($want) { & $F.LocalGroupAdd $group $Sid } else { & $F.LocalGroupRemove $group $Sid } }.GetNewClosure()
     $step = New-AVDTuneStep -Id "fslogix.group.$($List.ToLowerInvariant()).$($Action.ToLowerInvariant())" -Section FSLogix -Title "FSLogix $List list: $Action $Sid" -Why 'Controls which users FSLogix processes.' -SourceUrl "$script:Learn/concepts-include-exclude-groups" -Test $test -Apply $apply
-    Invoke-AVDTune -Plan ([pscustomobject]@{ Name = 'FSLogix groups'; Steps = @($step.Id) }) -Catalog @($step) -Machine $Machine -Root $Root -User $User -SnapshotId $SnapshotId -WhatIf:$WhatIf
+    $run = Invoke-AVDTune -Plan ([pscustomobject]@{ Name = 'FSLogix groups'; Steps = @($step.Id) }) -Catalog @($step) -Machine $Machine -Root $Root -User $User -SnapshotId $SnapshotId -WhatIf:$WhatIf
+    # a member added by hand is the administrator's: Undo of the recommended lists does not take it away (changed or already there)
+    if ($want -and -not $WhatIf -and @($run.Results | Where-Object { $_.Status -in 'Changed', 'Unchanged' }).Count -gt 0) { Set-AVDTuneFSLogixListsUndoClaim -Root $Root -List $List -Sid $Sid }
+    $run
 }
 
-function Test-AVDTuneDomainSid([string]$Sid) { $Sid -match '\AS-1-5-21-\d{1,10}-\d{1,10}-\d{1,10}\z' }
+function Test-AVDTuneDomainSid([string]$Sid) { $Sid -match '\AS-1-5-21-[0-9]{1,10}-[0-9]{1,10}-[0-9]{1,10}\z' }
 
 function New-AVDTuneFSLogixGroupStep {
     <# One membership as a step (Add or Remove by SID, no names). Unchanged when it already is as wanted; Failed when the local group does not exist. #>
@@ -278,56 +281,138 @@ function Get-AVDTuneFSLogixRecommendedLists {
         The recommended lists: Include = Everyone (S-1-1-0); Exclude = local Administrators (S-1-5-32-544) and, with a domain, Domain Admins (domain SID + -512).
         The domain SID comes only from the domain controller information (config\directory.json, DomainSid) and must have the strict form S-1-5-21-x-y-z;
         it is never derived or guessed. Without a domain (Entra only) or without a known domain SID only the local administrators are excluded, with a Notice.
+        With the adapter ($F.MasterDomainSid) the SID is checked against the domain of this master (the SID that Windows resolves for <NetBIOS>\Domain Admins):
+        a different domain SID is not used (no exclude, Notice). A master that is not domain joined cannot resolve it: the SID of the pinned domain controller
+        is used and the Notice says it could not be checked.
     #>
-    param([string]$Root = (Get-AVDTuneRoot), $Answers)
+    param([string]$Root = (Get-AVDTuneRoot), $Answers, $F)
     $dc = [string](Get-AVDTuneProp $Answers 'DomainController')
-    $sid = ''
+    $sid = ''; $dns = ''; $netbios = ''
     $dir = $null; try { $dir = Read-AVDTuneJson (Join-Path $Root 'config\directory.json') } catch { }
     $d = if ($dir) { Get-AVDTuneProp $dir 'Directory' } else { $null }
-    if ($d) { $c = [string](Get-AVDTuneProp $d 'DomainSid'); if (Test-AVDTuneDomainSid $c) { $sid = $c } }
+    if ($d) {
+        $c = [string](Get-AVDTuneProp $d 'DomainSid'); if (Test-AVDTuneDomainSid $c) { $sid = $c }
+        $dns = [string](Get-AVDTuneProp $d 'DnsName'); $netbios = [string](Get-AVDTuneProp $d 'NetBiosName')
+    }
     $exclude = @($script:AdminsSid); $notice = ''
     if ($dc -eq 'None') { $sid = ''; $notice = 'Entra ID only (no domain): only the local administrators are excluded; there is no Domain Admins group.' }
-    elseif ($sid) { $exclude += "$sid-512" }
+    elseif ($sid) {
+        $mine = ''
+        if ($F -and $F.PSObject.Properties['MasterDomainSid'] -and $netbios) { try { $mine = [string](& $F.MasterDomainSid $netbios) } catch { $mine = '' } }
+        if ($mine -and (Test-AVDTuneDomainSid $mine) -and $mine -ne $sid) {
+            $notice = "The domain SID of the domain controller information ($(if ($dns) { $dns } else { 'domain' })) is not the domain SID of this master ($mine): Domain Admins is not excluded. Read the domain controller in the start sequence again."
+            $sid = ''
+        }
+        else {
+            $exclude += "$sid-512"
+            if ($F -and $F.PSObject.Properties['MasterDomainSid'] -and -not $mine) { $notice = 'The domain SID could not be checked against this master (not domain joined or the domain is not reachable); the SID of the domain controller information is used.' }
+        }
+    }
     else { $notice = 'The domain SID is not known (read the domain controller in the start sequence first): only the local administrators are excluded, Domain Admins is not. AVDTune does not guess the SID.' }
-    [pscustomobject]@{ Include = @('S-1-1-0'); Exclude = @($exclude); DomainSid = $sid; Notice = $notice; Source = "$script:Learn/concepts-include-exclude-groups" }
+    [pscustomobject]@{ Include = @('S-1-1-0'); Exclude = @($exclude); DomainSid = $sid; DomainName = $dns; Notice = $notice; Source = "$script:Learn/concepts-include-exclude-groups" }
+}
+
+function Get-AVDTuneFSLogixListLabel([string]$Sid, $Rec) {
+    if ($Sid -eq 'S-1-1-0') { return 'Everyone' }
+    if ($Sid -eq $script:AdminsSid) { return "BUILTIN\Administrators ($Sid)" }
+    if ($Rec.DomainSid -and $Sid -eq "$($Rec.DomainSid)-512") { return "$(if ($Rec.DomainName) { $Rec.DomainName } else { 'domain' })\Domain Admins ($Sid)" }
+    $Sid
+}
+
+function Get-AVDTuneFSLogixListPlan {
+    <#
+        What the recommended lists would do on this master, calculated without a change: Entries (List, Sid, Label, Change = the member is not there yet),
+        Notices, Previous (members now). Include gets Everyone only while the include list is EMPTY (or already has Everyone): an include list that is
+        restricted to other members is left alone and a notice names them.
+    #>
+    param([Parameter(Mandatory)]$F, [string]$Root = (Get-AVDTuneRoot), $Answers)
+    $rec = Get-AVDTuneFSLogixRecommendedLists -Root $Root -Answers $Answers -F $F
+    $entries = New-Object System.Collections.ArrayList
+    $notices = New-Object System.Collections.ArrayList
+    $prev = @{}
+    if ($rec.Notice) { [void]$notices.Add($rec.Notice) }
+    foreach ($list in 'Include', 'Exclude') {
+        $group = if ($list -eq 'Include') { $script:IncludeGroup } else { $script:ExcludeGroup }
+        $mem = Get-AVDTuneFSLogixGroupMembers $F $group
+        $prev[$list] = $(if ($null -eq $mem) { @() } else { @($mem) })
+        $sids = @($rec.$list)
+        if ($list -eq 'Include' -and $null -ne $mem -and @($mem).Count -gt 0 -and @($mem) -notcontains 'S-1-1-0') {
+            [void]$notices.Add("Include list is restricted to $(@($mem) -join ', '); Everyone not added.")
+            $sids = @()
+        }
+        foreach ($sid in $sids) {
+            [void]$entries.Add([pscustomobject]@{ List = $list; Sid = $sid; Label = (Get-AVDTuneFSLogixListLabel $sid $rec); Change = ($null -eq $mem -or @($mem) -notcontains $sid) })
+        }
+    }
+    [pscustomobject]@{ Entries = @($entries); Notices = @($notices); Notice = (@($notices) -join ' '); Previous = $prev; Rec = $rec }
+}
+
+function Format-AVDTuneFSLogixListChanges {
+    <# The list changes of a plan for the confirmation dialog ("Include + Everyone; Exclude + BUILTIN\Administrators (S-1-5-32-544), + ..."); '' when nothing changes #>
+    param([Parameter(Mandatory)]$Plan)
+    $parts = @(foreach ($list in 'Include', 'Exclude') {
+            $c = @($Plan.Entries | Where-Object { $_.List -eq $list -and $_.Change })
+            if ($c.Count -gt 0) { "$list " + ((@($c | ForEach-Object { "+ $($_.Label)" })) -join ', ') }
+        })
+    $parts -join '; '
 }
 
 function Get-AVDTuneFSLogixListsUndoPath([string]$Root) { Join-Path $Root 'config\fslogix-lists-undo.json' }
 
+function Set-AVDTuneFSLogixListsUndoClaim {
+    <# A SID that was added by hand (also again after the Apply) belongs to the administrator: it leaves the "added" list of the undo entries and is kept as Claimed, so Undo reports it and leaves it. #>
+    param([Parameter(Mandatory)][string]$Root, [Parameter(Mandatory)][string]$List, [Parameter(Mandatory)][string]$Sid)
+    if (-not (Test-AVDTuneWriteAllowed)) { return }
+    $path = Get-AVDTuneFSLogixListsUndoPath $Root
+    $u = Read-AVDTuneJson $path
+    if (-not $u) { return }
+    $touched = $false; $out = @()
+    foreach ($e in @(@($u.Entries) | Where-Object { $_ })) {
+        $hit = @(@($e.Added) | Where-Object { $_ -and [string]$_.List -eq $List -and [string]$_.Sid -eq $Sid })
+        if ($hit.Count -gt 0) {
+            $touched = $true
+            $claimed = @(@(Get-AVDTuneProp $e 'Claimed') | Where-Object { $_ }) + [ordered]@{ List = $List; Sid = $Sid }
+            $left = @(@($e.Added) | Where-Object { $_ -and -not ([string]$_.List -eq $List -and [string]$_.Sid -eq $Sid) })
+            $e = [ordered]@{ At = $e.At; Added = @($left); Claimed = @($claimed); Previous = $e.Previous }
+        }
+        $out += $e
+    }
+    if ($touched) { Write-AVDTuneFile $path ([ordered]@{ Entries = @($out) } | ConvertTo-Json -Depth 8) }
+}
+
 function Set-AVDTuneFSLogixRecommendedLists {
     <#
         Puts the recommended members into the include and exclude lists (one run, steps per SID, through Invoke-AVDTune: gate, change log, LastChange).
-        Members that are already there are unchanged, foreign members stay. What was added is kept in a stack (config\fslogix-lists-undo.json): older entries are
-        never overwritten, Undo takes the newest one.
+        The plan (Get-AVDTuneFSLogixListPlan) decides what is set; members that are already there are unchanged, foreign members stay. What was really
+        changed (steps with the status Changed, after the run) is kept in a stack (config\fslogix-lists-undo.json): older entries are never overwritten,
+        Undo takes the newest one. A run in which nothing changed or the first step failed writes no entry for the steps that did not change.
     #>
     [CmdletBinding()]
     param([Parameter(Mandatory)]$Machine, [Parameter(Mandatory)]$F, [string]$Root = (Get-AVDTuneRoot), $Answers, [string]$User, [string]$SnapshotId, [switch]$WhatIf)
-    $rec = Get-AVDTuneFSLogixRecommendedLists -Root $Root -Answers $Answers
+    $plan = Get-AVDTuneFSLogixListPlan -F $F -Root $Root -Answers $Answers
     $steps = New-Object System.Collections.ArrayList
-    $added = New-Object System.Collections.ArrayList
-    $prev = @{}
-    foreach ($list in 'Include', 'Exclude') {
-        $group = if ($list -eq 'Include') { $script:IncludeGroup } else { $script:ExcludeGroup }
-        $mem = Get-AVDTuneFSLogixGroupMembers $F $group
-        $prev[$list] = @($mem)
-        foreach ($sid in @($rec.$list)) {
-            [void]$steps.Add((New-AVDTuneFSLogixGroupStep -F $F -List $list -Action Add -Sid $sid -IdPrefix 'fslogix.lists'))
-            if ($null -ne $mem -and @($mem) -notcontains $sid) { [void]$added.Add([ordered]@{ List = $list; Sid = $sid }) }
-        }
+    $byId = @{}
+    foreach ($e in $plan.Entries) {
+        $st = New-AVDTuneFSLogixGroupStep -F $F -List $e.List -Action Add -Sid $e.Sid -IdPrefix 'fslogix.lists'
+        [void]$steps.Add($st); $byId[$st.Id] = $e
     }
+    $run = Invoke-AVDTune -Plan ([pscustomobject]@{ Name = 'FSLogix lists'; Steps = @($steps | ForEach-Object { $_.Id }) }) -Catalog @($steps) -Machine $Machine -Root $Root -User $User -SnapshotId $SnapshotId -WhatIf:$WhatIf
+    $added = @(foreach ($r in @($run.Results)) { if ($r.Status -eq 'Changed' -and $byId.ContainsKey([string]$r.Id)) { $e = $byId[[string]$r.Id]; [ordered]@{ List = $e.List; Sid = $e.Sid } } })
     if (-not $WhatIf -and $added.Count -gt 0 -and (Test-AVDTuneWriteAllowed)) {
         $path = Get-AVDTuneFSLogixListsUndoPath $Root
         $old = Read-AVDTuneJson $path
         $entries = @(); if ($old) { $entries = @(@($old.Entries) | Where-Object { $_ }) }
-        $entry = [ordered]@{ At = (& $Machine.Now).ToString('o'); Added = @($added); Previous = [ordered]@{ Include = @($prev.Include); Exclude = @($prev.Exclude) } }
+        $entry = [ordered]@{ At = (& $Machine.Now).ToString('o'); Added = @($added); Previous = [ordered]@{ Include = @($plan.Previous.Include); Exclude = @($plan.Previous.Exclude) } }
         Write-AVDTuneFile $path ([ordered]@{ Entries = (@($entries) + @($entry)) } | ConvertTo-Json -Depth 8)
     }
-    $run = Invoke-AVDTune -Plan ([pscustomobject]@{ Name = 'FSLogix lists'; Steps = @($steps | ForEach-Object { $_.Id }) }) -Catalog @($steps) -Machine $Machine -Root $Root -User $User -SnapshotId $SnapshotId -WhatIf:$WhatIf
-    $run | Add-Member -NotePropertyName Notice -NotePropertyValue $rec.Notice -Force -PassThru
+    $run | Add-Member -NotePropertyName Notice -NotePropertyValue $plan.Notice -Force -PassThru
 }
 
 function Undo-AVDTuneFSLogixRecommendedLists {
-    <# Takes the newest entry of the lists undo stack and removes the SIDs that entry added (the members before stay, foreign members stay). #>
+    <#
+        Takes the newest entry of the lists undo stack and removes the SIDs that entry added. A SID stays (and is reported in Notice) when it was in the list
+        before the Apply or was added by hand after it (Set-AVDTuneFSLogixGroupMember marks those); foreign members stay.
+    #>
     [CmdletBinding()]
     param([Parameter(Mandatory)]$Machine, [Parameter(Mandatory)]$F, [string]$Root = (Get-AVDTuneRoot), [string]$User, [string]$SnapshotId, [switch]$WhatIf)
     $path = Get-AVDTuneFSLogixListsUndoPath $Root
@@ -335,13 +420,23 @@ function Undo-AVDTuneFSLogixRecommendedLists {
     $entries = @(); if ($u) { $entries = @(@($u.Entries) | Where-Object { $_ }) }
     if ($entries.Count -eq 0) { throw 'There is nothing to undo: no recommended lists were applied.' }
     $last = $entries[$entries.Count - 1]
-    $steps = @(foreach ($a in @($last.Added)) { New-AVDTuneFSLogixGroupStep -F $F -List ([string]$a.List) -Action Remove -Sid ([string]$a.Sid) -IdPrefix 'fslogix.lists.undo' -TitlePrefix 'Undo: ' })
-    $run = Invoke-AVDTune -Plan ([pscustomobject]@{ Name = 'FSLogix lists undo'; Steps = @($steps | ForEach-Object { $_.Id }) }) -Catalog $steps -Machine $Machine -Root $Root -User $User -SnapshotId $SnapshotId -WhatIf:$WhatIf
+    $before = Get-AVDTuneProp $last 'Previous'
+    $kept = New-Object System.Collections.ArrayList
+    $steps = @(foreach ($a in @($last.Added)) {
+            $list = [string]$a.List; $sid = [string]$a.Sid
+            $was = @(@(Get-AVDTuneProp $before $list) | Where-Object { $_ })
+            if ($was -contains $sid) { [void]$kept.Add("$list $sid (was in the list before the Apply)"); continue }
+            New-AVDTuneFSLogixGroupStep -F $F -List $list -Action Remove -Sid $sid -IdPrefix 'fslogix.lists.undo' -TitlePrefix 'Undo: '
+        })
+    foreach ($c in @(@(Get-AVDTuneProp $last 'Claimed') | Where-Object { $_ })) { [void]$kept.Add("$([string]$c.List) $([string]$c.Sid) (added by hand after the Apply)") }
+    if ($steps.Count -eq 0) { $run = [pscustomobject]@{ Results = @() } }
+    else { $run = Invoke-AVDTune -Plan ([pscustomobject]@{ Name = 'FSLogix lists undo'; Steps = @($steps | ForEach-Object { $_.Id }) }) -Catalog $steps -Machine $Machine -Root $Root -User $User -SnapshotId $SnapshotId -WhatIf:$WhatIf }
     if (-not $WhatIf -and @($run.Results | Where-Object { $_.Status -eq 'Failed' }).Count -eq 0) {
         $rest = @($entries | Select-Object -First ($entries.Count - 1))
         if ($rest.Count -eq 0) { Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue } else { Write-AVDTuneFile $path ([ordered]@{ Entries = @($rest) } | ConvertTo-Json -Depth 8) }
     }
-    $run
+    $note = if ($kept.Count -gt 0) { "Kept, not removed: $(@($kept) -join '; ')." } else { '' }
+    $run | Add-Member -NotePropertyName Notice -NotePropertyValue $note -Force -PassThru
 }
 
 #endregion
@@ -1175,6 +1270,11 @@ function New-AVDTuneFSLogixAdapter {
         try { $g = [ADSI]"WinNT://./$Name,group"; if (-not $g.Path) { return @{ Exists = $false; Members = @() } }; @{ Exists = $true; Members = @($g.Invoke('Members') | ForEach-Object { $b = New-Object Security.Principal.SecurityIdentifier(([ADSI]$_).InvokeGet('objectSid'), 0); $b.Value }) } }
         catch { @{ Exists = $false; Members = @() } }
     }
+    $a.MasterDomainSid = {
+        # the domain SID that THIS master resolves for <NetBIOS>\Domain Admins (SID without the last part -512); '' when it cannot be resolved (not domain joined, DC not reachable)
+        param($NetBios)
+        try { $x = ([Security.Principal.NTAccount]"$NetBios\Domain Admins").Translate([Security.Principal.SecurityIdentifier]).Value; if ($x -match '\A(S-1-5-21-[0-9]{1,10}-[0-9]{1,10}-[0-9]{1,10})-512\z') { $Matches[1] } else { '' } } catch { '' }
+    }
     $a.LocalGroupAdd = { param($Name, $Sid) $g = [ADSI]"WinNT://./$Name,group"; $g.Add("WinNT://$Sid") }
     $a.LocalGroupRemove = { param($Name, $Sid) $g = [ADSI]"WinNT://./$Name,group"; $g.Remove("WinNT://$Sid") }
     [pscustomobject]$a
@@ -1185,7 +1285,7 @@ function Remove-AVDTuneFolderNoFollowSafe([string]$Dir) { Remove-AVDTuneFolderNo
 #endregion
 
 Export-ModuleMember -Function Get-AVDTuneFSLogixSettingCatalog, Test-AVDTuneFSLogixUncPath, Test-AVDTuneFSLogixValue, Get-AVDTuneFSLogixInfo, Get-AVDTuneFSLogixSettingsState,
-    New-AVDTuneFSLogixRegStep, Get-AVDTuneFSLogixGroupMembers, Get-AVDTuneFSLogixUndoPath, Set-AVDTuneFSLogixSettings, Undo-AVDTuneFSLogixSettings, Get-AVDTuneFSLogixLastChange, Test-AVDTuneSid, Test-AVDTuneDomainSid, New-AVDTuneFSLogixGroupStep, Get-AVDTuneFSLogixRecommendedLists, Set-AVDTuneFSLogixRecommendedLists, Undo-AVDTuneFSLogixRecommendedLists, Get-AVDTuneFSLogixListsUndoPath, Get-AVDTuneFSLogixGroups, Get-AVDTuneFSLogixVersionState,
+    New-AVDTuneFSLogixRegStep, Get-AVDTuneFSLogixGroupMembers, Get-AVDTuneFSLogixUndoPath, Set-AVDTuneFSLogixSettings, Undo-AVDTuneFSLogixSettings, Get-AVDTuneFSLogixLastChange, Test-AVDTuneSid, Test-AVDTuneDomainSid, New-AVDTuneFSLogixGroupStep, Get-AVDTuneFSLogixRecommendedLists, Get-AVDTuneFSLogixListPlan, Format-AVDTuneFSLogixListChanges, Set-AVDTuneFSLogixListsUndoClaim, Set-AVDTuneFSLogixRecommendedLists, Undo-AVDTuneFSLogixRecommendedLists, Get-AVDTuneFSLogixListsUndoPath, Get-AVDTuneFSLogixGroups, Get-AVDTuneFSLogixVersionState,
     Get-AVDTuneFSLogixGroupChoices, Set-AVDTuneFSLogixGroupMember, Get-AVDTuneRedirectionTemplate, Test-AVDTuneRedirectionPath, New-AVDTuneRedirectionsXml,
     Test-AVDTuneRedirectionsXml, Get-AVDTuneRedirectionsTarget, Assert-AVDTuneRedirectionsPath, Write-AVDTuneUndoFile, Split-AVDTuneLogonName, Save-AVDTuneRedirections, Undo-AVDTuneRedirections, Get-AVDTuneFSLogixDefenderList,
     Get-AVDTuneFSLogixDefenderState, Set-AVDTuneFSLogixDefender, Undo-AVDTuneFSLogixDefender, Get-AVDTuneFSLogixLatest, Invoke-AVDTuneFSLogixInstall, Invoke-AVDTuneFSLogixInstallRecorded,
