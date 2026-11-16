@@ -625,33 +625,51 @@ function Get-AVDTuneFSLogixLatest {
 
 function ConvertTo-AVDTuneVersion([string]$Text) { $v = $null; if ([version]::TryParse(($Text -replace '[^0-9.].*$', ''), [ref]$v)) { $v } else { $null } }
 
+# Release name -> third part of the build version (3.<yy>.<M or MM><dd>.<time>), from the FSLogix release notes on Microsoft Learn (page date 2026-09-01).
+$script:FsReleaseBuilds = @{ '25.02' = 202; '25.04' = 401; '25.06' = 626; '25.09' = 822; '26.01' = 102; '26.08' = 826 }
+
 function Get-AVDTuneFSLogixVersionState {
     <#
         The state of the installation against the newest release (issue 63), for the status pill. -Latest is the result of Get-AVDTuneFSLogixLatest (the same
-        lookup as the Updates page) or $null when it was not read. Never green by guessing:
+        lookup as the Updates page) or $null when it was not read.
           NotInstalled (red) | Update (yellow, "Update available: <new>") | Current (green) | Unknown (grey, "Installed, newest version unknown" and the reason).
-        The newest release is named like FSLogix_<yy>.<mm>.zip, the installed product version is 3.<yy>.<build>... (older ones 2.9.<build>). The month cannot be
-        read from the product version, so only these cases are decided: product 2.x is older than any <yy>.<mm> release; the year of 3.<yy> older than the year of the
-        release is older; a later year is not older. The same year is Unknown (the Updates page decides after the download, from the file version of the installer).
-        Learn does not state this naming (Verified=false, docs\fslogix.md).
+        Learn (release notes, 25.02): the build version is 3.YY.MMDD.HHMMS, single digit months have no leading 0 (3.26.826 = 26-08-26, 3.25.1128 = 25-11-28);
+        2.9.x is the older numbering. The release NAME is not always the build month: 25.09 is build 3.25.822 (August). So:
+          - product 2.x is older than any <yy>.<mm> release (yellow);
+          - a release in the table of the release notes ($script:FsReleaseBuilds) is compared exactly with the build (month and day): older yellow, equal or newer green;
+          - a release not in the table: an older year is yellow; a later year or a build month not before the release month is green; a build month at least two months
+            before the release month is yellow (the releases so far had builds in the release month or one month before, an observation, not stated by Learn);
+            one month before is grey (it can be that release);
+          - a version that does not fit the pattern is grey with the reason. Never green by guessing.
     #>
     param([string]$Installed, $Latest)
     $mk = { param($s, $p, $t, $r, $lv) [pscustomobject]@{ State = $s; Pill = $p; Text = $t; Reason = $r; LatestVersion = $lv } }
+    $unk = { param($r, $lv) & $mk 'Unknown' 'unknown' 'Installed, newest version unknown' $r $lv }
     if (-not $Installed) { return & $mk 'NotInstalled' 'red' 'Not installed' '' '' }
-    if (-not $Latest) { return & $mk 'Unknown' 'unknown' 'Installed, newest version unknown' 'The newest release was not read yet.' '' }
-    if (-not $Latest.Ok) { return & $mk 'Unknown' 'unknown' 'Installed, newest version unknown' "The newest release could not be read: $($Latest.Error)" '' }
+    if (-not $Latest) { return & $unk 'The newest release was not read yet.' '' }
+    if (-not $Latest.Ok) { return & $unk "The newest release could not be read: $($Latest.Error)" '' }
     $lv = [string]$Latest.Version
-    if ($lv -notmatch '\A(\d{2})\.(\d{2})(\.\d+)?\z') { return & $mk 'Unknown' 'unknown' 'Installed, newest version unknown' "The release file name ($($Latest.FileName)) has no version of the form <yy>.<mm>." '' }
-    $ly = [int]$Matches[1]
-    $iv = ConvertTo-AVDTuneVersion $Installed
-    if (-not $iv) { return & $mk 'Unknown' 'unknown' 'Installed, newest version unknown' "The installed version '$Installed' could not be read." $lv }
-    if ($iv.Major -lt 3) { return & $mk 'Update' 'yellow' "Update available: $lv" "Installed $Installed is older than the release $lv." $lv }
-    $iy = $iv.Minor
-    if ($iy -lt $ly) { return & $mk 'Update' 'yellow' "Update available: $lv" "Installed $Installed is older than the release $lv." $lv }
-    if ($iy -gt $ly) { return & $mk 'Current' 'green' 'Installed, up to date' "Installed $Installed is newer than the newest release $lv." $lv }
-    & $mk 'Unknown' 'unknown' 'Installed, newest version unknown' "The newest release is $lv; installed $Installed is from the same year and the month cannot be read from the product version. The Updates page compares the installer after the download." $lv
+    if ($lv -notmatch '\A(\d{2})\.(\d{2})(\.\d+)?\z') { return & $unk "The release file name ($($Latest.FileName)) has no version of the form <yy>.<mm>." '' }
+    $ly = [int]$Matches[1]; $lm = [int]$Matches[2]
+    $older = { param($why) & $mk 'Update' 'yellow' "Update available: $lv" $why $lv }
+    $ok = { param($why) & $mk 'Current' 'green' 'Installed, up to date' $why $lv }
+    if ($Installed -notmatch '\A(\d{1,3})\.(\d{1,3})\.(\d{1,5})\.(\d{1,6})\z') { return & $unk "The installed version '$Installed' does not have the form <major>.<minor>.<build>.<revision>." $lv }
+    $major = [int]$Matches[1]; $iy = [int]$Matches[2]; $third = [int]$Matches[3]
+    if ($major -eq 2) { return & $older "Installed $Installed (numbering before 25.02) is older than the release $lv." }
+    if ($major -ne 3) { return & $unk "The installed version '$Installed' is not 2.x or 3.x." $lv }
+    $im = [math]::Floor($third / 100); $id = $third % 100
+    if ($third -lt 100 -or $im -lt 1 -or $im -gt 12 -or $id -lt 1 -or $id -gt 31) { return & $unk "The build part '$third' of $Installed is not a date (<M or MM><dd>)." $lv }
+    if ($iy -lt $ly) { return & $older "Installed $Installed (build 20$iy-$('{0:00}' -f $im)) is older than the release $lv." }
+    if ($iy -gt $ly) { return & $ok "Installed $Installed is newer than the newest release $lv." }
+    $known = $script:FsReleaseBuilds[$lv]
+    if ($null -ne $known) {
+        if ($third -ge $known) { return & $ok "Installed $Installed is the build of release $lv (3.$ly.$known) or newer." }
+        return & $older "Installed $Installed is older than release $lv (3.$ly.$known)."
+    }
+    if ($im -ge $lm) { return & $ok "Installed $Installed was built in month $im, not before the release month $lm of $lv." }
+    if ($im -le $lm - 2) { return & $older "Installed $Installed was built in month $im, two or more months before release $lv." }
+    & $unk "The newest release is $lv (not in the table of the release notes); installed $Installed was built one month before it, which can be that release or the one before." $lv
 }
-
 function Invoke-AVDTuneFSLogixInstall {
     <#
         Installs or updates FSLogix Apps: latest release from Microsoft -> a new folder below the protected state folder -> unzip -> the installer's

@@ -732,7 +732,7 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         Test-Smoke 'installation card: installed version, service and drivers' ($ui.TxtFslVersion.Text -like '*2.9.8884.27471*frxsvc Running*frxdrv*' -and $ui.TxtFslInstallPill.Text -eq 'Update available: 26.08') $ui.TxtFslVersion.Text
         # issue 63: the status pill against the newest release (the fake release is 26.08): older yellow, newer green, not readable grey
         $pillYellow = ($ui.TxtFslInstallPill.Text -eq 'Update available: 26.08' -and $ui.PillFslInstall.ToolTip -like '*older than the release 26.08*')
-        $script:Machine.Store.Registry['hklm:\software\fslogix\apps|installversion'] = '3.27.100.12345'; $script:FslLatestResult = $null; Update-FslInstall
+        $script:Machine.Store.Registry['hklm:\software\fslogix\apps|installversion'] = '3.27.101.12345'; $script:FslLatestResult = $null; Update-FslInstall
         $pillGreen = ($ui.TxtFslInstallPill.Text -eq 'Installed, up to date')
         $script:FslFake.F.Store.Latest = @{ Ok = $false; Url = ''; Error = 'fake: no connection' }; $script:FslLatestResult = $null; Update-FslInstall
         $pillGrey = ($ui.TxtFslInstallPill.Text -eq 'Installed, newest version unknown' -and $ui.PillFslInstall.ToolTip -like '*fake: no connection*' -and $ui.TxtFslLatest.Text -like '*fake: no connection*')

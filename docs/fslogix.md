@@ -60,10 +60,26 @@ The pill of the "Installation" card compares the installed version with the newe
 | red "Not installed" | no `InstallVersion` |
 | yellow "Update available: <yy.mm>" | the installed version is older than the newest release |
 | green "Installed, up to date" | the installed version is not older than the newest release |
-| grey "Installed, newest version unknown" + reason (tooltip and the line below) | the lookup failed or timed out, the file name has no `<yy>.<mm>`, or the same year (below) |
+| grey "Installed, newest version unknown" + reason (tooltip and the line below) | the lookup failed or timed out, the file name has no `<yy>.<mm>`, the installed version does not fit the pattern, or the case below |
 
-Not verified (Learn does not state it): the release is named `FSLogix_<yy>.<mm>.zip` and the product version is `3.<yy>.<build>` (`2.9.<build>` before). The month cannot be read from the product version, so within the same year the pill is grey with that reason, never green by guessing; the Updates page compares the installer after the download (file version). Only the year decides yellow (older year, or product 2.x) and green (later year). To be confirmed on the VM with a real release.
+How the versions are compared (source: FSLogix release notes, `https://learn.microsoft.com/en-us/fslogix/overview-release-notes`, page date 2026-09-01, read 2026-11-17). The notes state for 25.02: release name 25.02, build version `3.25.202.4223` = `3.YY.MMDD.HHMMS`, "single digit months don't have a leading 0" (so 3.26.826 = 26-08-26, 3.25.1128 = 25-11-28). Before that the numbering was 2.9.x (2210 hotfix 4 = 2.9.8884.27471).
 
+| Release (name) | Build version | third part |
+|---|---|---|
+| 25.02 | 3.25.202.4223 | 202 |
+| 25.04 | 3.25.401.15305 | 401 |
+| 25.06 | 3.25.626.21064 | 626 |
+| 25.09 | 3.25.822.19044 | 822 |
+| 26.01 | 3.26.102.18413 (CU1: 3.26.126.19110) | 102 |
+| 26.08 | 3.26.826.17182 | 826 |
+
+The release name is therefore not always the build month (25.09 was built on August 22), so "release yy.mm always equals build month" does not hold. The rules (`Get-AVDTuneFSLogixVersionState`, table in the module):
+- 2.x: yellow. A build part that is no date, a major other than 2 or 3, or a version not of the form `a.b.c.d`: grey.
+- Older year than the release: yellow; later year: green.
+- A release in the table above: exact compare of the third part (month and day): equal or newer green, older yellow.
+- A release not in the table (a future one; the table is extended when the notes list it): build month not before the release month green; two or more months before yellow; exactly one month before grey (can be that release, as 25.09 is build 822). "Two or more months" is an observation from the six releases above (build in the release month or one month before), not stated by Learn.
+
+Example: 3.26.826 against 26.08 green, against 26.11 yellow, against 26.09 grey; 3.25.1128 against 26.02 yellow.
 ## Storage token for the NTFS rows (issue 18)
 
 The ACL rows of the storage check read the NTFS rights over the Azure Files REST API with the signed-in user's token (OAuth, header `x-ms-file-request-intent: backup`, never a key). That is the fourth audience of the sign-in (`AVDTune.Session.psm1`):
