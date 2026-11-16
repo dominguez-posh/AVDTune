@@ -431,7 +431,7 @@ try {
     [void](Set-AVDTuneState -Root $state -Values @{ LastChange = $null })
     $seen = New-Object System.Collections.ArrayList
     $regSet = $m.RegSet; $storeLc = $state
-    $m.RegSet = { param($Path, $Name, $Value, $Type) [void]$seen.Add([string](Get-AVDTuneState $storeLc).LastChange); & $regSet $Path $Name $Value $Type }.GetNewClosure()
+    $m.RegSet = { param($Path, $Name, $Value, $Type) [void]$seen.Add([string](Get-AVDTuneLastChange -Root $storeLc)); & $regSet $Path $Name $Value $Type }.GetNewClosure()
     $r = Invoke-Opt $m 'optimization.reg-a'
     Test-Check 'lastchange: it is set BEFORE the first write of the run' ($seen.Count -eq 1 -and $seen[0] -ne '') ($seen -join ',')
     Clear-Backups

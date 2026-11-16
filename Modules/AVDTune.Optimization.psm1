@@ -843,7 +843,7 @@ function Invoke-AVDTuneOptimization {
         if ($pending.Count -gt 0) { throw "$($pending.Count) AppX removal(s) cannot be undone and need their own confirmation (ConfirmIrreversible). Nothing was changed." }
     }
     $results = New-Object System.Collections.ArrayList
-    $touched = $false; $noMachineChange = @{}
+    $touched = $false; $changeOwner = $false; $noMachineChange = @{}
     try {
         foreach ($it in $items) {
             $step = $it.Step
@@ -873,7 +873,7 @@ function Invoke-AVDTuneOptimization {
             if (-not $WhatIf -and -not $touched) {
                 $wouldChange = $true
                 try { $t = ConvertTo-AVDTuneTestResult (& $step.Test $Machine); $wouldChange = $(if ($Mode -eq 'Apply') { -not $t.Compliant } else { [bool]$t.Compliant -and $null -ne $step.Undo }) } catch { $wouldChange = $false }
-                if ($wouldChange) { [void](Set-AVDTuneState -Root $Root -Values @{ LastChange = (& $Machine.Now).ToString('o') }); $touched = $true }
+                if ($wouldChange) { $changeOwner = Start-AVDTuneChange -Root $Root; $touched = $true }   # marker: the first change of the version starts here (central helper, #27)
             }
             $r = Invoke-AVDTuneStep -Step $step -Machine $Machine -Mode $Mode -WhatIf:$WhatIf
             [void]$results.Add($r)
@@ -887,7 +887,10 @@ function Invoke-AVDTuneOptimization {
     }
     finally {
         $anyChange = @($results | Where-Object { $_.Status -in 'Changed', 'Reverted', 'Failed' -and -not $noMachineChange.ContainsKey($_.Id) }).Count -gt 0
-        if (-not $WhatIf -and ($touched -or $anyChange)) { [void](Set-AVDTuneState -Root $Root -Values @{ LastChange = (& $Machine.Now).ToString('o') }) }
+        if (-not $WhatIf -and ($touched -or $anyChange)) {
+            if (-not $touched) { $changeOwner = Start-AVDTuneChange -Root $Root }
+            Stop-AVDTuneChange -Root $Root -Owner $changeOwner   # stamps LastChange
+        }
     }
     $changed = @($results | Where-Object { $_.Status -in 'Changed', 'Reverted' })
     $failed = @($results | Where-Object { $_.Status -eq 'Failed' })

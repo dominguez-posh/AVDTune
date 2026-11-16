@@ -316,7 +316,7 @@ exit 0
     $p = Start-Process -FilePath $psExe -ArgumentList @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', "`"$child`"", '-Repo', "`"$repo`"", '-Root', "`"$root5`"") -PassThru -Wait -WindowStyle Hidden -RedirectStandardError "$child.err" -RedirectStandardOutput "$child.out"
     $crash5 = Get-AVDTuneFinishCrash -Root $root5
     Test-Check 'process crash while lifted: exit code 99, no finally block ran, the journal is Active with both services listed as lifted and not restored' ($p.ExitCode -eq 99 -and $crash5 -and $crash5.Phase -eq 'lifted' -and @(@($crash5.Lifted) | Where-Object { -not $_.Restored }).Count -eq 2) (($crash5 | ConvertTo-Json -Compress) + ' ' + (Get-Content -LiteralPath "$child.err" -Raw))
-    Test-Check 'process crash: LastChange was written before the first step (the snapshot gate counts it)' ((Get-AVDTuneState $root5).LastChange -and @($crash5.Steps).Count -eq 2) (@($crash5.Steps) -join ',')
+    Test-Check 'process crash: the change was marked before the first step (the marker counts as a change for the snapshot gate)' ((Get-AVDTuneLastChange -Root $root5) -and @($crash5.Steps).Count -eq 2) (@($crash5.Steps) -join ',')
     $m5 = New-AVDTuneFakeMachine -Seed @{ Services = @(@{ Name = 'wuauserv'; StartType = 'Manual'; Status = 'Stopped' }, @{ Name = 'bits'; StartType = 'Manual'; Status = 'Stopped' }) }
     $rep5 = Repair-AVDTuneFinishCrash -Machine $m5 -Root $root5 -User 'admin1'
     Test-Check 'the repair at the next start puts back what the crashed run had stopped' ($rep5.Repaired -and (& $m5.ServiceGet 'wuauserv').Status -eq 'Running' -and (& $m5.ServiceGet 'bits').Status -eq 'Running' -and -not (Get-AVDTuneFinishCrash -Root $root5) -and -not (Get-AVDTuneState $root5).Sealed) $rep5.Message
@@ -345,7 +345,8 @@ exit 0
     $rootE1 = New-Root; [void](Save-Healthcheck -Root $rootE1)
     $mE1 = New-Master; $fE1 = New-AVDTuneFakeFinish
     $v1 = (Get-AVDTuneState $rootE1).ImageVersion
-    $e1 = Invoke-AVDTuneFinish -Machine $mE1 -Fin $fE1 -Root $rootE1 -User 'admin1' -Progress { param($t, $p) if ($t -eq 'Image version closed') { [void](Start-AVDTuneImageVersion -Root $rootE1 -User 'admin1') } }
+    # since #27 the marker of the running finish refuses a version start; the race behind its back is simulated by removing the marker; the new version closes the gate (#27), the check opens it again so that the version step is what fails
+    $e1 = Invoke-AVDTuneFinish -Machine $mE1 -Fin $fE1 -Root $rootE1 -User 'admin1' -Progress { param($t, $p) if ($t -eq 'Image version closed') { [void](Set-AVDTuneState -Root $rootE1 -Values @{ ChangeInProgress = $null }); [void](Start-AVDTuneImageVersion -Root $rootE1 -User 'admin1'); Open-AVDTuneWriteGate -SnapshotId 'snap-check' -ConfirmedBy 'Check Runner' } }
     $sE1 = Get-AVDTuneState $rootE1
     Test-Check 'E1: "Start new version" while the finish runs: the version step fails, the new version is NOT marked finished' ($e1.Status -eq 'Failed' -and $e1.Message -like '*image version changed during the finish*' -and -not $sE1.Sealed -and @(@($sE1.Versions) | Where-Object { $_.PSObject.Properties['Finished'] }).Count -eq 0 -and $sE1.ImageVersion -ne $v1) ($e1.Message)
     $rootE4 = New-Root; [void](Save-Healthcheck -Root $rootE4)

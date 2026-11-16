@@ -966,13 +966,16 @@ function Set-AVDTuneEnvMaster {
     [CmdletBinding()]
     param([Parameter(Mandatory)]$Machine, [Parameter(Mandatory)]$Spec, [Parameter(Mandatory)][string]$Identity, [string]$Root = (Get-AVDTuneRoot), [string]$User, [string]$SnapshotId, [switch]$WhatIf)
     $v = Get-AVDTuneEnvMasterValues -Spec $Spec -Identity $Identity
-    if (-not $WhatIf -and (Test-AVDTuneWriteAllowed)) { [void](Set-AVDTuneState -Root $Root -Values @{ LastChange = (Get-Date).ToString('o') }) }   # the master changes: also a failed attempt may have written part of it
+    $changeOwner = $false; if (-not $WhatIf -and (Test-AVDTuneWriteAllowed)) { $changeOwner = Start-AVDTuneChange -Root $Root }   # marker and LastChange through the central helpers (#27): also a failed attempt may have written part of it
+    try {
     $runs = @(Set-AVDTuneFSLogixSettings -Machine $Machine -Root $Root -Values $v.Values -User $User -SnapshotId $SnapshotId -WhatIf:$WhatIf)
     foreach ($r in $v.Registry) {
         $step = New-AVDTuneFSLogixRegStep -Id 'fslogix.kerberos.cloudticket' -Path $r.Path -Name $r.Name -Value $r.Value -Type $r.Type -Title 'Allow the cloud Kerberos ticket (Entra Kerberos)' -SourceUrl $r.Source -Why 'The client asks Microsoft Entra ID for the Kerberos ticket of the share.'
         $runs += Invoke-AVDTune -Plan ([pscustomobject]@{ Name = 'Entra Kerberos client'; Steps = @($step.Id) }) -Catalog @($step) -Machine $Machine -Root $Root -User $User -SnapshotId $SnapshotId -WhatIf:$WhatIf
     }
     $runs
+    }
+    finally { Stop-AVDTuneChange -Root $Root -Owner $changeOwner }
 }
 
 function Get-AVDTuneEnvAclDiff {

@@ -332,13 +332,17 @@ function Repair-AVDTuneFinishCrash {
     if (-not (Test-AVDTuneWriteAllowed)) { throw 'The snapshot gate is not confirmed: AVDTune is read only until a snapshot of today is confirmed on the Overview.' }
     $record = Get-AVDTuneFinishCrash -Root $Root
     if (-not $record) { return [pscustomobject]@{ Repaired = $false; Failed = @(); Message = 'No interrupted finish.' } }
+    $changeOwner = Start-AVDTuneChange -Root $Root   # marker and LastChange through the central helpers (#27)
+    try {
     $failed = @(Restore-AVDTuneFinishLift -Machine $Machine -Root $Root)
     $record = Get-AVDTuneFinishRecord $Root
     $ok = ($failed.Count -eq 0)
     $record.Ended = (& $Machine.Now).ToString('o')
     if ($ok) { $record.Active = $false; $record.Phase = 'repaired'; $record.Result = 'Interrupted finish repaired: what was stopped runs again.' }
     else { $record.Phase = 'repair-failed'; $record.Result = 'Not back: ' + ($failed -join ', ') }
-    Save-AVDTuneFinishRecord -Root $Root -Record $record -Extra @{ LastChange = $record.Ended }
+    Save-AVDTuneFinishRecord -Root $Root -Record $record
+    }
+    finally { Stop-AVDTuneChange -Root $Root -Owner $changeOwner }
     $message = "The finish of $($record.Started) (by $($record.User)) did not end properly: AVDTune was closed or stopped in the middle. " + $(if ($ok) { 'What it had stopped runs again (a restart of the master starts the services as well). The version is NOT finished: run the finish again.' } else { 'NOT everything could be put back: ' + ($failed -join ', ') })
     $state = Get-AVDTuneState $Root
     if ($state.ImageVersion) { [void](Add-AVDTuneChangeLogEntry -Root $Root -Version ([string]$state.ImageVersion) -Category 'Finish' -Component 'Finish' -ChangeType Changed -Text $message -User $User -Source Step) }
@@ -579,8 +583,10 @@ function Invoke-AVDTuneFinish {
         Phase = 'running'; Started = $started.ToString('o'); Ended = $null; User = $User; SnapshotId = $SnapshotId; ImageVersion = $version; HealthcheckRunId = [string]$gate.RunId
         Steps = @(); Lifted = @(); Result = ''
     }
-    # journal and LastChange before the first step: a crash in the middle still counts as a change and is found at the next start
-    Save-AVDTuneFinishRecord -Root $Root -Record $record -Extra @{ LastChange = $started.ToString('o') }
+    # marker before the first step (central helper, #27): a crash in the middle still counts as a change and is found at the next start
+    $changeOwner = Start-AVDTuneChange -Root $Root -At $started
+    try {
+    Save-AVDTuneFinishRecord -Root $Root -Record $record
     $results = New-Object System.Collections.ArrayList
     $failed = $false; $err = ''
     try {
@@ -617,7 +623,7 @@ function Invoke-AVDTuneFinish {
         ImageVersion = $version; Reboot = $false; Results = @($results)
     }
     [void](Add-AVDTuneRun -Root $Root -Run $run)
-    Save-AVDTuneFinishRecord -Root $Root -Record $record -Extra @{ LastChange = $ended.ToString('o') }
+    Save-AVDTuneFinishRecord -Root $Root -Record $record
     foreach ($r in @($results | Where-Object { $_.Status -eq 'Changed' })) {
         [void](Add-AVDTuneChangeLogEntry -Root $Root -Version $version -Category 'Finish' -Component $r.Id -ChangeType Changed -Text $r.Title -User $User -SnapshotId $SnapshotId -RunId $run.Id -Source Step)
     }
@@ -627,6 +633,8 @@ function Invoke-AVDTuneFinish {
     [void](Add-AVDTuneChangeLogEntry -Root $Root -Version $version -Category 'Finish' -Component 'Finish' -ChangeType Note -Text $message -User $User -SnapshotId $SnapshotId -RunId $run.Id -Source Step)
     & $say $(if ($failed) { 'Stopped' } else { 'Finished' }) 100
     [pscustomobject]@{ Status = $(if ($failed) { 'Failed' } else { 'Finished' }); Results = @($results); Message = $message; Reboot = $false; RunId = $run.Id; WhatIf = $false }
+    }
+    finally { Stop-AVDTuneChange -Root $Root -Owner $changeOwner }
 }
 
 #endregion
