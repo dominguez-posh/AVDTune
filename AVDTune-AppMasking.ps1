@@ -243,13 +243,14 @@ function Show-MaskRun($Run, [string]$What) {
 }
 
 function Invoke-MaskSave([bool]$WhatIf) {
-    # One try/finally around everything: the connection is closed and the password box is cleared on every path (preview, refusal of the confirmation, error, success)
+    # One try/finally around everything: the connection is closed and the password box is cleared on every path (preview, refusal of the confirmation, error, success).
+    # The connection (with the password) is only made when it is needed: for the preview (nothing is written), and for a write only after the write gate and the confirmation.
     $lc = $null; $run = $null
     try {
         $p = Get-MaskRequest
         $m = Get-MaskAdapter
-        if ($p.Directory) { $lc = Get-MaskLdap; $p.Ldap = $lc.Ldap; $p.Conn = $lc.Conn }   # the groups are checked against the DC (name, SID) and the DN of the built-in Administrators group is read from it
         if ($WhatIf) {
+            if ($p.Directory) { $lc = Get-MaskLdap; $p.Ldap = $lc.Ldap; $p.Conn = $lc.Conn }   # the groups are checked against the DC (name, SID) and the DN of the built-in Administrators group is read from it
             $run = Save-AVDTuneRuleSet -Machine $script:Machine -M $m -Root $script:StateRoot @p -WhatIf
             $lines = @($run.Results | ForEach-Object { "$($_.Title): $($_.Status)" })
             $chg = if ($run.AssignmentChange) { " The existing assignment changes from '$($run.AssignmentChange.Old)' to '$($run.AssignmentChange.New)'." } else { '' }
@@ -262,14 +263,15 @@ function Invoke-MaskSave([bool]$WhatIf) {
             $where = if ($p.CreateGroup.Kind -eq 'Ad') { "in Active Directory, OU $($p.CreateGroup.OuDn), domain $($p.Directory.DnsName)" } else { 'on this master' }
             $text = "Create the group '$($p.CreateGroup.Name)' $where and write the rule set '$($p.Name)'? The group is deleted again by 'Undo the last change' as long as it has no members."
         }
-        # an existing rule set whose assignment would mean something else: both meanings in the question, accepted explicitly
-        $preview = Save-AVDTuneRuleSet -Machine $script:Machine -M $m -Root $script:StateRoot @p -WhatIf
-        if ($preview.AssignmentChange) {
-            $text += "`n`nThe rule set exists already and its assignment changes:`nNow: $($preview.AssignmentChange.Old)`nNew: $($preview.AssignmentChange.New)`nThis changes who sees the hidden items. Continue?"
-            $p.AcceptAssignmentChange = $true
-        }
         if (-not (Confirm-Action $text 'App Masking')) { return }
         if ($p.CreateGroup) { $p.Confirmed = $true }
+        if ($p.Directory) { $lc = Get-MaskLdap; $p.Ldap = $lc.Ldap; $p.Conn = $lc.Conn }   # only now: after the write gate and the confirmation
+        # an existing rule set whose assignment would mean something else: both meanings in a second question; Old and New go to the module, which refuses when the real values differ
+        $preview = Save-AVDTuneRuleSet -Machine $script:Machine -M $m -Root $script:StateRoot @p -WhatIf
+        if ($preview.AssignmentChange) {
+            if (-not (Confirm-Action "The rule set '$($p.Name)' exists already and its assignment changes:`nNow: $($preview.AssignmentChange.Old)`nNew: $($preview.AssignmentChange.New)`nThis changes who sees the hidden items. Continue?" 'App Masking')) { return }
+            $p.ExpectedChange = @{ Old = [string]$preview.AssignmentChange.Old; New = [string]$preview.AssignmentChange.New }
+        }
         $run = Invoke-MaskChange -Title 'Writing the App Masking rule set' -Step "Rule set $($p.Name)" -Block { Save-AVDTuneRuleSet -Machine $script:Machine -M $m -Root $script:StateRoot @p -User ([string]$env:USERNAME) -SnapshotId (Get-MaskGateSnapshot) }
     }
     finally { if ($lc) { & $lc.Close }; $ui.PwdMask.Clear() }
@@ -293,7 +295,13 @@ Add-Click $ui.BtnMaskLogoff {
     Assert-MaskWrite
     if (-not (Confirm-Action 'Put the shortcut "Abmelden" (signs the user out, no confirmation dialog) on the Public Desktop for all users?' 'Public Desktop')) { return }
     $m = Get-MaskAdapter
-    $run = Invoke-MaskChange -Title 'Adding the Abmelden shortcut' -Step 'Public Desktop' -Block { Add-AVDTuneComfortShortcut -Machine $script:Machine -M $m -Root $script:StateRoot -Id logoff -User ([string]$env:USERNAME) -SnapshotId (Get-MaskGateSnapshot) }
+    # the Public Desktop folder: Windows lets Authenticated Users/Users/Interactive change it. That is a warning, confirmed explicitly; any other problem (link, foreign owner, other write access) stops with its reason.
+    $prev = Add-AVDTuneComfortShortcut -Machine $script:Machine -M $m -Root $script:StateRoot -Id logoff -WhatIf
+    $expected = @($prev.DesktopWarnings)
+    if ($expected.Count -gt 0) {
+        if (-not (Confirm-Action "Warning: the folder of the Public Desktop can be changed by users ($($expected -join '; ')). That is the Windows default, but every user could replace or delete the shortcut, or put another one there. The file of the shortcut itself stays read only for users. Create the shortcut anyway?" 'Public Desktop')) { return }
+    }
+    $run = Invoke-MaskChange -Title 'Adding the Abmelden shortcut' -Step 'Public Desktop' -Block { Add-AVDTuneComfortShortcut -Machine $script:Machine -M $m -Root $script:StateRoot -Id logoff -ExpectedWarnings $expected -User ([string]$env:USERNAME) -SnapshotId (Get-MaskGateSnapshot) }
     Show-MaskRun $run 'Comfort shortcut'; Update-MaskView
 }
 Add-Click $ui.BtnMaskUndo {

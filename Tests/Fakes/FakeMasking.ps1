@@ -9,7 +9,7 @@ function New-AVDTuneFakeMasking {
     param([hashtable]$Seed = @{})
     $s = @{
         Files = @{}; Desktop = @(); Unsafe = $false; AdminName = 'BUILTIN\Administrators'; LocalGroups = @{}; LocalGroupSids = @{}; LocalGroupMembers = @{}; Shortcuts = @{}; Log = (New-Object System.Collections.ArrayList)
-        PublicDesktop = 'C:\Users\Public\Desktop'; SystemFolder = 'C:\Windows\System32'
+        PublicDesktop = 'C:\Users\Public\Desktop'; SystemFolder = 'C:\Windows\System32'; DesktopWarnings = @(); DesktopProblems = @()
     }
     foreach ($e in $Seed.GetEnumerator()) { $s[$e.Key] = $e.Value }
     $a = [ordered]@{ Kind = 'Fake'; Store = $s; Log = $s.Log; RulesFolder = $script:FakeRulesFolder }
@@ -35,6 +35,7 @@ function New-AVDTuneFakeMasking {
         if ($s.Unsafe) { throw 'fake: the Public Desktop is a link' }
         $s.Shortcuts[$Path] = @{ Target = $Target; Arguments = $Arguments; Icon = $Icon; Description = $Description; WorkingDirectory = $WorkingDirectory; AclProblems = @() }
     }.GetNewClosure()
+    $a.ShortcutFolderFindings = { param($Path) [pscustomobject]@{ Problems = @($s.DesktopProblems); Warnings = @($s.DesktopWarnings) } }.GetNewClosure()   # what the real adapter reads from the Public Desktop ACL (seed DesktopWarnings, DesktopProblems)
     $a.DeleteShortcut = { param($Path) [void]$s.Log.Add("DeleteShortcut $Path"); $s.Shortcuts.Remove($Path) }.GetNewClosure()
     $a.LocalGroupExists = { param($Name) $s.LocalGroups.ContainsKey($Name) }.GetNewClosure()
     $a.LocalGroupCreate = { param($Name, $Description) [void]$s.Log.Add("LocalGroupCreate $Name"); $s.LocalGroups[$Name] = $Description }.GetNewClosure()
@@ -59,7 +60,7 @@ function New-AVDTuneFakeMaskingLdap {
         [void]$s.Log.Add("Search $Scope $BaseDn $Filter")
         if ($Filter -like '*objectSid=*' -and $BaseDn -like 'CN=Builtin,*') { return @(& $mk $s.BuiltinDn @{ distinguishedName = @($s.BuiltinDn) }) }
         $hit = $null
-        if ($Filter -match 'sAMAccountName=([^)]*)\)') { $name = $Matches[1]; $hit = @($s.Groups | Where-Object { $_.Name -eq $name }) }
+        if ($Filter -match 'sAMAccountName=([^)]*)\)') { $name = [regex]::Replace($Matches[1], '\\([0-9a-fA-F]{2})', { param($m) [string][char][Convert]::ToInt32($m.Groups[1].Value, 16) }); $hit =@($s.Groups | Where-Object { $_.Name -eq $name }) }
         elseif ($Filter -match 'objectGUID=((?:\\[0-9a-f]{2})+)\)') { $hex = $Matches[1].Replace([string][char]92, '');$hit = @($s.Groups | Where-Object { (& $guidOf $_) -eq $hex }) }
         if ($null -eq $hit) { return @() }
         if ($Filter -like '*(member=*)*') { $hit = @($hit | Where-Object { @($_.Members).Count -gt 0 }) }

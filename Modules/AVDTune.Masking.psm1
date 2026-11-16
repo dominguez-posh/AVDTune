@@ -45,6 +45,16 @@ function Test-AVDTuneMaskingGroupName {
     [bool]($Name -and $Name.Length -le 64 -and $Name -match '\A[A-Za-z0-9]([A-Za-z0-9 ._-]{0,62}[A-Za-z0-9_-])?\z')
 }
 
+function Test-AVDTuneAdExistingGroupName {
+    <#
+        The name of a group that ALREADY exists in AD (sAMAccountName as the DC returned it, e.g. 'Vertrieb-Sued', 'Sales Team (EU)', 'HR$'): only length (1 to 256) and control characters are checked.
+        That is enough because the name only reaches an LDAP filter (escaped by ConvertTo-AVDTuneLdapFilterValue) and the .fxa as DOMAIN\name (a tab or line feed would break the row); no DN is built from it.
+        The strict Test-AVDTuneMaskingGroupName stays for names AVDTune creates.
+    #>
+    param([string]$Name)
+    [bool]($Name -and $Name.Length -le 256 -and $Name -notmatch '[\x00-\x1F\x7F\\]' -and $Name -ceq $Name.Trim())
+}
+
 function Test-AVDTuneMaskingPrefix([string]$Prefix) { [bool]($Prefix -match '\A[A-Za-z0-9]{1,16}\z') }
 
 function Get-AVDTuneAppGroupName {
@@ -309,7 +319,7 @@ function ConvertTo-AVDTuneAdGroupObject($E) {
 function Get-AVDTuneAdGroup {
     <# The group with this sAMAccountName in the domain: Dn, Sid, Sam, Guid, Description, Security, MemberCount (informational: AD may return only a range of members); $null when there is none. #>
     param([Parameter(Mandatory)]$Ldap, [Parameter(Mandatory)]$Conn, [Parameter(Mandatory)][string]$BaseDn, [Parameter(Mandatory)][string]$Name)
-    if (-not (Test-AVDTuneMaskingGroupName $Name)) { throw "'$Name' is not a valid group name." }
+    if (-not (Test-AVDTuneAdExistingGroupName $Name)) { throw "'$Name' is not a valid group name (1 to 256 characters, no control characters or backslash)." }   # the filter value is escaped below; the strict name rule is for groups AVDTune creates
     $r = @(& $Ldap.Search $Conn $BaseDn "(&(objectClass=group)(sAMAccountName=$(ConvertTo-AVDTuneLdapFilterValue $Name)))" 'Subtree' @('distinguishedName', 'objectSid', 'objectGUID', 'sAMAccountName', 'description', 'groupType', 'member'))
     if ($r.Count -eq 0) { return $null }
     if ($r.Count -gt 1) { throw "More than one group is named '$Name'." }
@@ -416,7 +426,7 @@ function Save-AVDTuneMaskingUndo {
     if ($Run.WhatIf) { return }
     $changed = @($Run.Results | Where-Object { $_.Status -eq 'Changed' } | ForEach-Object { $_.Id })
     $files = @(@($Undo.Files) | Where-Object { $_ -and $_.StepId -in $changed })
-    $groups = @(@($Undo.Groups) | Where-Object { $_ -and $_.StepId -in $changed })
+    $groups = @(@($Undo.Groups) | Where-Object { $_ -and ($_.StepId -in $changed -or (Get-AVDTuneProp $_ 'Provisional')) })   # a group that exists but could not be read back stays in the record with its DN (Provisional)
     $shortcuts = @(@($Undo.Shortcuts) | Where-Object { $_ -and $_.StepId -in $changed })
     if ($files.Count + $groups.Count + $shortcuts.Count -eq 0) { return }
     Write-AVDTuneUndoFile (Get-AVDTuneMaskingUndoPath $Root) ([ordered]@{ At = $Undo.At; Name = $Undo.Name; Files = $files; Groups = $groups; Shortcuts = $shortcuts } | ConvertTo-Json -Depth 6)
@@ -424,9 +434,16 @@ function Save-AVDTuneMaskingUndo {
 
 function Save-AVDTuneMaskingBackup {
     # What is about to be overwritten or deleted by an undo goes into config\masking-backups first (a failed backup stops the undo)
-    param([Parameter(Mandatory)][string]$Root, [Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][byte[]]$Bytes)
+    param([Parameter(Mandatory)][string]$Root, [Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][byte[]]$Bytes, [int]$Keep = 20)
     $name = '{0}-{1}-{2}.json' -f [datetime]::UtcNow.ToString('yyyyMMddHHmmssfff'), [guid]::NewGuid().ToString('N').Substring(0, 6), (Split-Path $Path -Leaf)
-    Write-AVDTuneFile (Join-Path $Root "config\masking-backups\$name") ([ordered]@{ Path = $Path; Sha256 = (Get-AVDTuneBytesSha256 $Bytes); Bytes = [Convert]::ToBase64String($Bytes) } | ConvertTo-Json)
+    $folder = Join-Path $Root 'config\masking-backups'
+    Write-AVDTuneFile (Join-Path $folder $name) ([ordered]@{ Path = $Path; Sha256 = (Get-AVDTuneBytesSha256 $Bytes); Bytes = [Convert]::ToBase64String($Bytes) } | ConvertTo-Json)
+    # retention: only the newest $Keep backups stay (the name starts with a UTC time stamp). Plain files of this folder only, no recursion, no links followed.
+    try {
+        $old = @([IO.Directory]::GetFiles($folder, '*.json') | Where-Object { (Split-Path $_ -Leaf) -match '\A\d{17}-[0-9a-f]{6}-' -and ((New-Object IO.FileInfo $_).Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0 } | Sort-Object { Split-Path $_ -Leaf } -Descending | Select-Object -Skip ([Math]::Max(1, $Keep)))
+        foreach ($f in $old) { [IO.File]::Delete($f) }
+    }
+    catch { }   # a failed clean-up never stops the undo that needs the backup
 }
 
 #endregion
@@ -463,14 +480,15 @@ function Save-AVDTuneRuleSet {
         the assignment becomes -Visibility with -Groups (@{ Account = 'DOMAIN\Group'; Dn; Sid; Sam }; a group with Sid is checked against the domain controller by sAMAccountName and
         SID, the DN is taken from the DC). -CreateGroup (@{ Kind = 'Ad'|'Local'; Name; OuDn }) creates the group first: AD only with -Confirmed, with $Ldap/$Conn/$Directory, the OU must be
         one of the DC's; a group that exists is refused. An existing rule set that has parse problems or rules of another type (registry, printers ...) is not changed. An existing
-        assignment that would mean something else needs -AcceptAssignmentChange (the run carries .AssignmentChange with Old and New for the confirmation).
+        assignment that would mean something else needs -ExpectedChange (@{ Old; New }, taken from the .AssignmentChange of the preview run and confirmed by the administrator): the module compares it
+        with the real Old and New and refuses on any difference (also when the rule set changed since the preview). A group in -Groups without Sid is refused when a domain controller is given.
         Validated first, then Invoke-AVDTune; the undo record is written after the run with what changed. -WhatIf changes nothing.
     #>
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)]$Machine, [Parameter(Mandatory)]$M, [string]$Root = (Get-AVDTuneRoot), [Parameter(Mandatory)][string]$Name, [Parameter(Mandatory)][object[]]$Entries,
         [ValidateSet('Hidden', 'HiddenExceptGroups')][string]$Visibility = 'Hidden', [object[]]$Groups = @(), $CreateGroup, $Ldap, $Conn, $Directory,
-        [switch]$Confirmed, [switch]$AcceptAssignmentChange, [string]$User, [string]$SnapshotId, [switch]$WhatIf
+        [switch]$Confirmed, $ExpectedChange, [string]$User, [string]$SnapshotId, [switch]$WhatIf
     )
     if (-not (Test-AVDTuneMaskingName $Name)) { throw "'$Name' is not a valid rule set name (letters, digits, space, '.', '_', '-', up to 64 characters)." }
     if (@($Entries).Count -eq 0) { throw 'No file to hide.' }
@@ -508,7 +526,10 @@ function Save-AVDTuneRuleSet {
             if (-not $x.Security) { throw "The group '$sam' is not a security group." }
             [void]$grpRows.Add([pscustomobject]@{ Account = "$([string]$Directory.NetBiosName)\$($x.Sam)"; Dn = $x.Dn })
         }
-        else { [void]$grpRows.Add([pscustomobject]@{ Account = [string]$g.Account; Dn = [string](Get-AVDTuneProp $g 'Dn') }) }
+        else {
+            if ($Ldap -or $Conn -or $Directory) { throw "The group '$([string](Get-AVDTuneProp $g 'Account'))' has no SID: with a domain controller every group is bound by sAMAccountName and SID, not taken from the caller's account and DN." }
+            [void]$grpRows.Add([pscustomobject]@{ Account = [string]$g.Account; Dn = [string](Get-AVDTuneProp $g 'Dn') })
+        }
     }
 
     # --- group to create
@@ -533,8 +554,15 @@ function Save-AVDTuneRuleSet {
             $apply = {
                 param($mach)
                 & $w.Add $Conn $dn ([ordered]@{ objectClass = 'group'; sAMAccountName = $gn; groupType = '-2147483646'; description = $desc })
-                $made = Get-AVDTuneAdGroup -Ldap $w -Conn $Conn -BaseDn $nc -Name $gn   # read back: the undo finds the group by its GUID and checks its SID
-                if (-not $made -or -not $made.Guid -or -not $made.Sid) { throw "The group $gn was created but its object GUID and SID could not be read back." }
+                $made = $null; $readErr = ''
+                try { $made = Get-AVDTuneAdGroup -Ldap $w -Conn $Conn -BaseDn $nc -Name $gn } catch { $readErr = $_.Exception.Message }   # read back: the undo finds the group by its GUID and checks its SID
+                if (-not $made -or -not $made.Guid -or -not $made.Sid) {
+                    # the group exists but the record cannot be complete: a provisional record with the DN (no GUID and SID: undo will not delete it by itself), the DN in the error
+                    $item.Provisional = $true; $item.Dn = $dn
+                    $prov = [ordered]@{ At = $undo.At; Name = $undo.Name; Files = @(); Shortcuts = @(); Groups = @(@{ StepId = 'appmasking.group.create'; Kind = 'Ad'; Name = $gn; Dn = $dn; NamingContext = $nc; Guid = ''; Sid = ''; Provisional = $true }) }
+                    try { Write-AVDTuneUndoFile (Get-AVDTuneMaskingUndoPath $Root) ($prov | ConvertTo-Json -Depth 6) } catch { }
+                    throw "The group $gn was created ($dn) but its object GUID and SID could not be read back$(if ($readErr) { " ($readErr)" }). It was not recorded completely: check it in AD and delete it by hand if it is not needed."
+                }
                 $item.Dn = $made.Dn; $item.Guid = $made.Guid; $item.Sid = $made.Sid
             }.GetNewClosure()
             [void]$steps.Add((New-AVDTuneStep -Id 'appmasking.group.create' -Section AppMasking -Title "AD group $gn in $([string]$CreateGroup.OuDn)" -Why 'The group is the switch: members see the hidden items. Membership stays in AD.' -SourceUrl "$script:Learn/concepts-fslogix-apps-rule-editor-rule-sets" -Risk High -Test $test -Apply $apply))
@@ -571,8 +599,16 @@ function Save-AVDTuneRuleSet {
         $oldVis = Get-AVDTuneRuleVisibility $oldFxaParsed; $newVis = Get-AVDTuneRuleVisibility $fxa
         if (-not (Test-AVDTuneMaskBytesEqual $oldFxa $fxaBytes) -and $oldVis.Text -cne $newVis.Text) {
             $change = [pscustomobject]@{ Old = $oldVis.Text; New = $newVis.Text }
-            if (-not $WhatIf -and -not $AcceptAssignmentChange) { throw "The assignment of the existing rule set '$Name' would change from '$($oldVis.Text)' to '$($newVis.Text)'. Confirm this change explicitly." }
+            if (-not $WhatIf -and -not $ExpectedChange) { throw "The assignment of the existing rule set '$Name' would change from '$($oldVis.Text)' to '$($newVis.Text)'. Confirm this change explicitly (pass Old and New of the preview as -ExpectedChange)." }
         }
+    }
+    # what the administrator confirmed (Old and New of the preview) must be exactly what is about to be written: a rule set that changed since the preview is not touched
+    if (-not $WhatIf -and $ExpectedChange) {
+        $isMap = $ExpectedChange -is [System.Collections.IDictionary]   # a hashtable (the page) or an object (parsed json)
+        $eo = if ($isMap) { [string]$ExpectedChange['Old'] } else { [string](Get-AVDTuneProp $ExpectedChange 'Old') }
+        $en = if ($isMap) { [string]$ExpectedChange['New'] } else { [string](Get-AVDTuneProp $ExpectedChange 'New') }
+        $co = if ($change) { $change.Old } else { '(no change)' }; $cn = if ($change) { $change.New } else { '(no change)' }
+        if (-not $change -or $eo -cne $co -or $en -cne $cn) { throw "The assignment of the rule set '$Name' is not what the preview showed (confirmed: '$eo' -> '$en'; now: '$co' -> '$cn'). Nothing was written; run the preview again." }
     }
     [void]$steps.Add((New-AVDTuneMaskingFileStep -Id 'appmasking.rules.fxr' -Title "Rule set ${Name}: $(@($Entries).Count) hiding rule(s)" -M $M -Path $fxrPath -Bytes $fxrBytes))
     [void]$steps.Add((New-AVDTuneMaskingFileStep -Id 'appmasking.rules.fxa' -Title "Rule set ${Name}: assignment ($Visibility)" -M $M -Path $fxaPath -Bytes $fxaBytes))
@@ -649,10 +685,16 @@ function Undo-AVDTuneMaskingChange {
         if (-not (Test-AVDTuneMaskingGroupName $gn)) { throw "The undo record names an invalid group '$gn'." }
         $rsid = [string](Get-AVDTuneProp $g 'Sid'); $rguid = [string](Get-AVDTuneProp $g 'Guid')
         if ([string]$g.Kind -eq 'Ad') {
+            if (-not $rguid -or -not $rsid) {
+                # a group that was created but could not be read back (provisional record): nothing is deleted without GUID and SID; the step fails with the DN, the other undo steps still run
+                $gdn = [string](Get-AVDTuneProp $g 'Dn')
+                $why = "The undo record of the group $gn has no object GUID and SID: it is not deleted$(if ($gdn) { " (it was created as ${gdn}: check it in AD and delete it by hand if it is not needed)" })."
+                [void]$steps.Add((New-AVDTuneStep -Id "appmasking.undo.group$i" -Section AppMasking -Title "Undo: group $gn" -Risk High -Test ({ param($mach) @{ Compliant = $false; State = 'not recorded completely' } }) -Apply ({ param($mach) throw $why }.GetNewClosure())))
+                continue
+            }
             if (-not ($Ldap -and $Conn)) { throw 'Undoing the AD group needs the connection to the domain controller (start sequence).' }
-            if (-not $rguid -or -not $rsid) { throw "The undo record of the group $gn has no object GUID and SID: it is not deleted." }
             $w = New-AVDTuneLdapWriter -Ldap $Ldap; $nc = [string]$g.NamingContext
-            $test = { param($mach) $x = Get-AVDTuneAdGroupByGuid -Ldap $w -Conn $Conn -BaseDn $nc -GuidHex $rguid; @{ Compliant = (-not $x); State = '' } }.GetNewClosure()
+            $test = { param($mach) $x = Get-AVDTuneAdGroupByGuid -Ldap $w -Conn $Conn -BaseDn $nc -GuidHex $rguid; @{ Compliant = (-not $x); State = $(if (-not $x) { 'group not found' } else { 'group exists' }) } }.GetNewClosure()
             $apply = {
                 param($mach)
                 $x = Get-AVDTuneAdGroupByGuid -Ldap $w -Conn $Conn -BaseDn $nc -GuidHex $rguid
@@ -665,7 +707,7 @@ function Undo-AVDTuneMaskingChange {
         }
         else {
             if (-not $rsid) { throw "The undo record of the local group $gn has no SID: it is not deleted." }
-            $test = { param($mach) @{ Compliant = (-not (& $M.LocalGroupInfo $gn).Exists); State = '' } }.GetNewClosure()
+            $test = { param($mach) @{ Compliant = (-not (& $M.LocalGroupInfo $gn).Exists); State = $(if (-not (& $M.LocalGroupInfo $gn).Exists) { 'group not found' } else { 'group exists' }) } }.GetNewClosure()
             $apply = {
                 param($mach)
                 $x = & $M.LocalGroupInfo $gn
@@ -680,6 +722,7 @@ function Undo-AVDTuneMaskingChange {
     }
     if ($steps.Count -eq 0) { throw 'The undo record is empty.' }
     $run = Invoke-AVDTune -Plan ([pscustomobject]@{ Name = 'App Masking undo'; Steps = @($steps | ForEach-Object { $_.Id }) }) -Catalog @($steps) -Machine $Machine -Root $Root -User $User -SnapshotId $SnapshotId -WhatIf:$WhatIf
+    foreach ($r in @($run.Results | Where-Object { $_.Id -like 'appmasking.undo.group*' -and $_.Status -eq 'Unchanged' -and $_.Before -eq 'group not found' })) { $r.Message = 'group not found, nothing deleted' }   # said in the result: nothing was deleted because the group was not there
     if (-not $WhatIf -and @($run.Results | Where-Object { $_.Status -eq 'Failed' }).Count -eq 0) { Remove-Item -LiteralPath (Get-AVDTuneMaskingUndoPath $Root) -Force -ErrorAction SilentlyContinue }
     $run
 }
@@ -702,17 +745,24 @@ function Get-AVDTuneComfortShortcuts {
 function Add-AVDTuneComfortShortcut {
     <# Creates a comfort shortcut on the Public Desktop (read only for users). An existing file of that name that is not ours is never replaced; one of ours with another target, icon or ACL is made right. #>
     [CmdletBinding()]
-    param([Parameter(Mandatory)]$Machine, [Parameter(Mandatory)]$M, [string]$Root = (Get-AVDTuneRoot), [Parameter(Mandatory)][ValidateSet('logoff')][string]$Id, [string]$User, [string]$SnapshotId, [switch]$WhatIf)
+    param([Parameter(Mandatory)]$Machine, [Parameter(Mandatory)]$M, [string]$Root = (Get-AVDTuneRoot), [Parameter(Mandatory)][ValidateSet('logoff')][string]$Id, [string[]]$ExpectedWarnings, [string]$User, [string]$SnapshotId, [switch]$WhatIf)
     $s = @(Get-AVDTuneComfortShortcuts -M $M | Where-Object Id -eq $Id)[0]
     $path = Join-Path (& $M.PublicDesktopFolder) $s.Name
     $cur = & $M.ReadShortcut $path
     if ($cur -and -not ([string]$cur.Description).StartsWith($script:ShortcutMarker)) { throw "$($s.Name) exists on the Public Desktop and was not made by AVDTune: it is not replaced." }
+    # the folder: a link, a foreign owner or write access of anyone but the Windows default groups stops; that default (Authenticated Users/Users/Interactive with Modify) is a warning that the
+    # administrator must confirm explicitly: -ExpectedWarnings carries the texts of the preview (.DesktopWarnings of the -WhatIf run) and must equal the current ones. The file ACL of the shortcut stays strict.
+    $folder = if ($M.PSObject.Properties['ShortcutFolderFindings']) { & $M.ShortcutFolderFindings $path } else { [pscustomobject]@{ Problems = @(); Warnings = @() } }
+    if (@($folder.Problems).Count -gt 0) { throw "The Public Desktop is not safe ($(@($folder.Problems) -join '; ')): no shortcut was written." }
+    $warnings = @($folder.Warnings)
+    if (-not $WhatIf -and $warnings.Count -gt 0 -and (@($ExpectedWarnings) -join "`n") -cne ($warnings -join "`n")) { throw "The Public Desktop folder can be changed by users ($($warnings -join '; ')). That is the Windows default, but anybody could replace or delete the shortcut: confirm this explicitly (the preview shows it)." }
     $stepId = "appmasking.comfort.$Id"
     $test = { param($mach) $c = & $M.ReadShortcut $path; @{ Compliant = [bool]($c -and $c.Target -ieq $s.Target -and $c.Arguments -ceq $s.Arguments -and $c.Icon -ieq $s.Icon -and [string]$c.WorkingDirectory -ieq $s.WorkingDirectory -and @($c.AclProblems).Count -eq 0); State = $(if ($c) { $c.Target } else { 'absent' }) } }.GetNewClosure()
     $apply = { param($mach) & $M.CreateShortcut $path $s.Target $s.Arguments $s.Icon $s.Description $s.WorkingDirectory }.GetNewClosure()
     $step = New-AVDTuneStep -Id $stepId -Section AppMasking -Title "Public Desktop shortcut $($s.Title)" -Why 'A comfort shortcut for all users.' -Risk Low -Test $test -Apply $apply
     $run = Invoke-AVDTune -Plan ([pscustomobject]@{ Name = 'App Masking comfort shortcut'; Steps = @($step.Id) }) -Catalog @($step) -Machine $Machine -Root $Root -User $User -SnapshotId $SnapshotId -WhatIf:$WhatIf
     Save-AVDTuneMaskingUndo -Root $Root -Undo ([pscustomobject]@{ At = (& $Machine.Now).ToString('o'); Name = $s.Name; Files = @(); Groups = @(); Shortcuts = @(@{ StepId = $stepId; Path = $path }) }) -Run $run
+    $run | Add-Member -NotePropertyName DesktopWarnings -NotePropertyValue @($warnings) -Force
     $run
 }
 
@@ -720,28 +770,51 @@ function Add-AVDTuneComfortShortcut {
 
 #region real adapter
 
-function Get-AVDTuneWriteChainProblems {
+function Get-AVDTuneWriteChainFindings {
     <#
         Every component of a path from the drive root down: none may be a link; every component below -AclBelow (default: the drive root, which keeps the Windows default) must pass
-        Get-AVDTuneAclProblems (owner Administrators/SYSTEM/TrustedInstaller, no write for others). -AllowMissingLeaf: the file itself does not exist yet. $ReadReport is Read-AVDTuneAclReport (a fake in the checks).
+        Get-AVDTuneAclFindings (owner Administrators/SYSTEM/TrustedInstaller, no write for others; inherit-only entries do not count). -AllowMissingLeaf: the file itself does not exist yet.
+        -WarnComponent (one folder of the chain) with -WarnWriteSids: write access of exactly these SIDs on that folder is a Warning, not a Problem (the Public Desktop, where Windows gives
+        Authenticated Users, Users and Interactive Modify); a link, a foreign owner and write access of anyone else on it, and every problem of every other component stay Problems.
+        Returns @{ Problems; Warnings }. $ReadReport is Read-AVDTuneAclReport (a fake in the checks).
     #>
-    param([Parameter(Mandatory)][string]$Path, [string]$AclBelow, [switch]$AllowMissingLeaf, [scriptblock]$ReadReport = { param($p) Read-AVDTuneAclReport $p })
+    param([Parameter(Mandatory)][string]$Path, [string]$AclBelow, [switch]$AllowMissingLeaf, [scriptblock]$ReadReport = { param($p) Read-AVDTuneAclReport $p }, [string]$WarnComponent, [string[]]$WarnWriteSids = @())
     $full = [IO.Path]::GetFullPath($Path).TrimEnd('\')
     $root = [IO.Path]::GetPathRoot($full).TrimEnd('\')
     $skip = if ($AclBelow) { [IO.Path]::GetFullPath($AclBelow).TrimEnd('\') } else { $root }
+    $warnAt = if ($WarnComponent) { [IO.Path]::GetFullPath($WarnComponent).TrimEnd('\') } else { $null }
     $parts = @($full.Substring($root.Length).Split([char]92) | Where-Object { $_ })
     $components = New-Object System.Collections.ArrayList; [void]$components.Add($root + '\')
     $cur = $root; foreach ($p in $parts) { $cur = "$cur\$p"; [void]$components.Add($cur) }
-    $problems = New-Object System.Collections.ArrayList
+    $problems = New-Object System.Collections.ArrayList; $warnings = New-Object System.Collections.ArrayList
     for ($i = 0; $i -lt $components.Count; $i++) {
         $c = [string]$components[$i]
         $r = & $ReadReport $c
         if (-not $r.Exists) { if ($AllowMissingLeaf -and $i -eq $components.Count - 1) { continue }; [void]$problems.Add("$c does not exist"); continue }
         if ($r.Link) { [void]$problems.Add("$c is a link"); continue }
         $below = $c.TrimEnd('\').Length -gt $skip.Length -and $c.StartsWith($skip, [StringComparison]::OrdinalIgnoreCase)
-        if ($below) { foreach ($x in @(Get-AVDTuneAclProblems $r)) { [void]$problems.Add("${c}: $x") } }
+        if ($below) {
+            $sids = if ($warnAt -and [string]::Equals($c.TrimEnd('\'), $warnAt, [StringComparison]::OrdinalIgnoreCase)) { $WarnWriteSids } else { @() }
+            $f = Get-AVDTuneAclFindings -Report $r -WarnWriteSids $sids
+            foreach ($x in @($f.Problems)) { [void]$problems.Add("${c}: $x") }
+            foreach ($x in @($f.Warnings)) { [void]$warnings.Add("${c}: $x") }
+        }
     }
-    @($problems)
+    [pscustomobject]@{ Problems = @($problems); Warnings = @($warnings) }
+}
+
+function Get-AVDTuneWriteChainProblems {
+    # The stops of Get-AVDTuneWriteChainFindings without any warning rule (every write access of others is a problem). Used for the rules folder and every other caller.
+    param([Parameter(Mandatory)][string]$Path, [string]$AclBelow, [switch]$AllowMissingLeaf, [scriptblock]$ReadReport = { param($p) Read-AVDTuneAclReport $p })
+    @((Get-AVDTuneWriteChainFindings -Path $Path -AclBelow $AclBelow -AllowMissingLeaf:$AllowMissingLeaf -ReadReport $ReadReport).Problems)
+}
+
+function Get-AVDTunePublicDesktopFindings {
+    # Problems and Warnings for a shortcut path on the Public Desktop: Authenticated Users / Users / Interactive with Modify on the folder is the Windows default and only a Warning
+    # (confirmed explicitly); a link, a foreign owner or write access of anyone else on the folder, or a link above it, is a stop.
+    param([Parameter(Mandatory)][string]$Path, [scriptblock]$ReadReport = { param($p) Read-AVDTuneAclReport $p })
+    $desk = Split-Path $Path -Parent
+    Get-AVDTuneWriteChainFindings -Path $Path -AllowMissingLeaf -AclBelow (Split-Path $desk -Parent) -ReadReport $ReadReport -WarnComponent $desk -WarnWriteSids @('S-1-5-11', 'S-1-5-32-545', 'S-1-5-4')
 }
 
 function New-AVDTuneMaskingAdapter {
@@ -811,7 +884,8 @@ function New-AVDTuneMaskingAdapter {
         # The Public Desktop itself (and its owner) must be admin-only for writing, and no component from the drive root may be a link.
         param($Path, $Target, $Arguments, $Icon, $Description, $WorkingDirectory)
         $desk = Split-Path $Path -Parent
-        $deskProblems = @(Get-AVDTuneWriteChainProblems -Path $Path -AllowMissingLeaf -AclBelow (Split-Path $desk -Parent))
+        # write access of Authenticated Users/Users/Interactive on the folder is the Windows default: only a warning here (the module made the administrator confirm it); everything else stops
+        $deskProblems = @((Get-AVDTunePublicDesktopFindings -Path $Path).Problems)
         if ($deskProblems.Count -gt 0) { throw "The Public Desktop is not safe ($($deskProblems -join '; ')): no shortcut was written." }
         $tempDir = Join-Path (Get-AVDTuneRoot) 'temp'
         [void][IO.Directory]::CreateDirectory($tempDir)
@@ -827,6 +901,7 @@ function New-AVDTuneMaskingAdapter {
         finally { [void][Runtime.InteropServices.Marshal]::ReleaseComObject($shell); if (Test-Path -LiteralPath $temp) { Remove-Item -LiteralPath $temp -Force -ErrorAction SilentlyContinue } }
         $after = @(Get-AVDTuneAclProblems (Read-AVDTuneAclReport $Path)); if ($after.Count -gt 0) { try { [IO.File]::Delete($Path) } catch { }; throw "$Path got an unsafe ACL ($($after -join '; ')) and was removed again." }
     }
+    $a.ShortcutFolderFindings = { param($Path) Get-AVDTunePublicDesktopFindings -Path $Path }
     $a.DeleteShortcut = { param($Path) if (Test-Path -LiteralPath $Path) { $r = Read-AVDTuneAclReport $Path; if ($r.Link) { throw "$Path is a link." }; [IO.File]::Delete($Path) } }
     $a.LocalGroupExists = { param($Name) try { $g = [ADSI]"WinNT://./$Name,group"; [bool]$g.Path } catch { $false } }
     $a.LocalGroupCreate = { param($Name, $Description) $c = [ADSI]'WinNT://.,computer'; $g = $c.Create('group', $Name); $g.SetInfo(); $g.Description = $Description; $g.SetInfo() }
@@ -844,7 +919,7 @@ function New-AVDTuneMaskingAdapter {
 
 #endregion
 
-Export-ModuleMember -Function Save-AVDTuneMaskingBackup, Get-AVDTuneWriteChainProblems, Get-AVDTuneRuleSetAssignment, Get-AVDTuneBytesSha256, Save-AVDTuneMaskingUndo, ConvertTo-AVDTuneGuidHex, ConvertTo-AVDTuneLdapBinaryFilter, Get-AVDTuneAdGroupByGuid, Test-AVDTuneAdGroupHasMembers, Test-AVDTuneMaskBytesEqual, Test-AVDTuneMaskingNeedsChange, Get-AVDTuneMaskAttr, Test-AVDTuneMaskingName, Test-AVDTuneMaskingGroupName, Test-AVDTuneMaskingPrefix, Get-AVDTuneAppGroupName, Test-AVDTuneMaskingRulePath, Test-AVDTuneOuDn,
+Export-ModuleMember -Function Save-AVDTuneMaskingBackup, Get-AVDTuneWriteChainProblems, Get-AVDTuneWriteChainFindings, Get-AVDTunePublicDesktopFindings, Get-AVDTuneRuleSetAssignment, Get-AVDTuneBytesSha256, Save-AVDTuneMaskingUndo, ConvertTo-AVDTuneGuidHex, ConvertTo-AVDTuneLdapBinaryFilter, Get-AVDTuneAdGroupByGuid, Test-AVDTuneAdGroupHasMembers, Test-AVDTuneMaskBytesEqual, Test-AVDTuneMaskingNeedsChange, Get-AVDTuneMaskAttr, Test-AVDTuneMaskingName, Test-AVDTuneMaskingGroupName, Test-AVDTuneAdExistingGroupName, Test-AVDTuneMaskingPrefix, Get-AVDTuneAppGroupName, Test-AVDTuneMaskingRulePath, Test-AVDTuneOuDn,
     ConvertTo-AVDTuneRuleBytes, ConvertFrom-AVDTuneRuleBytes, ConvertFrom-AVDTuneFxrText, ConvertTo-AVDTuneFxrText, ConvertTo-AVDTuneFxrRuleLine, New-AVDTuneFxaRow,
     ConvertFrom-AVDTuneFxaText, ConvertTo-AVDTuneFxaText, ConvertTo-AVDTuneFxaRows, Get-AVDTuneRuleVisibility, Get-AVDTuneMaskingSettings, Set-AVDTuneMaskingSettings,
     Get-AVDTuneMaskingCapabilities, New-AVDTuneLdapWriter, Get-AVDTuneAdGroup, Get-AVDTuneBuiltinAdminDn, Get-AVDTuneRuleSets, Get-AVDTunePublicDesktopList,

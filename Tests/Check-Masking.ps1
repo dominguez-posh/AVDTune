@@ -104,8 +104,9 @@ try {
     $noAccept = Get-ThrownText { Save-AVDTuneRuleSet -Machine $e2.Machine -M $e2.M -Root $tmp -Name 'Mixed' -Entries @(@{ Folder = $pd; Name = 'New.lnk' }) -Visibility Hidden -User 'admin1' -SnapshotId 's' }
     Test-Check 'assignment: an existing assignment that would mean something else is refused without the explicit accept (old and new meaning in the text), nothing written' ($noAccept -like '*would change from*Not hidden for anybody*to*Hidden for everyone*' -and (Test-AVDTuneMaskBytesEqual $e2.M.Store.Files["$rules\Mixed.fxa"] $oldFxa)) $noAccept
     $wiChange = Save-AVDTuneRuleSet -Machine $e2.Machine -M $e2.M -Root $tmp -Name 'Mixed' -Entries @(@{ Folder = $pd; Name = 'New.lnk' }) -Visibility Hidden -WhatIf
+    $anyChange = @{ Old = 'Not hidden for anybody (the assignment has no effect)'; New = 'Hidden for everyone except: BUILTIN\Administrators' }
     Test-Check 'assignment: the preview carries old and new meaning for the confirmation; the page can read the current meaning before' ($wiChange.AssignmentChange.Old -like 'Not hidden*' -and $wiChange.AssignmentChange.New -like 'Hidden for everyone*' -and (Get-AVDTuneRuleSetAssignment -M $e2.M -Name 'Mixed').Effect -eq 'NoEffect' -and $null -eq (Get-AVDTuneRuleSetAssignment -M $e2.M -Name 'Nothing')) $null
-    $c1 = Save-AVDTuneRuleSet -Machine $e2.Machine -M $e2.M -Root $tmp -Name 'Mixed' -Entries @(@{ Folder = $pd; Name = 'New.lnk' }, @{ Folder = 'C:\Some'; Name = 'file.exe' }) -Visibility Hidden -AcceptAssignmentChange -User 'admin1' -SnapshotId 's'
+    $c1 = Save-AVDTuneRuleSet -Machine $e2.Machine -M $e2.M -Root $tmp -Name 'Mixed' -Entries @(@{ Folder = $pd; Name = 'New.lnk' }, @{ Folder = 'C:\Some'; Name = 'file.exe' }) -Visibility Hidden -ExpectedChange $anyChange -User 'admin1' -SnapshotId 's'
     $mixedOut = Get-Written $e2 'Mixed' 'fxr'
     Test-Check 'change: with the accept the existing rule stays, only the missing rules are added (no doubles)' ($mixedOut -ceq ($fileOnly + "##`r`n$pd`tNew.lnk`t`t`t0x00000222`t`r`n##`r`nC:\Some`tfile.exe`t`t`t0x00000222`t`r`n") -and (Get-AVDTuneRuleSets -M $e2.M)[0].Visibility.Effect -eq 'Hidden') $mixedOut
     $c2 = Save-AVDTuneRuleSet -Machine $e2.Machine -M $e2.M -Root $tmp -Name 'Mixed' -Entries @(@{ Folder = $pd; Name = 'Third.lnk' }) -Visibility Hidden -User 'admin1' -SnapshotId 's'
@@ -118,13 +119,13 @@ try {
     $foreignSet = "1`r`n##`r`nHKEY_LOCAL_MACHINE\SOFTWARE\X`t`t`t`t0x00000011`t`r`n"
     $e2b = New-Env -Seed @{ Files = @{ "$rules\Foreign.fxr" = (ConvertTo-AVDTuneRuleBytes $foreignSet); "$rules\Foreign.fxa" = (ConvertTo-AVDTuneRuleBytes "1`t`r`n0x00000011`tEXAMPLE\Contractors`t`tEXAMPLE\Contractors`t0`t0`r`n") } }
     $before = $e2b.M.Store.Files["$rules\Foreign.fxa"]
-    $fe = Get-ThrownText { Save-AVDTuneRuleSet -Machine $e2b.Machine -M $e2b.M -Root $tmp -Name 'Foreign' -Entries $entries -Visibility Hidden -AcceptAssignmentChange -User a -SnapshotId s }
+    $fe = Get-ThrownText { Save-AVDTuneRuleSet -Machine $e2b.Machine -M $e2b.M -Root $tmp -Name 'Foreign' -Entries $entries -Visibility Hidden -ExpectedChange $anyChange -User a -SnapshotId s }
     Test-Check 'foreign rules: a rule set with a rule of another type (registry) is not changed, even with the accept (the new assignment would apply to that rule too)' ($fe -like '*another type*' -and (Test-AVDTuneMaskBytesEqual $e2b.M.Store.Files["$rules\Foreign.fxa"] $before)) $fe
     $e2c = New-Env -Seed @{ Files = @{ "$rules\Broken.fxr" = (ConvertTo-AVDTuneRuleBytes "2`r`n"); "$rules\Broken.fxa" = (ConvertTo-AVDTuneRuleBytes "1`t`r`n0x00000012`tS-1-1-0`t`tEveryone`t0`t0`r`n") } }
     $e2d = New-Env -Seed @{ Files = @{ "$rules\Broken2.fxr" = (ConvertTo-AVDTuneRuleBytes "1`r`n"); "$rules\Broken2.fxa" = (ConvertTo-AVDTuneRuleBytes "1`t`r`nfoo bar`r`n") } }
-    Test-Check 'parse problems: a rule set whose .fxr or .fxa has problems is not changed' ((Test-Throws { Save-AVDTuneRuleSet -Machine $e2c.Machine -M $e2c.M -Root $tmp -Name 'Broken' -Entries $entries -AcceptAssignmentChange -User a -SnapshotId s }) -and (Test-Throws { Save-AVDTuneRuleSet -Machine $e2d.Machine -M $e2d.M -Root $tmp -Name 'Broken2' -Entries $entries -AcceptAssignmentChange -User a -SnapshotId s })) $null
+    Test-Check 'parse problems: a rule set whose .fxr or .fxa has problems is not changed' ((Test-Throws { Save-AVDTuneRuleSet -Machine $e2c.Machine -M $e2c.M -Root $tmp -Name 'Broken' -Entries $entries -ExpectedChange $anyChange -User a -SnapshotId s }) -and (Test-Throws { Save-AVDTuneRuleSet -Machine $e2d.Machine -M $e2d.M -Root $tmp -Name 'Broken2' -Entries $entries -ExpectedChange $anyChange -User a -SnapshotId s })) $null
     $e2e = New-Env -Seed @{ Files = @{ "$rules\Gone.fxr" = (ConvertTo-AVDTuneRuleBytes "1`r`n"); "$rules\Gone.fxa" = (ConvertTo-AVDTuneRuleBytes "1`t`r`n0x00000012`tS-1-1-0`t`tEveryone`t0`t0`r`n") } }
-    [void](Save-AVDTuneRuleSet -Machine $e2e.Machine -M $e2e.M -Root $tmp -Name 'Gone' -Entries $entries -Visibility Hidden -AcceptAssignmentChange -User a -SnapshotId s)
+    [void](Save-AVDTuneRuleSet -Machine $e2e.Machine -M $e2e.M -Root $tmp -Name 'Gone' -Entries $entries -Visibility Hidden -ExpectedChange $anyChange -User a -SnapshotId s)
     $e2e.M.Store.Files["$rules\Gone.fxr"] = (ConvertTo-AVDTuneRuleBytes "1`r`n##`r`nfoo`t`t`t`t0x00000222`t`r`n")   # someone edited the file after AVDTune wrote it
     $ue = Undo-AVDTuneMaskingChange -Machine $e2e.Machine -M $e2e.M -Root $tmp -User a -SnapshotId s
     $guarded = (@($ue.Results | Where-Object { $_.Status -eq 'Failed' -and $_.Message -like '*changed after AVDTune wrote*' }).Count -eq 1 -and (Get-Written $e2e 'Gone' 'fxr').Contains('foo'))
@@ -318,8 +319,8 @@ try {
     $adapter = $src.Substring($src.IndexOf('function New-AVDTuneMaskingAdapter'))
     Test-Check 'source: the real writer creates files with CreateNew and the protected ACL, checks parent folder, folder and target with Get-AVDTuneAclProblems, never File.Replace' ($adapter -match 'FileMode\]::CreateNew' -and $adapter -match 'New-AVDTuneFileSecurity' -and $adapter -match 'Get-AVDTuneWriteChainProblems -Path \$Path -AllowMissingLeaf' -and ([regex]::Matches($adapter, 'Move-AVDTuneFileReplace \$temp \$Path')).Count -ge 2 -and $adapter -notmatch 'IO.File\]::Move|File\]::Replace') $null
     Test-Check 'source: the rules folder comes from the Program Files folder of Windows, programs are not started, nothing recursive is deleted, no regex without a limit on data' ($adapter -match 'Get-AVDTuneSystemFolder ProgramFiles' -and $src -notmatch 'Start-Process|Invoke-Expression|iex |Remove-Item .*-Recurse|ProcessStartInfo|Get-Command' -and $src -notmatch '\$env:(ProgramFiles|SystemRoot|windir|PATH)') $null
-    Test-Check 'source: the comfort shortcut target comes from the system folder API; the shortcut is written with the protected file ACL and links are refused' ($adapter -match 'Get-AVDTuneSystemFolder System' -and $adapter -match 'SetAccessControl\(\(New-AVDTuneFileSecurity\)\)' -and $adapter -match "Join-Path \(Get-AVDTuneRoot\) 'temp'" -and $adapter -match 'WorkingDirectory = \$WorkingDirectory' -and $adapter -match '-AclBelow' -and $adapter -match 'AclProblems = \$acl') $null
-    Test-Check 'source: reading refuses links and files over 4 MB; the LDAP filter value is escaped and the group name validated before it' ($adapter -match 'is a link: not read' -and $adapter -match '4MB' -and $src -match 'ConvertTo-AVDTuneLdapFilterValue \$Name' -and $src -match "if \(-not \(Test-AVDTuneMaskingGroupName \`$Name\)\) \{ throw ") $null
+    Test-Check 'source: the comfort shortcut target comes from the system folder API; the shortcut is written with the protected file ACL and links are refused' ($adapter -match 'Get-AVDTuneSystemFolder System' -and $adapter -match 'SetAccessControl\(\(New-AVDTuneFileSecurity\)\)' -and $adapter -match "Join-Path \(Get-AVDTuneRoot\) 'temp'" -and $adapter -match 'WorkingDirectory = \$WorkingDirectory' -and $src -match '-AclBelow' -and $adapter -match 'Get-AVDTunePublicDesktopFindings -Path \$Path' -and $adapter -match 'AclProblems = \$acl') $null
+    Test-Check 'source: reading refuses links and files over 4 MB; the LDAP filter value is escaped and the existing group name validated (length, control characters) before it' ($adapter -match 'is a link: not read' -and $adapter -match '4MB' -and $src -match 'ConvertTo-AVDTuneLdapFilterValue \$Name' -and $src -match "if \(-not \(Test-AVDTuneAdExistingGroupName \`$Name\)\) \{ throw ") $null
     Test-Check 'source: no password or token is handled in this module (the connection comes from the start sequence)' ($src -notmatch 'Password|SecureString|token|Credential') $null
     Test-Check 'source: the group is created only behind the Confirmed switch (AD and local)' (([regex]::Matches($src, 'needs your confirmation')).Count -eq 2) $null
 
@@ -328,8 +329,8 @@ try {
     $perr = $null; [void][System.Management.Automation.Language.Parser]::ParseInput($page, [ref]$null, [ref]$perr)
     Test-Check 'page: the page file parses and the hooks in Start-AVDTune.ps1 are there (import, dot-source, page switch)' (@($perr).Count -eq 0 -and ([IO.File]::ReadAllText((Join-Path $repo 'Start-AVDTune.ps1'))) -match "'Masking'\) \{ Import-Module" -and ([IO.File]::ReadAllText((Join-Path $repo 'Start-AVDTune.ps1'))) -match 'AVDTune-AppMasking.ps1' -and ([IO.File]::ReadAllText((Join-Path $repo 'Start-AVDTune.ps1'))) -match 'Update-MaskView') ($perr | ForEach-Object Message)
     $saveFn = $page.Substring($page.IndexOf('function Invoke-MaskSave'), $page.IndexOf('function Remove-MaskSet') - $page.IndexOf('function Invoke-MaskSave'))
-    $confirmAt = $saveFn.LastIndexOf('Confirm-Action'); $confirmedAt = $saveFn.IndexOf('$p.Confirmed = $true')
-    Test-Check 'page: a group is only created after Confirm-Action that names group, OU and domain; -Confirmed is set after it, never before; a changed assignment is confirmed with old and new meaning' ($confirmAt -gt 0 -and $confirmAt -lt $confirmedAt -and $saveFn.Contains('Create the group') -and $saveFn.Contains('OU $($p.CreateGroup.OuDn)') -and $saveFn.Contains('domain $($p.Directory.DnsName)') -and $saveFn.Contains('$preview.AssignmentChange.Old') -and $saveFn.Contains('$preview.AssignmentChange.New') -and $saveFn.IndexOf('$p.AcceptAssignmentChange = $true') -lt $confirmAt) $null
+    $confirmAt = $saveFn.IndexOf('Confirm-Action'); $confirmedAt = $saveFn.IndexOf('$p.Confirmed = $true')
+    Test-Check 'page: a group is only created after Confirm-Action that names group, OU and domain; -Confirmed is set after it, never before; a changed assignment is confirmed with old and new meaning' ($confirmAt -gt 0 -and $confirmAt -lt $confirmedAt -and $saveFn.Contains('Create the group') -and $saveFn.Contains('OU $($p.CreateGroup.OuDn)') -and $saveFn.Contains('domain $($p.Directory.DnsName)') -and $saveFn.Contains('$preview.AssignmentChange.Old') -and $saveFn.Contains('$preview.AssignmentChange.New') -and $saveFn.IndexOf('$p.ExpectedChange = ') -gt $saveFn.LastIndexOf('Confirm-Action')) $null
     $pwOk = (([regex]::Matches($page, 'Assert-MaskWrite')).Count -ge 5) -and (([regex]::Matches($page, 'Invoke-MaskChange -Title')).Count -eq 4)
     $pwClear = (([regex]::Matches($page, 'finally \{ if \(\$lc\) \{ & \$lc\.Close \}; \$ui\.PwdMask\.Clear\(\) \}')).Count -eq 2) -and $saveFn.IndexOf('try {') -lt $saveFn.IndexOf('Get-MaskRequest') -and $saveFn.IndexOf('try {') -lt $saveFn.IndexOf('return')
     $pwNoText = ($page -notmatch 'PwdMask\.Password\b') -and ($page -notmatch 'ConvertFrom-SecureString|SecureStringToBSTR|Marshal')
@@ -339,6 +340,130 @@ try {
     Test-Check 'page: existing AD groups are chosen by sAMAccountName and SID (not by name or CN) and the SID is sent to the module' ($page.Contains('Sam = (Get-MaskGroupSam $g); Sid = [string]$g.Sid') -and $page -notmatch "Where-Object \{ \`$_\.Name -eq \`$gn \}") $null
     Test-Check 'page: no Retry for the changes of the master and of AD' ($page -notmatch '-Retry|Retry =') $null
     Test-Check 'page: the connection to the domain controller is the pinned one (Connect-AVDTuneDirectory with the pins), no own TLS or bind code' ($page -match 'Connect-AVDTuneDirectory .*-Pins' -and $page -notmatch 'LdapConnection|NetworkCredential|SslStream') $null
+
+    # ---------------------------------------------------------------- re-check of the review (N1 to N7 and the group without SID)
+    # N1: existing AD groups with special names are bound by sAMAccountName and SID; the filter value is escaped, the .fxa row carries the name as it is
+    $sud = "Vertrieb-S$([char]0xFC)d"
+    $special = @($sud, 'Sales Team (EU)', 'HR$')
+    $spSeed = New-Object System.Collections.ArrayList
+    $k = 5000; foreach ($n in $special) { $k++; [void]$spSeed.Add(@{ Name = $n; Dn = "CN=$n,$ouDn"; Sid = "S-1-5-21-1-2-3-$k"; Description = 'x'; Members = @() }) }
+    $eS = New-Env -LdapSeed @{ Groups = $spSeed }
+    $spOk = $true; $spDetail = @(); $k = 5000
+    foreach ($n in $special) {
+        $k++
+        $gx = Get-AVDTuneAdGroup -Ldap $eS.Ldap -Conn c -BaseDn $dn -Name $n
+        $rs = Save-AVDTuneRuleSet -Machine $eS.Machine -M $eS.M -Root $tmp -Name "Special$k" -Entries $entries -Visibility HiddenExceptGroups -Groups @([pscustomobject]@{ Sam = $n; Sid = "S-1-5-21-1-2-3-$k"; Account = 'x\y'; Dn = '' }) -Ldap $eS.Ldap -Conn c -Directory $dirInfo -User a -SnapshotId s
+        $fx = Get-Written $eS "Special$k" 'fxa'; $pv = ConvertFrom-AVDTuneFxaText $fx
+        $rowOk = $gx -and $gx.Sam -ceq $n -and $fx -like "*0x00000012`tEXAMPLE\$n`tCN=$n,$ouDn`tEXAMPLE\$n`t*" -and @($pv.Problems).Count -eq 0 -and (Get-AVDTuneRuleVisibility $pv).Text -like "*EXAMPLE\$n*"
+        if (-not $rowOk) { $spOk = $false; $spDetail += "$n -> $fx" }
+    }
+    Test-Check 'N1 existing groups: "Vertrieb-S(u-umlaut)d", "Sales Team (EU)" and "HR$" are found by sAMAccountName and SID and the .fxa row carries the name as it is (DOMAIN\name, DN, display name); the rule set is read back without problems' $spOk ($spDetail -join ' | ')
+    $sqlog = @($eS.Ldap.Store.Log | Where-Object { $_ -like '*sAMAccountName=Sales*' })
+    Test-Check 'N1 existing groups: the filter value is escaped (parentheses as \28 and \29), nothing of the name is taken as filter syntax' ($sqlog.Count -ge 1 -and @($sqlog | Where-Object { $_ -like '*Sales Team \28EU\29*' }).Count -ge 1 -and @($sqlog | Where-Object { $_ -like '*Team (EU)*' }).Count -eq 0) ($sqlog -join ' | ')
+    $injName = 'a)(objectClass=*'
+    [void](Get-AVDTuneAdGroup -Ldap $eS.Ldap -Conn c -BaseDn $dn -Name $injName)
+    Test-Check 'N1 existing groups: a name with filter syntax is only escaped (\29\28 and \2a), the filter stays one equality' (@($eS.Ldap.Store.Log | Where-Object { $_ -like '*(sAMAccountName=a\29\28objectClass=\2a))' }).Count -eq 1) (($eS.Ldap.Store.Log | Select-Object -Last 1))
+    Test-Check 'N1 existing groups: empty, tab, line feed, backslash, a name over 256 characters and one with a blank at the end are refused; names AVDTune creates keep the strict rule' ((Test-Throws { Get-AVDTuneAdGroup -Ldap $eS.Ldap -Conn c -BaseDn $dn -Name "a`tb" }) -and (Test-Throws { Get-AVDTuneAdGroup -Ldap $eS.Ldap -Conn c -BaseDn $dn -Name "a`nb" }) -and (Test-Throws { Get-AVDTuneAdGroup -Ldap $eS.Ldap -Conn c -BaseDn $dn -Name 'a\b' }) -and (Test-Throws { Get-AVDTuneAdGroup -Ldap $eS.Ldap -Conn c -BaseDn $dn -Name ('a' * 257) }) -and (Test-Throws { Get-AVDTuneAdGroup -Ldap $eS.Ldap -Conn c -BaseDn $dn -Name 'ab ' }) -and -not (Test-AVDTuneAdExistingGroupName '') -and -not (Test-AVDTuneMaskingGroupName 'Sales Team (EU)') -and -not (Test-AVDTuneMaskingGroupName 'HR$') -and (Test-Throws { Save-AVDTuneRuleSet -Machine $eS.Machine -M $eS.M -Root $tmp -Name 'NewSp' -Entries $entries -Visibility HiddenExceptGroups -CreateGroup @{ Kind = 'Ad'; Name = 'Sales Team (EU)'; OuDn = $ouDn } -Ldap $eS.Ldap -Conn c -Directory $dirInfo -Confirmed -User a -SnapshotId s })) $null
+
+    # the group without SID (account and DN from the caller) is refused when a domain controller is given; the local form without a DC stays
+    $eN = New-Env
+    $noSidThrown = Get-ThrownText { Save-AVDTuneRuleSet -Machine $eN.Machine -M $eN.M -Root $tmp -Name 'NoSid' -Entries $entries -Visibility HiddenExceptGroups -Groups @([pscustomobject]@{ Account = 'EXAMPLE\Anybody'; Dn = 'CN=Anybody' }) -Ldap $eN.Ldap -Conn c -Directory $dirInfo -User a -SnapshotId s }
+    [void](Save-AVDTuneRuleSet -Machine $eN.Machine -M $eN.M -Root $tmp -Name 'NoSidLocal' -Entries $entries -Visibility HiddenExceptGroups -Groups @([pscustomobject]@{ Account = 'HOST\LocalGrp'; Dn = '' }) -User a -SnapshotId s)
+    Test-Check 'groups without SID: refused with a domain controller (bound by SID only), nothing written; without a DC (local group form) still accepted' ($noSidThrown -like '*has no SID*' -and -not $eN.M.Store.Files.ContainsKey("$rules\NoSid.fxa") -and (Get-Written $eN 'NoSidLocal' 'fxa') -like '*HOST\LocalGrp*') $noSidThrown
+
+    # N2: inherit-only entries are no write access to the object itself (general); the Public Desktop folder warns instead of stopping; owner, link, other writers and the file ACL stay strict
+    $uW = [pscustomobject]@{ Sid = 'S-1-5-32-545'; Write = $true; Inherited = $false; InheritOnly = $true }
+    $uWn = [pscustomobject]@{ Sid = 'S-1-5-32-545'; Write = $true; Inherited = $false; InheritOnly = $false }
+    $uWold = [pscustomobject]@{ Sid = 'S-1-5-32-545'; Write = $true; Inherited = $false }
+    $auW = [pscustomobject]@{ Sid = 'S-1-5-11'; Write = $true; Inherited = $false; InheritOnly = $false }
+    $inW = [pscustomobject]@{ Sid = 'S-1-5-4'; Write = $true; Inherited = $false; InheritOnly = $false }
+    $strangerW = [pscustomobject]@{ Sid = 'S-1-5-21-1-2-3-1001'; Write = $true; Inherited = $false; InheritOnly = $false }
+    $adminW = [pscustomobject]@{ Sid = 'S-1-5-32-544'; Write = $true; Inherited = $false; InheritOnly = $false }
+    $mkRep = { param($acl, $owner = 'S-1-5-18', $link = $false) [pscustomobject]@{ Exists = $true; Link = $link; Owner = $owner; Protected = $false; Rules = @($acl) } }
+    Test-Check 'N2 ACL: an inherit-only entry (IO) is no write access to the folder itself; the same entry without IO, and an entry without the InheritOnly property (old reports), still are' (@(Get-AVDTuneAclProblems (& $mkRep @($uW))).Count -eq 0 -and (Get-AVDTuneAclProblems (& $mkRep @($uWn))) -contains 'write access for S-1-5-32-545' -and (Get-AVDTuneAclProblems (& $mkRep @($uWold))) -contains 'write access for S-1-5-32-545') $null
+    Test-Check 'N2 ACL: Get-AVDTuneAclProblems has no warning rule: Authenticated Users with Modify is a problem for every caller (rules folder, watermark, shortcut file)' ((Get-AVDTuneAclProblems (& $mkRep @($auW))) -contains 'write access for S-1-5-11') $null
+    $script:deskRep = @{ 'C:\' = (& $mkRep @()); 'C:\Users' = (& $mkRep @()); 'C:\Users\Public' = (& $mkRep @()); 'C:\Users\Public\Desktop' = (& $mkRep @($auW, $inW, $uW, $adminW)) }
+    $readD = { param($p) $r = $script:deskRep[$p]; if ($r) { $r } else { [pscustomobject]@{ Exists = $false; Link = $false; Owner = ''; Protected = $false; Rules = @() } } }
+    $dlnk = 'C:\Users\Public\Desktop\Abmelden.lnk'
+    $fd = Get-AVDTunePublicDesktopFindings -Path $dlnk -ReadReport $readD
+    Test-Check 'N2 Public Desktop: Authenticated Users and Interactive with Modify (Windows default) is a warning, not an error; Users with IO and Administrators are no finding' (@($fd.Problems).Count -eq 0 -and @($fd.Warnings).Count -eq 1 -and $fd.Warnings[0] -like '*C:\Users\Public\Desktop: write access for S-1-5-11, S-1-5-4') (($fd.Problems + $fd.Warnings) -join ' | ')
+    $script:deskRep['C:\Users\Public\Desktop'] = (& $mkRep @($auW) 'S-1-5-21-1-2-3-1001')
+    $fOwn = Get-AVDTunePublicDesktopFindings -Path $dlnk -ReadReport $readD
+    $script:deskRep['C:\Users\Public\Desktop'] = (& $mkRep @() 'S-1-5-18' $true)
+    $fLink = Get-AVDTunePublicDesktopFindings -Path $dlnk -ReadReport $readD
+    $script:deskRep['C:\Users\Public\Desktop'] = (& $mkRep @($auW, $strangerW))
+    $fOther = Get-AVDTunePublicDesktopFindings -Path $dlnk -ReadReport $readD
+    $script:deskRep['C:\Users\Public\Desktop'] = (& $mkRep @())
+    $script:deskRep['C:\Users'] = (& $mkRep @() 'S-1-5-18' $true)
+    $fParent = Get-AVDTunePublicDesktopFindings -Path $dlnk -ReadReport $readD
+    Test-Check 'N2 Public Desktop: a foreign owner, a link (on the folder or above it) and write access of any other account stay a stop (also next to the warned groups)' (($fOwn.Problems -join ' ') -like '*owner is S-1-5-21-1-2-3-1001*' -and ($fLink.Problems -join ' ') -like '*Desktop is a link*' -and ($fOther.Problems -join ' ') -like '*write access for S-1-5-21-1-2-3-1001*' -and ($fOther.Problems -join ' ') -notlike '*S-1-5-11*' -and @($fOther.Warnings).Count -eq 1 -and ($fParent.Problems -join ' ') -like '*C:\Users is a link*') (($fOwn.Problems + $fLink.Problems + $fOther.Problems + $fParent.Problems) -join ' | ')
+    $script:reports['C:\Program Files\FSLogix\Apps'].Rules = @()
+    $script:reports['C:\Program Files\FSLogix\Apps\Rules'].Rules = @(@{ Sid = 'S-1-5-11'; Write = $true; Inherited = $false; InheritOnly = $false })
+    $rulesChain = @(Get-AVDTuneWriteChainProblems -Path 'C:\Program Files\FSLogix\Apps\Rules\x.fxr' -AllowMissingLeaf -ReadReport $read)
+    $script:reports['C:\Program Files\FSLogix\Apps\Rules'].Rules = @(@{ Sid = 'S-1-5-32-545'; Write = $true; Inherited = $false; InheritOnly = $true })
+    $rulesIo = @(Get-AVDTuneWriteChainProblems -Path 'C:\Program Files\FSLogix\Apps\Rules\x.fxr' -AllowMissingLeaf -ReadReport $read)
+    Test-Check 'N2 rules folder: no warning rule there (Authenticated Users with Modify stays a stop), an IO entry does not stop' (($rulesChain -join ' ') -like '*Rules:*write access for S-1-5-11*' -and $rulesIo.Count -eq 0) (($rulesChain + $rulesIo) -join ' | ')
+    $w1 = 'C:\Users\Public\Desktop: write access for S-1-5-11'
+    $eW = New-Env -Seed @{ DesktopWarnings = @($w1) }
+    $noOk = Get-ThrownText { Add-AVDTuneComfortShortcut -Machine $eW.Machine -M $eW.M -Root $tmp -Id logoff -User a -SnapshotId s }
+    $prevW = Add-AVDTuneComfortShortcut -Machine $eW.Machine -M $eW.M -Root $tmp -Id logoff -WhatIf
+    $wrongW = Get-ThrownText { Add-AVDTuneComfortShortcut -Machine $eW.Machine -M $eW.M -Root $tmp -Id logoff -ExpectedWarnings @('something else') -User a -SnapshotId s }
+    $stopped = $eW.M.Store.Shortcuts.Count -eq 0
+    $okW = Add-AVDTuneComfortShortcut -Machine $eW.Machine -M $eW.M -Root $tmp -Id logoff -ExpectedWarnings @($w1) -User a -SnapshotId s
+    Test-Check 'N2 comfort shortcut: the Windows-default warning needs the explicit confirmation (the preview run carries it, the write refuses without or with other warnings) and then writes' ($noOk -like '*confirm this explicitly*' -and $wrongW -like '*confirm this explicitly*' -and $stopped -and @($prevW.DesktopWarnings).Count -eq 1 -and $prevW.DesktopWarnings[0] -eq $w1 -and @($okW.Results | Where-Object Status -eq 'Changed').Count -eq 1 -and $eW.M.Store.Shortcuts.Count -eq 1) "$noOk | $wrongW"
+    $eP = New-Env -Seed @{ DesktopWarnings = @($w1); DesktopProblems = @('C:\Users\Public\Desktop: owner is S-1-5-21-1-2-3-1001') }
+    $pr = Get-ThrownText { Add-AVDTuneComfortShortcut -Machine $eP.Machine -M $eP.M -Root $tmp -Id logoff -ExpectedWarnings @($w1) -User a -SnapshotId s }
+    Test-Check 'N2 comfort shortcut: a problem on the folder (foreign owner, link, other writers) stops even with the confirmed warning, nothing is written' ($pr -like '*not safe*owner is*' -and $eP.M.Store.Shortcuts.Count -eq 0) $pr
+
+    # N3: Old and New of the preview go to the module, which compares them with the real values
+    $setN3 = { New-Env -Seed @{ Files = @{ "$rules\Pre.fxr" = (ConvertTo-AVDTuneRuleBytes $fileOnly); "$rules\Pre.fxa" = (ConvertTo-AVDTuneRuleBytes "1`t`r`n0x00000012`tS-1-1-0`t`tEveryone`t0`t0`r`n") } } }
+    $eA = & $setN3; $fxaA = $eA.M.Store.Files["$rules\Pre.fxa"]
+    $badNew = Get-ThrownText { Save-AVDTuneRuleSet -Machine $eA.Machine -M $eA.M -Root $tmp -Name 'Pre' -Entries $entries -Visibility Hidden -ExpectedChange @{ Old = $anyChange.Old; New = 'Hidden for everyone except: Somebody' } -User a -SnapshotId s }
+    $badOld = Get-ThrownText { Save-AVDTuneRuleSet -Machine $eA.Machine -M $eA.M -Root $tmp -Name 'Pre' -Entries $entries -Visibility Hidden -ExpectedChange @{ Old = 'Hidden for everyone'; New = 'Hidden for everyone' } -User a -SnapshotId s }
+    $none = Get-ThrownText { Save-AVDTuneRuleSet -Machine $eA.Machine -M $eA.M -Root $tmp -Name 'Pre' -Entries $entries -Visibility Hidden -User a -SnapshotId s }
+    Test-Check 'N3 preview values: a different Old or New than the real ones, and no expected change at all, are refused with both values in the text; nothing is written' ($badNew -like '*not what the preview showed*' -and $badOld -like '*not what the preview showed*' -and $none -like '*would change from*' -and (Test-AVDTuneMaskBytesEqual $eA.M.Store.Files["$rules\Pre.fxa"] $fxaA)) "$badNew | $badOld"
+    $goodA = Save-AVDTuneRuleSet -Machine $eA.Machine -M $eA.M -Root $tmp -Name 'Pre' -Entries $entries -Visibility Hidden -ExpectedChange @{ Old = $anyChange.Old; New = $anyChange.New } -User a -SnapshotId s
+    $again = Get-ThrownText { Save-AVDTuneRuleSet -Machine $eA.Machine -M $eA.M -Root $tmp -Name 'Pre' -Entries $entries -Visibility Hidden -ExpectedChange @{ Old = $anyChange.Old; New = $anyChange.New } -User a -SnapshotId s }
+    Test-Check 'N3 preview values: the exact Old and New write; an expected change that no longer exists (the rule set changed since the preview) is refused' (@($goodA.Results | Where-Object Status -eq 'Changed').Count -ge 1 -and (Get-AVDTuneRuleSetAssignment -M $eA.M -Name 'Pre').Effect -eq 'Hidden' -and $again -like '*not what the preview showed*') $again
+
+    # N4: the connection (password) is made after the write gate and the confirmation, not before
+    $iAssert = $saveFn.IndexOf('Assert-MaskWrite'); $iFirstConfirm = $saveFn.IndexOf('Confirm-Action'); $iLdapWrite = $saveFn.LastIndexOf('Get-MaskLdap'); $iLdapPreview = $saveFn.IndexOf('Get-MaskLdap'); $iReturn = $saveFn.IndexOf('return')
+    Test-Check 'N4 page: Get-MaskLdap in the write path comes after Assert-MaskWrite and the first confirmation; the only other call is in the preview branch (nothing written)' ($iLdapWrite -gt $iFirstConfirm -and $iFirstConfirm -gt $iAssert -and $iAssert -gt 0 -and $iLdapPreview -lt $iAssert -and $iLdapPreview -lt $iReturn -and ([regex]::Matches($saveFn, 'Get-MaskLdap')).Count -eq 2) "assert=$iAssert confirm=$iFirstConfirm write=$iLdapWrite preview=$iLdapPreview return=$iReturn"
+    Test-Check 'N3 page: the preview values (Old, New) are passed to the module as ExpectedChange after the second confirmation; the comfort shortcut passes the previewed warnings after a confirmation' ($saveFn.Contains('$p.ExpectedChange = @{ Old = ') -and $page.Contains('-ExpectedWarnings $expected') -and $page.Contains('$prev.DesktopWarnings') -and $page.IndexOf('$prev.DesktopWarnings') -lt $page.IndexOf('-ExpectedWarnings $expected')) $null
+
+    # N5: the read-back after the add fails: provisional record with the DN, the DN in the error
+    $eR = New-Env; $ldR = $eR.Ldap; $stR = $ldR.Store; $origR = $ldR.Search
+    $ldR.Search = { param($c, $b, $f, $s, $a) if ($stR.Added.Count -gt 0 -and $f -like '*sAMAccountName=AVD-App-Prov*') { throw 'fake: read timed out' }; & $origR $c $b $f $s $a }.GetNewClosure()
+    Get-ChildItem (Join-Path $tmp 'config') -Filter 'masking-undo*.json' -ErrorAction SilentlyContinue | Remove-Item -Force
+    $rP = Save-AVDTuneRuleSet -Machine $eR.Machine -M $eR.M -Root $tmp -Name 'Prov' -Entries $entries -Visibility HiddenExceptGroups -CreateGroup @{ Kind = 'Ad'; Name = 'AVD-App-Prov'; OuDn = $ouDn } -Ldap $ldR -Conn c -Directory $dirInfo -Confirmed -User a -SnapshotId s
+    $gStep = @($rP.Results | Where-Object Id -eq 'appmasking.group.create')[0]
+    $allRec = @(Get-ChildItem (Join-Path $tmp 'config') -Filter 'masking-undo*.json' | ForEach-Object { [IO.File]::ReadAllText($_.FullName) }) -join ' '
+    Test-Check 'N5 read-back fails: the step fails, the error names the DN, and the undo record (also an older version of it) holds the DN as a provisional entry without GUID and SID' ($gStep.Status -eq 'Failed' -and $gStep.Message -like "*CN=AVD-App-Prov,$ouDn*" -and $gStep.Message -like '*read timed out*' -and $allRec -like "*CN=AVD-App-Prov,$ouDn*" -and $allRec -like '*Provisional*') "$($gStep.Status) $($gStep.Message)"
+    $uP = Undo-AVDTuneMaskingChange -Machine $eR.Machine -M $eR.M -Root $tmp -Ldap $ldR -Conn c -User a -SnapshotId s
+    $uPg = @($uP.Results | Where-Object { $_.Id -like 'appmasking.undo.group*' })
+    Test-Check 'N5 read-back fails: undo never deletes a group without GUID and SID (the step fails with the DN), and the group still exists' ($uPg.Count -eq 1 -and $uPg[0].Status -eq 'Failed' -and $uPg[0].Message -like "*CN=AVD-App-Prov,$ouDn*" -and $stR.Deleted.Count -eq 0 -and $stR.Groups.Count -eq 1) (($uP.Results | ForEach-Object { "$($_.Id) $($_.Status) $($_.Message)" }) -join ' ; ')
+
+    # N6: undo without a hit says so
+    $e6 = New-Env
+    [void](Save-AVDTuneRuleSet -Machine $e6.Machine -M $e6.M -Root $tmp -Name 'Gone6' -Entries $entries -Visibility HiddenExceptGroups -CreateGroup @{ Kind = 'Ad'; Name = 'AVD-App-Gone6'; OuDn = $ouDn } -Ldap $e6.Ldap -Conn c -Directory $dirInfo -Confirmed -User a -SnapshotId s)
+    $e6.Ldap.Store.Groups.Clear()   # someone deleted the group already
+    $u6 = Undo-AVDTuneMaskingChange -Machine $e6.Machine -M $e6.M -Root $tmp -Ldap $e6.Ldap -Conn c -User a -SnapshotId s
+    $g6 = @($u6.Results | Where-Object { $_.Id -like 'appmasking.undo.group*' })[0]
+    $e6b = New-Env
+    [void](Save-AVDTuneRuleSet -Machine $e6b.Machine -M $e6b.M -Root $tmp -Name 'Gone6b' -Entries $entries -Visibility HiddenExceptGroups -CreateGroup @{ Kind = 'Local'; Name = 'AVDTune-App-Gone6b' } -Confirmed -User a -SnapshotId s)
+    $e6b.M.Store.LocalGroups.Remove('AVDTune-App-Gone6b')
+    $u6b = Undo-AVDTuneMaskingChange -Machine $e6b.Machine -M $e6b.M -Root $tmp -User a -SnapshotId s
+    $g6b = @($u6b.Results | Where-Object { $_.Id -like 'appmasking.undo.group*' })[0]
+    Test-Check 'N6 undo without a hit: the result of a group that is not there (AD and local) says "group not found, nothing deleted"; nothing was deleted' ($g6.Status -eq 'Unchanged' -and $g6.Message -eq 'group not found, nothing deleted' -and $e6.Ldap.Store.Deleted.Count -eq 0 -and $g6b.Status -eq 'Unchanged' -and $g6b.Message -eq 'group not found, nothing deleted' -and @($u6.Results | Where-Object { $_.Id -like 'appmasking.undo.file*' -and $_.Status -eq 'Changed' }).Count -ge 1) "$($g6.Status) $($g6.Message) | $($g6b.Status) $($g6b.Message)"
+
+    # N7: config\masking-backups keeps only the newest backups
+    $bk = Join-Path $tmp 'config\masking-backups'
+    if (Test-Path $bk) { Get-ChildItem $bk -Filter '*.json' | Remove-Item -Force }
+    1..25 | ForEach-Object { Save-AVDTuneMaskingBackup -Root $tmp -Path "$rules\n$_.fxr" -Bytes ([Text.Encoding]::ASCII.GetBytes("backup $_")) }
+    $left = @(Get-ChildItem $bk -Filter '*.json' | ForEach-Object Name)
+    Save-AVDTuneMaskingBackup -Root $tmp -Path "$rules\n26.fxr" -Bytes ([byte[]](1)) -Keep 3
+    $left3 = @(Get-ChildItem $bk -Filter '*.json').Count
+    Test-Check 'N7 backups: after 25 backups only the newest 20 are left (the oldest are removed, the newest stays); -Keep sets the limit' ($left.Count -eq 20 -and @($left | Where-Object { $_ -like '*-n25.fxr.json' }).Count -eq 1 -and @($left | Where-Object { $_ -like '*-n1.fxr.json' -or $_ -like '*-n5.fxr.json' }).Count -eq 0 -and $left3 -eq 3) "$($left.Count) $left3"
 }
 finally {
     Close-AVDTuneWriteGate
