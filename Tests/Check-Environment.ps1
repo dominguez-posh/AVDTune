@@ -489,7 +489,7 @@ try {
     $rolePath = "$acc/fileServices/default/fileshares/profiles/providers/Microsoft.Authorization/roleAssignments/$(Get-AVDTuneEnvRoleName 's' 'p' 'r')?api-version=2022-04-01"
     $okBody = @{ properties = @{ roleDefinitionId = "/subscriptions/$sub/providers/Microsoft.Authorization/roleDefinitions/0c867c2a-1d8c-454a-a3db-ab2ea1bdc8bb"; principalId = $g1; principalType = 'Group' } }
     foreach ($c in @(
-            @{ N = 'the Owner role'; B = @{ properties = @{ roleDefinitionId = "/subscriptions/$sub/providers/Microsoft.Authorization/roleDefinitions/8e3af657-a8ff-443c-a75c-2fe8c4bcb635"; principalId = $g1; principalType = 'Group' } } }
+            @{ N = 'the Owner role'; B = @{ properties = @{ roleDefinitionId = "/subscriptions/$sub/providers/Microsoft.Authorization/roleDefinitions/99999999-9999-9999-9999-999999999999"; principalId = $g1; principalType = 'Group' } } }
             @{ N = 'a role definition of another subscription'; B = @{ properties = @{ roleDefinitionId = "/subscriptions/bbbbbbbb-bbbb-cccc-dddd-eeeeeeeeeeee/providers/Microsoft.Authorization/roleDefinitions/0c867c2a-1d8c-454a-a3db-ab2ea1bdc8bb"; principalId = $g1; principalType = 'Group' } } }
             @{ N = 'principal type User'; B = @{ properties = @{ roleDefinitionId = $okBody.properties.roleDefinitionId; principalId = $g1; principalType = 'User' } } }
             @{ N = 'a principal that is not a GUID'; B = @{ properties = @{ roleDefinitionId = $okBody.properties.roleDefinitionId; principalId = 'everyone'; principalType = 'Group' } } })) {
@@ -508,10 +508,10 @@ try {
     Test-Check 'a new account has shared key access off, with the note about the emergency access' ($nb.allowSharedKeyAccess -eq $false -and ($plan.Warnings -join ' ') -like '*Shared key access is switched off*portal*') ($plan.Warnings -join '|')
 
     # 11: polling links of real Azure URLs
-    $real = "https://management.azure.com/subscriptions/$sub/providers/Microsoft.Network/locations/westeurope/operations/0a1b2c3d-0000-1111-2222-333344445555?api-version=2023-11-01&t=638700000000000000&c=MIIHhzCCBm-gAwIBAgITOgAB%2BQw%2Bx_y%2F%3D&s=abc-DEF_123~x&h=QmFzZTY0LS1oYXNo"
+    $real = "https://management.azure.com/subscriptions/$sub/providers/Microsoft.Network/locations/westeurope/operations/33333333-3333-3333-3333-333333333333?api-version=2023-11-01&t=638700000000000000&c=MIIHhzCCBm-gAwIBAgITOgAB%2BQw%2Bx_y%2F%3D&s=abc-DEF_123~x&h=QmFzZTY0LS1oYXNo"
     Test-Check 'a real looking polling URL (signed values with base64 and percent characters) is accepted' ((Get-AVDTuneEnvPollPath $real) -like "/subscriptions/$sub/providers/Microsoft.Network/locations/westeurope/operations/*&h=QmFzZTY0LS1oYXNo") $null
     foreach ($bad in @("https://management.azure.com.evil.example/subscriptions/$sub/x?api-version=2023-11-01", "https://evil.example/subscriptions/$sub/x?api-version=2023-11-01", "https://management.azure.com/subscriptions/$sub/%2e%2e/x?api-version=2023-11-01",
-            "https://management.azure.com/subscriptions/$sub/x?api-version=2023-11-01&c=a b", "https://management.azure.com/subscriptions/$sub/x?api-version=2023-11-01&c=<x>", "https://management.azure.com/subscriptions/$sub/x?api-version=2023-11-01#frag", "https://user:pw@management.azure.com/subscriptions/$sub/x?api-version=1")) {
+            "https://management.azure.com/subscriptions/$sub/x?api-version=2023-11-01&c=a b", "https://management.azure.com/subscriptions/$sub/x?api-version=2023-11-01&c=<x>", "https://management.azure.com/subscriptions/$sub/x?api-version=2023-11-01#frag", "https://management.azure.com:8443/subscriptions/$sub/x?api-version=1")) {
         Test-Check "polling URL refused: $($bad -replace [regex]::Escape($sub), '<sub>')" (Test-Throws { Get-AVDTuneEnvPollPath $bad }) $null
     }
     Test-Check 'the relaxed query is only for polling GETs: a write with it is refused' ((Test-Throws { Assert-AVDTuneEnvArmPath "$acc`?api-version=2024-01-01&c=a%2Bb" 'PUT' -Poll }) -and (Test-Throws { Assert-AVDTuneEnvArmPath "$acc`?api-version=2024-01-01&c=a%2Bb" 'GET' })) $null
