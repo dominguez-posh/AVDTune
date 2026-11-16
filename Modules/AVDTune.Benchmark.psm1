@@ -1341,6 +1341,7 @@ function New-AVDTuneBenchmarkReport {
         }
         $status = [string]$m.status; if ($m.status -ne 'ok' -and (Get-AVDTuneProp $m 'reason')) { $status += ': ' + [string]$m.reason }
         if ((Get-AVDTuneProp $m 'unstable')) { $status += ' (instabil)' }
+        if ((Get-AVDTuneProp $m 'outlier')) { $status += ' (Ausreisser: weit ausserhalb des Referenzbereichs)' }
         if ($m.status -eq 'ok' -and (Get-AVDTuneProp $m 'calibrated') -eq $false) { $status += ' (nicht kalibriert)' }
         $med = if ($null -ne (Get-AVDTuneProp $m 'median')) { '{0:0.###}' -f [double]$m.median } else { '' }
         $pmed = if ($pm) { '{0:0.###}' -f [double]$pm.median } else { '' }
@@ -1452,9 +1453,11 @@ function ConvertTo-AVDTuneBenchAggregate {
             $entry.calibrated = -not ($ref -and (Get-AVDTuneProp $ref 'calibrated') -eq $false)
             if ($ref -and $med -gt 0) { $entry.reference = [double]$ref.value; $entry.index = Get-AVDTuneBenchRound (Get-AVDTuneBenchIndex $med ([double]$ref.value) ([string]$first.better)) }
             else { $entry.reference = $null; $entry.index = $null }
+            # plausibility band: a value more than 5 times above or below the reference is marked as an outlier (a measurement that did not run what it says; it still counts, but the report shows it)
+            $entry.outlier = [bool]($ref -and $med -gt 0 -and [double]$ref.value -gt 0 -and ($med / [double]$ref.value -gt 5 -or $med / [double]$ref.value -lt 0.2))
         }
         else {
-            $entry.median = $null; $entry.cv = $null; $entry.unstable = $false; $entry.reference = $null; $entry.index = $null
+            $entry.median = $null; $entry.cv = $null; $entry.unstable = $false; $entry.reference = $null; $entry.index = $null; $entry.outlier = $false
             $entry.status = $(if ($status) { $status } else { 'failed' }); $entry.reason = $reason
         }
         $entry.disturbedBy = @()

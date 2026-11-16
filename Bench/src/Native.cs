@@ -14,15 +14,24 @@ public sealed class JobGroup : IDisposable
     [StructLayout(LayoutKind.Sequential)] private struct ExtendedLimit { public BasicLimit Basic; public IoCounters Io; public UIntPtr ProcessMemory, JobMemory, PeakProcess, PeakJob; }
     [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)] private static extern IntPtr CreateJobObjectW(IntPtr attributes, string? name);
     [DllImport("kernel32.dll", SetLastError = true)] private static extern bool SetInformationJobObject(IntPtr job, int infoClass, ref ExtendedLimit info, int length);
+    [DllImport("kernel32.dll", SetLastError = true, EntryPoint = "SetInformationJobObject")] private static extern bool SetJobUiLimits(IntPtr job, int infoClass, ref uint info, int length);
     [DllImport("kernel32.dll", SetLastError = true)] private static extern bool AssignProcessToJobObject(IntPtr job, IntPtr process);
     [DllImport("kernel32.dll", SetLastError = true)] private static extern bool TerminateJobObject(IntPtr job, uint exitCode);
     [DllImport("kernel32.dll", SetLastError = true)] private static extern bool QueryInformationJobObject(IntPtr job, int infoClass, IntPtr info, int length, out int returned);
     [DllImport("kernel32.dll")] private static extern bool CloseHandle(IntPtr handle);
 
     private IntPtr _job;
+    private uint _uiLimits;
+    /// <summary>The UI limits that were set on this job.</summary>
+    public uint UiLimits => _uiLimits;
 
     /// <param name="jobMemoryBytes">Hard limit of the committed memory of the whole job (JOB_OBJECT_LIMIT_JOB_MEMORY); 0 = none. A process that would go over it fails its allocation instead of eating the machine.</param>
-    public JobGroup(long jobMemoryBytes = 0)
+    /// <summary>UI restrictions that Office, Edge and Explorer survive (JOB_OBJECT_UILIMIT_*): no switching of the desktop (0x40), no change of the display settings (0x10), no ExitWindows (0x80), no change of
+    /// system parameters (0x8). NOT set, because those programs use them: HANDLES (0x1, windows outside the job such as the shell), GLOBALATOMS (0x20, Office), READ/WRITECLIPBOARD (0x2/0x4, copy and paste).
+    /// Not verified on a real Office yet (issue #17); when a program does not start with them the measure fails with the reason, the limits are never silently dropped.</summary>
+    public const uint ApplicationUiLimits = 0x40 | 0x10 | 0x80 | 0x8;
+
+    public JobGroup(long jobMemoryBytes = 0, uint uiLimits = 0)
     {
         _job = CreateJobObjectW(IntPtr.Zero, null);
         if (_job == IntPtr.Zero) throw new Win32Exception();
@@ -30,6 +39,8 @@ public sealed class JobGroup : IDisposable
         l.Basic.LimitFlags = 0x2000;   // JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
         if (jobMemoryBytes > 0) { l.Basic.LimitFlags |= 0x200; l.JobMemory = (UIntPtr)(ulong)jobMemoryBytes; }   // JOB_OBJECT_LIMIT_JOB_MEMORY
         if (!SetInformationJobObject(_job, 9, ref l, Marshal.SizeOf<ExtendedLimit>())) { int e = Marshal.GetLastWin32Error(); CloseHandle(_job); _job = IntPtr.Zero; throw new Win32Exception(e); }
+        if (uiLimits != 0 && !SetJobUiLimits(_job, 4, ref uiLimits, 4)) { int e = Marshal.GetLastWin32Error(); CloseHandle(_job); _job = IntPtr.Zero; throw new Win32Exception(e, "the UI limits of the job could not be set"); }   // JobObjectBasicUIRestrictions
+        _uiLimits = uiLimits;
     }
 
     /// <summary>Puts a process into the job. When that fails the process is ended: nothing runs outside the job.</summary>

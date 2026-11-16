@@ -18,6 +18,7 @@ Commands:
   share   FSLogix share: open/close, round trip (--host), metadata in --dir (the test folder on the share)
   gpu     GPU: 3D scene 1080p/2160p, DirectCompute; gpuinfo lists the adapters
   capacity  capacity simulation (about 30 min): probe plus load workers per level; --dir, --max-users, --app powershell=path
+  selftest-launcher  proves the restricted launcher on this machine; run ELEVATED (exit 0 pass, 1 fail, 3 not run); optional --dir
   load    one load worker of the capacity simulation (started by capacity only)
   info    system facts (CPU model, cores, RAM)
   all     cpu + mem + disp
@@ -35,6 +36,7 @@ Result: one JSON document on stdout, progress on stderr. Exit code 0 when it ran
         Options o;
         try { o = Options.Parse(args); }
         catch (Exception e) { Console.Error.WriteLine(e.Message); Console.Error.WriteLine(Usage); return 2; }
+        if (o.Command == "selftest-launcher") { Console.OutputEncoding = new UTF8Encoding(false); return LauncherSelfTest.Run(o); }
         if (o.Command is "" or "help") { Console.Out.WriteLine(Usage); return o.Command == "help" ? 0 : 2; }
         Log.Quiet = o.Quiet;
         Console.OutputEncoding = new UTF8Encoding(false);

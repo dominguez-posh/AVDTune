@@ -125,11 +125,16 @@ internal static class Round2
             Check("server: /ready/<token> is noticed", server.WaitReady(2000));
             server.AddWrapper(3);
             string wrap = G("/w/" + server.Token);
-            Check("wrapper: same origin page with Speedometer in an iframe, reading #result-number and reporting to /result/<token>", wrap.StartsWith("HTTP/1.1 200") && wrap.Contains("<iframe") && wrap.Contains("src=\"/index.html?startAutomatically&amp;iterationCount=3\"") && wrap.Contains("result-number") && wrap.Contains("/result/" + server.Token) && !wrap.Contains("http://") && !wrap.Contains("devtools", StringComparison.OrdinalIgnoreCase));
-            Check("wrapper: a wrong token gets 404, no page", G("/w/" + new string('a', 32)).StartsWith("HTTP/1.1 404") && !G("/w/x").Contains("<iframe"));
+            string secret = System.Text.RegularExpressions.Regex.Match(wrap, "&s=([0-9a-f]{32})").Groups[1].Value;
+            Check("wrapper: same origin page with Speedometer in an iframe, reading #result-number and reporting to /result/<token> with a second secret", wrap.StartsWith("HTTP/1.1 200") && wrap.Contains("<iframe") && wrap.Contains("src=\"/index.html?startAutomatically&amp;iterationCount=3\"") && wrap.Contains("result-number") && wrap.Contains("/result/" + server.Token) && secret.Length == 32 && !wrap.Contains("http://") && !wrap.Contains("devtools", StringComparison.OrdinalIgnoreCase));
+            Check("wrapper: the secret is not the token and not in the Edge command line (WrapperUrl), only in the page", secret != server.Token && !server.WrapperUrl.Contains(secret) && !server.Origin.Contains(secret));
+            Check("wrapper: Referrer-Policy no-referrer, CSP default-src 'self' and frame-ancestors 'self', a nonce for the one script, no unsafe-eval", wrap.Contains("Referrer-Policy: no-referrer") && wrap.Contains("Content-Security-Policy: default-src 'self'") && wrap.Contains("frame-ancestors 'self'") && wrap.Contains("script-src 'nonce-") && !wrap.Contains("unsafe-eval") && wrap.Contains("<script nonce=\"") && G("/start.html").Contains("Referrer-Policy: no-referrer"));
+            Check("wrapper: given out once (the secret is not handed to a second request), a wrong token gets 404", G("/w/" + server.Token).StartsWith("HTTP/1.1 404") && G("/w/" + new string('a', 32)).StartsWith("HTTP/1.1 404") && !G("/w/x").Contains("<iframe"));
             Check("result: nothing is reported before the page does", server.Result == null);
-            Check("result: a wrong token or a bad value is refused and changes nothing", G("/result/" + new string('b', 32) + "?v=99").StartsWith("HTTP/1.1 404") && G("/result/" + server.Token + "?v=abc").StartsWith("HTTP/1.1 400") && G("/result/" + server.Token + "?v=1e9").StartsWith("HTTP/1.1 400") && G("/result/" + server.Token + "?v=-4").StartsWith("HTTP/1.1 400") && G("/result/" + server.Token).StartsWith("HTTP/1.1 400") && G("/result/" + server.Token + "?v=0").StartsWith("HTTP/1.1 400") && server.Result == null);
-            Check("result: the first valid report is kept, a second one does not replace it", G("/result/" + server.Token + "?v=27.5").StartsWith("HTTP/1.1 200") && server.Result == "27.5" && G("/result/" + server.Token + "?v=99").StartsWith("HTTP/1.1 200") && server.Result == "27.5");
+            Check("result: without the secret, with a wrong secret, a wrong token or a bad value it is refused and changes nothing", G("/result/" + server.Token + "?v=27.5").StartsWith("HTTP/1.1 400") && G("/result/" + server.Token + "?v=27.5&s=" + new string('0', 32)).StartsWith("HTTP/1.1 400") && G("/result/" + new string('b', 32) + "?v=99&s=" + secret).StartsWith("HTTP/1.1 404") && G("/result/" + server.Token + "?v=abc&s=" + secret).StartsWith("HTTP/1.1 400") && G("/result/" + server.Token + "?v=1e9&s=" + secret).StartsWith("HTTP/1.1 400") && G("/result/" + server.Token + "?v=-4&s=" + secret).StartsWith("HTTP/1.1 400") && G("/result/" + server.Token + "?v=0&s=" + secret).StartsWith("HTTP/1.1 400") && server.Result == null);
+            Check("result: the first valid report with the secret is kept, a second one does not replace it", G("/result/" + server.Token + "?v=27.5&s=" + secret).StartsWith("HTTP/1.1 200") && server.Result == "27.5" && G("/result/" + server.Token + "?v=99&s=" + secret).StartsWith("HTTP/1.1 200") && server.Result == "27.5");
+            Check("result: ParseResultQuery needs the secret of the run", SiteServer.ParseResultQuery("v=1.5&s=" + secret, secret) == "1.5" && SiteServer.ParseResultQuery("v=1.5&s=" + secret, new string('1', 32)) == null && SiteServer.ParseResultQuery("v=1.5", secret) == null);
+            Check("speedometer: a score outside the plausible band (0.5 to 500 runs/min) is refused", Speedometer.Plausible(27.5) && Speedometer.Plausible(0.5) && !Speedometer.Plausible(0.01) && !Speedometer.Plausible(5000) && !Speedometer.Plausible(double.NaN));
             Check("request: the query is returned (and the fragment dropped)", SiteServer.ParseRequestFull("GET /result/x?v=1.5#f HTTP/1.1\r\nHost: 127.0.0.1:5000", 5000) is ("/result/x", "v=1.5", 200));
             string wrong = Raw(server.Port, "GET /index.html HTTP/1.1\r\nHost: attacker.example\r\n\r\n");
             Check("server: a wrong Host gets 421, no content", wrong.StartsWith("HTTP/1.1 421") && !wrong.Contains("idx"));
@@ -142,7 +147,7 @@ internal static class Round2
                 var held = new List<System.Net.Sockets.TcpClient>();
                 for (int i2 = 0; i2 < 10; i2++) { var c = new System.Net.Sockets.TcpClient("127.0.0.1", slow.Port); held.Add(c); }
                 Thread.Sleep(300);
-                Check("server: more connections than the limit are closed at once (counted as refused)", slow.RefusedCount >= 5, slow.RefusedCount.ToString());
+                Check("server: more connections than the limit are closed at once (counted as refused, and as busy so the measure can say 'server busy')", slow.RefusedCount >= 5 && slow.BusyCount >= 5 && new SiteServer(null).BusyCount == 0, slow.RefusedCount.ToString());
                 double t0 = Timing.Now(); bool closed = false;
                 try { var ns = held[0].GetStream(); held[0].ReceiveTimeout = 4000; closed = ns.Read(new byte[16], 0, 16) == 0; } catch (IOException) { closed = true; }
                 Check("server: a client that sends nothing is dropped after the read time limit (cancellation token)", closed && Timing.Now() - t0 < 3.0, (Timing.Now() - t0).ToString("0.0"));
@@ -215,13 +220,35 @@ internal static class Round2
         Check("edge: InPrivate, throw-away profile, no first run, no sync, no extensions, no debugging port, the page last", edge.Contains("--inprivate") && edge.Contains(@"--user-data-dir=C:\p") && edge.Contains("--no-first-run") && edge.Contains("--disable-sync") && edge.Contains("--disable-extensions") && !edge.Any(a => a.Contains("remote-debugging")) && edge[^1].StartsWith("http://127.0.0.1:"));
     }
 
-    [System.Runtime.InteropServices.DllImport("kernel32.dll")] private static extern bool CloseHandle(IntPtr h);
+    public static int NotRun;
+    private static bool Wrap(Action a) { try { a(); return true; } catch { return false; } }
+    private static string SrcText()
+    {
+        for (var d = new DirectoryInfo(AppContext.BaseDirectory); d != null; d = d.Parent) if (File.Exists(Path.Combine(d.FullName, "src", "Speedometer.cs"))) return string.Concat(Directory.GetFiles(Path.Combine(d.FullName, "src"), "*.cs").Select(File.ReadAllText));
+        return "";
+    }
+    private static bool MakeJunction(string link, string target)
+    {
+        try
+        {
+            var psi = new System.Diagnostics.ProcessStartInfo(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "cmd.exe")) { UseShellExecute = false, CreateNoWindow = true };
+            psi.ArgumentList.Add("/c"); psi.ArgumentList.Add("mklink"); psi.ArgumentList.Add("/J"); psi.ArgumentList.Add(link); psi.ArgumentList.Add(target);
+            using var p = System.Diagnostics.Process.Start(psi)!; p.WaitForExit(10000);
+            return Directory.Exists(link) && (new DirectoryInfo(link).Attributes & FileAttributes.ReparsePoint) != 0;
+        }
+        catch { return false; }
+    }
 
     private static void LauncherChecks()
     {
         Check("launcher: arguments are quoted the way CommandLineToArgvW reads them back", RestrictedLauncher.QuoteArg("abc") == "abc" && RestrictedLauncher.QuoteArg("a b") == "\"a b\"" && RestrictedLauncher.QuoteArg("") == "\"\"" && RestrictedLauncher.QuoteArg("a\"b") == "\"a\\\"b\"" && RestrictedLauncher.QuoteArg(@"C:\x y\") == "\"C:\\x y\\\\\"" && RestrictedLauncher.BuildArguments(new[] { "/q", "a b" }) == "/q \"a b\"");
         Check("launcher: the environment block is sorted, NUL-ended, NUL at the end", RestrictedLauncher.EnvironmentBlock(new Dictionary<string, string> { ["b"] = "2", ["A"] = "1" }) == "A=1\0b=2\0\0");
         Check("launcher: only a token that is not elevated and Medium or lower is accepted", RestrictedLauncher.IntegrityAcceptable(0x2000, false) && RestrictedLauncher.IntegrityAcceptable(0x1000, false) && !RestrictedLauncher.IntegrityAcceptable(0x3000, false) && !RestrictedLauncher.IntegrityAcceptable(0x2000, true) && !RestrictedLauncher.IntegrityAcceptable(0x4000, true));
+        Check("token facts: the Administrators group must be deny-only and not enabled; absent is fine", RestrictedLauncher.AdminGroupProblem(new[] { ("S-1-5-32-544", 0x10u) }) == null && RestrictedLauncher.AdminGroupProblem(new[] { ("S-1-5-32-545", 0x7u) }) == null && RestrictedLauncher.AdminGroupProblem(new[] { ("S-1-5-32-544", 0x7u) }) != null && RestrictedLauncher.AdminGroupProblem(new[] { ("S-1-5-32-544", 0x14u) }) != null && RestrictedLauncher.AdminGroupProblem(new[] { ("S-1-5-32-544", 0x0u) }) != null);
+        Check("token facts: only standard-user privileges are accepted", RestrictedLauncher.ExtraPrivileges(new[] { "SeChangeNotifyPrivilege", "SeShutdownPrivilege" }).Count == 0 && RestrictedLauncher.ExtraPrivileges(new[] { "SeChangeNotifyPrivilege", "SeDebugPrivilege", "SeBackupPrivilege" }).SequenceEqual(new[] { "SeDebugPrivilege", "SeBackupPrivilege" }) && RestrictedLauncher.ExtraPrivileges(new[] { "SeIncreaseQuotaPrivilege" }).Count == 1);
+        Check("selftest: a process that is not elevated gets NOT RUN (null), which is never a pass; error 1314 is a FAIL in the self test source", (RestrictedLauncher.IsElevated() || LauncherSelfTest.Execute() == null) && SrcText().Contains("e.NativeErrorCode == 1314 ?") && !SrcText().Contains("SKIP launcher"));
+        Check("launcher (source): SeIncreaseQuotaPrivilege is switched off again after the start, UI limits are set on the application jobs", SrcText().Contains("EnablePrivilege(\"SeIncreaseQuotaPrivilege\", false)") && SrcText().Contains("JobGroup.ApplicationUiLimits") && JobGroup.ApplicationUiLimits == (0x40u | 0x10u | 0x80u | 0x8u));
+        using (var ui = new JobGroup(0, JobGroup.ApplicationUiLimits)) Check("job: the UI limits (no desktop switch, display settings, ExitWindows, system parameters) are set on the job; the clipboard, atoms and handles are not limited because Office and Edge use them", ui.UiLimits == JobGroup.ApplicationUiLimits && (ui.UiLimits & 0x1) == 0 && (ui.UiLimits & 0x20) == 0 && (ui.UiLimits & 0x6) == 0);
         var env = Apps.ChildEnvironment(@"C:\tmp1");
         Check("apps: the child environment is ours with TEMP and TMP in the program's own folder", env["TEMP"] == @"C:\tmp1" && env["TMP"] == @"C:\tmp1" && env.ContainsKey("SystemRoot") == (Environment.GetEnvironmentVariable("SystemRoot") != null));
 
@@ -239,29 +266,39 @@ internal static class Round2
             Check("user folder: the user gets Modify, not full control (no change of permissions)", rules.Where(r => r.IdentityReference.Value == me && me != "S-1-5-18" && me != "S-1-5-32-544").All(r => (r.FileSystemRights & System.Security.AccessControl.FileSystemRights.ChangePermissions) == 0 && (r.FileSystemRights & System.Security.AccessControl.FileSystemRights.Write) != 0));
             Check("user folder: an existing folder is refused (it could have been prepared by someone else)", Throws(() => Apps.CreateUserFolder(made)));
 
-            // live: a program started with the reduced token (the Safer API gives a standard-user token from a normal or an elevated process)
-            try
+            // work layout (N2): the tool's files in data\\ are read-only for the user of the programs, tmp\\ and prof\\ may be written, nobody else; one atomic call each
+            string work = Path.Combine(dir, "work");
+            Apps.CreateWorkLayout(work);
+            System.Security.AccessControl.FileSystemRights Rights(string p) { var rs = new DirectoryInfo(p).GetAccessControl().GetAccessRules(true, false, typeof(System.Security.Principal.SecurityIdentifier)).Cast<System.Security.AccessControl.FileSystemAccessRule>().Where(r => r.IdentityReference.Value == me && me != "S-1-5-18" && me != "S-1-5-32-544").ToList(); return rs.Count == 0 ? 0 : rs[0].FileSystemRights; }
+            bool plainUser = me != "S-1-5-18" && me != "S-1-5-32-544";
+            Check("work layout: data\\ and the root are read and execute only for the user, tmp\\ and prof\\ are modify", !plainUser || ((Rights(Apps.DataDir(work)) & System.Security.AccessControl.FileSystemRights.WriteData) == 0 && (Rights(work) & System.Security.AccessControl.FileSystemRights.WriteData) == 0 && (Rights(Apps.DataDir(work)) & System.Security.AccessControl.FileSystemRights.ReadAndExecute) == System.Security.AccessControl.FileSystemRights.ReadAndExecute && (Rights(Apps.TmpDir(work)) & System.Security.AccessControl.FileSystemRights.Write) != 0 && (Rights(Apps.ProfileDir(work)) & System.Security.AccessControl.FileSystemRights.Write) != 0), $"{Rights(work)} {Rights(Apps.DataDir(work))}");
+            Check("work layout: each folder is protected (no inheritance), none has a rule for anyone but Administrators, SYSTEM and the user", new[] { work, Apps.DataDir(work), Apps.TmpDir(work), Apps.ProfileDir(work) }.All(p => { var s = new DirectoryInfo(p).GetAccessControl(); return s.AreAccessRulesProtected && s.GetAccessRules(true, false, typeof(System.Security.Principal.SecurityIdentifier)).Cast<System.Security.AccessControl.FileSystemAccessRule>().All(r => want.Contains(r.IdentityReference.Value)); }));
+            Check("work layout: a second creation of any of them fails (atomic, no check-then-create)", Throws(() => Apps.CreateWorkLayout(work)) && Throws(() => Apps.CreateUserFolder(Apps.DataDir(work))) && Throws(() => Apps.CreateUserFolder(Apps.TmpDir(work))));
+            string occupied = Path.Combine(dir, "occupied"); File.WriteAllText(occupied, "x");
+            Check("work layout: a file of that name is also refused", Throws(() => Apps.CreateUserFolder(occupied)));
+
+            // links (N2, N3): found after a run, and removed without following them
+            string target = Path.Combine(dir, "target"); Directory.CreateDirectory(target); File.WriteAllText(Path.Combine(target, "keep.txt"), "keep");
+            Check("links: a clean work folder has none", FolderTools.FindLink(work) == null);
+            string junction = Path.Combine(Apps.TmpDir(work), "j");
+            bool madeJunction = MakeJunction(junction, target);
+            if (madeJunction)
             {
-                IntPtr token = RestrictedLauncher.MakeToken();
-                var (rid, elevated) = RestrictedLauncher.Query(token);
-                CloseHandle(token);
-                Check("launcher: the token made from this process is Medium or lower and not elevated", RestrictedLauncher.IntegrityAcceptable(rid, elevated), $"0x{rid:X} {elevated}");
-                string cmd = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "cmd.exe");
-                string tmp = Path.Combine(made, "t"); Apps.CreateUserFolder(tmp);
-                using var job = new JobGroup();
-                string mark = Path.Combine(tmp, "mark.txt");
-                using var p = RestrictedLauncher.Start(cmd, "/c echo ok > \"" + mark + "\"", made, Apps.ChildEnvironment(tmp), job);
-                Check("launcher: a program is started with the reduced token inside the job and writes in its own folder", p.WaitForExit(15000) && File.Exists(mark));
-                using var job2 = new JobGroup();
-                using var q = RestrictedLauncher.Start(cmd, "/c ping -n 30 127.0.0.1 >nul", made, Apps.ChildEnvironment(tmp), job2);
-                Thread.Sleep(300);
-                var (qr, qe) = RestrictedLauncher.QueryProcess(q.Handle);
-                Check("launcher: the running program really has a Medium or lower, not elevated token, and is in the job", RestrictedLauncher.IntegrityAcceptable(qr, qe) && job2.Pids().Contains(q.Id), $"0x{qr:X} {qe}");
-                job2.Terminate();
-                Check("launcher: ending the job ends the program", q.WaitForExit(5000));
+                Check("links: a junction made inside the work folder is found after the run", FolderTools.FindLink(work) == junction);
+                File.WriteAllText(Path.Combine(Apps.ProfileDir(work), "f.txt"), "x");
+                var ro = Path.Combine(Apps.TmpDir(work), "ro.txt"); File.WriteAllText(ro, "x"); File.SetAttributes(ro, FileAttributes.ReadOnly);
+                Apps.RemoveFolder(work);
+                Check("links: removing the work folder deletes the link itself, never the content of its target (no follow)", !Directory.Exists(work) && File.Exists(Path.Combine(target, "keep.txt")) && File.ReadAllText(Path.Combine(target, "keep.txt")) == "keep");
+                Check("links: a link as the folder to remove is deleted itself, the target stays", MakeJunction(Path.Combine(dir, "j2"), target) && Wrap(() => Apps.RemoveFolder(Path.Combine(dir, "j2"))) && !Directory.Exists(Path.Combine(dir, "j2")) && File.Exists(Path.Combine(target, "keep.txt")));
             }
-            catch (System.ComponentModel.Win32Exception e) when (e.NativeErrorCode == 1314)
-            { Console.WriteLine("SKIP launcher live checks: this account lacks a privilege for CreateProcessAsUser (" + e.Message + ")"); }
+            else Console.WriteLine("SKIP links: a junction could not be made here");
+            FolderTools.RemoveNoFollow(Path.Combine(dir, "nothing-here"));
+            Check("links: removing a path that is not there is fine", true);
+
+            // live launcher checks only count when this process is elevated (the case the restriction protects against); otherwise: NOT RUN, never a pass (N1)
+            var live = LauncherSelfTest.Execute(dir);
+            if (live == null) { NotRun++; Console.WriteLine("NOT RUN launcher live checks (not elevated): run  AVDTune.Bench.exe selftest-launcher  elevated on the test VM (issue #17); this is not a pass"); }
+            else foreach (var x in live) Check("launcher (elevated): " + x.Name, x.Ok, x.Detail);
         }
         finally { try { Directory.Delete(dir, true); } catch { } }
 

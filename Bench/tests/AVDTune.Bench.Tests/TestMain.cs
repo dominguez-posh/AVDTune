@@ -26,7 +26,7 @@ public static class TestMain
         Files();
         OptionsAndJson();
         _failed += Round2.Run();
-        Console.WriteLine(_failed == 0 ? "ALL OK" : $"{_failed} FAILED");
+        Console.WriteLine(_failed == 0 ? "ALL OK" + (Round2.NotRun > 0 ? $" ({Round2.NotRun} group of live launcher checks NOT RUN: not elevated)" : "") : $"{_failed} FAILED");
         return _failed == 0 ? 0 : 1;
     }
 

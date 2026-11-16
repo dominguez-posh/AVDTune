@@ -39,25 +39,43 @@ public static class Apps
         return null;
     }
 
-    /// <summary>Folder security for the work folder of the started programs: protected (no inheritance), Administrators and SYSTEM full control, and the user of this process (the token of the programs
-    /// is a reduced version of it) Modify. Nobody else. Only this folder and what is made below it.</summary>
-    public static DirectorySecurity UserFolderSecurity(SecurityIdentifier user)
+    /// <summary>Folder security for the folders of the started programs: protected (no inheritance), Administrators and SYSTEM full control, and the user of this process (the token of the programs is a
+    /// reduced version of it) with exactly <paramref name="userRights"/>. Nobody else.</summary>
+    public static DirectorySecurity UserFolderSecurity(SecurityIdentifier user, FileSystemRights userRights = FileSystemRights.Modify)
     {
         var s = new DirectorySecurity();
         s.SetAccessRuleProtection(true, false);
-        foreach (var (sid, rights) in new[] { (new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null), FileSystemRights.FullControl), (new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null), FileSystemRights.FullControl), (user, FileSystemRights.Modify) })
+        foreach (var (sid, rights) in new[] { (new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null), FileSystemRights.FullControl), (new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null), FileSystemRights.FullControl), (user, userRights) })
             s.AddAccessRule(new FileSystemAccessRule(sid, rights, InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit, PropagationFlags.None, AccessControlType.Allow));
         return s;
     }
 
-    /// <summary>Makes the folder in one step with <see cref="UserFolderSecurity"/> (an existing folder is an error: it could have been prepared by someone else).</summary>
-    public static string CreateUserFolder(string path)
+    /// <summary>Makes the folder in ONE atomic call with the protected ACL (<see cref="FolderTools.CreateExclusive"/>): an existing folder, file or link is an error, there is no check-then-create gap.</summary>
+    public static string CreateUserFolder(string path, FileSystemRights userRights = FileSystemRights.Modify)
     {
-        var d = new DirectoryInfo(path);
-        if (d.Exists) throw new IOException("the folder exists already: " + path);
         var user = WindowsIdentity.GetCurrent().User ?? throw new InvalidOperationException("the user of this process is unknown");
-        d.Create(UserFolderSecurity(user));
+        FolderTools.CreateExclusive(path, UserFolderSecurity(user, userRights));
         return path;
+    }
+
+    // Layout of the work folder of the programs: the files the tool writes (documents, the 500 files) are in data\ where the user of the programs may only read and execute; the user may write only
+    // in tmp\ (TEMP, working directory) and prof\ (Edge profiles).
+    public static string DataDir(string work) => Path.Combine(work, "data");
+    public static string TmpDir(string work) => Path.Combine(work, "tmp");
+    public static string ProfileDir(string work) => Path.Combine(work, "prof");
+
+    /// <summary>Makes the work folder: the root and data\ read and execute, tmp\ and prof\ modify for the user of the programs.</summary>
+    public static void CreateWorkLayout(string work)
+    {
+        // every folder is made atomically; the root and data\ are made writable first and tightened to read and execute right after, still before any program has been started (a process that runs
+        // without the Administrators group - a non-elevated check run - could not make the sub folders in a root that it may only read)
+        var user = WindowsIdentity.GetCurrent().User ?? throw new InvalidOperationException("the user of this process is unknown");
+        CreateUserFolder(work, FileSystemRights.Modify);
+        CreateUserFolder(DataDir(work), FileSystemRights.Modify);
+        CreateUserFolder(TmpDir(work), FileSystemRights.Modify);
+        CreateUserFolder(ProfileDir(work), FileSystemRights.Modify);
+        new DirectoryInfo(DataDir(work)).SetAccessControl(UserFolderSecurity(user, FileSystemRights.ReadAndExecute));
+        new DirectoryInfo(work).SetAccessControl(UserFolderSecurity(user, FileSystemRights.ReadAndExecute));   // tmp\ and prof\ are protected and keep their own rules
     }
 
     /// <summary>Environment of a started program: the variables of this process (the allowlist AVDTune made) with TEMP and TMP in the program's own folder, which the reduced token can write.</summary>
@@ -102,11 +120,7 @@ public static class Apps
         var list = new List<Measure>();
         if (string.IsNullOrWhiteSpace(o.Dir) || !Directory.Exists(o.Dir)) return new() { Measure.Not("host.app.word.warm", "ms", false, "failed", "--dir (an existing work folder) is needed") };
         var work = Path.Combine(o.Dir, "apps-" + Guid.NewGuid().ToString("N").Substring(0, 12));
-        try
-        {
-            CreateUserFolder(work);
-            CreateUserFolder(Path.Combine(work, "tmp"));
-        }
+        try { CreateWorkLayout(work); }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException or InvalidOperationException) { RemoveFolder(work); return new() { Measure.Not("host.app.word.warm", "ms", false, "failed", "the work folder of the programs could not be made: " + e.Message) }; }
         try
         {
@@ -129,9 +143,9 @@ public static class Apps
                 string? docx = null, xlsx = null, folder = null;
                 try
                 {
-                    if (key == "word") { docx = Path.Combine(work, "bench.docx"); TestDocs.WriteDocx(docx); }
-                    if (key == "excel") { xlsx = Path.Combine(work, "bench.xlsx"); TestDocs.WriteXlsx(xlsx); }
-                    if (key == "explorer") folder = TestDocs.WriteFolder500(work, "AVDTuneBench" + Guid.NewGuid().ToString("N").Substring(0, 8));
+                    if (key == "word") { docx = Path.Combine(DataDir(work), "bench.docx"); TestDocs.WriteDocx(docx); }
+                    if (key == "excel") { xlsx = Path.Combine(DataDir(work), "bench.xlsx"); TestDocs.WriteXlsx(xlsx); }
+                    if (key == "explorer") folder = TestDocs.WriteFolder500(DataDir(work), "AVDTuneBench" + Guid.NewGuid().ToString("N").Substring(0, 8));
                 }
                 catch (Exception e) when (e is IOException or UnauthorizedAccessException)
                 { list.Add(Measure.Not($"host.app.{key}.cold", "ms", false, "failed", e.Message)); list.Add(Measure.Not($"host.app.{key}.warm", "ms", false, "failed", e.Message)); continue; }
@@ -167,7 +181,10 @@ public static class Apps
         Log.Progress($"apps: {key} {phase}");
         try
         {
+            LastLink = null;
             var r = key == "explorer" ? StartExplorer(exe, folder!, work) : StartInJob(key, exe, work, docx, xlsx);
+            LastLink ??= FolderTools.FindLink(work);
+            if (LastLink != null) return Measure.Not(id, "ms", false, "failed", "a link was found in the work folder after the run (not trusted): " + LastLink);
             if (r.Ms == null) return Measure.Not(id, "ms", false, "failed", r.Reason);
             var m = Measure.Ok(id, "ms", false, r.Ms.Value);
             if (key == "explorer") m.Detail["viaRunningShell"] = r.ViaShell;
@@ -177,9 +194,12 @@ public static class Apps
         { return Measure.Not(id, "ms", false, "failed", e.Message); }
     }
 
+    /// <summary>The first link found in the work folder right after a program has ended (before the profile is removed); the measure then fails.</summary>
+    private static string? LastLink;
+
     private static (double? Ms, string Reason, bool ViaShell) StartInJob(string key, string exe, string work, string? docx, string? xlsx)
     {
-        using var job = new JobGroup();
+        using var job = new JobGroup(0, JobGroup.ApplicationUiLimits);
         string? profile = null;
         var args = new List<string>();
         SiteServer? server = null;
@@ -191,11 +211,11 @@ public static class Apps
                 case "excel": args.Add("/e"); args.Add(xlsx!); break;
                 case "edge":
                     server = new SiteServer(null);
-                    profile = Path.Combine(work, "edge-" + Guid.NewGuid().ToString("N").Substring(0, 8));
+                    profile = Path.Combine(ProfileDir(work), "edge-" + Guid.NewGuid().ToString("N").Substring(0, 8));
                     args.AddRange(EdgeArgs(profile, server.Origin + "/start.html")); break;
             }
             double t0 = Timing.Now();
-            using var p = RestrictedLauncher.Start(exe, RestrictedLauncher.BuildArguments(args), work, ChildEnvironment(Path.Combine(work, "tmp")), job);
+            using var p = RestrictedLauncher.Start(exe, RestrictedLauncher.BuildArguments(args), TmpDir(work), ChildEnvironment(TmpDir(work)), job);
             double deadline = t0 + TimeoutMs / 1000.0;
             bool ready = false;
             while (Timing.Now() < deadline)
@@ -204,7 +224,7 @@ public static class Apps
                 if (IsReady(key, wins, WindowTools.HasChildClass, server?.ReadyCalled ?? false)) { ready = true; break; }
                 Thread.Sleep(20);
             }
-            if (!ready) return (null, $"{key} was not ready in {TimeoutMs / 1000} s", false);
+            if (!ready) return (null, server != null && server.BusyCount > 0 ? $"server busy: {server.BusyCount} connections to the loopback server were refused" : $"{key} was not ready in {TimeoutMs / 1000} s", false);
             if (key != "edge") { try { p.WaitForInputIdle(Math.Max(100, (int)((deadline - Timing.Now()) * 1000))); } catch (InvalidOperationException) { } }
             double ms = (Timing.Now() - t0) * 1000.0;
             CloseJob(job);
@@ -214,6 +234,7 @@ public static class Apps
         {
             job.Terminate();
             server?.Dispose();
+            LastLink = FolderTools.FindLink(work);   // before the profile is removed: a link the program made must be seen, not silently deleted
             if (profile != null) RemoveFolder(profile);
         }
     }
@@ -227,11 +248,12 @@ public static class Apps
         job.Terminate();
     }
 
+    /// <summary>Removes a folder the programs could write to, never following a link (<see cref="FolderTools.RemoveNoFollow"/>); retries for files that are still held for a moment.</summary>
     public static void RemoveFolder(string dir)
     {
         for (int i = 0; i < 20; i++)
         {
-            try { if (Directory.Exists(dir)) Directory.Delete(dir, true); return; }
+            try { FolderTools.RemoveNoFollow(dir); return; }
             catch (IOException) { Thread.Sleep(250); }
             catch (UnauthorizedAccessException) { Thread.Sleep(250); }
         }
@@ -243,9 +265,9 @@ public static class Apps
     private static (double? Ms, string Reason, bool ViaShell) StartExplorer(string exe, string folder, string work)
     {
         string title = Path.GetFileName(folder);
-        using var job = new JobGroup();
+        using var job = new JobGroup(0, JobGroup.ApplicationUiLimits);
         double t0 = Timing.Now();
-        using var p = RestrictedLauncher.Start(exe, $"/n,\"{folder}\"", work, ChildEnvironment(Path.Combine(work, "tmp")), job);
+        using var p = RestrictedLauncher.Start(exe, $"/n,\"{folder}\"", TmpDir(work), ChildEnvironment(TmpDir(work)), job);
         double deadline = t0 + TimeoutMs / 1000.0;
         IntPtr hwnd = IntPtr.Zero; int pid = 0;
         while (Timing.Now() < deadline && hwnd == IntPtr.Zero)
@@ -274,15 +296,16 @@ public static class Apps
         {
             try
             {
-                using var job = new JobGroup();
+                using var job = new JobGroup(0, JobGroup.ApplicationUiLimits);
                 double t0 = Timing.Now();
-                using var p = RestrictedLauncher.Start(exe, RestrictedLauncher.BuildArguments(new[] { "-NoProfile", "-NonInteractive", "-Command", "exit" }), work, ChildEnvironment(Path.Combine(work, "tmp")), job);
+                using var p = RestrictedLauncher.Start(exe, RestrictedLauncher.BuildArguments(new[] { "-NoProfile", "-NonInteractive", "-Command", "exit" }), TmpDir(work), ChildEnvironment(TmpDir(work)), job);
                 if (!p.WaitForExit(TimeoutMs)) return Measure.Not("host.app.powershell.warm", "ms", false, "failed", $"powershell.exe did not end in {TimeoutMs / 1000} s");
                 times.Add((Timing.Now() - t0) * 1000.0);
             }
             catch (Exception e) when (e is System.ComponentModel.Win32Exception or InvalidOperationException)
             { return Measure.Not("host.app.powershell.warm", "ms", false, "failed", e.Message); }
         }
+        if (FolderTools.FindLink(work) is { } link) return Measure.Not("host.app.powershell.warm", "ms", false, "failed", "a link was found in the work folder after the run (not trusted): " + link);
         var m = Measure.Ok("host.app.powershell.warm", "ms", false, Evaluation.Median(times));
         m.Detail["starts"] = times.Count;
         return m;

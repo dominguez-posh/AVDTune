@@ -647,6 +647,15 @@ public static class StandIn { public static int Main(string[] a) {
         $lc = (@(Test-AVDTuneBenchmarkClean -Bench $lb -Root $r2) -join ' | ')
         Test-Check 'cleanliness: a share test folder, an attached container (label AVDTuneBench), a mount point and Edge or Office leftovers are reported' ($lc -like '*share test folder*AVDTune-Bench-*' -and $lc -like '*attached container*AVDTuneBench*' -and $lc -like '*work leftover*mnt1*' -and $lc -like '*work leftover*edge-1234*' -and $lc -like '*apps-0f*') $lc
         Test-Check 'cleanliness (source): the real scan looks for AVDTune-Bench-<guid> on VHDLocations, volumes labelled AVDTuneBench, mnt/edge/apps folders' ($adapterSrc -match 'LeftoverScan' -and $adapterSrc -match "FileSystemLabel -eq 'AVDTuneBench'" -and $adapterSrc -match 'AVDTune-Bench-\[0-9a-f\]\{32\}\$' -and $adapterSrc -match 'mnt\\d\+\|edge-') $null
+        # plausibility band against the reference (N4)
+        $refO = [pscustomobject]@{ Measures = [pscustomobject]@{ 'host.app.speedometer' = [pscustomobject]@{ value = 20.0 }; 'host.app.edge.warm' = [pscustomobject]@{ value = 300.0 } } }
+        $mk = { param($id, $v) [pscustomobject]@{ id = $id; unit = 'x'; better = 'higher'; value = $v; status = 'ok'; reason = $null } }
+        $aggO = ConvertTo-AVDTuneBenchAggregate -Runs @(, @((& $mk 'host.app.speedometer' 150.0), (& $mk 'host.app.edge.warm' 310.0))) -Reference $refO -Config $config
+        $aggLow = ConvertTo-AVDTuneBenchAggregate -Runs @(, @((& $mk 'host.app.speedometer' 2.0))) -Reference $refO -Config $config
+        Test-Check 'plausibility: a value more than 5 times above or below the reference is marked as an outlier, a normal one is not' ($aggO[0].outlier -eq $true -and $aggO[1].outlier -eq $false -and $aggLow[0].outlier -eq $true) "$($aggO[0].outlier) $($aggO[1].outlier) $($aggLow[0].outlier)"
+        $outCur = Get-AVDTuneBenchmarkResult -Root $rr -RunId $made['2026.11.010'].RunId | Select-Object -First 1
+        $outCur.measures[0] | Add-Member -NotePropertyName outlier -NotePropertyValue $true -Force
+        Test-Check 'plausibility: the report shows the outlier' ((New-AVDTuneBenchmarkReport -Current $outCur -Previous $null -Baseline $null -Config $config) -like '*Ausreisser*') $null
         # markup in imageVersion, GPU and capacity values of a result file is shown as text
         $evil2 = Get-AVDTuneBenchmarkResult -Root $rr -RunId $made['2026.11.010'].RunId | Select-Object -First 1
         $evil2.system.imageVersion = '<script>alert(2)</script>'

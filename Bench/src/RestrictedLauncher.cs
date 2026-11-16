@@ -121,8 +121,10 @@ public static class RestrictedLauncher
     /// put into the job or its token is not the reduced one, the process is ended and an exception says why.</summary>
     public static Process Start(string exe, string arguments, string? workDir, IReadOnlyDictionary<string, string> environment, JobGroup job)
     {
-        EnablePrivilege("SeIncreaseQuotaPrivilege");
-        IntPtr token = MakeToken();
+        EnablePrivilege("SeIncreaseQuotaPrivilege", true);   // CreateProcessAsUser needs it; switched off again in finally (N5)
+        IntPtr token;
+        try { token = MakeToken(); }
+        catch { EnablePrivilege("SeIncreaseQuotaPrivilege", false); throw; }
         IntPtr env = Marshal.StringToHGlobalUni(EnvironmentBlock(environment));
         var pi = new ProcessInformation();
         bool created = false;
@@ -151,17 +153,91 @@ public static class RestrictedLauncher
             if (pi.Process != IntPtr.Zero) CloseHandle(pi.Process);
             Marshal.FreeHGlobal(env);
             CloseHandle(token);
+            EnablePrivilege("SeIncreaseQuotaPrivilege", false);
         }
     }
 
-    private static void EnablePrivilege(string name)
+    /// <summary>True when this process runs elevated (full administrator token).</summary>
+    public static bool IsElevated()
+    {
+        if (!OpenProcessToken(Process.GetCurrentProcess().Handle, 0x8, out var token)) return false;
+        try { return Query(token).Elevated; } finally { CloseHandle(token); }
+    }
+
+    /// <summary>The privileges a standard user token may keep (Safer NORMALUSER leaves SeChangeNotify; the others appear on some builds). Everything else is a finding.</summary>
+    public static readonly string[] StandardPrivileges = { "SeChangeNotifyPrivilege", "SeIncreaseWorkingSetPrivilege", "SeShutdownPrivilege", "SeUndockPrivilege", "SeTimeZonePrivilege" };
+
+    /// <summary>Privileges outside the standard-user set (empty = fine).</summary>
+    public static List<string> ExtraPrivileges(IEnumerable<string> held) => held.Where(p => !StandardPrivileges.Contains(p, StringComparer.OrdinalIgnoreCase)).ToList();
+
+    /// <summary>Null when the group list is fine: the Administrators group (S-1-5-32-544) is either not there or has SE_GROUP_USE_FOR_DENY_ONLY (0x10) and is not enabled for access.</summary>
+    public static string? AdminGroupProblem(IEnumerable<(string Sid, uint Attributes)> groups)
+    {
+        foreach (var (sid, attr) in groups)
+        {
+            if (sid != "S-1-5-32-544") continue;
+            if ((attr & 0x10) == 0) return $"the Administrators group is not deny-only (attributes 0x{attr:X})";
+            if ((attr & 0x4) != 0) return $"the Administrators group is deny-only but also enabled (attributes 0x{attr:X})";
+        }
+        return null;
+    }
+
+    public sealed record TokenFacts(uint IntegrityRid, bool Elevated, List<(string Sid, uint Attributes)> Groups, List<string> Privileges);
+
+    [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)] private static extern bool ConvertSidToStringSidW(IntPtr sid, out IntPtr text);
+    [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)] private static extern bool LookupPrivilegeNameW(string? system, ref long luid, StringBuilder name, ref int length);
+
+    /// <summary>Everything the review asks for about a token: integrity, elevation, TokenGroups (SID and attributes) and TokenPrivileges (names). The handle needs TOKEN_QUERY.</summary>
+    public static TokenFacts Inspect(IntPtr token)
+    {
+        var (rid, elevated) = Query(token);
+        var groups = new List<(string, uint)>();
+        var privs = new List<string>();
+        GetTokenInformation(token, 2, IntPtr.Zero, 0, out int need);   // TokenGroups
+        IntPtr buf = Marshal.AllocHGlobal(Math.Max(need, 16));
+        try
+        {
+            if (!GetTokenInformation(token, 2, buf, need, out _)) throw new Win32Exception(Marshal.GetLastWin32Error(), "the token groups could not be read");
+            int n = Marshal.ReadInt32(buf);
+            for (int i = 0; i < n; i++)
+            {
+                IntPtr sidPtr = Marshal.ReadIntPtr(buf, 8 + i * 16);
+                uint attr = (uint)Marshal.ReadInt32(buf, 8 + i * 16 + 8);
+                if (ConvertSidToStringSidW(sidPtr, out var text)) { groups.Add((Marshal.PtrToStringUni(text)!, attr)); LocalFree(text); }
+            }
+        }
+        finally { Marshal.FreeHGlobal(buf); }
+        GetTokenInformation(token, 3, IntPtr.Zero, 0, out need);   // TokenPrivileges
+        buf = Marshal.AllocHGlobal(Math.Max(need, 16));
+        try
+        {
+            if (!GetTokenInformation(token, 3, buf, need, out _)) throw new Win32Exception(Marshal.GetLastWin32Error(), "the token privileges could not be read");
+            int n = Marshal.ReadInt32(buf);
+            for (int i = 0; i < n; i++)
+            {
+                long luid = Marshal.ReadInt64(buf, 4 + i * 12);
+                var sb = new StringBuilder(128); int len = 128;
+                privs.Add(LookupPrivilegeNameW(null, ref luid, sb, ref len) ? sb.ToString() : "LUID " + luid);
+            }
+        }
+        finally { Marshal.FreeHGlobal(buf); }
+        return new TokenFacts(rid, elevated, groups, privs);
+    }
+
+    public static TokenFacts InspectProcess(IntPtr process)
+    {
+        if (!OpenProcessToken(process, 0x8, out var token)) throw new Win32Exception(Marshal.GetLastWin32Error(), "the token of the process could not be opened");
+        try { return Inspect(token); } finally { CloseHandle(token); }
+    }
+
+    private static void EnablePrivilege(string name, bool enable)
     {
         IntPtr token = IntPtr.Zero;
         try
         {
             if (!OpenProcessToken(Process.GetCurrentProcess().Handle, 0x20 | 0x8, out token)) return;
             if (!LookupPrivilegeValueW(null, name, out long luid)) return;
-            var tp = new TokenPrivileges { Count = 1, Luid = luid, Attributes = 2 };
+            var tp = new TokenPrivileges { Count = 1, Luid = luid, Attributes = enable ? 2u : 0u };
             AdjustTokenPrivileges(token, false, ref tp, 0, IntPtr.Zero, IntPtr.Zero);
         }
         catch (Exception e) when (e is DllNotFoundException or EntryPointNotFoundException) { }

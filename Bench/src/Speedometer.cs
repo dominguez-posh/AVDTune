@@ -9,31 +9,36 @@ namespace AVDTune.Bench;
 public static class Speedometer
 {
     public const int TimeoutSec = 600;
+    /// <summary>A Speedometer 3.1 score outside this band is not a measurement of a browser (runs per minute); it is refused as implausible.</summary>
+    public static bool Plausible(double score) => score is >= 0.5 and <= 500;
 
     public static Measure Run(Options o, string edgeExe, string siteDir, string work)
     {
         const string Id = "host.app.speedometer";
         Log.Progress("apps: speedometer");
         if (!File.Exists(Path.Combine(siteDir, "index.html"))) return Measure.Not(Id, "runs/min", true, "skipped", "the Speedometer copy is not complete (index.html missing)");
-        string profile = Path.Combine(work, "edge-spd-" + Guid.NewGuid().ToString("N").Substring(0, 8));
-        using var job = new JobGroup();
+        string profile = Path.Combine(Apps.ProfileDir(work), "edge-spd-" + Guid.NewGuid().ToString("N").Substring(0, 8));
+        using var job = new JobGroup(0, JobGroup.ApplicationUiLimits);
         SiteServer? server = null;
         try
         {
             server = new SiteServer(siteDir);
             server.AddWrapper(o.SpeedIterations);
-            using var p = RestrictedLauncher.Start(edgeExe, RestrictedLauncher.BuildArguments(Apps.EdgeArgs(profile, server.WrapperUrl, "--window-size=1280,900")), work, Apps.ChildEnvironment(Path.Combine(work, "tmp")), job);
+            using var p = RestrictedLauncher.Start(edgeExe, RestrictedLauncher.BuildArguments(Apps.EdgeArgs(profile, server.WrapperUrl, "--window-size=1280,900")), Apps.TmpDir(work), Apps.ChildEnvironment(Apps.TmpDir(work)), job);
             double deadline = Timing.Now() + TimeoutSec;
             string? text = null;
             while (Timing.Now() < deadline)
             {
                 text = server.Result;
                 if (text != null) break;
-                if (job.Pids().Count == 0) return Measure.Not(Id, "runs/min", true, "failed", "Edge ended before Speedometer gave a result");
+                if (job.Pids().Count == 0) return server.BusyCount > 0 ? Busy(server) : Measure.Not(Id, "runs/min", true, "failed", "Edge ended before Speedometer gave a result");
                 Thread.Sleep(300);
             }
-            if (text == null) return Measure.Not(Id, "runs/min", true, "failed", $"Speedometer did not finish in {TimeoutSec} s");
+            if (text == null) return server.BusyCount > 0 ? Busy(server) : Measure.Not(Id, "runs/min", true, "failed", $"Speedometer did not finish in {TimeoutSec} s");
+            job.Terminate();
+            if (FolderTools.FindLink(work) is { } link) return Measure.Not(Id, "runs/min", true, "failed", "a link was found in the work folder after the run: " + link);
             if (!TryParseScore(text, out double score)) return Measure.Not(Id, "runs/min", true, "failed", "Speedometer gave no usable result");
+            if (!Plausible(score)) return Measure.Not(Id, "runs/min", true, "failed", $"Speedometer reported {score:0.##} runs/min, outside the plausible band 0.5 to 500");
             var m = Measure.Ok(Id, "runs/min", true, score);
             m.Detail["iterations"] = o.SpeedIterations;
             m.Detail["version"] = "3.1";
@@ -43,6 +48,8 @@ public static class Speedometer
         { return Measure.Not(Id, "runs/min", true, "failed", e.Message); }
         finally { job.Terminate(); server?.Dispose(); Apps.RemoveFolder(profile); }
     }
+
+    private static Measure Busy(SiteServer s) => Measure.Not("host.app.speedometer", "runs/min", true, "failed", $"server busy: {s.BusyCount} connections to the loopback server were refused (something else is using it, or too many at once)");
 
     public static bool TryParseScore(string? text, out double score)
     {
