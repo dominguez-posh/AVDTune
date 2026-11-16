@@ -57,7 +57,7 @@ try {
         [void](Add-AVDTuneFakeLibraryPackage $lib -App 'contoso-tool' -Version '1.0.0' -Product '{AAAAAAAA-0000-1111-2222-333333333333}' -Name 'Contoso Tool')
         [void](Add-AVDTuneFakeLibraryPackage $lib -App 'contoso-tool' -Version '1.1.0' -Product '{BBBBBBBB-0000-1111-2222-333333333333}' -Name 'Contoso Tool')
         [void](Add-AVDTuneFakeLibraryPackage $lib -App 'orphan-pkg' -Version '2.0' -NoAnchor)
-        if ($SiteUrl) { $ctx = New-AVDTuneLibraryContext -SitesToken $lib.SitesToken -GraphToken $lib.GraphToken -SiteUrl $SiteUrl -Library $Library -Http $lib.Http }
+        if ($SiteUrl) { $ctx = New-AVDTuneLibraryContext -SitesToken $lib.SitesToken -GraphToken $lib.GraphToken -SiteUrl $SiteUrl -Library $Library -Transport $lib.Transport }
     }
     else {
         $m = New-AVDTuneMachine; $u = New-AVDTuneUpdateAdapter
@@ -67,6 +67,7 @@ try {
     $progress = { param($t) $Sync.Text = $t }
     switch ($Kind) {
         'Scan' {
+            [void](Clear-AVDTuneSoftwareWork -Root $Root)
             $notes = New-Object System.Collections.ArrayList
             $Sync.Text = 'Reading the installed software ...'
             $installed = @(Get-AVDTuneInstalledSoftware -Machine $m)

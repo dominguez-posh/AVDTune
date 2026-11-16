@@ -222,7 +222,8 @@ try {
     $badUrls = 'http://graph.microsoft.com/v1.0/sites', 'https://evil.example.com/v1.0/sites', 'https://graph.microsoft.com.evil.com/v1.0/sites', ('https://user:pw' + [char]64 + 'graph.microsoft.com/v1.0/sites'), 'https://graph.microsoft.com:8443/v1.0/sites',
     'https://graph.microsoft.com/v1.0/sites#frag', 'https://graph.microsoft.com/v1.0/sites?a=1?b=2', 'https://graph.microsoft.com/v1.0/sites/../me', 'https://graph.microsoft.com/v1.0/sites/a b', 'https://graph.microsoft.com/v1.0/sites?x=<script>', '', 'ftp://graph.microsoft.com/x'
     Test-Check 'library URL: http, other hosts, look-alike host, credentials, port, fragment, two question marks, dot-dot, spaces, script characters, ftp are refused' (@($badUrls | Where-Object { (Test-AVDTuneLibraryUrl $_).Ok }).Count -eq 0) (@($badUrls | Where-Object { (Test-AVDTuneLibraryUrl $_).Ok }) -join ' | ')
-    Test-Check 'download redirect: only https on SharePoint hosts is followed; Graph itself, other hosts, http, credentials are not (and no token goes along)' ((Test-AVDTuneDownloadUrl 'https://contoso.sharepoint.com/sites/PackTune/_layouts/15/download.aspx?x=1') -and -not (Test-AVDTuneDownloadUrl 'https://evil.example.com/a') -and -not (Test-AVDTuneDownloadUrl 'http://contoso.sharepoint.com/a') -and -not (Test-AVDTuneDownloadUrl 'https://contoso.sharepoint.com.evil.com/a') -and -not (Test-AVDTuneDownloadUrl 'https://u:p@contoso.sharepoint.com/a') -and -not (Test-AVDTuneDownloadUrl 'https://contoso.sharepoint.com/a#b')) $null
+    $rh = Get-AVDTuneRedirectHosts "https://contoso.sharepoint.com/sites/PackTune"
+    Test-Check 'download redirect target: only https on the SharePoint host of the site and its -my variant; Graph, other tenants, look-alikes, http, credentials, fragments are not' ((Test-AVDTuneDownloadUrl 'https://contoso.sharepoint.com/sites/PackTune/_layouts/15/download.aspx?x=1' -AllowedHost $rh) -and -not (Test-AVDTuneDownloadUrl 'https://evil.example.com/a' -AllowedHost $rh) -and -not (Test-AVDTuneDownloadUrl 'http://contoso.sharepoint.com/a' -AllowedHost $rh) -and -not (Test-AVDTuneDownloadUrl 'https://contoso.sharepoint.com.evil.com/a' -AllowedHost $rh) -and -not (Test-AVDTuneDownloadUrl 'https://u:p@contoso.sharepoint.com/a' -AllowedHost $rh) -and -not (Test-AVDTuneDownloadUrl 'https://contoso.sharepoint.com/a#b' -AllowedHost $rh)) $null
     $libOff = New-AVDTuneFakeLibrary
     Test-Check 'library context: a site that is not SharePoint of a tenant and a bad library name are refused' ((Get-ThrownText { New-AVDTuneLibraryContext -SitesToken 'a' -GraphToken 'b' -SiteUrl 'https://evil.example.com/sites/x' }) -and (Get-ThrownText { New-AVDTuneLibraryContext -SitesToken 'a' -GraphToken 'b' -SiteUrl $libOff.SiteUrl -Library '../x' })) $null
     $script:httpCalls = 0
@@ -230,7 +231,7 @@ try {
                 (Test-Refused { Invoke-PackTuneStoreGraph -Method PUT -Path '/drives/d1/root:/a/b:/content' -Bytes ([byte[]]@(1)) }),
                 (Test-Refused { Invoke-PackTuneStoreGraph -Method DELETE -Path '/drives/d1/root:/a' }),
                 (Test-Refused { Invoke-PackTuneStoreGraph -Method POST -Path '/sites' -Body @{ a = 1 } }),
-                (Test-Refused { Invoke-PackTuneStoreGraph -Absolute 'https://evil.example.com/upload' })) } finally { $script:LibraryContext = $null } } (New-AVDTuneLibraryContext -SitesToken 'a' -GraphToken 'b' -SiteUrl $libOff.SiteUrl -Http { $script:httpCalls++; $null })
+                (Test-Refused { Invoke-PackTuneStoreGraph -Absolute 'https://evil.example.com/upload' })) } finally { $script:LibraryContext = $null } } (New-AVDTuneLibraryContext -SitesToken 'a' -GraphToken 'b' -SiteUrl $libOff.SiteUrl -Transport { $script:httpCalls++; throw "no request expected" })
     Test-Check 'the library is read only: PUT, DELETE, POST with a body and an absolute upload address are refused before any request' (($readOnly -join ',') -eq 'refused,refused,refused,refused' -and $script:httpCalls -eq 0) ($readOnly -join ',')
     Test-Check 'the shared store file is unchanged (SOURCE.json hash)' ((Get-FileHash (Join-Path $repo 'Shared\PackTune-Store.ps1') -Algorithm SHA256).Hash.ToLower() -eq ((Get-Content (Join-Path $repo 'Shared\SOURCE.json') -Raw | ConvertFrom-Json).Files | Where-Object Path -eq 'PackTune-Store.ps1').Sha256) $null
 
@@ -243,21 +244,111 @@ try {
     [void](Add-AVDTuneFakeLibraryPackage $lib -App 'prefix-pkg' -Version '1.0' -AnchorPrefix)
     [void](Add-AVDTuneFakeLibraryPackage $lib -App 'noproduct-pkg' -Version '1.0' -NoProduct)
     [void](Add-AVDTuneFakeLibraryPackage $lib -App 'half-pkg' -Version '1.0' -NoManifest)
-    $ctx = New-AVDTuneLibraryContext -SitesToken $lib.SitesToken -GraphToken $lib.GraphToken -SiteUrl $lib.SiteUrl -Http $lib.Http
+    $ctx = New-AVDTuneLibraryContext -SitesToken $lib.SitesToken -GraphToken $lib.GraphToken -SiteUrl $lib.SiteUrl -Transport $lib.Transport
     $xl = New-Env
     $li = Get-AVDTuneLibraryItems -Context $ctx -Machine $xl.M
     $by = @{}; foreach ($i in $li.Items) { $by["$($i.AppId)|$($i.Version)"] = $i }
     Test-Check 'library list: the complete versions of the store with their Intune anchor; the version without manifest is not listed' ($li.State -eq 'Ready' -and $by.Count -eq 6 -and -not $by.ContainsKey('half-pkg|1.0') -and $by['contoso-tool|1.0.0'].Installable -and $by['contoso-tool|1.0.0'].Manifest -eq $hashA -and $by['contoso-tool|1.0.0'].Name -eq 'Contoso Tool' -and $by['contoso-tool|1.0.0'].Installed -eq '1.0.0') ($li | ConvertTo-Json -Depth 4 -Compress)
     Test-Check 'library list: without Intune anchor, MSIX, the short hash prefix and a missing product code are listed but not installable, with the reason' (-not $by['orphan-pkg|2.0'].Installable -and $by['orphan-pkg|2.0'].Why -like '*no trust anchor*' -and -not $by['msix-pkg|3.0'].Installable -and $by['msix-pkg|3.0'].Why -like '*MSIX*' -and -not $by['prefix-pkg|1.0'].Installable -and $by['prefix-pkg|1.0'].Why -like '*no trust anchor*' -and -not $by['noproduct-pkg|1.0'].Installable -and $by['noproduct-pkg|1.0'].Why -like '*product code*') $null
     Test-Check 'library list: the installed version comes from the Uninstall key of the product code' ($by['contoso-tool|1.0.0'].Installed -eq '1.0.0' -and $by['contoso-tool|1.1.0'].Installed -eq '') $null
-    $reqs = @($lib.Log)
-    Test-Check 'tokens go only to their audience: the Sites token to the store, the Graph token to the Intune notes (the fake answers 403 otherwise)' (@($reqs | Where-Object { $_ -like 'GET graph *' }).Count -ge 1 -and @($reqs | Where-Object { $_ -like 'GET sites *' }).Count -ge 4 -and -not ($reqs -join '|').Contains($lib.SitesToken)) $null
     $libNo = New-AVDTuneFakeLibrary; $libNo.Store.Offline = $true
-    $lo = Get-AVDTuneLibraryItems -Context (New-AVDTuneLibraryContext -SitesToken 'a' -GraphToken 'b' -SiteUrl $libNo.SiteUrl -Http $libNo.Http) -Machine $xl.M
+    $lo = Get-AVDTuneLibraryItems -Context (New-AVDTuneLibraryContext -SitesToken 'a' -GraphToken 'b' -SiteUrl $libNo.SiteUrl -Transport $libNo.Transport) -Machine $xl.M
     Test-Check 'library offline: State NoAccess with a readable cause, no exception' ($lo.State -eq 'NoAccess' -and $lo.Message -like '*cannot be reached*') $lo.Message
     $libI = New-AVDTuneFakeLibrary; [void](Add-AVDTuneFakeLibraryPackage $libI -App 'contoso-tool' -Version '1.0.0'); $libI.Store.IntuneOffline = $true
-    $li2 = Get-AVDTuneLibraryItems -Context (New-AVDTuneLibraryContext -SitesToken $libI.SitesToken -GraphToken $libI.GraphToken -SiteUrl $libI.SiteUrl -Http $libI.Http) -Machine $xl.M
+    $li2 = Get-AVDTuneLibraryItems -Context (New-AVDTuneLibraryContext -SitesToken $libI.SitesToken -GraphToken $libI.GraphToken -SiteUrl $libI.SiteUrl -Transport $libI.Transport) -Machine $xl.M
     Test-Check 'Intune not readable: nothing can be trusted, no package is installable, the note says why' (@($li2.Items | Where-Object Installable).Count -eq 0 -and $li2.Notes[0] -like '*no package can be trusted*') ($li2.Notes -join '|')
+    # ---- transport level: the real loop (redirects by hand, token only to Graph, limits, paging) runs against the fake transport
+    $hostsLog = @($lib.Log)
+    Test-Check 'tokens: every request to Graph carried a bearer token, none went anywhere else, and no log line holds a token (the fake answers 403 to the token of the other audience, so the list only works with the right ones)' (@($hostsLog | Where-Object { $_ -like 'GET graph.microsoft.com auth=True *' }).Count -ge 5 -and @($hostsLog | Where-Object { $_ -notlike 'GET graph.microsoft.com auth=True *' }).Count -eq 0 -and -not (($hostsLog -join '|') -match 'fake-sites-token|fake-graph-token') -and $li.State -eq 'Ready' -and $by['contoso-tool|1.0.0'].Anchored) (($hostsLog | Select-Object -First 3) -join ' | ')
+    Test-Check 'download redirect target: the -my variant of the tenant is allowed, another tenant, Graph and a call without hosts are not' ((Test-AVDTuneDownloadUrl 'https://contoso-my.sharepoint.com/x' -AllowedHost $rh) -and -not (Test-AVDTuneDownloadUrl 'https://fabrikam.sharepoint.com/x' -AllowedHost $rh) -and -not (Test-AVDTuneDownloadUrl 'https://fabrikam-my.sharepoint.com/x' -AllowedHost $rh) -and -not (Test-AVDTuneDownloadUrl 'https://graph.microsoft.com/v1.0/x' -AllowedHost $rh) -and -not (Test-AVDTuneDownloadUrl 'https://contoso.sharepoint.com/x')) $null
+    & $module { $script:WorkSecurity = { $sec = New-AVDTuneStateSecurity; $sec.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule([System.Security.Principal.WindowsIdentity]::GetCurrent().User, 'FullControl', 'ContainerInherit, ObjectInherit', 'None', 'Allow'))); $sec } }   # the check runs without elevation: the current user must be able to write into what it creates
+    $swContext = { param($l) New-AVDTuneLibraryContext -SitesToken $l.SitesToken -GraphToken $l.GraphToken -SiteUrl $l.SiteUrl -Transport $l.Transport }
+    $getFile = { param($ctxL, [int64]$max) $out = Join-Path $tmp ("dl-" + [guid]::NewGuid().ToString("N")); [void](& $module { param($c, $o, $m) $script:LibraryContext = $c; try { Invoke-AVDTuneLibraryGet -Url 'https://graph.microsoft.com/v1.0/drives/drive-1/root:/contoso-tool/1.0.0/installer.zip:/content' -Audience Sites -OutFile $o -MaxBytes $m } finally { $script:LibraryContext = $null } } $ctxL $out $max); $out }
+    $libR = New-AVDTuneFakeLibrary; [void](Add-AVDTuneFakeLibraryPackage $libR -App 'contoso-tool' -Version '1.0.0'); $libR.Store.Redirect = $true
+    $f1 = & $getFile (& $swContext $libR) 1MB
+    $rl = @($libR.Log)
+    Test-Check 'a 302 to SharePoint is followed by hand and the second request carries NO Authorization header (the file arrives, the first request had the token)' ((Test-Path $f1) -and (Get-Item $f1).Length -gt 0 -and $rl[-2] -like 'GET graph.microsoft.com auth=True *' -and $rl[-1] -like 'GET contoso.sharepoint.com auth=False /dl/*') ($rl[-2..-1] -join ' | ')
+    $libE = New-AVDTuneFakeLibrary; [void](Add-AVDTuneFakeLibraryPackage $libE -App 'contoso-tool' -Version '1.0.0'); $libE.Store.Redirect = $true; $libE.Store.RedirectTo = 'https://evil.example.com/steal'
+    $eText = Get-ThrownText { & $getFile (& $swContext $libE) 1MB }
+    Test-Check 'a 302 to a foreign host is refused and nothing is requested from it' ($eText -like '*redirect to evil.example.com was refused*' -and @($libE.Log | Where-Object { $_ -like '*evil*' }).Count -eq 0) $eText
+    $libT2 = New-AVDTuneFakeLibrary; [void](Add-AVDTuneFakeLibraryPackage $libT2 -App 'contoso-tool' -Version '1.0.0'); $libT2.Store.Redirect = $true; $libT2.Store.RedirectTo = 'https://fabrikam.sharepoint.com/dl/x'
+    Test-Check 'a 302 to the SharePoint of another tenant is refused as well' ((Get-ThrownText { & $getFile (& $swContext $libT2) 1MB }) -like '*redirect to fabrikam.sharepoint.com was refused*') $null
+    $libH = New-AVDTuneFakeLibrary; [void](Add-AVDTuneFakeLibraryPackage $libH -App 'contoso-tool' -Version '1.0.0'); $libH.Store.Redirect = $true; $libH.Store.RedirectHops = 6
+    Test-Check 'six redirects in a row end the request (five are allowed)' ((Get-ThrownText { & $getFile (& $swContext $libH) 1MB }) -like '*Too many redirects*') $null
+    $libH5 = New-AVDTuneFakeLibrary; [void](Add-AVDTuneFakeLibraryPackage $libH5 -App 'contoso-tool' -Version '1.0.0'); $libH5.Store.Redirect = $true; $libH5.Store.RedirectHops = 5
+    $f5 = & $getFile (& $swContext $libH5) 1MB
+    Test-Check 'a chain of five redirects still works, and the token is on the first request only' ((Get-Item $f5).Length -gt 0 -and @($libH5.Log | Where-Object { $_ -like '* auth=True *' }).Count -eq 1 -and @($libH5.Log | Where-Object { $_ -like 'GET contoso.sharepoint.com auth=True*' }).Count -eq 0) (($libH5.Log) -join ' | ')
+    $libP = New-AVDTuneFakeLibrary; $libP.Store.PageSize = 2
+    foreach ($n in 1..5) { [void](Add-AVDTuneFakeLibraryPackage $libP -App "pkg-$n" -Version '1.0') }
+    $anch = & $module { param($c) $script:LibraryContext = $c; try { Get-AVDTuneIntuneAnchors } finally { $script:LibraryContext = $null } } (& $swContext $libP)
+    Test-Check 'paging: the Intune list is followed over @odata.nextLink to the last page (5 apps over 3 requests)' ($anch.Count -eq 5 -and @($libP.Log | Where-Object { $_ -like '*mobileApps*' }).Count -eq 3) "$($anch.Count) $(@($libP.Log | Where-Object { $_ -like '*mobileApps*' }).Count)"
+    $libW = New-AVDTuneFakeLibrary; [void](Add-AVDTuneFakeLibraryPackage $libW -App 'contoso-tool' -Version '1.0.0' -WrongAnchor)
+    Open-AVDTuneWriteGate -SnapshotId 'snap-check' -ConfirmedBy 'Check Runner'
+    $xw = New-Env
+    $rw = Invoke-AVDTuneSoftwareRun -Machine $xw.M -U $xw.U -Root $tmp -LibraryContext (& $swContext $libW) -Items @(New-AVDTuneSoftwareItem -Action Install -Source library -Id 'contoso-tool' -Version '1.0.0')
+    Test-Check 'Intune carries another manifest hash than the store: refused, nothing but the manifest downloaded, nothing started' ($rw.Results[0].Status -eq 'Failed' -and $rw.Results[0].Message -like '*does not match the one recorded in Intune*' -and (Get-RunLog $xw.U).Count -eq 0 -and @($libW.Log | Where-Object { $_ -like '*installer.zip*' }).Count -eq 0) $rw.Results[0].Message
+    # size limits
+    $libZ = New-AVDTuneFakeLibrary; [void](Add-AVDTuneFakeLibraryPackage $libZ -App 'contoso-tool' -Version '1.0.0')
+    $zText = Get-ThrownText { & $getFile (& $swContext $libZ) 10 }
+    Test-Check 'a download larger than the limit is stopped and the partial file is removed' ($zText -like '*larger than the allowed 10 bytes*' -and @(Get-ChildItem $tmp -Filter 'dl-*' | Where-Object { $_.Length -gt 0 -and $_.Length -le 10 }).Count -eq 0) $zText
+    $libM = New-AVDTuneFakeLibrary; [void](Add-AVDTuneFakeLibraryPackage $libM -App 'contoso-tool' -Version '1.0.0')
+    $libM.Store.Tamper['contoso-tool/1.0.0/manifest.json'] = New-Object byte[] (1MB + 10)
+    $xm2 = New-Env
+    $rm2 = Invoke-AVDTuneSoftwareRun -Machine $xm2.M -U $xm2.U -Root $tmp -LibraryContext (& $swContext $libM) -Items @(New-AVDTuneSoftwareItem -Action Install -Source library -Id 'contoso-tool' -Version '1.0.0')
+    Test-Check 'a manifest.json of more than 1 MB is refused before any hash is made or anything is unpacked' ($rm2.Results[0].Status -eq 'Failed' -and $rm2.Results[0].Message -like '*larger than the allowed*' -and (Get-RunLog $xm2.U).Count -eq 0) $rm2.Results[0].Message
+    $libF2 = New-AVDTuneFakeLibrary; [void](Add-AVDTuneFakeLibraryPackage $libF2 -App 'contoso-tool' -Version '1.0.0')
+    $libF2.Store.Tamper['contoso-tool/1.0.0/installer.zip'] = New-Object byte[] ($libF2.Store.Files['contoso-tool/1.0.0/installer.zip'].Length + 500)
+    $xf3 = New-Env
+    $rf3 = Invoke-AVDTuneSoftwareRun -Machine $xf3.M -U $xf3.U -Root $tmp -LibraryContext (& $swContext $libF2) -Items @(New-AVDTuneSoftwareItem -Action Install -Source library -Id 'contoso-tool' -Version '1.0.0')
+    Test-Check 'a file that is longer than the size in the manifest is stopped while it is read (before the hash check)' ($rf3.Results[0].Status -eq 'Failed' -and $rf3.Results[0].Message -like '*larger than the allowed*' -and (Get-RunLog $xf3.U).Count -eq 0) $rf3.Results[0].Message
+    $bigAnswer = & $module { $s = New-Object IO.MemoryStream (, ([byte[]](New-Object byte[] (5MB)))); try { [void](Read-AVDTuneLimited -Stream $s -MaxBytes 4MB); 'no' } catch { 'stopped' } }
+    Test-Check 'a JSON answer of more than 4 MB is stopped' ($bigAnswer -eq 'stopped') $null
+    # \A..\z: a trailing line feed is no valid value
+    Test-Check 'a trailing line feed is refused by the checks of id, version, search text, library name and library package name' (-not (Test-AVDTunePackageId "git`n") -and -not (Test-AVDTunePackageVersion "1.0`n") -and -not (Test-AVDTuneSearchText "git`n") -and [bool](Get-ThrownText { New-AVDTuneLibraryContext -SitesToken 'a' -GraphToken 'b' -SiteUrl "https://contoso.sharepoint.com/sites/x`n" }) -and [bool](Get-ThrownText { New-AVDTuneLibraryContext -SitesToken 'a' -GraphToken 'b' -SiteUrl 'https://contoso.sharepoint.com/sites/x' -Library "Lib`n" }) -and [bool](Get-ThrownText { Invoke-AVDTuneSoftwareRun -Machine $xw.M -U $xw.U -Root $tmp -Items @(New-AVDTuneSoftwareItem -Action Install -Source library -Id "app`n" -Version '1.0') }) -and [bool](Get-ThrownText { Invoke-AVDTuneSoftwareRun -Machine $xw.M -U $xw.U -Root $tmp -Items @(New-AVDTuneSoftwareItem -Action Install -Source library -Id 'app' -Version "1.0`n") })) $null
+    # zip bomb: real bytes are counted
+    $bombZip = Join-Path $tmp 'bomb.zip'
+    [IO.File]::WriteAllBytes($bombZip, (New-AVDTuneFakeZip @{ 'a.bin' = (New-Object byte[] 2000000); 'b.bin' = (New-Object byte[] 2000000) }))
+    Test-Check 'zip: a total over the limit is stopped while the bytes are copied (limit 3 MB, two entries of 2 MB)' ((Get-ThrownText { Expand-PackTuneZip -Path $bombZip -Destination (Join-Path $tmp 'bomb-out') -MaxBytes 3000000 }) -like '*more data than*' -or (Get-ThrownText { Expand-PackTuneZip -Path $bombZip -Destination (Join-Path $tmp 'bomb-out2') -MaxBytes 3000000 }) -like '*larger than allowed*') $null
+    Test-Check 'zip: the same archive within the limit unpacks completely' ((Get-ThrownText { Expand-PackTuneZip -Path $bombZip -Destination (Join-Path $tmp 'bomb-ok') -MaxBytes 5000000 }) -eq $null -and (Get-Item (Join-Path $tmp 'bomb-ok\b.bin')).Length -eq 2000000) $null
+    $liar = [byte[]](New-AVDTuneFakeZip @{ 'a.bin' = (New-Object byte[] 2000000) })
+    $sig = [byte[]]@(0x50, 0x4B, 0x01, 0x02)
+    for ($i = 0; $i -lt $liar.Length - 4; $i++) { if ($liar[$i] -eq 0x50 -and $liar[$i + 1] -eq 0x4B -and $liar[$i + 2] -eq 0x01 -and $liar[$i + 3] -eq 0x02) { [BitConverter]::GetBytes([uint32]1000).CopyTo($liar, $i + 24) } }
+    $liarZip = Join-Path $tmp 'liar.zip'; [IO.File]::WriteAllBytes($liarZip, $liar)
+    $lieText = Get-ThrownText { Expand-PackTuneZip -Path $liarZip -Destination (Join-Path $tmp 'liar-out') -MaxBytes 5000000 }
+    Test-Check 'zip: an entry whose header declares 1000 bytes but holds 2 MB is stopped (the real bytes are counted, not the declared size)' ([bool]$lieText -and (-not (Test-Path (Join-Path $tmp 'liar-out\a.bin')) -or (Get-Item (Join-Path $tmp 'liar-out\a.bin')).Length -le 1000)) $lieText
+    # work folder: explicit ACL, in one step, cleaned at the start
+    & $module { $script:WorkSecurity = { New-AVDTuneStateSecurity } }
+    $wbase = Join-Path $tmp 'wf'; [void][IO.Directory]::CreateDirectory($wbase)
+    $wf = Join-Path $wbase 'software'
+    & $module { param($p, $b) New-AVDTuneWorkFolder -Path $p -Base $b } $wf $wbase
+    $acl = Get-Acl -LiteralPath $wf
+    $sids = @($acl.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier]) | ForEach-Object { $_.IdentityReference.Value })
+    Test-Check 'the work folder has its own protected ACL (Administrators and SYSTEM only, inheritance cut) on every new level' ($acl.AreAccessRulesProtected -and @($sids | Where-Object { $_ -notin 'S-1-5-32-544', 'S-1-5-18' }).Count -eq 0 -and $sids.Count -ge 2 -and (Get-Acl -LiteralPath (Join-Path $wbase 'software')).AreAccessRulesProtected) ($sids -join ',')
+    $ownerAcl = Get-Acl -LiteralPath $wf; $ownerAcl.SetAccessRuleProtection($false, $false); $ownerAcl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule([System.Security.Principal.WindowsIdentity]::GetCurrent().User, 'FullControl', 'ContainerInherit, ObjectInherit', 'None', 'Allow'))); (New-Object IO.DirectoryInfo $wf).SetAccessControl($ownerAcl)   # the creator may change the permissions: lets the check clean up after itself
+    $junction = Join-Path $wbase 'link'; [void](New-Item -ItemType Junction -Path $junction -Target $tmp)
+    Test-Check 'a link on the way is refused' ([bool](Get-ThrownText { & $module { param($p, $b) New-AVDTuneWorkFolder -Path $p -Base $b } (Join-Path $junction 'work\x') $wbase })) $null
+    [IO.Directory]::Delete($junction)
+    $wbase = Join-Path $tmp 'wf2'
+    [void][IO.Directory]::CreateDirectory((Join-Path $wbase 'software\work\left1\sub')); [IO.File]::WriteAllText((Join-Path $wbase 'software\work\left1\sub\f.txt'), 'x')
+    $cleared = & $module { param($r) Clear-AVDTuneSoftwareWork -Root $r } $wbase
+    Test-Check 'work folders that a crash left behind are removed at the start' ($cleared -ge 1 -and @(Get-ChildItem (Join-Path $wbase 'software\work')).Count -eq 0) $cleared
+    & $module { $script:WorkSecurity = { $sec = New-AVDTuneStateSecurity; $sec.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule([System.Security.Principal.WindowsIdentity]::GetCurrent().User, 'FullControl', 'ContainerInherit, ObjectInherit', 'None', 'Allow'))); $sec } }   # the check runs without elevation: the current user must be able to write into what it creates
+    # the MSI is held and hashed again before msiexec
+    $xh = New-Env
+    $heldInfo = @{}
+    $xh.U.Run = { param($File, [string[]]$Arguments, [int]$TimeoutSeconds = 600)
+        if ($File -like '*msiexec*') {
+            $msiPath = $Arguments[1]
+            $heldInfo.DeleteFailed = $false; try { [IO.File]::Delete($msiPath) } catch { $heldInfo.DeleteFailed = $true }
+            $heldInfo.WriteFailed = $false; try { [IO.File]::WriteAllText($msiPath, 'swapped') } catch { $heldInfo.WriteFailed = $true }
+            $heldInfo.Text = [IO.File]::ReadAllText($msiPath)
+        }
+        [void]$xh.U.Log.Add("Run $File $($Arguments -join ' ')"); [pscustomobject]@{ ExitCode = 0; Output = '' } }.GetNewClosure()
+    $libMsi = New-AVDTuneFakeLibrary; [void](Add-AVDTuneFakeLibraryPackage $libMsi -App 'contoso-tool' -Version '1.0.0')
+    $rh2 = Invoke-AVDTuneSoftwareRun -Machine $xh.M -U $xh.U -Root $tmp -LibraryContext (& $swContext $libMsi) -Items @(New-AVDTuneSoftwareItem -Action Install -Source library -Id 'contoso-tool' -Version '1.0.0')
+    Test-Check 'the MSI is held without write and delete sharing while msiexec runs: it can be neither deleted nor replaced' ($rh2.Results[0].Status -eq 'Changed' -and $heldInfo.DeleteFailed -and $heldInfo.WriteFailed -and $heldInfo.Text -eq 'MSI stand-in') ($heldInfo | ConvertTo-Json -Compress)
+    Close-AVDTuneWriteGate
+
 
     Open-AVDTuneWriteGate -SnapshotId 'snap-check' -ConfirmedBy 'Check Runner'
     $xi = New-Env
@@ -271,7 +362,7 @@ try {
     $ri = Invoke-AVDTuneSoftwareRun -Machine $xi.M -U $xi.U -Root $tmp -LibraryContext $ctx -User 'admin1' -Items @(New-AVDTuneSoftwareItem -Action Update -Source library -Id 'contoso-tool' -Version '1.1.0' -Title 'Contoso Tool')
     Test-Check 'library update: verified against Intune, unpacked, msiexec /i with the MSI from the protected work folder and fixed switches' ($ri.Results[0].Status -eq 'Changed' -and $seen.Args[0] -eq '/i' -and $seen.Exists -and $seen.Text -eq 'MSI stand-in' -and $seen.Args[2] -eq '/qn' -and $seen.Args[3] -eq '/norestart' -and $seen.Args[4] -eq '/l*v' -and $seen.Msi -like "$tmp\software\work\*\package\installer\setup\tool.msi" -and $seen.Args[5] -like "$tmp\logs\*") ($ri.Results[0].Message + ' ' + ($seen.Args -join ' '))
     Test-Check 'library install: the work folder is gone afterwards, the log folder is the protected one' (@(Get-ChildItem (Join-Path $tmp 'software\work') -ErrorAction SilentlyContinue).Count -eq 0 -and (Test-Path (Join-Path $tmp 'software\work'))) $null
-    $clx = @(Get-AVDTuneChangeLog -Root $tmp | Where-Object { $_.Component -eq 'PackTune library' })
+    $clx = @(Get-AVDTuneChangeLog -Root $tmp | Where-Object { $_.Component -eq 'PackTune library' -and $_.ChangeType -eq 'Updated' })
     Test-Check 'library update: change log entry with the version, run record, LastChange' ($clx.Count -eq 1 -and $clx[0].ChangeType -eq 'Updated' -and $clx[0].Text -like '*1.1.0*' -and (Get-AVDTuneState $tmp).LastChange) ($clx | ConvertTo-Json -Compress)
     $xr = New-Env
     $rr = Invoke-AVDTuneSoftwareRun -Machine $xr.M -U $xr.U -Root $tmp -LibraryContext $ctx -Items @(New-AVDTuneSoftwareItem -Action Remove -Source library -Id 'contoso-tool' -Version '1.0.0')
@@ -290,13 +381,13 @@ try {
     $libT = New-AVDTuneFakeLibrary; [void](Add-AVDTuneFakeLibraryPackage $libT -App 'contoso-tool' -Version '1.0.0')
     $mf = [Text.Encoding]::UTF8.GetString($libT.Store.Files['contoso-tool/1.0.0/manifest.json']).Replace('PackTune.Store', 'PackTune.Store') + ' '
     $libT.Store.Files['contoso-tool/1.0.0/manifest.json'] = [Text.Encoding]::UTF8.GetBytes($mf)
-    $ctxT = New-AVDTuneLibraryContext -SitesToken $libT.SitesToken -GraphToken $libT.GraphToken -SiteUrl $libT.SiteUrl -Http $libT.Http
+    $ctxT = New-AVDTuneLibraryContext -SitesToken $libT.SitesToken -GraphToken $libT.GraphToken -SiteUrl $libT.SiteUrl -Transport $libT.Transport
     $xt = New-Env
     $rt = Invoke-AVDTuneSoftwareRun -Machine $xt.M -U $xt.U -Root $tmp -LibraryContext $ctxT -Items @(New-AVDTuneSoftwareItem -Action Install -Source library -Id 'contoso-tool' -Version '1.0.0')
     Test-Check 'a manifest that differs from the one in Intune: nothing is unpacked, nothing is started' ($rt.Results[0].Status -eq 'Failed' -and $rt.Results[0].Message -like '*does not match the one recorded in Intune*' -and (Get-RunLog $xt.U).Count -eq 0 -and -not (Get-ChildItem (Join-Path $tmp 'software\work') -ErrorAction SilentlyContinue)) $rt.Results[0].Message
     $libF = New-AVDTuneFakeLibrary; [void](Add-AVDTuneFakeLibraryPackage $libF -App 'contoso-tool' -Version '1.0.0')
     $libF.Store.Tamper['contoso-tool/1.0.0/installer.zip'] = [byte[]]@(1, 2, 3)
-    $ctxF = New-AVDTuneLibraryContext -SitesToken $libF.SitesToken -GraphToken $libF.GraphToken -SiteUrl $libF.SiteUrl -Http $libF.Http
+    $ctxF = New-AVDTuneLibraryContext -SitesToken $libF.SitesToken -GraphToken $libF.GraphToken -SiteUrl $libF.SiteUrl -Transport $libF.Transport
     $xf2 = New-Env
     $rf2 = Invoke-AVDTuneSoftwareRun -Machine $xf2.M -U $xf2.U -Root $tmp -LibraryContext $ctxF -Items @(New-AVDTuneSoftwareItem -Action Install -Source library -Id 'contoso-tool' -Version '1.0.0')
     Test-Check 'a file that differs from the manifest hash: refused, not unpacked, nothing started, work folder removed' ($rf2.Results[0].Status -eq 'Failed' -and $rf2.Results[0].Message -like '*does not match the manifest*' -and (Get-RunLog $xf2.U).Count -eq 0 -and -not (Get-ChildItem (Join-Path $tmp 'software\work') -ErrorAction SilentlyContinue)) $rf2.Results[0].Message
@@ -305,7 +396,7 @@ try {
     [void](Add-AVDTuneFakeLibraryPackage $libS -App 'slip-pkg' -Version '1.0' -InstallerEntries @{ '../../evil.msi' = 'x' })
     [void](Add-AVDTuneFakeLibraryPackage $libS -App 'two-pkg' -Version '1.0' -InstallerEntries @{ 'a.msi' = '1'; 'b.msi' = '2' })
     [void](Add-AVDTuneFakeLibraryPackage $libS -App 'none-pkg' -Version '1.0' -InstallerEntries @{ 'readme.txt' = 'no msi' })
-    $ctxS = New-AVDTuneLibraryContext -SitesToken $libS.SitesToken -GraphToken $libS.GraphToken -SiteUrl $libS.SiteUrl -Http $libS.Http
+    $ctxS = New-AVDTuneLibraryContext -SitesToken $libS.SitesToken -GraphToken $libS.GraphToken -SiteUrl $libS.SiteUrl -Transport $libS.Transport
     foreach ($case in @(@{ App = 'slip-pkg'; Like = '*not allowed*' }, @{ App = 'none-pkg'; Like = '*no single MSI*' })) {
         $xs2 = New-Env
         $rs2 = Invoke-AVDTuneSoftwareRun -Machine $xs2.M -U $xs2.U -Root $tmp -LibraryContext $ctxS -Items @(New-AVDTuneSoftwareItem -Action Install -Source library -Id $case.App -Version '1.0')

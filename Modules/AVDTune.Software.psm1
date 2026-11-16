@@ -22,11 +22,12 @@ Import-Module (Join-Path $PSScriptRoot 'AVDTune.psm1')
 Import-Module (Join-Path $PSScriptRoot 'AVDTune.Updates.psm1')
 Import-Module (Join-Path $PSScriptRoot 'AVDTune.Trust.psm1')
 
-$script:PackageIdPattern = '^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$'
-$script:PackageVersionPattern = '^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$'
-$script:SearchPattern = '^[\p{L}\p{N}][\p{L}\p{N} ._+-]{0,63}$'
-$script:LibrarySitePattern = '^https://[A-Za-z0-9-]+\.sharepoint\.com/(sites|teams)/[A-Za-z0-9._-]+/?$'
-$script:LibraryNamePattern = '^[A-Za-z0-9][A-Za-z0-9 ._-]{0,60}$'
+$script:PackageIdPattern = '\A[A-Za-z0-9][A-Za-z0-9._+-]{0,127}\z'
+$script:PackageVersionPattern = '\A[A-Za-z0-9][A-Za-z0-9._+-]{0,63}\z'
+$script:SearchPattern = '\A[\p{L}\p{N}][\p{L}\p{N} ._+-]{0,63}\z'
+$script:LibrarySitePattern = '\Ahttps://[A-Za-z0-9-]+\.sharepoint\.com/(sites|teams)/[A-Za-z0-9._-]+/?\z'
+$script:LibraryNamePattern = '\A[A-Za-z0-9][A-Za-z0-9 ._-]{0,60}\z'
+$script:SegmentPattern = '\A[A-Za-z0-9][A-Za-z0-9._-]{0,79}\z'   # the shared StoreSegment ends with $, which also lets a trailing line feed pass
 $script:DefaultLibrary = 'PackTune Packages'
 $script:GraphV1 = 'https://graph.microsoft.com/v1.0'
 $script:MaxSearchRows = 30
@@ -54,7 +55,20 @@ function Invoke-PackTuneStoreGraph {
     param([string]$Method = 'GET', [string]$Path, [string]$Absolute, $Body, [string]$InFile, [byte[]]$Bytes, [string]$OutFile, [hashtable]$Headers = @{})
     if ($Method -ne 'GET' -or $null -ne $Body -or $InFile -or $Bytes -or $Absolute) { throw 'AVDTune reads the package store only: a request that writes or uploads is refused.' }
     if (-not $script:LibraryContext) { throw 'The package store is not open (internal: no library context).' }
-    $answer = Invoke-AVDTuneLibraryGet -Url ($script:GraphV1 + $Path) -Audience Sites -OutFile $OutFile
+    $max = 4MB
+    if ($OutFile) {
+        # downloads: manifest.json at most 1 MB; every other file at most the size the (already checked) manifest names; a file the manifest does not name gets 1 MB
+        $leaf = ''; if ($Path -match '/([^/:]+):/content\z') { $leaf = [uri]::UnescapeDataString($Matches[1]) }
+        $max = 1MB
+        if ($leaf -ne 'manifest.json' -and $script:LibraryContext.Sizes.ContainsKey($leaf)) { $max = [int64]$script:LibraryContext.Sizes[$leaf] }
+        if ($max -gt 2GB) { throw "The manifest names $leaf with more than 2 GB: refused." }
+    }
+    $answer = Invoke-AVDTuneLibraryGet -Url ($script:GraphV1 + $Path) -Audience Sites -OutFile $OutFile -MaxBytes $max
+    if ($OutFile -and $leaf -eq 'manifest.json') {
+        $m = $null; try { $m = [IO.File]::ReadAllText($OutFile) | ConvertFrom-Json } catch { }
+        $script:LibraryContext.Sizes = @{}
+        foreach ($e in @(Get-AVDTuneProp $m 'files')) { $n = [string](Get-AVDTuneProp $e 'name'); $s = Get-AVDTuneProp $e 'size'; if ($n -and ($s -is [int] -or $s -is [int64] -or $s -is [long])) { $script:LibraryContext.Sizes[$n] = [int64]$s } }
+    }
     # The shared code asks every item for .folder, which Graph only sends for folders; this module runs in strict mode, so the property is always there
     if ($answer -and $answer.PSObject.Properties['value']) { foreach ($item in @($answer.value)) { if ($item -and -not $item.PSObject.Properties['folder']) { $item | Add-Member -NotePropertyName folder -NotePropertyValue $null } } }
     $answer
@@ -77,6 +91,7 @@ function Expand-PackTuneZip {
         $total = [int64]0
         foreach ($e in $zip.Entries) { $total += $e.Length }
         if ($total -gt $MaxBytes) { throw 'The archive is larger than allowed when unpacked.' }
+        $written = [int64]0
         foreach ($e in $zip.Entries) {
             $name = $e.FullName
             if ($name -match '(^|[\\/])\.\.([\\/]|$)' -or $name -match '^[\\/]' -or $name -match '[:*?"<>|]' -or $name -match '(^|[\\/])(CON|PRN|AUX|NUL|COM\d|LPT\d)(\.|[\\/]|$)') { throw "The archive has an entry that is not allowed: $name" }
@@ -87,7 +102,15 @@ function Expand-PackTuneZip {
             $in = $e.Open()
             try {
                 $out = [IO.File]::Open($target, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write)
-                try { $in.CopyTo($out) } finally { $out.Dispose() }
+                try {
+                    $buf = New-Object byte[] 81920; $entryBytes = [int64]0
+                    while (($n = $in.Read($buf, 0, $buf.Length)) -gt 0) {
+                        $entryBytes += $n; $written += $n
+                        if ($entryBytes -gt [int64]$e.Length -or $written -gt $MaxBytes) { throw "The archive holds more data than it declares (entry $name): stopped." }   # the declared sizes are not trusted
+                        $out.Write($buf, 0, $n)
+                    }
+                }
+                finally { $out.Dispose() }
             }
             finally { $in.Dispose() }
         }
@@ -211,11 +234,11 @@ function ConvertFrom-AVDTuneIntuneNote {
     foreach ($part in ($m.Groups[1].Value -split ';')) { $i = $part.IndexOf('='); if ($i -gt 0) { $kv[$part.Substring(0, $i).Trim().ToLowerInvariant()] = $part.Substring($i + 1).Trim() } }
     foreach ($k in 'kind', 'app', 'ver', 'manifest') { if (-not $kv.ContainsKey($k)) { return $null } }
     if ($kv.kind -cnotin 'msi', 'msix') { return $null }
-    if ($kv.app -cnotmatch $script:StoreSegment -or $kv.app -match '\.\.') { return $null }
-    if ($kv.ver -cnotmatch $script:StoreSegment -or $kv.ver -match '\.\.') { return $null }
-    if ($kv.manifest.ToLowerInvariant() -notmatch '^[0-9a-f]{64}$') { return $null }
+    if ($kv.app -cnotmatch $script:SegmentPattern -or $kv.app -match '\.\.') { return $null }
+    if ($kv.ver -cnotmatch $script:SegmentPattern -or $kv.ver -match '\.\.') { return $null }
+    if ($kv.manifest.ToLowerInvariant() -notmatch '\A[0-9a-f]{64}\z') { return $null }
     $product = ''
-    if ($kv.ContainsKey('product')) { if ($kv.product -match '^\{?([0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12})\}?$') { $product = '{' + $Matches[1].ToUpperInvariant() + '}' } else { return $null } }
+    if ($kv.ContainsKey('product')) { if ($kv.product -match '\A\{?([0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12})\}?\z') { $product = '{' + $Matches[1].ToUpperInvariant() + '}' } else { return $null } }
     [pscustomobject]@{ Kind = [string]$kv.kind; AppId = [string]$kv.app; Version = [string]$kv.ver; Product = $product; Manifest = $kv.manifest.ToLowerInvariant() }
 }
 
@@ -235,7 +258,7 @@ function Get-AVDTuneInstalledSoftware {
             if ([int](& $Machine.RegGet $key 'SystemComponent') -eq 1) { continue }
             if ([string](& $Machine.RegGet $key 'ParentKeyName')) { continue }
             $rel = [string](& $Machine.RegGet $key 'ReleaseType'); if ($rel -match '(?i)update|hotfix|security') { continue }
-            $isMsi = ($sub -match '^\{[0-9A-Fa-f-]{36}\}$') -and ([int](& $Machine.RegGet $key 'WindowsInstaller') -eq 1)
+            $isMsi = ($sub -match '\A\{[0-9A-Fa-f-]{36}\}\z') -and ([int](& $Machine.RegGet $key 'WindowsInstaller') -eq 1)
             [void]$rows.Add([pscustomobject]@{
                     Name = (Remove-AVDTuneControlCharacters $name 160); Version = (Remove-AVDTuneControlCharacters ([string](& $Machine.RegGet $key 'DisplayVersion')) 60)
                     Publisher = (Remove-AVDTuneControlCharacters ([string](& $Machine.RegGet $key 'Publisher')) 100); Arch = $u.Arch; Key = $sub
@@ -373,77 +396,115 @@ function Test-AVDTuneLibraryUrl {
     if ($u.Host -ne 'graph.microsoft.com') { return (& $no "the host $($u.Host) is not allowed") }
     if (([regex]::Matches($Url, '\?')).Count -gt 1) { return (& $no 'more than one question mark') }
     $raw = $Url.Substring(0, [Math]::Min($Url.Length, 2000))
-    $m = [regex]::Match($raw, "^https://graph\.microsoft\.com(/[A-Za-z0-9._:/%,()'-]+)(\?[A-Za-z0-9`$=,&._%()+/'-]*)?$", 'None', [TimeSpan]::FromSeconds(1))
+    $m = [regex]::Match($raw, "\Ahttps://graph\.microsoft\.com(/[A-Za-z0-9._:/%,()'-]+)(\?[A-Za-z0-9`$=,&._%()+/'-]*)?\z", 'None', [TimeSpan]::FromSeconds(1))
     if (-not $m.Success) { return (& $no 'the path or query has characters that are not allowed') }
     if ($m.Groups[1].Value -match '(^|/)\.\.?(/|$)' -or $raw -match '(?i)%2e|%2f|%5c|%00') { return (& $no 'the path climbs or hides a separator') }
     @{ Ok = $true; Reason = '' }
 }
 
+function Get-AVDTuneRedirectHosts {
+    # The hosts a download may be redirected to: the SharePoint host of the site and its -my variant (OneDrive for Business storage of the same tenant)
+    param([Parameter(Mandatory)][string]$SiteUrl)
+    $h = ([Uri]$SiteUrl).Host.ToLowerInvariant()
+    $tenant = $h.Substring(0, $h.IndexOf('.'))
+    @($h, ($tenant + "-my" + $h.Substring($h.IndexOf("."))))
+}
+
 function Test-AVDTuneDownloadUrl {
-    # Pure: the redirect of a Graph download: https on SharePoint (*.sharepoint.com), default port, no credentials, no fragment. No token goes there.
-    param([string]$Url)
+    # Pure: the redirect of a Graph download: https on one of the allowed SharePoint hosts (Get-AVDTuneRedirectHosts), default port, no credentials, no fragment. No token goes there.
+    param([string]$Url, [string[]]$AllowedHost)
     $u = $null
     if (-not $Url -or $Url.Length -gt 4000 -or $Url.Contains('#') -or -not [Uri]::TryCreate($Url, [UriKind]::Absolute, [ref]$u)) { return $false }
-    ($u.Scheme -eq 'https' -and $u.IsDefaultPort -and -not $u.UserInfo -and $u.Host -match '^[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)*\.sharepoint\.com$')
+    if (-not $AllowedHost) { return $false }
+    ($u.Scheme -eq 'https' -and $u.IsDefaultPort -and -not $u.UserInfo -and $u.Host.ToLowerInvariant() -in @($AllowedHost | ForEach-Object { $_.ToLowerInvariant() }))
+}
+
+function Invoke-AVDTuneHttpRequest {
+    <#
+        The real transport: ONE GET, no automatic redirect, no proxy surprises beyond the system default. Returns Status, Headers (Location only), Stream and Close.
+        The loop around it (Invoke-AVDTuneLibraryGet) is the part with the rules; the checks replace this function through the Transport member of the context
+        with a fake that answers status, headers and a stream, so the real loop runs.
+    #>
+    param([Parameter(Mandatory)][string]$Url, [hashtable]$Headers = @{})
+    [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+    $req = [System.Net.HttpWebRequest]::Create($Url)
+    $req.Method = 'GET'; $req.AllowAutoRedirect = $false; $req.Timeout = 60000; $req.ReadWriteTimeout = 120000
+    foreach ($k in $Headers.Keys) { $req.Headers.Add([string]$k, [string]$Headers[$k]) }
+    try { $resp = $req.GetResponse() }
+    catch {
+        $resp = Get-AVDTuneProp $_.Exception 'Response'
+        if (-not $resp) { throw "SharePoint or Graph cannot be reached: $($_.Exception.Message)" }
+    }
+    $r = $resp
+    @{ Status = [int]$r.StatusCode; Headers = @{ Location = [string]$r.Headers['Location'] }; Stream = $r.GetResponseStream(); Close = { $r.Close() }.GetNewClosure() }
+}
+
+function Read-AVDTuneLimited {
+    # Copies a stream in blocks and counts the real bytes: more than MaxBytes is an error (the declared length is not trusted). To a new file (-OutFile, removed on an error) or into memory (text).
+    param([Parameter(Mandatory)]$Stream, [Parameter(Mandatory)][int64]$MaxBytes, [string]$OutFile)
+    $buf = New-Object byte[] 81920
+    $total = [int64]0
+    $mem = $null; $out = $null
+    try {
+        if ($OutFile) { $out = [IO.File]::Open($OutFile, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write) } else { $mem = New-Object IO.MemoryStream }
+        while (($n = $Stream.Read($buf, 0, $buf.Length)) -gt 0) {
+            $total += $n
+            if ($total -gt $MaxBytes) { throw "The answer is larger than the allowed $MaxBytes bytes: stopped." }
+            if ($out) { $out.Write($buf, 0, $n) } else { $mem.Write($buf, 0, $n) }
+        }
+        if ($mem) { return [Text.Encoding]::UTF8.GetString($mem.ToArray()) }
+    }
+    catch { if ($out) { $out.Dispose(); $out = $null; Remove-Item -LiteralPath $OutFile -Force -ErrorAction SilentlyContinue }; throw }
+    finally { if ($out) { $out.Dispose() } }
 }
 
 function Invoke-AVDTuneLibraryGet {
     <#
         One GET to Microsoft Graph with the token of the audience (Sites for the package store, Graph for the Intune notes). Redirects are never followed
-        automatically: a download is followed by hand to SharePoint, every hop checked, without the token. -OutFile saves the content into a new file
-        (CreateNew, in the protected work folder); otherwise the answer is parsed JSON. The request itself is the replaceable member Http of the context
-        (the checks use a fake); the rules above are applied before it is called.
+        automatically: this loop follows them by hand, at most 5, every hop checked (graph.microsoft.com, or the SharePoint host of the site and its -my variant);
+        the token goes only to graph.microsoft.com, never to SharePoint. -OutFile saves the content into a new file (CreateNew), at most -MaxBytes; otherwise the
+        answer is parsed JSON of at most 4 MB. The request itself is $ctx.Transport (default Invoke-AVDTuneHttpRequest): the checks give it a fake.
     #>
-    param([Parameter(Mandatory)][string]$Url, [ValidateSet('Sites', 'Graph')][string]$Audience = 'Sites', [string]$OutFile)
+    param([Parameter(Mandatory)][string]$Url, [ValidateSet('Sites', 'Graph')][string]$Audience = 'Sites', [string]$OutFile, [int64]$MaxBytes = 4MB)
     $ctx = $script:LibraryContext
     if (-not $ctx) { throw 'The package store is not open (internal: no library context).' }
     $check = Test-AVDTuneLibraryUrl $Url
     if (-not $check.Ok) { throw "Refused request to the library: $($check.Reason)." }
     $token = if ($Audience -eq 'Graph') { [string]$ctx.GraphToken } else { [string]$ctx.SitesToken }
     if (-not $token) { throw "Not signed in for $Audience (no token). Sign in on the Overview first." }
-    if ($ctx.Http) { return (& $ctx.Http $Url $token $OutFile) }
-    [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
-    $current = $Url; $withToken = $true
-    for ($hop = 0; $hop -lt 5; $hop++) {
-        $req = [System.Net.HttpWebRequest]::Create($current)
-        $req.Method = 'GET'; $req.AllowAutoRedirect = $false; $req.Timeout = 60000; $req.ReadWriteTimeout = 120000
-        if ($withToken) { $req.Headers.Add('Authorization', "Bearer $token") }
-        try { $resp = $req.GetResponse() }
-        catch {
-            $resp = Get-AVDTuneProp $_.Exception 'Response'
-            if (-not $resp) { throw "SharePoint or Graph cannot be reached: $($_.Exception.Message)" }
-        }
+    $transport = if ($ctx.Transport) { $ctx.Transport } else { ${function:Invoke-AVDTuneHttpRequest} }
+    $allowed = Get-AVDTuneRedirectHosts $ctx.SiteUrl
+    $current = $Url; $redirects = 0
+    while ($true) {
+        $isGraph = ([Uri]$current).Host -eq 'graph.microsoft.com'
+        $headers = @{}; if ($isGraph) { $headers['Authorization'] = "Bearer $token" }
+        $resp = & $transport $current $headers
         try {
-            $code = [int]$resp.StatusCode
+            $code = [int]$resp.Status
             if ($code -in 301, 302, 303, 307, 308) {
-                $loc = [string]$resp.Headers['Location']
+                if (++$redirects -gt 5) { throw 'Too many redirects.' }
+                $loc = [string]$resp.Headers.Location
                 $abs = $null; if (-not [Uri]::TryCreate([Uri]$current, $loc, [ref]$abs)) { throw 'A redirect with an address that is not valid was refused.' }
-                if (-not (Test-AVDTuneDownloadUrl $abs.AbsoluteUri) -and -not ((Test-AVDTuneLibraryUrl $abs.AbsoluteUri).Ok)) { throw "A redirect to $($abs.Host) was refused (only graph.microsoft.com and SharePoint are allowed)." }
-                $withToken = ($abs.Host -eq 'graph.microsoft.com'); $current = $abs.AbsoluteUri
+                if (-not (Test-AVDTuneDownloadUrl $abs.AbsoluteUri -AllowedHost $allowed) -and -not ((Test-AVDTuneLibraryUrl $abs.AbsoluteUri).Ok)) { throw "A redirect to $($abs.Host) was refused (only graph.microsoft.com and the SharePoint host of the site are allowed)." }
+                $current = $abs.AbsoluteUri
                 continue
             }
             if ($code -lt 200 -or $code -gt 299) { throw "Graph answered $code." }
-            if ($OutFile) {
-                $in = $resp.GetResponseStream()
-                $out = [IO.File]::Open($OutFile, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write)
-                try { $in.CopyTo($out) } finally { $out.Dispose(); $in.Dispose() }
-                return $null
-            }
-            $text = (New-Object IO.StreamReader($resp.GetResponseStream())).ReadToEnd()
+            if ($OutFile) { Read-AVDTuneLimited -Stream $resp.Stream -MaxBytes $MaxBytes -OutFile $OutFile; return $null }
+            $text = Read-AVDTuneLimited -Stream $resp.Stream -MaxBytes $MaxBytes
             if (-not $text.Trim()) { return $null }
             return ($text | ConvertFrom-Json)
         }
-        finally { $resp.Close() }
+        finally { if ($resp.Close) { & $resp.Close } }
     }
-    throw 'Too many redirects.'
 }
 
 function New-AVDTuneLibraryContext {
-    <# The tokens (strings, kept in memory only) and the site of one library session. -Http replaces the request itself (the checks). Close it with Close-AVDTuneLibraryContext. #>
-    param([string]$SitesToken, [string]$GraphToken, [Parameter(Mandatory)][string]$SiteUrl, [string]$Library = $script:DefaultLibrary, [scriptblock]$Http)
+    <# The tokens (strings, kept in memory only) and the site of one library session. -Transport replaces the single request (status, headers, stream; the checks). Close it with Close-AVDTuneLibraryContext. #>
+    param([string]$SitesToken, [string]$GraphToken, [Parameter(Mandatory)][string]$SiteUrl, [string]$Library = $script:DefaultLibrary, [scriptblock]$Transport)
     if ($SiteUrl -notmatch $script:LibrarySitePattern) { throw 'The address of the SharePoint site is not valid (https://<tenant>.sharepoint.com/sites/<name>).' }
     if ($Library -notmatch $script:LibraryNamePattern) { throw 'The name of the library is not valid.' }
-    [pscustomobject]@{ SitesToken = $SitesToken; GraphToken = $GraphToken; SiteUrl = $SiteUrl.TrimEnd('/'); Library = $Library; Http = $Http }
+    [pscustomobject]@{ SitesToken = $SitesToken; GraphToken = $GraphToken; SiteUrl = $SiteUrl.TrimEnd('/'); Library = $Library; Transport = $Transport; Sizes = @{} }
 }
 
 function Close-AVDTuneLibraryContext($Context) { if ($Context) { $Context.SitesToken = $null; $Context.GraphToken = $null } }
@@ -486,7 +547,7 @@ function Get-AVDTuneLibraryItems {
         try { $anchors = Get-AVDTuneIntuneAnchors } catch { [void]$notes.Add("Intune could not be read, so no package can be trusted: $($_.Exception.Message)") }
         $items = New-Object System.Collections.ArrayList
         foreach ($app in @(Get-PackTuneStoreApps -Store $state.Store)) {
-            if ($app -notmatch $script:StoreSegment) { continue }
+            if ($app -notmatch $script:SegmentPattern) { continue }
             foreach ($v in @(Get-PackTuneStoreVersions -AppId $app -Store $state.Store)) {
                 if (-not $v.Complete) { continue }
                 $a = $null; $key = "$app|$($v.Version)"; if ($anchors.ContainsKey($key)) { $a = $anchors[$key] }
@@ -508,6 +569,39 @@ function Get-AVDTuneLibraryItems {
     finally { $script:LibraryContext = $previousContext }
 }
 
+function Get-AVDTuneStreamHash($Stream) {
+    $Stream.Position = 0
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try { ([BitConverter]::ToString($sha.ComputeHash($Stream)) -replace '-', '').ToLowerInvariant() } finally { $sha.Dispose(); $Stream.Position = 0 }
+}
+
+$script:WorkSecurity = { New-AVDTuneStateSecurity }   # replaceable for the checks (a developer run without elevation cannot write into a folder that only Administrators may write)
+function New-AVDTuneWorkFolder {
+    # Creates Path below Base level by level; each new folder is created in one step with the protected ACL (Administrators and SYSTEM only). A level that is a link is refused.
+    param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][string]$Base)
+    $baseFull = [IO.Path]::GetFullPath($Base).TrimEnd('\'); $full = [IO.Path]::GetFullPath($Path).TrimEnd('\')
+    if (-not $full.StartsWith($baseFull + '\', [StringComparison]::OrdinalIgnoreCase)) { throw 'The work folder is not below the state folder.' }
+    $parts = $full.Substring($baseFull.Length + 1) -split '[\\/]'
+    $cur = $baseFull
+    foreach ($p in $parts) {
+        $cur = Join-Path $cur $p
+        $d = New-Object IO.DirectoryInfo $cur
+        if ($d.Exists) { if (($d.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw "$cur is a link." }; continue }
+        $d.Create((& $script:WorkSecurity))
+    }
+}
+
+function Clear-AVDTuneSoftwareWork {
+    # At the start of a run and of a scan: work folders that a crash left behind in <root>\software\work are removed (links as links). Returns the number removed.
+    param([Parameter(Mandatory)][string]$Root)
+    $work = New-Object IO.DirectoryInfo (Join-Path (Join-Path $Root 'software') 'work')
+    if (-not $work.Exists) { return 0 }
+    if (($work.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { $work.Delete(); return 0 }
+    $n = 0
+    foreach ($c in $work.GetDirectories()) { try { Remove-AVDTuneFolderNoFollow $c.FullName; $n++ } catch { } }
+    $n
+}
+
 function Get-AVDTuneLibraryMsi {
     # The MSI of a downloaded package: the only .msi in the unpacked installer folder (links are not followed); otherwise the one the recipe names by file name
     param([Parameter(Mandatory)][string]$InstallerFolder, [string]$RecipePath)
@@ -517,7 +611,7 @@ function Get-AVDTuneLibraryMsi {
     if ($all.Count -gt 1 -and $RecipePath -and (Test-Path -LiteralPath $RecipePath)) {
         $r = $null; try { $r = [IO.File]::ReadAllText($RecipePath) | ConvertFrom-Json } catch { }
         $entry = Get-AVDTuneProp $r 'EntryPoint'
-        if ($entry -is [string] -and $entry -match '^[A-Za-z0-9._ +()-]{1,120}\.msi$') {
+        if ($entry -is [string] -and $entry -match '\A[A-Za-z0-9._ +()-]{1,120}\.msi\z') {
             $hit = @($all | Where-Object { $_.Name -ieq $entry })
             if ($hit.Count -eq 1) { return $hit[0].FullName }
         }
@@ -548,8 +642,8 @@ function Test-AVDTuneSoftwareItem {
     # Throws before anything is started when a field is not what it must be
     param($Item)
     if ($Item.Source -eq 'library') {
-        if ($Item.Id -cnotmatch $script:StoreSegment -or $Item.Id -match '\.\.') { throw "'$($Item.Id)' is not a valid library package name." }
-        if ($Item.Version -cnotmatch $script:StoreSegment -or $Item.Version -match '\.\.') { throw "'$($Item.Version)' is not a valid library package version." }
+        if ($Item.Id -cnotmatch $script:SegmentPattern -or $Item.Id -match '\.\.') { throw "'$($Item.Id)' is not a valid library package name." }
+        if ($Item.Version -cnotmatch $script:SegmentPattern -or $Item.Version -match '\.\.') { throw "'$($Item.Version)' is not a valid library package version." }
         return
     }
     if (-not (Test-AVDTunePackageId $Item.Id)) { throw "'$($Item.Id)' is not a valid package id." }
@@ -624,14 +718,22 @@ function Invoke-AVDTuneLibraryItem {
         $softRoot = Join-Path $Root 'software'
         foreach ($d in $Root, $softRoot) { if (Test-Path -LiteralPath $d) { if (((Get-Item -LiteralPath $d -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { return & $new 'Failed' "$d is a link: the library is not used." 'Link' $false '' } } }
         $work = Join-Path (Join-Path $softRoot 'work') ([guid]::NewGuid().ToString('N'))
-        [void][IO.Directory]::CreateDirectory($work)   # inherits the protected ACL of the state folder (admin-only); one fresh folder per run
+        New-AVDTuneWorkFolder -Path $work -Base $Root   # every level made in one step with its own admin-only ACL (no moment without it, nothing inherited by chance)
         & $say "Downloading $($pkg.Name) $($pkg.Version) and checking it against Intune ..."
         $saved = Save-PackTuneStoreVersion -AppId $pkg.AppId -Version $pkg.Version -Destination (Join-Path $work 'package') -ExpectedManifest $pkg.Manifest -Store (Resolve-PackTuneStore -SiteUrl $Context.SiteUrl -Library $Context.Library)
         if (-not $saved.InstallerFolder) { return & $new 'Failed' 'The package has no installer.zip.' 'NoInstaller' $false '' }
         $msi = Get-AVDTuneLibraryMsi -InstallerFolder $saved.InstallerFolder -RecipePath (Join-Path $saved.Destination 'recipe.json')
         if (-not $msi) { return & $new 'Failed' 'The installer folder has no single MSI (and the recipe names none): this package cannot be installed here.' 'NoMsi' $false '' }
-        & $say "Installing $($pkg.Name) $($pkg.Version) ..."
-        $r = Invoke-AVDTuneSoftwareTool -U $U -Tool 'msiexec.exe' -Arguments @('/i', $msi, '/qn', '/norestart', '/l*v', $log) -TimeoutSeconds 3600
+        # the MSI is held open (read sharing only: nobody can change or replace it) and hashed again right before msiexec starts; a difference stops the install
+        $hold = [IO.File]::Open($msi, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+        try {
+            $h1 = Get-AVDTuneStreamHash $hold
+            & $say "Installing $($pkg.Name) $($pkg.Version) ..."
+            $h2 = Get-AVDTuneStreamHash $hold
+            if ($h1 -ne $h2) { return & $new 'Failed' 'The installer changed between the check and the start: not started.' 'Changed' $false '' }
+            $r = Invoke-AVDTuneSoftwareTool -U $U -Tool 'msiexec.exe' -Arguments @('/i', $msi, '/qn', '/norestart', '/l*v', $log) -TimeoutSeconds 3600
+        }
+        finally { $hold.Dispose() }
         if (-not $r.Ok) { return & $new 'Failed' $r.Error $r.Code $false '' }
         if ($r.ExitCode -in 0, 3010, 1641) { return & $new 'Changed' $(if ($r.ExitCode -eq 0) { "Package $($Item.Action.ToLower())d." } else { "Package $($Item.Action.ToLower())d, a restart is needed." }) '' ($r.ExitCode -ne 0) $pkg.Version }
         & $new 'Failed' $(if ($r.ExitCode -eq 1618) { 'Another installation is running on this computer.' } else { "msiexec returned the exit code $($r.ExitCode); the log is $log." }) $r.ExitCode $false ''
@@ -657,6 +759,7 @@ function Invoke-AVDTuneSoftwareRun {
     if ($WhatIf) { return [pscustomobject]@{ WhatIf = $true; Results = @($list | ForEach-Object { New-AVDTuneSoftwareResult -Machine $Machine -Item $_ -Status 'WhatIf' -Message 'Would run.' }); Run = $null; Reboot = $false } }
     if (-not (Test-AVDTuneWriteAllowed)) { throw 'The snapshot gate is not confirmed: AVDTune is read only until a snapshot of today is confirmed on the Overview.' }
     if ($list.Count -eq 0) { return [pscustomobject]@{ WhatIf = $false; Results = @(); Run = $null; Reboot = $false } }
+    [void](Clear-AVDTuneSoftwareWork -Root $Root)
     $started = & $Machine.Now
     [void](Set-AVDTuneState -Root $Root -Values @{ LastChange = $started.ToString('o') })
     $results = New-Object System.Collections.ArrayList
@@ -703,4 +806,4 @@ function Get-AVDTuneSoftwareHistory {
 Export-ModuleMember -Function Get-AVDTuneSoftwareSettings, Set-AVDTuneSoftwareSettings, Test-AVDTunePackageId, Test-AVDTunePackageVersion, Test-AVDTuneSearchText, Compare-AVDTuneVersion,
     ConvertFrom-AVDTuneWingetTable, ConvertFrom-AVDTuneChocoPackages, ConvertFrom-AVDTuneIntuneNote, Get-AVDTuneInstalledSoftware, Test-AVDTuneMsiexecTrust, Invoke-AVDTuneSoftwareTool,
     Search-AVDTuneCatalog, Get-AVDTuneManagedSoftware, Test-AVDTuneLibraryUrl, Test-AVDTuneDownloadUrl, New-AVDTuneLibraryContext, Close-AVDTuneLibraryContext, Get-AVDTuneLibraryItems,
-    New-AVDTuneSoftwareItem, Get-AVDTuneCatalogArguments, Invoke-AVDTuneSoftwareRun, Get-AVDTuneSoftwareHistory, Expand-PackTuneZip
+    New-AVDTuneSoftwareItem, Get-AVDTuneCatalogArguments, Invoke-AVDTuneSoftwareRun, Get-AVDTuneSoftwareHistory, Expand-PackTuneZip, Get-AVDTuneRedirectHosts, Invoke-AVDTuneLibraryGet, Read-AVDTuneLimited, Clear-AVDTuneSoftwareWork, New-AVDTuneWorkFolder
