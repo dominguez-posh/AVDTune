@@ -107,6 +107,54 @@ try {
     $ch1 = Get-AVDTuneFSLogixGroupChoices -Root $tmp -Answers ([pscustomobject]@{ DomainController = 'OnPremises' })
     Test-Check 'group choices with the domain information: the groups with SIDs' ($ch1.Source -eq 'Directory' -and $ch1.Groups[0].Sid -eq $sddlUsers) $null
 
+    # ---------------------------------------------------------------- recommended lists (issue 62)
+    $dom = 'S-1-5-21-1111111111-2222222222-333333333'
+    Test-Check 'SID validation is anchored (\A...\z): a trailing newline or a prefix is no SID; the domain SID is strict S-1-5-21-x-y-z' (-not (Test-AVDTuneSid "S-1-1-0`n") -and -not (Test-AVDTuneSid "x S-1-1-0") -and (Test-AVDTuneSid 'S-1-1-0') -and (Test-AVDTuneDomainSid $dom) -and -not (Test-AVDTuneDomainSid "$dom`n") -and -not (Test-AVDTuneDomainSid 'S-1-5-21-1-2') -and -not (Test-AVDTuneDomainSid 'S-1-5-32-544') -and -not (Test-AVDTuneDomainSid "$dom-512") -and -not (Test-AVDTuneDomainSid 'S-1-5-21-a-b-c')) $null
+    $dirFile = Join-Path $tmp 'config\directory.json'; $dirKeep = Get-Content -LiteralPath $dirFile -Raw
+    $setDir = { param($info) if ($null -eq $info) { Remove-Item -LiteralPath $dirFile -Force -ErrorAction SilentlyContinue } else { Write-AVDTuneFile $dirFile (([ordered]@{ ReadAt = '2026-11-17'; Directory = $info }) | ConvertTo-Json -Depth 6) } }
+    $ansDom = [pscustomobject]@{ DomainController = 'OnPremises' }; $ansEntra = [pscustomobject]@{ DomainController = 'None' }
+    & $setDir @{ DomainSid = $dom; Groups = @() }
+    $rDom = Get-AVDTuneFSLogixRecommendedLists -Root $tmp -Answers $ansDom
+    Test-Check 'with a domain: include Everyone, exclude local Administrators and Domain Admins (domain SID from the DC information + -512), no notice' ((@($rDom.Include) -join ',') -eq 'S-1-1-0' -and (@($rDom.Exclude) -join ',') -eq "S-1-5-32-544,$dom-512" -and $rDom.Notice -eq '') (@($rDom.Exclude) -join ',')
+    $rEntra = Get-AVDTuneFSLogixRecommendedLists -Root $tmp -Answers $ansEntra
+    Test-Check 'without a domain (Entra only): only the local administrators, with a visible notice, even when an old directory.json is there' ((@($rEntra.Exclude) -join ',') -eq 'S-1-5-32-544' -and $rEntra.Notice -like '*Entra*') $rEntra.Notice
+    & $setDir $null
+    $rNoSid = Get-AVDTuneFSLogixRecommendedLists -Root $tmp -Answers $ansDom
+    Test-Check 'domain SID missing: only the local administrators, notice says the SID is not known and not guessed' ((@($rNoSid.Exclude) -join ',') -eq 'S-1-5-32-544' -and $rNoSid.Notice -like '*not known*guess*') $rNoSid.Notice
+    & $setDir @{ DomainSid = "$dom-1104"; Groups = @(@{ Name = 'Domain Admins'; Sid = "$dom-512" }) }
+    $rBad = Get-AVDTuneFSLogixRecommendedLists -Root $tmp -Answers $ansDom
+    Test-Check 'a malformed domain SID in the file is not used, and a Domain Admins group SID in the groups is not taken instead (no guessing)' ((@($rBad.Exclude) -join ',') -eq 'S-1-5-32-544' -and $rBad.Notice -like '*not known*') $rBad.Notice
+
+    & $setDir @{ DomainSid = $dom; Groups = @() }
+    $fl = New-AVDTuneFakeFSLogix -Seed @{ Groups = @{ 'FSLogix Profile Include List' = @('S-1-1-0'); 'FSLogix Profile Exclude List' = @('S-1-5-21-9-9-9-1234') } }
+    $wi = Set-AVDTuneFSLogixRecommendedLists -Machine $m -F $fl -Root $tmp -Answers $ansDom -WhatIf
+    Test-Check 'Test (WhatIf) changes nothing and writes no undo entry' (@($fl.Store.Groups['FSLogix Profile Exclude List']).Count -eq 1 -and -not (Test-Path -LiteralPath (Get-AVDTuneFSLogixListsUndoPath $tmp))) $null
+    $ap = Set-AVDTuneFSLogixRecommendedLists -Machine $m -F $fl -Root $tmp -Answers $ansDom -User 'admin1' -SnapshotId 'snap-check'
+    $ex = @($fl.Store.Groups['FSLogix Profile Exclude List']); $inc = @($fl.Store.Groups['FSLogix Profile Include List'])
+    Test-Check 'Apply: Everyone stays in include (unchanged), local Administrators and Domain Admins added by SID, the foreign entry stays' (@($ap.Results | Where-Object Status -eq 'Changed').Count -eq 2 -and @($ap.Results | Where-Object Status -eq 'Unchanged').Count -eq 1 -and $ex -contains 'S-1-5-32-544' -and $ex -contains "$dom-512" -and $ex -contains 'S-1-5-21-9-9-9-1234' -and $inc.Count -eq 1 -and $inc[0] -eq 'S-1-1-0') ($ex -join ',')
+    Test-Check 'Apply goes through the gate: change log entries, and the log only names SIDs' (@(Get-AVDTuneChangeLog -Root $tmp | Where-Object Category -eq 'FSLogix').Count -ge 2) $null
+    $ap2 = Set-AVDTuneFSLogixRecommendedLists -Machine $m -F $fl -Root $tmp -Answers $ansDom -User 'admin1' -SnapshotId 'snap-check'
+    Test-Check 'Apply again: everything unchanged, the undo stack has no second entry' (@($ap2.Results | Where-Object Status -eq 'Changed').Count -eq 0 -and @((Read-AVDTuneJson (Get-AVDTuneFSLogixListsUndoPath $tmp)).Entries).Count -eq 1) $null
+    $un = Undo-AVDTuneFSLogixRecommendedLists -Machine $m -F $fl -Root $tmp -User 'admin1' -SnapshotId 'snap-check'
+    $ex2 = @($fl.Store.Groups['FSLogix Profile Exclude List'])
+    Test-Check 'Undo: exactly what Apply added is gone, the foreign entry and Everyone stay, the undo file is gone' ($ex2.Count -eq 1 -and $ex2[0] -eq 'S-1-5-21-9-9-9-1234' -and @($fl.Store.Groups['FSLogix Profile Include List']) -contains 'S-1-1-0' -and -not (Test-Path -LiteralPath (Get-AVDTuneFSLogixListsUndoPath $tmp))) ($ex2 -join ',')
+    Test-Check 'Undo without an earlier Apply is refused with the reason' ((Get-ThrownText { Undo-AVDTuneFSLogixRecommendedLists -Machine $m -F $fl -Root $tmp -User 'admin1' -SnapshotId 'snap-check' }) -like '*nothing to undo*') $null
+    $fe = New-AVDTuneFakeFSLogix
+    $null = Set-AVDTuneFSLogixRecommendedLists -Machine $m -F $fe -Root $tmp -Answers $ansEntra -User a -SnapshotId 'snap-check'
+    $null = Set-AVDTuneFSLogixGroupMember -Machine $m -F $fe -Root $tmp -List Exclude -Action Add -Sid 'S-1-5-21-7-7-7-500' -User a -SnapshotId 'snap-check'
+    $null = Set-AVDTuneFSLogixRecommendedLists -Machine $m -F $fe -Root $tmp -Answers $ansDom -User a -SnapshotId 'snap-check'
+    $null = Undo-AVDTuneFSLogixRecommendedLists -Machine $m -F $fe -Root $tmp -User a -SnapshotId 'snap-check'
+    Test-Check 'two Applies, one Undo: the older undo entry is not overwritten and stays; only the newest Apply is undone, a later foreign entry stays' (@((Read-AVDTuneJson (Get-AVDTuneFSLogixListsUndoPath $tmp)).Entries).Count -eq 1 -and @($fe.Store.Groups['FSLogix Profile Exclude List']) -contains 'S-1-5-21-7-7-7-500' -and @($fe.Store.Groups['FSLogix Profile Exclude List']) -contains 'S-1-5-32-544' -and @($fe.Store.Groups['FSLogix Profile Exclude List']) -notcontains "$dom-512") $null
+    Remove-Item -LiteralPath (Get-AVDTuneFSLogixListsUndoPath $tmp) -Force -ErrorAction SilentlyContinue
+    $fm = New-AVDTuneFakeFSLogix -Seed @{ Groups = @{} }
+    $miss = Set-AVDTuneFSLogixRecommendedLists -Machine $m -F $fm -Root $tmp -Answers $ansDom -User a -SnapshotId 'snap-check'
+    Test-Check 'FSLogix not installed (no local groups): first step Failed with the reason, the rest skipped, no undo entry' (@($miss.Results | Where-Object Status -eq 'Failed').Count -eq 1 -and @($miss.Results | Where-Object Status -eq 'Skipped').Count -eq 2 -and -not (Test-Path -LiteralPath (Get-AVDTuneFSLogixListsUndoPath $tmp))) $null
+    Close-AVDTuneWriteGate
+    $noGate = Get-ThrownText { Set-AVDTuneFSLogixRecommendedLists -Machine $m -F $fl -Root $tmp -Answers $ansDom -User a -SnapshotId 'x' }
+    Open-AVDTuneWriteGate -SnapshotId 'snap-check' -ConfirmedBy 'Check Runner'
+    Test-Check 'without the write gate the lists are not written (counter-test)' (@($fl.Store.Groups['FSLogix Profile Exclude List']).Count -eq 1 -and (@($fl.Store.Groups['FSLogix Profile Exclude List']) -notcontains 'S-1-5-32-544')) $noGate
+    [IO.File]::WriteAllText($dirFile, $dirKeep)
+
     # ---------------------------------------------------------------- redirections.xml
     $tpl = @(Get-AVDTuneRedirectionTemplate)
     Test-Check 'template: Windows, Edge, Chrome, Teams, Office; only Teams is verified (Learn)' ((($tpl.Group | Sort-Object) -join ',') -eq 'Chrome,Edge,Office,Teams,Windows' -and @($tpl | Where-Object Verified).Count -eq 1 -and ($tpl | Where-Object Group -eq 'Teams').Paths.Count -eq 5) $null

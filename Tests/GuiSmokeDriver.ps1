@@ -749,6 +749,17 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         $ui.CmbFslList.SelectedItem = 'Exclude'
         $ui.BtnFslExcludeAdmins.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
         Test-Smoke 'groups: the local Administrators are in the exclude list; the groups of the domain controller are offered' ($script:FslFake.F.Store.Groups['FSLogix Profile Exclude List'] -contains 'S-1-5-32-544' -and $ui.TxtFslGroups.Text -like '*S-1-5-32-544*' -and @($ui.CmbFslGroup.ItemsSource) -contains 'AVD-Users') $ui.TxtFslGroupHint.Text
+        # recommended lists (issue 62): one button, the contents of both lists are checked, the foreign entry stays, Undo takes only what was added
+        $domAdmins = 'S-1-5-21-1111111111-2222222222-333333333-512'
+        $script:FslFake.F.Store.Groups['FSLogix Profile Exclude List'] = @('S-1-5-21-9-9-9-1234')
+        $script:FslFake.F.Store.Groups['FSLogix Profile Include List'] = @()
+        $ui.BtnFslListsApply.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
+        $exl = @($script:FslFake.F.Store.Groups['FSLogix Profile Exclude List']); $inl = @($script:FslFake.F.Store.Groups['FSLogix Profile Include List'])
+        Test-Smoke 'Apply recommended lists: include = Everyone; exclude = local Administrators + Domain Admins (domain SID from the DC information) + the foreign entry; the lists text shows them' ($inl.Count -eq 1 -and $inl[0] -eq 'S-1-1-0' -and $exl -contains 'S-1-5-32-544' -and $exl -contains $domAdmins -and $exl -contains 'S-1-5-21-9-9-9-1234' -and $exl.Count -eq 3 -and $ui.TxtFslGroups.Text -like "*$domAdmins*" -and $ui.TxtFslGroups.Text -like '*S-1-5-21-9-9-9-1234*' -and $script:ConfirmAsked -like '*Everyone*') "$($exl -join ',') / $($inl -join ',') / $($script:ConfirmAsked)"
+        $ui.BtnFslListsUndo.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
+        $exl2 = @($script:FslFake.F.Store.Groups['FSLogix Profile Exclude List'])
+        Test-Smoke 'Undo recommended lists: what was added is gone, the foreign entry stays' ($exl2.Count -eq 1 -and $exl2[0] -eq 'S-1-5-21-9-9-9-1234' -and @($script:FslFake.F.Store.Groups['FSLogix Profile Include List']).Count -eq 0) ($exl2 -join ',')
+        $ui.BtnFslListsApply.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
         $ui.CmbFslGroup.Text = 'not-a-group'
         $ui.BtnFslGroupAdd.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
         Test-Smoke 'a name that is no group and no SID is refused with the reason' ($script:LastToast -like '*neither a group of the domain nor a SID*') $script:LastToast

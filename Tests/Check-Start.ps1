@@ -867,6 +867,10 @@ try {
     Test-Check 'OU tree: Corp > AVD > Groups and Servers, 4 OUs' ($info.OuCount -eq 4 -and $info.OuTree.Count -eq 2 -and ($info.OuTree | Where-Object Name -eq 'Corp').Children[0].Name -eq 'AVD' -and ($info.OuTree | Where-Object Name -eq 'Corp').Children[0].Children[0].Name -eq 'Groups') ($info.OuTree | ConvertTo-Json -Compress -Depth 6)
     $g = $info.Groups | Where-Object Name -eq 'AVD-Users'
     Test-Check 'groups with their SIDs; security and distribution groups told apart' ($info.Groups.Count -eq 3 -and $g.Sid -match '^S-1-5-21-1111111111-2222222222-333333333-1104$' -and $g.Security -and -not ($info.Groups | Where-Object Name -eq 'Mail-List').Security) ($info.Groups | ForEach-Object { "$($_.Name)=$($_.Sid)" })
+    Test-Check 'the domain SID is read from the domain object (strict S-1-5-21-x-y-z), not derived from a group' ($info.DomainSid -ceq 'S-1-5-21-1111111111-2222222222-333333333') $info.DomainSid
+    $ldapNoSid = New-AVDTuneFakeLdap; $ldapNoSid.Store.Entries.DomainSidMissing = $true
+    $inos = Get-AVDTuneDirectoryInfo -Ldap $ldapNoSid -Connection $r2.Connection
+    Test-Check 'a domain SID the DC does not return stays empty with a warning (never guessed from the groups)' ($inos.DomainSid -eq '' -and @($inos.Warnings | Where-Object { $_ -like '*domain SID*' }).Count -eq 1 -and $inos.Groups.Count -eq 3) ($inos.Warnings -join ';')
     $ldapPartial = New-AVDTuneFakeLdap; $ldapPartial.Store.Entries.Fail = 'group'
     $ip = Get-AVDTuneDirectoryInfo -Ldap $ldapPartial -Connection $r2.Connection
     Test-Check 'a part that cannot be read becomes a warning, the rest is still returned' ($ip.Warnings.Count -eq 1 -and $ip.Warnings[0] -like 'Groups not read*' -and $ip.OuCount -eq 4) ($ip.Warnings -join ';')

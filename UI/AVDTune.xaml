@@ -410,8 +410,13 @@
                                     <Border Style="{DynamicResource CardBox}" Margin="0,16,0,0" Background="{DynamicResource Card}" Padding="20,16">
                                         <StackPanel>
                                             <TextBlock Text="Include and exclude lists" Style="{DynamicResource CardTitle}"/>
-                                            <TextBlock Style="{DynamicResource Hint}" Margin="0,4,0,0" TextWrapping="Wrap" Text="Local groups that decide who FSLogix processes. The exclude list is empty by default; the include list contains Everyone. Administrators should be excluded so that an admin sign-in does not lock a container."/>
+                                            <TextBlock Style="{DynamicResource Hint}" Margin="0,4,0,0" TextWrapping="Wrap" Text="Local groups that decide who FSLogix processes. Recommended: include Everyone, exclude the local Administrators and (with a domain) Domain Admins, so that an admin sign-in does not lock a container. Members are set by SID; entries that are already there stay. Applying the settings above sets these lists too."/>
                                             <TextBox x:Name="TxtFslGroups" Style="{DynamicResource SelectableText}" Margin="0,8,0,0" Height="80" AcceptsReturn="True" VerticalScrollBarVisibility="Auto" FontFamily="Cascadia Mono, Consolas" FontSize="12" Padding="10,8" Foreground="{DynamicResource Text}" AutomationProperties.Name="Members of the include and exclude lists"/>
+                                            <StackPanel Orientation="Horizontal" Margin="0,10,0,0">
+                                                <Button x:Name="BtnFslListsApply" Content="Apply recommended lists" Margin="0,0,8,0" AutomationProperties.Name="Set the recommended include and exclude lists in one step"/>
+                                                <Button x:Name="BtnFslListsUndo" Content="Undo recommended lists" AutomationProperties.Name="Remove the members that the last Apply recommended lists added"/>
+                                            </StackPanel>
+                                            <TextBlock x:Name="TxtFslListsNotice" Style="{DynamicResource Hint}" Margin="0,8,0,0" TextWrapping="Wrap"/>
                                             <StackPanel Orientation="Horizontal" Margin="0,10,0,0">
                                                 <ComboBox x:Name="CmbFslList" Width="110" Margin="0,0,8,0" AutomationProperties.Name="Which list"/>
                                                 <ComboBox x:Name="CmbFslGroup" Width="260" Margin="0,0,8,0" IsEditable="True" AutomationProperties.Name="Group from the domain, or a SID"/>

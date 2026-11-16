@@ -11,6 +11,7 @@ Issue 10, plan sections 5a and 5d. Code: `Modules\AVDTune.FSLogix.psm1`, `Module
 | Settings reference | fslogix/reference-configuration-settings | names, types, defaults, meaning of every value |
 | Recommended values | fslogix/tutorial-configure-profile-containers | `DeleteLocalProfileWhenVHDShouldApply=1`, `FlipFlopProfileDirectoryName=1`, `LockedRetryCount=3`, `LockedRetryInterval=15`, `ReAttachRetryCount=3`, `ReAttachIntervalSeconds=15`, `ProfileType=0`, `SizeInMBs=30000`, `VolumeType=vhdx` |
 | Include/exclude lists | fslogix/concepts-include-exclude-groups | exclude list empty by default, include list holds Everyone |
+| Well-known SIDs | windows-server/identity/ad-ds/manage/understand-security-identifiers | Everyone `S-1-1-0`, BUILTIN\Administrators `S-1-5-32-544`, Domain Admins `<domain SID>-512` |
 | redirections.xml | fslogix/concepts-redirections-xml, fslogix/tutorial-redirections-xml | elements, `ExcludeCommonFolders` bitmask, `Copy` 0 to 3, `RedirXMLSourceFolder` (folder only), the Teams folders |
 | Antivirus exclusions | fslogix/overview-prerequisites (page date 2026-03-30) | the Defender list, RC4 to AES-SHA1 notice (April 2026) |
 | Services and drivers | fslogix/reference-service-drivers-components | frxsvc, frxccds, frxdrv, frxdrvvt, frxccd |
@@ -35,6 +36,21 @@ Issue 10, plan sections 5a and 5d. Code: `Modules\AVDTune.FSLogix.psm1`, `Module
 - The Storage audience (issue 18) is built but not tried on a real tenant: scope `https://storage.azure.com/user_impersonation`, token audience `https://storage.azure.com`. Whether Get Permission accepts that user token (see the line above) is still to be proven on the VM. Without the token the ACL rows say "not checkable" with the reason.
 - Not built: reading Entra applications (admin consent, Conditional Access exclusion) and Entra groups: shown as a by-hand hint. Subscriptions: the one of this VM plus ids you enter (the ARM adapter allows only paths below a subscription id).
 
+## Recommended include and exclude lists (issue 62)
+
+On the FSLogix page, "Apply recommended lists" (and "Apply" of the settings, which calls the same step) sets the two local groups `FSLogix Profile Include List` and `FSLogix Profile Exclude List`:
+
+| List | Members (by SID, never by name) |
+|---|---|
+| Include | Everyone `S-1-1-0` (the default; set again when it is missing) |
+| Exclude | BUILTIN\Administrators `S-1-5-32-544` and, with a domain, Domain Admins = domain SID + `-512` |
+
+- The domain SID comes only from the domain controller information (`config\directory.json`, field `DomainSid`, the `objectSid` of the domain object read over LDAPS in the start sequence). It must have exactly the form `S-1-5-21-x-y-z` (`\A...\z` pattern); anything else is not used. It is never derived from a group SID or guessed.
+- Without a domain (Entra only) or without a known domain SID only the local administrators are excluded, and the page says so (notice under the buttons, in the confirmation).
+- Members that are already there stay; foreign entries stay and are shown in the list text. More exclude groups stay optional (pick a group or type a SID).
+- Test (WhatIf), Apply and Undo run through `Invoke-AVDTune` (write gate, change log, `LastChange`). "Undo recommended lists" removes exactly the members the last Apply added (a stack in `config\fslogix-lists-undo.json`: older entries are never overwritten); members that were there before and foreign members stay.
+- Source: the include/exclude groups concept page above (exclude groups, the include list for Everyone, why administrators are excluded) and the well-known SID table. Not verified offline: the exact wording of the Learn recommendation to exclude administrators (the page names the groups but not their names, see "Not verified"); the group names and adding a domain SID through the WinNT provider are tried on the VM (F3, F9).
+
 ## Storage token for the NTFS rows (issue 18)
 
 The ACL rows of the storage check read the NTFS rights over the Azure Files REST API with the signed-in user's token (OAuth, header `x-ms-file-request-intent: backup`, never a key). That is the fourth audience of the sign-in (`AVDTune.Session.psm1`):
@@ -55,6 +71,7 @@ The Storage token is optional. An app registration made before issue 18 has no c
 | F1 | FSLogix page: "Install or update FSLogix" | The newest release is downloaded to a folder below `C:\ProgramData\AVDTune\temp`, the signature is checked, FSLogix installs, `InstallVersion` appears, the folder is gone. Updates page shows FSLogix as updatable before. |
 | F2 | Fill in recommended, Test, Apply, Undo | Registry values under `HKLM\SOFTWARE\FSLogix\Profiles` as shown; Undo puts the old ones back; change log and LastChange. |
 | F3 | Exclude local administrators | `FSLogix Profile Exclude List` contains Administrators (check with `lusrmgr`). |
+| F9 | FSLogix page: "Apply recommended lists" in a domain, then Undo | Exclude contains Administrators and Domain Admins (SID ends in `-512`), include contains Everyone, existing foreign members stay; Undo removes only what was added; without a domain only Administrators and a notice. |
 | F4 | redirections.xml: generate, save | File on the share; the `RedirXMLSourceFolder` value set; a hand-written TokenBroker exclusion is refused. |
 | F5 | Defender: add the missing exclusions, Undo | `Get-MpPreference` shows them; Undo removes only those AVDTune added. |
 | F6 | Run test; run test with write tests (needs a share) | Rows as in the screenshots; write test folder gone from the share; no VHDX left; if the master has no access (not joined): yellow, not red. |

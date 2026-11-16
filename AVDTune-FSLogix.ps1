@@ -153,7 +153,9 @@ Add-Click $ui.BtnFslSettingsApply {
     if ($vals.Count -eq 0) { throw 'Nothing to change: every filled value equals the current one.' }
     if (-not (Confirm-Action "Write $($vals.Count) FSLogix setting(s) to the registry of this master?" 'FSLogix settings')) { return }
     $run = Invoke-FslChange -Kind 'fslogix-settings' -Title 'Applying FSLogix settings' -Step "Writing $($vals.Count) setting(s) to the registry" -Block { Set-AVDTuneFSLogixSettings -Machine $script:Machine -Root $script:StateRoot -Values $vals -User (Get-FslUser) -SnapshotId (Get-FslGateSnapshot) }
-    Show-FslRun $run 'FSLogix settings'; Update-FslView
+    Show-FslRun $run 'FSLogix settings'
+    if (@($run.Results | Where-Object { $_.Status -eq 'Failed' }).Count -eq 0) { Invoke-FslRecommendedLists -Quiet }
+    Update-FslView
 }
 Add-Click $ui.BtnFslSettingsUndo {
     Assert-FslWrite
@@ -177,6 +179,8 @@ function Update-FslGroups {
     $ui.TxtFslGroups.Text = "Include list ($($g.IncludeName)):`r`n  $(& $fmt $g.Include)`r`nExclude list ($($g.ExcludeName)):`r`n  $(& $fmt $g.Exclude)"
     $ch = Get-FslGroupChoices
     foreach ($cmb in $ui.CmbFslGroup, $ui.CmbFslUsersGroup, $ui.CmbFslAdminsGroup) { $keepText = $cmb.Text; $cmb.ItemsSource = @($ch.Groups | ForEach-Object { $_.Name }); $cmb.Text = $keepText }
+    $rec = Get-AVDTuneFSLogixRecommendedLists -Root $script:StateRoot -Answers (Get-FslAnswers)
+    $ui.TxtFslListsNotice.Text = "Recommended: include $(@($rec.Include) -join ', '); exclude $(@($rec.Exclude) -join ', ').$(if ($rec.Notice) { ' ' + $rec.Notice })"
     $ui.TxtFslGroupHint.Text = $(if ($ch.Source -eq 'Directory') { "$(@($ch.Groups).Count) groups from the domain controller. Pick one or type a SID." } else { $ch.Hint })
 }
 function Invoke-FslGroupChange([string]$Action, [string]$Text) {
@@ -187,6 +191,20 @@ function Invoke-FslGroupChange([string]$Action, [string]$Text) {
     if (-not (Confirm-Action "$Action $sid in the FSLogix $list list?" 'FSLogix lists')) { return }
     $run = Set-AVDTuneFSLogixGroupMember -Machine $script:Machine -F (Get-FslAdapter) -Root $script:StateRoot -List $list -Action $Action -Sid $sid -User (Get-FslUser) -SnapshotId (Get-FslGateSnapshot)
     Show-FslRun $run "FSLogix $list list"; Update-FslGroups
+}
+function Invoke-FslRecommendedLists([switch]$Quiet) {
+    # Include = Everyone, Exclude = local Administrators (+ Domain Admins with a known domain SID); the settings Apply calls this too (no second confirmation)
+    $rec = Get-AVDTuneFSLogixRecommendedLists -Root $script:StateRoot -Answers (Get-FslAnswers)
+    if (-not $Quiet -and -not (Confirm-Action "Set the recommended lists? Include: Everyone. Exclude: $(@($rec.Exclude) -join ', ').$(if ($rec.Notice) { ' ' + $rec.Notice })" 'FSLogix lists')) { return }
+    $run = Invoke-FslChange -Kind 'fslogix-lists' -Title 'Applying the recommended FSLogix lists' -Step 'Setting the include and exclude lists' -Block { Set-AVDTuneFSLogixRecommendedLists -Machine $script:Machine -F (Get-FslAdapter) -Root $script:StateRoot -Answers (Get-FslAnswers) -User (Get-FslUser) -SnapshotId (Get-FslGateSnapshot) }
+    Show-FslRun $run 'FSLogix lists'; Update-FslGroups
+}
+Add-Click $ui.BtnFslListsApply { Assert-FslWrite; Invoke-FslRecommendedLists }
+Add-Click $ui.BtnFslListsUndo {
+    Assert-FslWrite
+    if (-not (Confirm-Action 'Remove the members that the last Apply recommended lists added? Entries that were there before stay.' 'Undo')) { return }
+    $run = Invoke-FslChange -Kind 'fslogix-lists' -Title 'Undo of the recommended FSLogix lists' -Step 'Removing the members that were added' -Block { Undo-AVDTuneFSLogixRecommendedLists -Machine $script:Machine -F (Get-FslAdapter) -Root $script:StateRoot -User (Get-FslUser) -SnapshotId (Get-FslGateSnapshot) }
+    Show-FslRun $run 'Undo of the FSLogix lists'; Update-FslGroups
 }
 $ui.CmbFslList.ItemsSource = @('Exclude', 'Include'); $ui.CmbFslList.SelectedIndex = 0
 Add-Click $ui.BtnFslGroupAdd { Invoke-FslGroupChange 'Add' ([string]$ui.CmbFslGroup.Text) }
