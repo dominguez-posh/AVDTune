@@ -77,7 +77,7 @@ public static class Workloads
     public static long SortChecksum(string[] sorted)
     {
         long h = sorted.Length;
-        for (int i = 0; i < sorted.Length; i += Math.Max(1, sorted.Length / 7)) h = h * 31 + sorted[i].GetHashCode(StringComparison.Ordinal) % 1000003;
+        for (int i = 0; i < sorted.Length; i += Math.Max(1, sorted.Length / 7)) { long c = 17; foreach (char ch in sorted[i]) c = (c * 131 + ch) % 1000003; h = (h * 31 + c) & 0x7FFFFFFFFFFFL; }
         return h;
     }
 }

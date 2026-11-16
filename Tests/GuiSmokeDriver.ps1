@@ -502,7 +502,7 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         if ($script:BenchJob) { return $false }
         $window.UpdateLayout()
         $r = @(Get-AVDTuneBenchmarkResult -Root $script:StateRoot)
-        Test-Smoke 'quick run done: result stored, score and five categories shown, provisional note, history row' ($r.Count -eq 1 -and $r[0].mode -eq 'quick' -and $ui.TxtBenchScore.Text -match '^\d+$' -and $ui.PanelBenchCats.Children.Count -eq 5 -and $ui.BoxBenchProvisional.Visibility -eq 'Visible' -and $ui.PanelBenchHistory.Children.Count -eq 1 -and $ui.BtnBenchFull.IsEnabled) "$($r.Count) $($ui.TxtBenchScore.Text) | $($ui.TxtBenchState.Text)"
+        Test-Smoke 'quick run done: result stored, score and six categories shown, provisional note, history row' ($r.Count -eq 1 -and $r[0].mode -eq 'quick' -and $ui.TxtBenchScore.Text -match '^\d+$' -and $ui.PanelBenchCats.Children.Count -eq 6 -and $ui.BoxBenchProvisional.Visibility -eq 'Visible' -and $ui.PanelBenchHistory.Children.Count -eq 1 -and $ui.BtnBenchFull.IsEnabled) "$($r.Count) $($ui.TxtBenchScore.Text) | $($ui.TxtBenchState.Text)"
         Test-Smoke 'the run is in the protocol and the change log, services are back' (@($script:Protocol.Actions | Where-Object { $_.Category -eq 'benchmark' }).Count -ge 1 -and @(Get-AVDTuneChangeLog -Root $script:StateRoot | Where-Object { $_.Category -eq 'Benchmark' }).Count -ge 1) $null
         Save-SmokeShot '35-benchmark'
         $true } }

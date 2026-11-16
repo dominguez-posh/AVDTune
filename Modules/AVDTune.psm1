@@ -684,7 +684,7 @@ function Initialize-AVDTuneToolTemp {
         and has no owner or rule of someone else (Get-AVDTuneStateSecurityProblems on the folder itself); otherwise it is set aside (renamed to <tool>.untrusted-<stamp>, never
         repaired or deleted in place) and a new one is created in one step with the protected ACL. Returns the path.
     #>
-    param([Parameter(Mandatory)][ValidateSet('base', 'winget', 'choco', 'msiexec', 'bench', 'office')][string]$Tool, [Parameter(Mandatory)][string]$StateRoot, [scriptblock]$ReadAcl)
+    param([Parameter(Mandatory)][ValidateSet('base', 'winget', 'choco', 'msiexec', 'bench', 'office', 'apps')][string]$Tool, [Parameter(Mandatory)][string]$StateRoot, [scriptblock]$ReadAcl)
     $parent = Join-Path $StateRoot 'temp'
     $dir = Join-Path $parent $Tool
     foreach ($c in @($StateRoot, $parent)) {
@@ -753,15 +753,28 @@ function Remove-AVDTuneChildTempLeftovers {
     catch { }
 }
 
+function Get-AVDTuneProfilePath {
+    # Profile folder of the user of this token, from HKLM ProfileList (never from user-controlled settings or the environment); the folder API only when the key is missing
+    $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+    try { $v = [string](Get-ItemProperty -LiteralPath ('HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\' + $sid) -ErrorAction Stop).ProfileImagePath; if ($v) { return [Environment]::ExpandEnvironmentVariables($v) } } catch { }
+    [Environment]::GetFolderPath('UserProfile')
+}
+
+function Get-AVDTuneHklmValue([string]$Name) {
+    # ProgramFilesDir / CommonFilesDir (64-bit view) from HKLM
+    try { [string](Get-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion' -Name $Name -ErrorAction Stop).$Name } catch { [Environment]::GetFolderPath('ProgramFiles') }
+}
+
 function Get-AVDTuneChildEnvironment {
     <#
         The complete environment of a program AVDTune starts (allowlist; ProcessStartInfo gets it after Clear(), so nothing else is passed on: no DOTNET_*, COR*, __COMPAT_LAYER,
         no variable of the user's profile). Every value comes from Windows (GetFolderPath, HKLM, .NET), never from $env: a process of the same administrator that is not elevated can set
         HKCU\Environment, which an elevated process started from his session inherits (ChocolateyInstall, TEMP, windir, SystemRoot, PATH).
         Profiles by -Tool: base (all), winget (+ USERPROFILE, LOCALAPPDATA, APPDATA, HOMEDRIVE/HOMEPATH from the known folders), choco (+ ChocolateyInstall from HKLM, PATH also has the
-        Windows PowerShell folder), msiexec, bench and office (as base; office = the Office Deployment Tool setup.exe, #35). TEMP and TMP are -TempDir (Initialize-AVDTuneToolTemp).
+        Windows PowerShell folder), msiexec, bench and office (as base; office = the Office Deployment Tool setup.exe, #35), apps (benchmark application starts, #14: Word, Excel and Edge need a profile:
+        USERPROFILE from ProfileList in HKLM by the SID of the token, APPDATA and LOCALAPPDATA derived from it, USERNAME, USERDOMAIN, COMPUTERNAME, HOMEDRIVE/HOMEPATH, ProgramW6432, CommonProgramW6432, ALLUSERSPROFILE, PUBLIC). TEMP and TMP are -TempDir (Initialize-AVDTuneToolTemp).
     #>
-    param([Parameter(Mandatory)][ValidateSet('base', 'winget', 'choco', 'msiexec', 'bench', 'office')][string]$Tool, [Parameter(Mandatory)][string]$TempDir)
+    param([Parameter(Mandatory)][ValidateSet('base', 'winget', 'choco', 'msiexec', 'bench', 'office', 'apps')][string]$Tool, [Parameter(Mandatory)][string]$TempDir)
     $windows = Get-AVDTuneSystemFolder Windows; $system = Get-AVDTuneSystemFolder System
     $e = [ordered]@{}
     $e['SystemRoot'] = $windows; $e['windir'] = $windows; $e['SystemDrive'] = [IO.Path]::GetPathRoot($windows).TrimEnd('\')
@@ -788,6 +801,20 @@ function Get-AVDTuneChildEnvironment {
         $e['LOCALAPPDATA'] = Join-Path $profileDir 'AppData\Local'
         $e['APPDATA'] = Join-Path $profileDir 'AppData\Roaming'
         $e['HOMEDRIVE'] = $driveRoot; $e['HOMEPATH'] = $profileDir.Substring($driveRoot.Length)
+    }
+    if ($Tool -eq 'apps') {
+        $profileDir = Get-AVDTuneProfilePath
+        $who = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+        $e['USERPROFILE'] = $profileDir
+        $e['APPDATA'] = Join-Path $profileDir 'AppData\Roaming'; $e['LOCALAPPDATA'] = Join-Path $profileDir 'AppData\Local'
+        $e['ProgramW6432'] = Get-AVDTuneHklmValue 'ProgramFilesDir'; $e['CommonProgramW6432'] = Get-AVDTuneHklmValue 'CommonFilesDir'
+        $e['ALLUSERSPROFILE'] = [Environment]::GetFolderPath('CommonApplicationData'); $e['PUBLIC'] = ([Environment]::GetFolderPath('CommonDocuments') -replace '\Documents$', '')
+        $bs = [string][char]92
+        $at = $who.IndexOf($bs)
+        $e['USERNAME'] = $(if ($at -ge 0) { $who.Substring($at + 1) } else { $who }); $e['USERDOMAIN'] = $(if ($at -ge 0) { $who.Substring(0, $at) } else { [Environment]::MachineName })
+        $e['COMPUTERNAME'] = [Environment]::MachineName
+        $pathRoot = [IO.Path]::GetPathRoot($profileDir)
+        $e['HOMEDRIVE'] = $pathRoot.TrimEnd([char]92); $e['HOMEPATH'] = $profileDir.Substring($pathRoot.Length - 1)
     }
     if ($Tool -eq 'choco') {
         $e['ChocolateyInstall'] = Get-AVDTuneChocolateyRoot
@@ -1676,7 +1703,7 @@ function Get-AVDTuneOverview {
 
 #endregion
 
-Export-ModuleMember -Function Get-AVDTuneSystemFolder, Get-AVDTuneChocolateyRoot, Get-AVDTuneChildTool, Initialize-AVDTuneToolTemp, Get-AVDTuneChildEnvironment, New-AVDTuneChildStartInfo, Get-AVDTuneProp, Get-AVDTuneWebResponse, Test-AVDTuneElevated, Get-AVDTuneRoot, Test-AVDTuneDefaultRoot, Test-AVDTuneTestMode, Resolve-AVDTuneTestScript, Get-AVDTuneLongPath, Get-AVDTuneTestModeRefusal, Confirm-AVDTuneAction, ConvertTo-AVDTuneArgument, New-AVDTuneMachine, Invoke-AVDTuneMachine,
+Export-ModuleMember -Function Get-AVDTuneSystemFolder, Get-AVDTuneChocolateyRoot, Get-AVDTuneChildTool, Initialize-AVDTuneToolTemp, Get-AVDTuneChildEnvironment, Get-AVDTuneProfilePath, Get-AVDTuneHklmValue, New-AVDTuneChildStartInfo, Get-AVDTuneProp, Get-AVDTuneWebResponse, Test-AVDTuneElevated, Get-AVDTuneRoot, Test-AVDTuneDefaultRoot, Test-AVDTuneTestMode, Resolve-AVDTuneTestScript, Get-AVDTuneLongPath, Get-AVDTuneTestModeRefusal, Confirm-AVDTuneAction, ConvertTo-AVDTuneArgument, New-AVDTuneMachine, Invoke-AVDTuneMachine,
     New-AVDTuneStateSecurity, Initialize-AVDTuneState, Read-AVDTuneAclInfo, Get-AVDTuneStateSecurityProblems, Move-AVDTuneStateToQuarantine, New-AVDTuneProtectedFolder, Assert-AVDTuneStateSecurity, Get-AVDTuneStateSecurityReport, Get-AVDTuneState, Set-AVDTuneState, Test-AVDTuneImageVersion, Get-AVDTuneNextImageVersion, Start-AVDTuneImageVersion,
     Add-AVDTuneRun, Get-AVDTuneRun, Get-AVDTuneLastChange, Get-AVDTuneChangeTimes, Get-AVDTuneChangeMarker, Test-AVDTuneChangeInProgress, Resolve-AVDTuneStaleChange, Start-AVDTuneChange, Stop-AVDTuneChange, Get-AVDTuneSnapshotClockBufferMinutes, ConvertTo-AVDTuneUtc, Get-AVDTuneSnapshotWindow, Test-AVDTuneSnapshotInWindow,New-AVDTuneStep, Invoke-AVDTuneStep, New-AVDTuneStepFromData, Get-AVDTuneStepCatalog, Invoke-AVDTune,
     Add-AVDTuneChangeLogEntry, Get-AVDTuneChangeLog, Get-AVDTuneChangeLogVersions, ConvertTo-AVDTuneChangeLogDocument, Export-AVDTuneChangeLog,

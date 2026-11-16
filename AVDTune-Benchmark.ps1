@@ -130,7 +130,15 @@ function Update-BenchmarkView {
             $cc = $null; if ($cmp -and $cmp.Categories.Contains($c.Name)) { $cc = $cmp.Categories[$c.Name] }
             [void]$ui.PanelBenchCats.Children.Add((New-BenchCatRow $title $c.Value.index $cc))
         }
-        foreach ($k in @($h.missingCategories)) { $t = $script:BenchCatTitle[[string]$k]; $notes += "$t was not measured$(if ($k -eq 'apps') { ' (comes with a later version of the benchmark)' })." }
+        foreach ($k in @($h.missingCategories)) { $t = $script:BenchCatTitle[[string]$k]; $notes += "$t was not measured." }
+        foreach ($pair in @(@('fslogix', 'FSLogix score'), @('gpu', 'GPU score'))) {
+            $sc = $shown.scores.PSObject.Properties[$pair[0]]
+            if (-not $sc) { continue }
+            $sc = $sc.Value
+            if ($null -ne $sc.value) { $notes += ('{0}: {1}{2}.' -f $pair[1], $sc.value, $(if ($sc.partial) { ' (partial score without ' + (@($sc.missingCategories) -join ', ') + ')' } else { '' })) }
+            elseif ($sc.reason) { $notes += ('{0}: {1}.' -f $pair[1], $sc.reason) }
+        }
+        if ($shown.capacity -and $null -ne $shown.capacity.estimatedUsers) { $notes += "Capacity: about $($shown.capacity.estimatedUsers) users (own method, an estimate)." }
         $bad = @($shown.measures | Where-Object { $_.status -ne 'ok' })
         if ($bad.Count -gt 0) { $notes += "Not measured: " + ((@($bad | ForEach-Object { "$($_.id) ($($_.reason))" })) -join '; ') }
         if ($h.unstable) { $notes += 'At least one measure varied more than 10 percent between the runs (unstable).' }
