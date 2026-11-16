@@ -1045,10 +1045,10 @@ function Get-AVDTuneChangeTimes {
     & $parse (Get-AVDTuneProp $state 'LastChange')
     if (-not $IgnoreMarker) { & $parse (Get-AVDTuneProp (Get-AVDTuneProp $state 'ChangeInProgress') 'Started') }
     foreach ($run in @(Get-AVDTuneRun -Root $Root)) {
-        if (-not $run -or (Get-AVDTuneProp $run 'WhatIf')) { continue }
+        if (-not $run -or (Get-AVDTuneProp $run 'WhatIf') -or (Get-AVDTuneProp $run 'Kind') -eq 'Environment-Azure') { continue }   # Azure resources have their own journal undo (docs\security-checklist.md)
         if (@(@(Get-AVDTuneProp $run 'Results') | Where-Object { $_ -and (($_.Status -in 'Changed', 'Reverted') -or ($_.Status -eq 'Failed' -and (Get-AVDTuneProp $_ 'Mode') -ne 'Test')) }).Count -gt 0) { & $parse (Get-AVDTuneProp $run 'Ended') }
     }
-    foreach ($e in @(Get-AVDTuneChangeLog -Root $Root)) { if ($e.Source -eq 'Step' -and $e.Category -notin 'Snapshot', 'Readiness', 'Benchmark') { & $parse $e.At } }
+    foreach ($e in @(Get-AVDTuneChangeLog -Root $Root)) { if ($e.Source -eq 'Step' -and $e.Category -notin 'Snapshot', 'Readiness', 'Benchmark', 'Azure') { & $parse $e.At } }
     $times.ToArray()
 }
 
