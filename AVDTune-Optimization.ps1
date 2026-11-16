@@ -3,6 +3,12 @@
 # The page is built in code and put next to the other pages, so UI\AVDTune.xaml stays untouched. Reading the state changes nothing; Apply and Undo need the open
 # write gate and a confirmation, and an AppX removal (cannot be undone) needs its own second confirmation. They run on the window thread (short; the bar shows the task).
 
+if ($script:TestMode) {
+    # Test mode: the fake machine gets the AppX, Defender and registry detail members of the list (the real ones are added by the module, only to a real machine)
+    . (Get-TestScript 'FakeOptimization.ps1')
+    if ($null -eq $script:Machine.PSObject.Properties['AppxState']) { Add-AVDTuneOptimizationFakeMembers -Machine $script:Machine -Appx @('Microsoft.BingNews') }
+}
+
 $script:OptStatus = $null
 $script:OptChecked = @{}        # id -> $true / $false; filled from the defaults of the data file at the first view
 $script:OptInitDone = $false
