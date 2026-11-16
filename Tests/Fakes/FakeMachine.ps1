@@ -10,7 +10,7 @@ function New-AVDTuneFakeMachine {
     param([hashtable]$Seed = @{})
     $store = @{
         Registry = @{}; Keys = @{}; Services = @{}; Tasks = @{}; Native = @{}; Log = (New-Object System.Collections.ArrayList)
-        ComputerName = $(if ($Seed.ComputerName) { $Seed.ComputerName } else { 'GM-TEST01' }); Now = $Seed.Now; Imds = $null; FailWrites = @()
+        ComputerName = $(if ($Seed.ComputerName) { $Seed.ComputerName } else { 'GM-TEST01' }); Now = $Seed.Now; Imds = $null; FailWrites = @(); Kinds = @{}
         Paths = @(@($Seed.Paths) | Where-Object { $_ }); Dirs = $(if ($Seed.Dirs) { $Seed.Dirs } else { @{} }); Hotfixes = @(@($Seed.Hotfixes) | Where-Object { $_ }); NetAdapters = @(@($Seed.NetAdapters) | Where-Object { $_ })
         Files = @{}; Folders = @{}; Acl = $(if ($Seed.Acl) { $Seed.Acl } else { @{} }); Pnp = @(@($Seed.Pnp) | Where-Object { $_ }); Arch = $(if ($Seed.Arch) { $Seed.Arch } else { 'AMD64' }); Tpm = $(if ($Seed.ContainsKey('Tpm')) { $Seed.Tpm } else { $null })
         Firmware = $(if ($Seed.ContainsKey('Firmware')) { $Seed.Firmware } else { $null })
@@ -52,11 +52,19 @@ function New-AVDTuneFakeMachine {
         $false
     }.GetNewClosure()
     $m.RegGet = { param($Path, $Name) $k = (([string]$Path) + '|' + ([string]$Name)).ToLowerInvariant(); if ($store.Registry.ContainsKey($k)) { $store.Registry[$k] } else { $null } }.GetNewClosure()
+    $m.RegGetRaw = {
+        param($Path, $Name)
+        $k = (([string]$Path) + '|' + ([string]$Name)).ToLowerInvariant()
+        if (-not $store.Registry.ContainsKey($k)) { return $null }
+        $v = $store.Registry[$k]
+        $kind = if ($store.Kinds -and $store.Kinds.ContainsKey($k)) { $store.Kinds[$k] } elseif ($v -is [int] -or $v -is [uint32]) { 'DWord' } elseif ($v -is [long]) { 'QWord' } else { 'String' }
+        @{ Value = $v; Kind = $kind }
+    }.GetNewClosure()
     $m.RegSet = {
         param($Path, $Name, $Value, $Type)
         $k = (([string]$Path) + '|' + ([string]$Name)).ToLowerInvariant()
         foreach ($bad in @($store.FailWrites)) { if ($bad -and $k -like "*$($bad.ToLowerInvariant())*") { throw "fake: write refused for $Path|$Name" } }
-        $store.Registry[$k] = $Value; [void]$store.Log.Add("RegSet $Path|$Name=$Value ($Type)")
+        $store.Registry[$k] = $Value; if ($Type) { $store.Kinds[$k] = [string]$Type }; [void]$store.Log.Add("RegSet $Path|$Name=$Value ($Type)")
     }.GetNewClosure()
     $m.RegRemove = {
         param($Path, $Name)

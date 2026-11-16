@@ -27,7 +27,7 @@ Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, Sys
 $script:AppRoot = $PSScriptRoot
 $script:ToolVersion = (Get-Content -LiteralPath (Join-Path $PSScriptRoot 'VERSION') -Raw -Encoding UTF8).Trim()   # the file VERSION is also the version of the release
 Import-Module (Join-Path $PSScriptRoot 'Modules\AVDTune.psm1') -Force
-foreach ($part in 'Trust', 'Session', 'Snapshot', 'Directory', 'Start', 'UpdateBlock', 'Updates', 'Readiness', 'Watermark', 'Benchmark', 'Shortcut', 'FSLogix', 'Storage', 'Software') { Import-Module (Join-Path $PSScriptRoot "Modules\AVDTune.$part.psm1") -Force }
+foreach ($part in 'Trust', 'Session', 'Snapshot', 'Directory', 'Start', 'UpdateBlock', 'Updates', 'Readiness', 'Watermark', 'Benchmark', 'Shortcut', 'FSLogix', 'Storage', 'Software', 'Office') { Import-Module (Join-Path $PSScriptRoot "Modules\AVDTune.$part.psm1") -Force }
 Import-Module (Join-Path $PSScriptRoot 'Modules\AVDTune.Release.psm1') -Force
 . (Join-Path $PSScriptRoot 'AVDTune-Theme.ps1')
 
@@ -199,7 +199,7 @@ foreach ($page in $script:PageTable) {
 
 function Show-Page([string]$Key) {
     $script:CurrentPage = $Key
-    $isPlaceholder = $Key -notin 'Overview', 'Protocol', 'Updates', 'UpdateBlock', 'UserExperience', 'Benchmark', 'FSLogix', 'Software'
+    $isPlaceholder = $Key -notin 'Overview', 'Protocol', 'Updates', 'UpdateBlock', 'UserExperience', 'Benchmark', 'FSLogix', 'Software', 'Office'
     $ui.PageOverview.Visibility = ConvertTo-Vis ($Key -eq 'Overview')
     $ui.PageProtocol.Visibility = ConvertTo-Vis ($Key -eq 'Protocol')
     $ui.PageUpdates.Visibility = ConvertTo-Vis ($Key -eq 'Updates')
@@ -208,6 +208,7 @@ function Show-Page([string]$Key) {
     $ui.PageBenchmark.Visibility = ConvertTo-Vis ($Key -eq 'Benchmark')
     $ui.PageFSLogix.Visibility = ConvertTo-Vis ($Key -eq 'FSLogix')
     $ui.PageSoftware.Visibility = ConvertTo-Vis ($Key -eq 'Software')
+    $ui.PageOffice.Visibility = ConvertTo-Vis ($Key -eq 'Office')
     $ui.PagePlaceholder.Visibility = ConvertTo-Vis $isPlaceholder
     $ui["Nav$Key"].IsChecked = $true
     Update-ReadOnlyBanner
@@ -225,6 +226,7 @@ function Show-Page([string]$Key) {
     elseif ($Key -eq 'Benchmark') { Update-BenchmarkView }
     elseif ($Key -eq 'FSLogix') { Update-FslView }
     elseif ($Key -eq 'Software') { Show-SoftwarePage }
+    elseif ($Key -eq 'Office') { Update-OffView }
 }
 
 # ---------------------------------------------------------------- Overview
@@ -451,6 +453,7 @@ $script:ReadyFakeArm = $(if ($script:TestMode) { $script:Services.Arm } else { $
 . (Join-Path $PSScriptRoot 'AVDTune-Benchmark.ps1')
 . (Join-Path $PSScriptRoot 'AVDTune-FSLogix.ps1')
 . (Join-Path $PSScriptRoot 'AVDTune-Software.ps1')   # the Software page (issue 31): its own XAML, module and task handling
+. (Join-Path $PSScriptRoot 'AVDTune-Office.ps1')
 
 # ---------------------------------------------------------------- theme switch
 function Update-ThemeButton { $ui.BtnTheme.Content = [string][char]$(if ($script:Settings.Theme -eq 'Dark') { 0xE706 } else { 0xE708 }) }
