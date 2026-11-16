@@ -25,6 +25,7 @@ param([string]$Root, [string]$DenyListPath)
 # GUIDs that are public and may appear in code and docs (lower case). Every entry says what it is.
 $script:AllowedGuids = @{
     'ae6d2014-e692-45fa-a88b-ee552567cdc1' = 'Path of the public FSLogix download on download.microsoft.com (target of aka.ms/fslogix_download), used by the network benchmark'
+    'ec984aec-a0f9-47e9-901f-71415a66345b' = 'VIRTUAL_STORAGE_TYPE_VENDOR_MICROSOFT (virtdisk.h), vendor of the VHDX type for the profile container test'
     '0c867c2a-1d8c-454a-a3db-ab2ea1bdc8bb' = 'Azure built-in role Storage File Data SMB Share Contributor (Microsoft Learn, built-in roles)'
     'a7264617-510b-434b-a828-9731dc254ea7' = 'Azure built-in role Storage File Data SMB Share Elevated Contributor'
     '69566ab7-960f-475b-8e7c-b3118f30c6bd' = 'Azure built-in role Storage File Data Privileged Contributor'

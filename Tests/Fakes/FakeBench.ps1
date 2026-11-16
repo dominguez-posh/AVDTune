@@ -106,7 +106,7 @@ function New-AVDTuneFakeBench {
             $dir = $Arguments[([array]::IndexOf(@($Arguments), '--dir') + 1)]
             if (-not (Test-Path -LiteralPath $dir)) { throw 'the work folder does not exist' }
         }
-        if ($Command -eq 'gpuinfo') { return [pscustomobject]@{ schemaVersion = 1; command = 'gpuinfo'; measures = @(); info = [pscustomobject]@{ hardware = [bool]$store.Gpu; adapter = 'Fake GPU 8Q'; driver = '31.0.15.0'; vramMiB = 8192 } } }
+        if ($Command -eq 'gpuinfo') { return [pscustomobject]@{ schemaVersion = 1; command = 'gpuinfo'; measures = @(); info = [pscustomobject]@{ hardware = [bool]$store.Gpu; adapter = 'Fake GPU 8Q'; driver = '537.58'; vramMiB = 8192 } } }
         if ($Command -eq 'share') { $shareDir = $Arguments[([array]::IndexOf(@($Arguments), '--dir') + 1)]; if (-not $store.ShareFolders.ContainsKey($shareDir)) { throw 'the test folder on the share does not exist' } }
         $list = @()
         foreach ($id in @($ids | Where-Object { $store.SkipMeasures -notcontains $_ })) {

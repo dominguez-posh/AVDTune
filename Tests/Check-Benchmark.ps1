@@ -554,7 +554,7 @@ public static class StandIn { public static int Main(string[] a) {
             $mu.Store.Registry['hklm:\software\fslogix\profiles|vhdlocations'] = $case.V
             Test-Check "share: VHDLocations '$(@($case.V) -join ' & ')' gives '$($case.W)'" ((Get-AVDTuneBenchShare -Machine $mu) -eq $case.W) (Get-AVDTuneBenchShare -Machine $mu)
         }
-        Test-Check 'share: the host of a UNC path' ((Get-AVDTuneBenchShareHost '\\acct.file.core.windows.net\profiles') -eq 'acct.file.core.windows.net' -and (Get-AVDTuneBenchShareHost 'C:\x') -eq '') $null
+        Test-Check 'share: the host of a UNC path' ((Get-AVDTuneBenchShareHost '\\account.file.core.windows.net\profiles') -eq 'account.file.core.windows.net' -and (Get-AVDTuneBenchShareHost 'C:\x') -eq '') $null
         $mnoShare = New-Master
         $rs = New-AVDTuneFakeBench -Reference $ref -Config $config
         [void](Invoke-AVDTuneBenchmark -Machine $mnoShare -Bench $rs -Root $r2 -Mode Quick -SkipIdleCheck -NoReport)
