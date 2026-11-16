@@ -605,7 +605,8 @@ function Get-AVDTuneStateSecurityProblems {
 
 #region child environment (issue #47)
 
-$script:ChildEnvHooks = @{ Root = ''; AclReader = $null }   # for the checks: a state folder of their own and a fake ACL reader (they run unelevated); set from the module scope only
+$script:ChildEnvHooks = @{ Root = ''; AclReader = $null }   # for the checks: a state folder of their own and a fake ACL reader (they run unelevated); only honoured inside the test mode (Test-AVDTuneTestMode), set from the module scope only
+$script:ChildEnvHooks.Machine = $null   # test hook: scriptblock (name) -> raw HKLM environment value
 
 function Get-AVDTuneSystemFolder {
     # Fixed system folders from Windows itself, never from environment variables (a user can set those in HKCU\Environment)
@@ -622,7 +623,15 @@ function Get-AVDTuneSystemFolder {
 function Get-AVDTuneMachineEnvironmentValue {
     # A value of the machine environment (HKLM, writable by administrators only); $null when it is not there. Never the process environment.
     param([Parameter(Mandatory)][string]$Name)
-    try { [string](Get-ItemProperty -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Environment' -Name $Name -ErrorAction Stop).$Name } catch { $null }
+    if ($script:ChildEnvHooks.Machine -and (Test-AVDTuneTestMode).Enabled) { return (& $script:ChildEnvHooks.Machine $Name) }
+    # Raw: Get-ItemProperty would expand a REG_EXPAND_SZ value (%ProgramData%) with the environment of this process
+    try {
+        $key = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey('SYSTEM\CurrentControlSet\Control\Session Manager\Environment')
+        if (-not $key) { return $null }
+        try { $v = $key.GetValue($Name, $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames) } finally { $key.Close() }
+        if ($null -eq $v) { $null } else { [string]$v }
+    }
+    catch { $null }
 }
 
 function Get-AVDTuneChocolateyRoot {
@@ -664,7 +673,7 @@ function Initialize-AVDTuneToolTemp {
         $bad = $file.Exists -or (($info.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)
         if (-not $bad) {
             $p = @{ Root = $dir; NoRecurse = $true }
-            if ($ReadAcl) { $p.ReadAcl = $ReadAcl; $p.AdminSid = '' }
+            if ($ReadAcl -and (Test-AVDTuneTestMode).Enabled) { $p.ReadAcl = $ReadAcl; $p.AdminSid = '' }
             $bad = @(Get-AVDTuneStateSecurityProblems @p).Count -gt 0
         }
         if (-not $bad) { return $dir }
@@ -673,12 +682,50 @@ function Initialize-AVDTuneToolTemp {
         for ($n = 2; (Test-Path -LiteralPath $aside); $n++) { $aside = Join-Path $parent "$Tool.untrusted-$stamp-$n" }
         if ($file.Exists) { [IO.File]::Move($dir, $aside) } else { [IO.Directory]::Move($dir, $aside) }   # a rename: nothing inside is opened or followed
     }
+    Remove-AVDTuneChildTempLeftovers -Parent $parent -Tool $Tool
     $elevated = Test-AVDTuneElevated
     $security = New-AVDTuneStateSecurity -WithOwner:$elevated
     # AVDTune starts these programs elevated; a non-elevated process (the checks) must not lock itself out of its own folder
     if (-not $elevated) { $security.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule([Security.Principal.WindowsIdentity]::GetCurrent().User, 'FullControl', 'ContainerInherit, ObjectInherit', 'None', 'Allow'))) }
     (New-Object IO.DirectoryInfo $dir).Create($security)
     $dir
+}
+
+function Remove-AVDTuneTreeNoFollow {
+    # Deletes a folder tree; a link (junction, symlink) is removed as a link, never followed. Returns $true when it is gone.
+    param([Parameter(Mandatory)][string]$Path)
+    try {
+        $item = New-Object IO.DirectoryInfo $Path
+        if (-not $item.Exists) { return $true }
+        if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { $item.Delete(); return $true }
+        foreach ($c in $item.GetFileSystemInfos()) {
+            if ($c -is [IO.DirectoryInfo]) { [void](Remove-AVDTuneTreeNoFollow -Path $c.FullName) }
+            else { $c.Attributes = [IO.FileAttributes]::Normal; $c.Delete() }
+        }
+        $item.Delete()
+        $true
+    }
+    catch { $false }
+}
+
+function Remove-AVDTuneChildTempLeftovers {
+    # Bounded clean-up in <state>\temp: set-aside folders <tool>.untrusted-* beyond the newest two, and (by name, not followed) entries of the tool's own folder
+    # not touched for 3 days (download caches and installer leftovers). Failures are ignored (a file in use stays until the next start).
+    param([Parameter(Mandatory)][string]$Parent, [Parameter(Mandatory)][string]$Tool, [int]$KeepAside = 2, [int]$StaleDays = 3)
+    try {
+        $aside = @((New-Object IO.DirectoryInfo $Parent).GetDirectories("$Tool.untrusted-*") | Sort-Object LastWriteTimeUtc -Descending)
+        for ($i = $KeepAside; $i -lt $aside.Count; $i++) { [void](Remove-AVDTuneTreeNoFollow -Path $aside[$i].FullName) }
+        $own = New-Object IO.DirectoryInfo (Join-Path $Parent $Tool)
+        if ($own.Exists -and -not ($own.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+            $limit = (Get-Date).AddDays(-$StaleDays); $n = 0
+            foreach ($c in $own.GetFileSystemInfos()) {
+                if (++$n -gt 500) { break }
+                if ($c.LastWriteTime -ge $limit) { continue }
+                if ($c -is [IO.DirectoryInfo]) { [void](Remove-AVDTuneTreeNoFollow -Path $c.FullName) } else { try { $c.Attributes = [IO.FileAttributes]::Normal; $c.Delete() } catch { } }
+            }
+        }
+    }
+    catch { }
 }
 
 function Get-AVDTuneChildEnvironment {
@@ -712,8 +759,9 @@ function Get-AVDTuneChildEnvironment {
         $profileDir = [Environment]::GetFolderPath('UserProfile')
         $driveRoot = [IO.Path]::GetPathRoot($profileDir).TrimEnd('\')
         $e['USERPROFILE'] = $profileDir
-        $e['LOCALAPPDATA'] = [Environment]::GetFolderPath('LocalApplicationData')
-        $e['APPDATA'] = [Environment]::GetFolderPath('ApplicationData')
+        # derived from the profile folder (from the token), not from the shell folder values in HKCU that a non-elevated process of the same user can change
+        $e['LOCALAPPDATA'] = Join-Path $profileDir 'AppData\Local'
+        $e['APPDATA'] = Join-Path $profileDir 'AppData\Roaming'
         $e['HOMEDRIVE'] = $driveRoot; $e['HOMEPATH'] = $profileDir.Substring($driveRoot.Length)
     }
     if ($Tool -eq 'choco') {
@@ -729,9 +777,10 @@ function New-AVDTuneChildStartInfo {
         the environment from Get-AVDTuneChildEnvironment (profile by file name) with TEMP/TMP in <state>\temp\<tool> (admin-only, no links). choco also gets --cache-location in that folder.
     #>
     param([Parameter(Mandatory)][string]$File, [string[]]$Arguments = @(), [string]$Tool, [string]$StateRoot)
+    if (-not [IO.Path]::IsPathRooted($File)) { throw "A program is started with its full path, not through PATH: $File" }
     if (-not $Tool) { $Tool = Get-AVDTuneChildTool -File $File }
-    if (-not $StateRoot) { $StateRoot = $(if ($script:ChildEnvHooks.Root) { $script:ChildEnvHooks.Root } else { Get-AVDTuneRoot }) }
-    $temp = Initialize-AVDTuneToolTemp -Tool $Tool -StateRoot $StateRoot -ReadAcl $script:ChildEnvHooks.AclReader
+    if (-not $StateRoot) { $StateRoot = $(if ($script:ChildEnvHooks.Root -and (Test-AVDTuneTestMode).Enabled) { $script:ChildEnvHooks.Root } else { Get-AVDTuneRoot }) }
+    $temp = Initialize-AVDTuneToolTemp -Tool $Tool -StateRoot $StateRoot -ReadAcl $(if ((Test-AVDTuneTestMode).Enabled) { $script:ChildEnvHooks.AclReader })
     $list = @($Arguments | ForEach-Object { [string]$_ })
     if ($Tool -eq 'choco') { $list += "--cache-location=$temp" }
     $psi = New-Object System.Diagnostics.ProcessStartInfo
@@ -1382,7 +1431,7 @@ function Get-AVDTuneHealth {
     else { Add-Health 'avdagent' 'AVD agent' 'ok' 'Not installed (as it should be on a master).' }
 
     $dsreg = $null
-    try { $dsreg = & $Machine.Run 'dsregcmd.exe' @('/status') } catch { }
+    try { $dsreg = & $Machine.Run (Join-Path (Get-AVDTuneSystemFolder System) 'dsregcmd.exe') @('/status') } catch { }
     if ($dsreg -and $dsreg.ExitCode -eq 0 -and $dsreg.Output) {
         $entra = $dsreg.Output -match '(?im)^\s*AzureAdJoined\s*:\s*YES'
         $domain = $dsreg.Output -match '(?im)^\s*DomainJoined\s*:\s*YES'

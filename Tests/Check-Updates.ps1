@@ -55,7 +55,7 @@ function New-Env([hashtable]$UExtra = @{}, [hashtable]$MExtra = @{}) {
 
 $tmp = Join-Path ([IO.Path]::GetTempPath()) ('avdtune-upd-' + [guid]::NewGuid().ToString('N'))
 try {
-    $env:AVDTUNE_ROOT = $tmp
+    $env:AVDTUNE_ROOT = $tmp; $env:AVDTUNE_FAKE = Join-Path $PSScriptRoot 'Fakes\FakeMachine.ps1'   # the test mode (child environment hooks are honoured only inside it)
     [void](Initialize-AVDTuneState -Root $tmp)
     [void](Start-AVDTuneImageVersion -Root $tmp -Date ([datetime]'2026-11-15') -User 'admin1')
     Close-AVDTuneWriteGate
@@ -353,7 +353,7 @@ try {
     }
     Test-Check 'real Run (#47): with evil ChocolateyInstall, TEMP, TMP, windir, PATH (SystemRoot cannot be set to evil: it breaks this process itself) in this process, every tool profile gets only the fixed values from Windows (and TEMP/TMP in its own folder below the state folder)' $okFixed ($why -join ' | ')
     $wi = $seenEnv.winget.Env
-    Test-Check 'real Run (#47): winget also gets USERPROFILE, LOCALAPPDATA and APPDATA from the known folders, not from the environment' ($wi['USERPROFILE'] -eq [Environment]::GetFolderPath('UserProfile') -and $wi['LOCALAPPDATA'] -eq [Environment]::GetFolderPath('LocalApplicationData') -and $wi['APPDATA'] -eq [Environment]::GetFolderPath('ApplicationData')) "$($wi['USERPROFILE']) $($wi['LOCALAPPDATA'])"
+    Test-Check 'real Run (#47): winget also gets USERPROFILE, LOCALAPPDATA and APPDATA (derived from the profile folder), not from the environment' ($wi['USERPROFILE'] -eq [Environment]::GetFolderPath('UserProfile') -and $wi['LOCALAPPDATA'] -eq (Join-Path ([Environment]::GetFolderPath('UserProfile')) 'AppData\Local') -and $wi['APPDATA'] -eq (Join-Path ([Environment]::GetFolderPath('UserProfile')) 'AppData\Roaming')) "$($wi['USERPROFILE']) $($wi['LOCALAPPDATA'])"
     $ch = $seenEnv.choco
     $chocoTemp = Join-Path $tmp 'temp\choco'
     Test-Check 'real Run (#47): choco gets ChocolateyInstall from HKLM (Get-AVDTuneChocolateyRoot) and --cache-location in its admin-only folder; others get neither' ($ch.Env['ChocolateyInstall'] -eq (Get-AVDTuneChocolateyRoot) -and $ch.Args -eq "one arg|--cache-location=$chocoTemp" -and -not $seenEnv.base.Env.ContainsKey('ChocolateyInstall') -and $seenEnv.winget.Args -eq 'one arg' -and $seenEnv.msiexec.Args -eq 'one arg') "$($ch.Env['ChocolateyInstall']) | $($ch.Args)"
@@ -386,8 +386,40 @@ try {
     Test-Check 'child tool (#47): the profile follows the file name (winget, choco, msiexec, bench), anything else is base' ((Get-AVDTuneChildTool 'C:\x\WinGet.exe') -eq 'winget' -and (Get-AVDTuneChildTool 'C:\x\choco.exe') -eq 'choco' -and (Get-AVDTuneChildTool 'msiexec.exe') -eq 'msiexec' -and (Get-AVDTuneChildTool 'D:\a\AVDTune.Bench.exe') -eq 'bench' -and (Get-AVDTuneChildTool 'C:\x\dism.exe') -eq 'base') $null
     $psi = New-AVDTuneChildStartInfo -File (Join-Path $toolDir 'choco.exe') -Arguments @('outdated', '-r') -StateRoot $tmp
     Test-Check 'child start (#47): no shell, no window, redirected output, choco gets --cache-location, the environment is exactly Get-AVDTuneChildEnvironment' (-not $psi.UseShellExecute -and $psi.CreateNoWindow -and $psi.Arguments -eq "outdated -r --cache-location=$chocoTemp" -and $psi.EnvironmentVariables.Count -eq (Get-AVDTuneChildEnvironment -Tool choco -TempDir $chocoTemp).Count) $psi.Arguments
-    $srcFiles = @(Get-ChildItem -LiteralPath (Join-Path $repo 'Modules') -Filter '*.psm1' | Where-Object { (Get-Content -LiteralPath $_.FullName -Raw) -match 'New-Object\s+(System\.)?Diagnostics\.ProcessStartInfo|Start-Process' } | ForEach-Object { $_.Name } | Sort-Object)
-    Test-Check 'child start (#47): only AVDTune.psm1 (New-AVDTuneChildStartInfo) and AVDTune.Benchmark.psm1 (Invoke-AVDTuneChildProcess, same Get-AVDTuneChildEnvironment) build a process start; Updates.Run uses New-AVDTuneChildStartInfo' (($srcFiles -join ',') -eq 'AVDTune.Benchmark.psm1,AVDTune.psm1' -and (Get-Content -LiteralPath (Join-Path $repo 'Modules\AVDTune.Updates.psm1') -Raw) -match 'New-AVDTuneChildStartInfo -File \$File') ($srcFiles -join ',')
+    # the source guard: every way to start a program is either in the two builders or a listed exception (#53 handles the exceptions)
+    $startPattern = 'New-Object\s+(System\.)?Diagnostics\.ProcessStartInfo|\[(System\.)?Diagnostics\.ProcessStartInfo\]::new|\[(System\.)?Diagnostics\.Process\]::Start|Start-Process|&\s+(\$icacls\b|\(Join-Path[^\r\n]*\.exe''\)|[''"][^\r\n''"]*\.exe[''"])'
+    $startHits = @{}
+    foreach ($f in @(Get-ChildItem -LiteralPath (Join-Path $repo 'Modules') -Filter '*.psm1')) {
+        $n = ([regex]::Matches(((Get-Content -LiteralPath $f.FullName | Where-Object { $_ -notmatch '^\s*(#|<#)' }) -join "`n"), $startPattern)).Count
+        if ($n) { $startHits[$f.Name] = $n }
+    }
+    $startKnown = @{ 'AVDTune.Benchmark.psm1' = 2; 'AVDTune.psm1' = 3; 'AVDTune.Updates.psm1' = 1; 'AVDTune.FSLogix.psm1' = 1 }   # Benchmark: ProcessStartInfo + Start of Invoke-AVDTuneChildProcess; AVDTune.psm1: ProcessStartInfo of New-AVDTuneChildStartInfo, Start of the machine Run, the icacls call of the quarantine; Updates: Start of the adapter Run (its psi comes from the builder); FSLogix: klist (icacls and klist are the exceptions of #53)
+    $startDiff = @(@($startHits.Keys) + @($startKnown.Keys) | Sort-Object -Unique | Where-Object { $startHits[$_] -ne $startKnown[$_] } | ForEach-Object { "$_ $($startHits[$_]) <> $($startKnown[$_])" })
+    Test-Check 'child start (#47): the only starts of programs are the two builders (New-AVDTuneChildStartInfo, Invoke-AVDTuneChildProcess) and the listed exceptions (icacls, klist); Updates.Run uses the builder' ($startDiff.Count -eq 0 -and (Get-Content -LiteralPath (Join-Path $repo 'Modules\AVDTune.Updates.psm1') -Raw) -match 'New-AVDTuneChildStartInfo -File \$File') ($startDiff -join '; ')
+    # a program without a full path is refused (no search through PATH)
+    Test-Check 'child start (#47): a file name without a path throws, nothing is started' ((Get-ThrownText { New-AVDTuneChildStartInfo -File 'dsregcmd.exe' -Arguments @('/status') -StateRoot $tmp }) -like '*full path*') $null
+    # HKLM value as REG_EXPAND_SZ: read raw, never expanded with this process's environment; a value with % falls back to the default
+    $keepPd = [Environment]::GetEnvironmentVariable('ProgramData', 'Process')
+    try {
+        [Environment]::SetEnvironmentVariable('ProgramData', 'evil', 'Process')
+        & $psmAVDTune { $script:ChildEnvHooks.Machine = { param($n) if ($n -eq 'ChocolateyInstall') { '%ProgramData%\chocolatey' } else { $null } } }
+        $chocoRoot = Get-AVDTuneChocolateyRoot
+    }
+    finally { [Environment]::SetEnvironmentVariable('ProgramData', $keepPd, 'Process'); & $psmAVDTune { $script:ChildEnvHooks.Machine = $null } }
+    Test-Check 'child env (#47): ChocolateyInstall as REG_EXPAND_SZ with %ProgramData% and ProgramData=evil in the process is not expanded: the default under the real ProgramData' ($chocoRoot -eq (Join-Path ([Environment]::GetFolderPath('CommonApplicationData')) 'chocolatey')) $chocoRoot
+    $rawHklm = & $psmAVDTune { Get-AVDTuneMachineEnvironmentValue -Name 'Path' }
+    Test-Check 'child env (#47): the real HKLM read returns the raw text (Path keeps its %SystemRoot% parts, none expanded)' ($rawHklm -and $rawHklm -like '*%SystemRoot%*') $rawHklm
+    # clean-up: set-aside folders beyond the newest two are removed (a link inside as a link only), stale entries of the tool folder too
+    $cl = Join-Path $tmp 'cleanup'; [void](New-Item -ItemType Directory -Path (Join-Path $cl 'temp') -Force)
+    $out3 = Join-Path $tmp 'outside3'; [void](New-Item -ItemType Directory -Path $out3 -Force); Set-Content -LiteralPath (Join-Path $out3 'keep.txt') -Value 'keep'
+    foreach ($k in 1..4) { $d = Join-Path $cl "temp\base.untrusted-2026010$k-000000"; [void](New-Item -ItemType Directory -Path $d -Force); (Get-Item -LiteralPath $d).LastWriteTime = (Get-Date).AddDays(-$k) }
+    [void](& $cmd /c mklink /J (Join-Path $cl 'temp\base.untrusted-20260104-000000\lnk') $out3); (Get-Item -LiteralPath (Join-Path $cl 'temp\base.untrusted-20260104-000000')).LastWriteTime = (Get-Date).AddDays(-4)
+    $baseDir = Join-Path $cl 'temp\base'; [void](New-Item -ItemType Directory -Path $baseDir -Force)
+    $stale = Join-Path $baseDir 'stale'; [void](New-Item -ItemType Directory -Path $stale -Force); (Get-Item -LiteralPath $stale).LastWriteTime = (Get-Date).AddDays(-10)
+    $fresh = Join-Path $baseDir 'fresh.txt'; Set-Content -LiteralPath $fresh -Value 'x'
+    & $psmAVDTune { Remove-AVDTuneChildTempLeftovers -Parent $args[0] -Tool base } (Join-Path $cl 'temp')
+    $left = @(Get-ChildItem (Join-Path $cl 'temp') -Filter 'base.untrusted-*' -Force | ForEach-Object { $_.Name } | Sort-Object)
+    Test-Check 'child TEMP (#47): clean-up keeps the two newest set-aside folders, removes older ones and stale entries without following a link; fresh files stay' ($left.Count -eq 2 -and $left[0] -like '*20260101*' -and $left[1] -like '*20260102*' -and (Test-Path -LiteralPath (Join-Path $out3 'keep.txt')) -and -not (Test-Path -LiteralPath $stale) -and (Test-Path -LiteralPath $fresh)) ($left -join ',')
 
     # ---------------------------------------------------------------- history
     $h = @(Get-AVDTuneUpdateHistory -Root $tmp)
@@ -421,7 +453,7 @@ try {
 }
 finally {
     Close-AVDTuneWriteGate
-    $env:AVDTUNE_ROOT = $null
+    $env:AVDTUNE_ROOT = $null; $env:AVDTUNE_FAKE = $null
     if (Test-Path $tmp) { Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue }
 }
 if ($script:failed -gt 0) { throw "$script:failed check(s) failed." }
