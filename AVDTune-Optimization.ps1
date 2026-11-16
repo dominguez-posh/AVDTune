@@ -56,7 +56,7 @@ function Initialize-OptPage {
     $presetButtons = @{}
     foreach ($p in @(@('recommended', 'AVD multi-session (recommended)'), @('conservative', 'Conservative'), @('all', 'Everything'), @('none', 'Nothing'))) {
         $b = New-Object System.Windows.Controls.Button; $b.Content = $p[1]; $b.Margin = '0,0,8,6'; $b.DataContext = $p[0]; [System.Windows.Automation.AutomationProperties]::SetName($b, "Select the preset $($p[1])")
-        [void]$presetRow.Children.Add($b); $presetButtons[$p[0]] = $b
+        $b.Tag = [string]$p[1]; [void]$presetRow.Children.Add($b); $presetButtons[$p[0]] = $b   # Tag: the label without the status
     }
     $refresh = New-Object System.Windows.Controls.Button; $refresh.Content = 'Refresh state'; $refresh.Margin = '16,0,8,6'; [System.Windows.Automation.AutomationProperties]::SetName($refresh, 'Read the state of the list again')
     [void]$presetRow.Children.Add($refresh)
@@ -83,6 +83,7 @@ Initialize-OptPage
 function Set-OptBusy([bool]$Busy) {
     # while the state is read: no Apply, no Undo, no second read (the buttons follow the data again in Show-OptList)
     $ui.BtnOptRefresh.IsEnabled = -not $Busy
+    Update-OptPresetStatus
     if ($Busy) { $ui.BtnOptApply.IsEnabled = $false; $ui.BtnOptUndo.IsEnabled = $false }
 }
 function Start-OptRead {
@@ -156,8 +157,32 @@ function Get-OptSelectedRows {
     @($script:OptStatus.Rows | Where-Object { $script:OptChecked[$_.Id] -and $_.Present })
 }
 
+function Update-OptPresetStatus {
+    # The three presets say whether their set is in place on this host: green with a check when every entry of the set is in place (entries that are not on this host count
+    # as in place), otherwise neutral with "x of y in place". Nothing while the state is being read or run, or when the data is not valid. "Nothing" has no status.
+    $st = $script:OptStatus
+    $show = [bool]($st -and $st.DataValid -and -not $script:OptJob -and -not $script:OptRun)
+    foreach ($name in 'recommended', 'conservative', 'all') {
+        $b = $ui.OptPresets[$name]; $label = [string]$b.Tag
+        $b.ClearValue([System.Windows.Controls.Button]::ForegroundProperty)
+        if (-not $show) { $b.Content = $label; $b.ToolTip = $null; continue }
+        $ids = @(Get-AVDTuneOptimizationPresetIds -Entries $st.Rows -Preset $name)
+        $rows = @($st.Rows | Where-Object { $_.Id -in $ids })
+        $done = @($rows | Where-Object { -not $_.Present -or $_.Compliant }).Count
+        if ($rows.Count -gt 0 -and $done -eq $rows.Count) {
+            $b.Content = "$label  $([char]0x2713) in place"; Set-Brush $b ([System.Windows.Controls.Button]::ForegroundProperty) 'Success'
+            $b.ToolTip = "All $($rows.Count) entries of this set are in place (entries that are not on this host count as in place)."
+        }
+        else {
+            $b.Content = "$label  ($done of $($rows.Count) in place)"
+            $b.ToolTip = "$done of $($rows.Count) entries of this set are in place (entries that are not on this host count as in place)."
+        }
+    }
+}
+
 function Show-OptList {
     $st = $script:OptStatus
+    Update-OptPresetStatus
     $script:OptBuilding = $true
     try {
         $ui.PanelOptList.Children.Clear()
