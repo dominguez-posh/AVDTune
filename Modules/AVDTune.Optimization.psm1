@@ -34,17 +34,28 @@ $script:KindProps = @{
     Registry = @('Path', 'Name', 'Type', 'Value', 'OnlyIfKeyExists'); ServiceStartup = @('Name', 'Startup'); TaskDisabled = @('TaskPath', 'TaskName')
     AppxRemove = @('PackageName'); DefenderPref = @('Parameter', 'Value')
 }
-# Set-MpPreference parameters an entry may use, with the type and the values that are allowed (the name is data, so only this list goes to the cmdlet)
+# Set-MpPreference parameters an entry may use. Only protecting values are allowed (Allowed / Only / Min..Max); the name is data, so only this list goes to the cmdlet.
+# Undo may restore any earlier value of the right type (the value that was there before), so it checks the Type only.
 $script:DefenderParams = @{
-    PUAProtection = @{ Type = 'int'; Allowed = @(0, 1, 2) }; DisableLocalAdminMerge = @{ Type = 'bool' }; RandomizeScheduleTaskTimes = @{ Type = 'bool' }
-    MAPSReporting = @{ Type = 'int'; Allowed = @(0, 1, 2) }; CloudBlockLevel = @{ Type = 'int'; Allowed = @(0, 2, 4, 6) }; CloudExtendedTimeout = @{ Type = 'int'; Min = 0; Max = 50 }
-    ScanAvgCPULoadFactor = @{ Type = 'int'; Min = 5; Max = 100 }; SignatureUpdateInterval = @{ Type = 'int'; Min = 0; Max = 24 }; DisableCatchupQuickScan = @{ Type = 'bool' }
-    CheckForSignaturesBeforeRunningScan = @{ Type = 'bool' }; UILockdown = @{ Type = 'bool' }
-    LowThreatDefaultAction = @{ Type = 'int'; Allowed = @(1, 2, 3, 6, 8, 9, 10) }; ModerateThreatDefaultAction = @{ Type = 'int'; Allowed = @(1, 2, 3, 6, 8, 9, 10) }
-    HighThreatDefaultAction = @{ Type = 'int'; Allowed = @(1, 2, 3, 6, 8, 9, 10) }; SevereThreatDefaultAction = @{ Type = 'int'; Allowed = @(1, 2, 3, 6, 8, 9, 10) }
+    PUAProtection = @{ Type = 'int'; Allowed = @(1, 2) }; DisableLocalAdminMerge = @{ Type = 'bool'; Only = $true }; RandomizeScheduleTaskTimes = @{ Type = 'bool'; Only = $true }
+    MAPSReporting = @{ Type = 'int'; Allowed = @(1, 2) }; CloudBlockLevel = @{ Type = 'int'; Allowed = @(2, 4, 6) }; CloudExtendedTimeout = @{ Type = 'int'; Min = 1; Max = 50 }
+    ScanAvgCPULoadFactor = @{ Type = 'int'; Min = 5; Max = 100 }; SignatureUpdateInterval = @{ Type = 'int'; Min = 1; Max = 24 }; DisableCatchupQuickScan = @{ Type = 'bool'; Only = $false }
+    CheckForSignaturesBeforeRunningScan = @{ Type = 'bool'; Only = $true }; UILockdown = @{ Type = 'bool'; Only = $true }
+    LowThreatDefaultAction = @{ Type = 'int'; Allowed = @(2, 3) }; ModerateThreatDefaultAction = @{ Type = 'int'; Allowed = @(2, 3) }
+    HighThreatDefaultAction = @{ Type = 'int'; Allowed = @(2, 3) }; SevereThreatDefaultAction = @{ Type = 'int'; Allowed = @(2, 3) }
 }
+# Limits of what the list may touch (checked when the data is read, when a step is built, and again in the members of the real machine). Case-insensitive.
+$script:RegAllowPrefixes = @('HKLM:\SOFTWARE\Policies\', 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\')
+$script:AutologgerPrefix = 'HKLM:\SYSTEM\CurrentControlSet\Control\WMI\Autologger\'
+$script:AutologgerNames = @('Cellcore', 'ReadyBoot', 'WDIContextLog', 'WiFiDriverIHVSession', 'WiFiSession', 'ReFSLog', 'Mellanox-Kernel')
+$script:FirewallPath = 'HKLM:\SYSTEM\CurrentControlSet\Services\SharedAccess\Parameters\FirewallPolicy'
+$script:FirewallName = 'DeleteUserAppContainersOnLogoff'
+$script:RegDenyComponents = @('windows defender', 'windows defender security center', 'microsoft antimalware', 'windowsupdate', 'lsa', 'image file execution options', 'winlogon', 'run', 'runonce', 'runonceex', 'runservices', 'runservicesonce', 'services', 'eventlog')
+$script:ServiceAllow = @('DiagTrack', 'MapsBroker', 'lfsvc', 'RmSvc', 'SEMgrSvc', 'XblAuthManager', 'XblGameSave', 'XboxGipSvc', 'XboxNetApiSvc', 'icssvc', 'autotimesvc', 'SmsRouter', 'DusmSvc', 'SysMain', 'WerSvc', 'DPS', 'DiagSvc', 'WdiSystemHost', 'defragsvc', 'WSearch')
+$script:ServiceDeny = @('WinDefend', 'WdNisSvc', 'WdNisDrv', 'WdFilter', 'WdBoot', 'Sense', 'SecurityHealthService', 'wscsvc', 'mpssvc', 'BFE', 'EventLog', 'wuauserv', 'UsoSvc', 'WaaSMedicSvc', 'BITS', 'TrustedInstaller', 'CryptSvc', 'RpcSs', 'RpcEptMapper', 'DcomLaunch', 'LSM', 'SamSs', 'lanmanserver', 'lanmanworkstation', 'Winmgmt', 'ProfSvc', 'TermService', 'UmRdpService', 'SessionEnv', 'Netlogon', 'KeyIso', 'Dhcp', 'Dnscache', 'NlaSvc', 'W32Time', 'Schedule', 'gpsvc', 'Appinfo', 'AppIDSvc', 'VSS', 'InstallService', 'ClipSVC', 'wlidsvc', 'frxsvc', 'frxccd', 'RdAgent', 'WindowsAzureGuestAgent', 'WaAppAgent', 'Spooler', 'StorSvc', 'seclogon', 'SgrmBroker', 'sppsvc', 'LicenseManager', 'CDPSvc', 'webthreatdefsvc', 'Sysmon')
+$script:TaskDenyComponents = @('windowsupdate', 'updateorchestrator', 'windows defender', 'waasmedic')
+$script:AppxDeny = @('Microsoft.WindowsStore', 'Microsoft.SecHealthUI', 'Microsoft.DesktopAppInstaller', 'Microsoft.AAD.BrokerPlugin', 'Microsoft.Windows.ShellExperienceHost', 'Microsoft.Windows.StartMenuExperienceHost', 'Microsoft.VCLibs*', 'Microsoft.UI.Xaml*', 'Microsoft.NET.Native*', 'MSTeams', 'Microsoft.Windows.CloudExperienceHost', 'Microsoft.LockApp', 'Microsoft.WindowsAppRuntime*', 'Microsoft.Windows.Search', 'MicrosoftWindows.Client.*')
 $script:RegexCache = @{}
-
 #region data: read and check
 
 function Get-AVDTuneOptimizationDataPath { $script:DataFile }
@@ -72,6 +83,66 @@ function Test-OptProps($Object, [string[]]$Allowed, [string[]]$Required) {
     $extra = @($names | Where-Object { $_ -cnotin $Allowed })
     $missing = @($Required | Where-Object { $_ -cnotin $names })
     @{ Extra = $extra; Missing = $missing }
+}
+
+function Get-OptRegistryProblem {
+    # Why a registry value may not be touched, or $null. Category Autologger: only Start of the known loggers. Registry: below the policy prefixes, never in the protected places.
+    param([string]$Category, [string]$Path, [string]$Name)
+    $cmp = [StringComparison]::OrdinalIgnoreCase
+    if ($Category -eq 'Autologger') {
+        $ok = ($Name -eq 'Start') -and $Path.StartsWith($script:AutologgerPrefix, $cmp) -and (@($script:AutologgerNames) -contains $Path.Substring($script:AutologgerPrefix.Length))
+        if ($ok) { return $null } else { return 'an autologger entry may only set Start of one of the known loggers.' }
+    }
+    if ($Path.Equals($script:FirewallPath, $cmp)) { if ($Name -eq $script:FirewallName) { return $null } else { return 'only DeleteUserAppContainersOnLogoff may be set in FirewallPolicy.' } }
+    $allowed = $false; foreach ($p in $script:RegAllowPrefixes) { if ($Path.StartsWith($p, $cmp) -and $Path.Length -gt $p.Length) { $allowed = $true } }
+    if (-not $allowed) { return 'the key is not below HKLM:\SOFTWARE\Policies\ or HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\.' }
+    foreach ($c in $Path.Split('\')) {
+        $l = $c.ToLowerInvariant()
+        if (@($script:RegDenyComponents) -contains $l -or $l -like '*smartscreen*' -or $l -like '*defender*' -or $l -like '*antimalware*') { return "the key '$c' is protected (security, updates, start-up or logon settings are never changed by this list)." }
+    }
+    if ($Name -like '*smartscreen*') { return 'SmartScreen settings are never changed by this list.' }
+    $null
+}
+function Get-OptServiceProblem([string]$Name) {
+    if (@($script:ServiceDeny) -contains $Name) { return "the service '$Name' is protected and never changed by this list." }
+    if (@($script:ServiceAllow) -notcontains $Name) { return "the service '$Name' is not on the list of services this tool may change." }
+    $null
+}
+function Get-OptTaskProblem([string]$TaskPath) {
+    foreach ($c in $TaskPath.Split('\')) { if (@($script:TaskDenyComponents) -contains $c.ToLowerInvariant()) { return "tasks below '$c' (updates, Defender) are never changed by this list." } }
+    $null
+}
+function Get-OptAppxProblem([string]$PackageName) {
+    foreach ($d in $script:AppxDeny) { if ($PackageName -like $d) { return "the package '$PackageName' is protected and never removed by this list." } }
+    $null
+}
+function Get-OptDefenderProblem {
+    # Set: only a protecting value. -Restore (Undo): the type only, the value is the one that was there before.
+    param([string]$Parameter, $Value, [switch]$Restore)
+    if (@($script:DefenderParams.Keys) -cnotcontains $Parameter) { return 'the Defender setting is not on the list.' }
+    $d = $script:DefenderParams[$Parameter]
+    if ($d.Type -eq 'bool') {
+        if ($Value -isnot [bool]) { return "the value of $Parameter must be true or false (a real boolean)." }
+        if (-not $Restore -and $d.ContainsKey('Only') -and $Value -ne $d.Only) { return "$Parameter may only be set to $($d.Only.ToString().ToLowerInvariant()) (the other value weakens protection)." }
+        return $null
+    }
+    if (-not (Test-OptInt $Value)) { return "the value of $Parameter must be a whole number." }
+    if ($Restore) { return $null }
+    if ($d.ContainsKey('Allowed') -and ([int64]$Value -notin $d.Allowed)) { return "the value of $Parameter must be one of $($d.Allowed -join ', ') (other values weaken protection)." }
+    if ($d.ContainsKey('Min') -and ([int64]$Value -lt $d.Min -or [int64]$Value -gt $d.Max)) { return "the value of $Parameter must be from $($d.Min) to $($d.Max)." }
+    $null
+}
+function Get-OptEntryProblem {
+    # The limits of the list for one typed entry (as made by ConvertTo-OptEntry): $null or the reason. Also used when a step is built.
+    param([Parameter(Mandatory)]$Entry)
+    switch ([string]$Entry.Kind) {
+        'Registry' { Get-OptRegistryProblem -Category ([string]$Entry.Category) -Path ([string]$Entry.Path) -Name ([string]$Entry.Name) }
+        'ServiceStartup' { Get-OptServiceProblem ([string]$Entry.Name) }
+        'TaskDisabled' { Get-OptTaskProblem ([string]$Entry.TaskPath) }
+        'AppxRemove' { Get-OptAppxProblem ([string]$Entry.PackageName) }
+        'DefenderPref' { Get-OptDefenderProblem -Parameter ([string]$Entry.Parameter) -Value $Entry.Value }
+        default { "unknown kind '$($Entry.Kind)'." }
+    }
 }
 
 function ConvertTo-OptEntry {
@@ -109,7 +180,7 @@ function ConvertTo-OptEntry {
             $path = Get-AVDTuneProp $Raw 'Path'; $name = Get-AVDTuneProp $Raw 'Name'; $type = Get-AVDTuneProp $Raw 'Type'; $value = Get-AVDTuneProp $Raw 'Value'
             $okPath = (Test-OptText $path 8 260) -and (Test-OptPattern $path '^HKLM:\\[A-Za-z0-9 _.{}()\-]+(\\[A-Za-z0-9 _.{}()\-]+)*$') -and -not (@(([string]$path).Split('\')) -contains '..') -and -not (@(([string]$path).Split('\')) -contains '.')
             if (-not $okPath) { [void]$errors.Add("${label}: Path must be a key below HKLM:\ (letters, digits, space and _ . { } ( ) - only).") }
-            if (-not ((Test-OptText $name 1 100) -and (Test-OptPattern $name '^[A-Za-z0-9 _.\-]+$'))) { [void]$errors.Add("${label}: Name is not a valid value name.") }
+            if (-not ((Test-OptText $name 1 100) -and (Test-OptPattern $name '\A[A-Za-z0-9 _.\-]+\z') -and -not (Test-OptPattern $name '(?i)\APS(Path|ParentPath|ChildName|Drive|Provider)\z'))) { [void]$errors.Add("${label}: Name is not a valid value name (PSPath and similar names are refused).") }
             if (-not ((Test-OptText $type 3 10) -and ([string]$type -cin @('DWord', 'String')))) { [void]$errors.Add("${label}: Type must be DWord or String.") }
             elseif ([string]$type -eq 'DWord' -and -not ((Test-OptInt $value) -and [int64]$value -ge 0 -and [int64]$value -le 2147483647)) { [void]$errors.Add("${label}: a DWord Value must be a whole number from 0 to 2147483647 (a number, not text).") }
             elseif ([string]$type -eq 'String' -and -not (Test-OptText $value 0 260)) { [void]$errors.Add("${label}: a String Value must be text of up to 260 characters.") }
@@ -148,6 +219,7 @@ function ConvertTo-OptEntry {
             $e.Parameter = [string]$param; $e.Value = $(if ($value -is [bool]) { $value } elseif (Test-OptInt $value) { [int64]$value } else { $null })
         }
     }
+    if ($errors.Count -eq 0) { $problem = Get-OptEntryProblem ([pscustomobject]$e); if ($problem) { [void]$errors.Add("${label}: $problem") } }
     @{ Entry = [pscustomobject]$e; Errors = @($errors) }
 }
 
@@ -231,14 +303,16 @@ function Get-AVDTuneOptimizationCategoryOrder { @($script:CategoryOrder) }
 
 function Get-OptBackupPath([string]$Root) { Join-Path $Root 'config\optimization-backup.json' }
 function Read-OptBackupFile([string]$Root) {
-    # Id -> record. A file that cannot be read is an error (never replaced by an empty one: that would drop the older backups)
+    # Id -> record. A file that is there must be schema 1 with an Items object, else this throws: it is never replaced by an empty one (that would drop the older backups)
     $path = Get-OptBackupPath $Root
     $items = @{}
     if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return $items }
     $doc = Read-AVDTuneJson $path
-    if ($null -eq $doc) { return $items }
+    if ($doc -isnot [System.Management.Automation.PSCustomObject]) { throw 'The file of saved earlier values is empty or not an object.' }
+    $schema = Get-AVDTuneProp $doc 'Schema'
+    if (-not ((Test-OptInt $schema) -and [int64]$schema -eq 1)) { throw 'The file of saved earlier values has an unknown schema.' }
     $list = Get-AVDTuneProp $doc 'Items'
-    if ($null -eq $list) { return $items }
+    if ($list -isnot [System.Management.Automation.PSCustomObject]) { throw 'The file of saved earlier values has no Items object.' }
     foreach ($prop in $list.PSObject.Properties) { $items[[string]$prop.Name] = $prop.Value }
     $items
 }
@@ -284,17 +358,27 @@ function ConvertTo-OptCompare($Value) {
 
 function Add-AVDTuneOptimizationMachineMembers {
     <#
-        The machine adapter has no AppX and Defender preference members of its own. This adds them to a real machine (checks add fakes:
-        Tests\Fakes\FakeOptimization.ps1). A machine that is neither real nor has the members is refused. Names are checked again here before they reach a cmdlet.
+        The machine adapter has no AppX, Defender preference or registry detail members of its own. This adds them to a real machine (checks add fakes:
+        Tests\Fakes\FakeOptimization.ps1). A machine that is neither real nor has the members is refused. Every member checks its arguments again (anchored
+        patterns with a timeout, the same allow and deny lists as the data check) before a cmdlet or the registry is touched.
     #>
     param([Parameter(Mandatory)]$Machine)
     $defenderNames = @($script:DefenderParams.Keys)
     $appx = @{ At = [datetime]::MinValue; Prov = @(); Inst = @() }
+    $regGuard = {
+        param($Path, $Name)
+        if (-not ((Test-OptText $Path 8 260) -and (Test-OptPattern $Path '\AHKLM:\\[A-Za-z0-9 _.{}()\-]+(\\[A-Za-z0-9 _.{}()\-]+)*\z'))) { throw 'Invalid registry path.' }
+        if ($Name -and -not ((Test-OptText $Name 1 100) -and (Test-OptPattern $Name '\A[A-Za-z0-9 _.\-]+\z') -and -not (Test-OptPattern $Name '(?i)\APS(Path|ParentPath|ChildName|Drive|Provider)\z'))) { throw 'Invalid registry value name.' }
+        $cat = if ($Path.StartsWith($script:AutologgerPrefix, [StringComparison]::OrdinalIgnoreCase)) { 'Autologger' } else { 'Registry' }
+        $problem = Get-OptRegistryProblem -Category $cat -Path $Path -Name $(if ($Name) { $Name } else { $(if ($cat -eq 'Autologger') { 'Start' } else { $script:FirewallName }) })
+        if ($problem -and $Path.Equals($script:FirewallPath, [StringComparison]::OrdinalIgnoreCase)) { $problem = $null }
+        if ($problem) { throw "Refused: $problem" }
+    }.GetNewClosure()
     $real = @{
         AppxState = {
             # The two package lists are read once and kept for 10 seconds (the status asks about dozens of packages; each call of the cmdlets takes seconds)
             param($Name)
-            if ($Name -notmatch '^[A-Za-z0-9._-]{3,100}$') { throw 'Invalid package name.' }
+            if (-not (Test-OptPattern $Name '\A[A-Za-z0-9._\-]{3,100}\z')) { throw 'Invalid package name.' }
             if (((Get-Date) - $appx.At).TotalSeconds -gt 10) {
                 $appx.Prov = @(Get-AppxProvisionedPackage -Online -ErrorAction Stop | ForEach-Object { [string]$_.DisplayName })
                 $appx.Inst = @(Get-AppxPackage -AllUsers -ErrorAction Stop | ForEach-Object { [string]$_.Name })
@@ -304,7 +388,8 @@ function Add-AVDTuneOptimizationMachineMembers {
         }.GetNewClosure()
         AppxRemove = {
             param($Name)
-            if ($Name -notmatch '^[A-Za-z0-9._-]{3,100}$') { throw 'Invalid package name.' }
+            if (-not (Test-OptPattern $Name '\A[A-Za-z0-9._\-]{3,100}\z')) { throw 'Invalid package name.' }
+            $problem = Get-OptAppxProblem $Name; if ($problem) { throw "Refused: $problem" }
             try {
                 foreach ($p in @(Get-AppxProvisionedPackage -Online -ErrorAction Stop | Where-Object { $_.DisplayName -eq $Name })) { [void](Remove-AppxProvisionedPackage -Online -PackageName $p.PackageName -ErrorAction Stop) }
                 foreach ($p in @(Get-AppxPackage -AllUsers -Name $Name -ErrorAction Stop)) { Remove-AppxPackage -Package $p.PackageFullName -AllUsers -ErrorAction Stop }
@@ -313,19 +398,48 @@ function Add-AVDTuneOptimizationMachineMembers {
         }.GetNewClosure()
         MpGet = {
             param($Name)
-            if ($Name -notin $defenderNames) { throw 'Defender setting is not on the list.' }
+            if ($Name -cnotin $defenderNames) { throw 'Defender setting is not on the list.' }
             $pref = Get-MpPreference -ErrorAction Stop
             $prop = $pref.PSObject.Properties[$Name]
             if ($prop) { $prop.Value } else { $null }
         }.GetNewClosure()
         MpSet = {
-            param($Name, $Value)
-            if ($Name -notin $defenderNames) { throw 'Defender setting is not on the list.' }
+            # -Restore ($true, Undo): the value that was there before, the type is checked; otherwise only a protecting value of the list goes through
+            param($Name, $Value, $Restore = $false)
+            if ($Name -cnotin $defenderNames) { throw 'Defender setting is not on the list.' }
+            $problem = Get-OptDefenderProblem -Parameter $Name -Value $Value -Restore:([bool]$Restore); if ($problem) { throw "Refused: $problem" }
             $splat = @{ $Name = $Value }
             Set-MpPreference @splat -ErrorAction Stop
         }.GetNewClosure()
+        RegInfo = {
+            # Value as it is stored (not expanded) with its kind, read through the registry key (never through a property object: names like PSPath cannot clash)
+            param($Path, $Name)
+            & $regGuard $Path $Name
+            $key = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($Path.Substring(6))
+            if (-not $key) { return [pscustomobject]@{ KeyExists = $false; Exists = $false; Kind = $null; Value = $null } }
+            try {
+                if (@($key.GetValueNames() | Where-Object { $_ -eq $Name }).Count -eq 0) { return [pscustomobject]@{ KeyExists = $true; Exists = $false; Kind = $null; Value = $null } }
+                [pscustomobject]@{ KeyExists = $true; Exists = $true; Kind = [string]$key.GetValueKind($Name); Value = $key.GetValue($Name, $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames) }
+            }
+            finally { $key.Close() }
+        }.GetNewClosure()
+        RegKeyRemoveEmpty = {
+            # Removes a key this tool created, but only when it holds no values and no sub keys
+            param($Path)
+            & $regGuard $Path $null
+            $i = $Path.LastIndexOf('\'); $parent = $Path.Substring(6, $i - 6); $leaf = $Path.Substring($i + 1)
+            $pk = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($parent, $true)
+            if (-not $pk) { return }
+            try {
+                $k = $pk.OpenSubKey($leaf)
+                if (-not $k) { return }
+                $empty = ($k.ValueCount -eq 0 -and $k.SubKeyCount -eq 0); $k.Close()
+                if ($empty) { $pk.DeleteSubKey($leaf, $false) }
+            }
+            finally { $pk.Close() }
+        }.GetNewClosure()
     }
-    foreach ($name in 'AppxState', 'AppxRemove', 'MpGet', 'MpSet') {
+    foreach ($name in 'AppxState', 'AppxRemove', 'MpGet', 'MpSet', 'RegInfo', 'RegKeyRemoveEmpty') {
         if ($null -ne $Machine.PSObject.Properties[$name]) { continue }
         if ($Machine.Kind -ne 'Real') { throw "The machine adapter has no member '$name'." }
         $Machine | Add-Member -NotePropertyName $name -NotePropertyValue $real[$name]
@@ -333,14 +447,27 @@ function Add-AVDTuneOptimizationMachineMembers {
     $Machine
 }
 
+function Get-OptCreatedKeys {
+    # The keys of a path that do not exist yet (outermost first), only those below the allowed prefix
+    param($Machine, [string]$Path)
+    $prefix = $null
+    foreach ($p in @($script:RegAllowPrefixes) + @($script:AutologgerPrefix)) { if ($Path.StartsWith($p, [StringComparison]::OrdinalIgnoreCase)) { $prefix = $p } }
+    if (-not $prefix) { return @() }
+    $parts = $Path.Substring($prefix.Length).Split('\'); $cur = $prefix.TrimEnd('\'); $created = @()
+    foreach ($part in $parts) { $cur = "$cur\$part"; if (-not (& $Machine.RegKeyExists $cur)) { $created += $cur } }
+    @($created)
+}
+
 function New-AVDTuneOptimizationStep {
     <#
         One entry as a step (Test/Apply/Undo for Invoke-AVDTuneStep) plus Present (is there anything to change on this machine). The scriptblocks only talk to the
-        machine adapter and the backup file; nothing of the entry is evaluated as code.
+        machine adapter and the backup file; nothing of the entry is evaluated as code. An entry that breaks the limits of the list is refused here as well
+        (not only when the data is read), so an entry made by hand cannot get around them.
     #>
     param([Parameter(Mandatory)]$Entry, [Parameter(Mandatory)][string]$Root)
+    $problem = Get-OptEntryProblem $Entry
+    if ($problem) { throw "Entry $($Entry.Id) refused: $problem" }
     $id = $Entry.Id
-
     switch ($Entry.Kind) {
         'Registry' {
             $path = $Entry.Path; $name = $Entry.Name; $type = $Entry.Type; $want = $Entry.Value; $onlyKey = $Entry.OnlyIfKeyExists
@@ -348,8 +475,10 @@ function New-AVDTuneOptimizationStep {
             $test = { param($m) $v = & $m.RegGet $path $name; @{ Compliant = ($null -ne $v -and [string]$v -eq [string]$want); State = $(if ($null -eq $v) { 'not set' } else { [string]$v }) } }.GetNewClosure()
             $apply = {
                 param($m)
-                $v = & $m.RegGet $path $name
-                [void](Save-AVDTuneOptimizationBackup -Root $Root -Id $id -Record @{ Kind = 'Registry'; Exists = ($null -ne $v); Value = (ConvertTo-OptScalar $v); At = (& $m.Now).ToString('o') })
+                $info = & $m.RegInfo $path $name
+                if ($info.Exists -and [string]$info.Kind -notin 'DWord', 'String') { throw "The value exists with the type $($info.Kind), which this tool cannot save and restore. Nothing was changed." }
+                $created = @(Get-OptCreatedKeys -Machine $m -Path $path)
+                [void](Save-AVDTuneOptimizationBackup -Root $Root -Id $id -Record @{ Kind = 'Registry'; Exists = [bool]$info.Exists; ValueKind = $(if ($info.Exists) { [string]$info.Kind } else { $null }); Value = (ConvertTo-OptScalar $info.Value); KeyCreated = $created; At = (& $m.Now).ToString('o') })
                 & $m.RegSet $path $name $want $type
             }.GetNewClosure()
             $undo = {
@@ -358,22 +487,31 @@ function New-AVDTuneOptimizationStep {
                 if ($null -eq $b) { throw 'There is no saved earlier value for this entry (AVDTune did not set it), so there is nothing to undo.' }
                 if ((Get-AVDTuneProp $b 'Exists') -isnot [bool]) { throw 'The saved earlier value is damaged.' }
                 if ($b.Exists) {
-                    $old = Get-AVDTuneProp $b 'Value'
-                    if ($type -eq 'DWord' -and -not (Test-OptInt $old)) { throw 'The saved earlier value is damaged (not a number).' }
-                    if ($type -eq 'String' -and $old -isnot [string]) { throw 'The saved earlier value is damaged (not text).' }
-                    & $m.RegSet $path $name $old $type
+                    $old = Get-AVDTuneProp $b 'Value'; $kind = [string](Get-AVDTuneProp $b 'ValueKind')
+                    if ($kind -cnotin 'DWord', 'String') { throw 'The saved earlier value type is damaged.' }
+                    if ($kind -eq 'DWord' -and -not ((Test-OptInt $old) -and [int64]$old -ge 0 -and [int64]$old -le 2147483647)) { throw 'The saved earlier value is damaged (not a number).' }
+                    if ($kind -eq 'String' -and $old -isnot [string]) { throw 'The saved earlier value is damaged (not text).' }
+                    & $m.RegSet $path $name $old $kind
                 }
-                else { & $m.RegRemove $path $name }
+                else {
+                    & $m.RegRemove $path $name
+                    $made = @(Get-AVDTuneProp $b 'KeyCreated' | Where-Object { $_ })
+                    foreach ($k in @($made | Sort-Object { $_.Length } -Descending)) {
+                        # only keys of the same path, only as far as they are empty
+                        if (([string]$k).Length -le $path.Length -and $path.StartsWith([string]$k, [StringComparison]::OrdinalIgnoreCase)) { & $m.RegKeyRemoveEmpty ([string]$k) }
+                    }
+                }
             }.GetNewClosure()
         }
         'ServiceStartup' {
-            $name = $Entry.Name; $startup = $Entry.Startup
+            $name = $Entry.Name; $startup = $Entry.Startup; $svcKey = "HKLM:\SYSTEM\CurrentControlSet\Services\$name"
             $present = { param($m) $null -ne (& $m.ServiceGet $name) }.GetNewClosure()
             $test = { param($m) $s = & $m.ServiceGet $name; if (-not $s) { @{ Compliant = $true; State = 'not present' } } else { @{ Compliant = ([string]$s.StartType -eq $startup); State = [string]$s.StartType } } }.GetNewClosure()
             $apply = {
                 param($m)
                 $s = & $m.ServiceGet $name
-                [void](Save-AVDTuneOptimizationBackup -Root $Root -Id $id -Record @{ Kind = 'ServiceStartup'; StartType = [string]$s.StartType; At = (& $m.Now).ToString('o') })
+                $delayed = & $m.RegGet $svcKey 'DelayedAutostart'
+                [void](Save-AVDTuneOptimizationBackup -Root $Root -Id $id -Record @{ Kind = 'ServiceStartup'; StartType = [string]$s.StartType; DelayedAutostart = $(if ($null -ne $delayed) { [int64]$delayed } else { $null }); At = (& $m.Now).ToString('o') })
                 & $m.ServiceSetStartup $name $startup
             }.GetNewClosure()
             $undo = {
@@ -383,6 +521,11 @@ function New-AVDTuneOptimizationStep {
                 $old = Get-AVDTuneProp $b 'StartType'
                 if (-not ((Test-OptText $old 4 10) -and ([string]$old -cin @('Automatic', 'Manual', 'Disabled')))) { throw "The saved earlier start type '$old' cannot be restored (only Automatic, Manual or Disabled)." }
                 & $m.ServiceSetStartup $name ([string]$old)
+                # "Automatic (delayed start)" is the start type Automatic plus this flag; setting the start type can clear it
+                if ([string]$old -eq 'Automatic') {
+                    $wasDelayed = ((Get-AVDTuneProp $b 'DelayedAutostart') -eq 1); $nowDelayed = ((& $m.RegGet $svcKey 'DelayedAutostart') -eq 1)
+                    if ($wasDelayed -ne $nowDelayed) { & $m.RegSet $svcKey 'DelayedAutostart' $(if ($wasDelayed) { 1 } else { 0 }) 'DWord' }
+                }
             }.GetNewClosure()
         }
         'TaskDisabled' {
@@ -416,24 +559,23 @@ function New-AVDTuneOptimizationStep {
             $undo = $null   # AppX removal cannot be undone
         }
         'DefenderPref' {
-            $param = $Entry.Parameter; $want = $Entry.Value; $dp = $script:DefenderParams[$param]
+            $param = $Entry.Parameter; $want = $Entry.Value
             $present = { param($m) try { $null -ne (& $m.MpGet $param) } catch { $false } }.GetNewClosure()
             $test = { param($m) $v = & $m.MpGet $param; @{ Compliant = ($null -ne $v -and (ConvertTo-OptCompare $v) -eq (ConvertTo-OptCompare $want)); State = $(if ($null -eq $v) { 'not available' } else { [string](ConvertTo-OptCompare $v) }) } }.GetNewClosure()
             $apply = {
                 param($m)
                 $v = & $m.MpGet $param
                 [void](Save-AVDTuneOptimizationBackup -Root $Root -Id $id -Record @{ Kind = 'DefenderPref'; Value = (ConvertTo-OptScalar $v); At = (& $m.Now).ToString('o') })
-                & $m.MpSet $param $want
+                & $m.MpSet $param $want $false
             }.GetNewClosure()
             $undo = {
                 param($m)
                 $b = Get-AVDTuneOptimizationBackup -Root $Root -Id $id
                 if ($null -eq $b) { throw 'There is no saved earlier value for this entry (AVDTune did not set it), so there is nothing to undo.' }
                 $old = Get-AVDTuneProp $b 'Value'
-
-                if ($dp.Type -eq 'bool') { if ($old -isnot [bool]) { throw 'The saved earlier value is damaged (not true or false).' } }
-                elseif (-not (Test-OptInt $old)) { throw 'The saved earlier value is damaged (not a number).' }
-                & $m.MpSet $param $old
+                $problem = Get-OptDefenderProblem -Parameter $param -Value $old -Restore
+                if ($problem) { throw "The saved earlier value is damaged: $problem" }
+                & $m.MpSet $param $old $true
             }.GetNewClosure()
         }
         default { throw "Unknown kind '$($Entry.Kind)'." }
@@ -481,7 +623,8 @@ function Invoke-AVDTuneOptimization {
     <#
         Applies or undoes the chosen entries (ids) on the machine. Needs the open write gate unless -WhatIf. Entries are independent: one that fails does not stop the others.
         Apply of an AppX removal needs -ConfirmIrreversible, else nothing at all is changed and an error is thrown (WhatIf is exempt: it changes nothing).
-        Writes a run record, one change log entry per change (Apply and Undo) and LastChange (also after a failed attempt). Returns the summary with the results.
+        LastChange (snapshot gate) is set BEFORE the first change of the run (never for -WhatIf) and again at the end, also when the run ends in an error.
+        Writes a run record and one change log entry per change (Apply and Undo) and per failure. The saved earlier value of an entry is removed only after a successful Undo.
     #>
     [CmdletBinding()]
     param(
@@ -502,24 +645,35 @@ function Invoke-AVDTuneOptimization {
         if ($pending.Count -gt 0) { throw "$($pending.Count) AppX removal(s) cannot be undone and need their own confirmation (ConfirmIrreversible). Nothing was changed." }
     }
     $results = New-Object System.Collections.ArrayList
-    foreach ($it in $items) {
-        $step = $it.Step
-        $present = $true; $presentError = $null
-        try { $present = [bool](& $it.Present $Machine) } catch { $present = $false; $presentError = $_.Exception.Message }
-        if (-not $present) {
-            [void]$results.Add([pscustomobject]@{ Id = $step.Id; Section = $step.Section; Title = $step.Title; Mode = $Mode; Status = 'Skipped'; Before = $null; After = $null; Message = $(if ($presentError) { "Cannot be read: $presentError" } else { 'Not present on this machine.' }); Reboot = $false; WhatIf = [bool]$WhatIf; At = $null })
-            continue
+    $touched = $false
+    try {
+        foreach ($it in $items) {
+            $step = $it.Step
+            $present = $true; $presentError = $null
+            try { $present = [bool](& $it.Present $Machine) } catch { $present = $false; $presentError = $_.Exception.Message }
+            if (-not $present) {
+                [void]$results.Add([pscustomobject]@{ Id = $step.Id; Section = $step.Section; Title = $step.Title; Mode = $Mode; Status = 'Skipped'; Before = $null; After = $null; Message = $(if ($presentError) { "Cannot be read: $presentError" } else { 'Not present on this machine.' }); Reboot = $false; WhatIf = [bool]$WhatIf; At = $null })
+                continue
+            }
+            # The snapshot gate must see the change even when the run is cut short: LastChange is written before the step that is about to change something
+            if (-not $WhatIf -and -not $touched) {
+                $wouldChange = $true
+                try { $t = ConvertTo-AVDTuneTestResult (& $step.Test $Machine); $wouldChange = $(if ($Mode -eq 'Apply') { -not $t.Compliant } else { [bool]$t.Compliant -and $null -ne $step.Undo }) } catch { $wouldChange = $false }
+                if ($wouldChange) { [void](Set-AVDTuneState -Root $Root -Values @{ LastChange = (& $Machine.Now).ToString('o') }); $touched = $true }
+            }
+            $r = Invoke-AVDTuneStep -Step $step -Machine $Machine -Mode $Mode -WhatIf:$WhatIf
+            [void]$results.Add($r)
+            if ($WhatIf) { continue }
+            # the saved earlier value goes only after a successful Undo; a failure of any kind keeps it
+            if ($Mode -eq 'Undo' -and $r.Status -eq 'Reverted') {
+                try { Remove-AVDTuneOptimizationBackup -Root $Root -Id $step.Id }
+                catch { $r.Message = (($r.Message + ' ' + "The file of saved values could not be updated: $($_.Exception.Message)").Trim()) }
+            }
         }
-        $hadBackup = $false; try { $hadBackup = ($null -ne (Get-AVDTuneOptimizationBackup -Root $Root -Id $step.Id)) } catch { }
-        $r = Invoke-AVDTuneStep -Step $step -Machine $Machine -Mode $Mode -WhatIf:$WhatIf
-        [void]$results.Add($r)
-        if ($WhatIf) { continue }
-        try {
-            if ($Mode -eq 'Undo' -and $r.Status -eq 'Reverted') { Remove-AVDTuneOptimizationBackup -Root $Root -Id $step.Id }
-            # an Apply that failed before it changed anything leaves no backup behind (the value is still what it was)
-            elseif ($Mode -eq 'Apply' -and $r.Status -eq 'Failed' -and -not $hadBackup -and $r.Message -ne 'The test still fails after Apply.') { Remove-AVDTuneOptimizationBackup -Root $Root -Id $step.Id }
-        }
-        catch { $r.Message = (($r.Message + ' ' + "The file of saved values could not be updated: $($_.Exception.Message)").Trim()) }
+    }
+    finally {
+        $anyChange = @($results | Where-Object { $_.Status -in 'Changed', 'Reverted', 'Failed' }).Count -gt 0
+        if (-not $WhatIf -and ($touched -or $anyChange)) { [void](Set-AVDTuneState -Root $Root -Values @{ LastChange = (& $Machine.Now).ToString('o') }) }
     }
     $changed = @($results | Where-Object { $_.Status -in 'Changed', 'Reverted' })
     $failed = @($results | Where-Object { $_.Status -eq 'Failed' })
@@ -536,8 +690,6 @@ function Invoke-AVDTuneOptimization {
     }
     [void](Add-AVDTuneRun -Root $Root -Run $run)
     $summary.RunId = $run.Id
-    # A failed attempt may have changed something half-way: it counts for the snapshot gate like a change
-    if ($changed.Count -gt 0 -or $failed.Count -gt 0) { [void](Set-AVDTuneState -Root $Root -Values @{ LastChange = $now.ToString('o') }) }
     if ($state.ImageVersion) {
         foreach ($r in $changed) {
             $e = $byId[$r.Id]
@@ -557,4 +709,4 @@ function Invoke-AVDTuneOptimization {
 
 Export-ModuleMember -Function Get-AVDTuneOptimizationDataPath, Read-AVDTuneOptimizationData, Get-AVDTuneOptimizationPresetIds, Get-AVDTuneOptimizationCategoryLabel, Get-AVDTuneOptimizationCategoryOrder,
     Add-AVDTuneOptimizationMachineMembers, New-AVDTuneOptimizationStep, Get-AVDTuneOptimizationStatus, Invoke-AVDTuneOptimization,
-    Get-AVDTuneOptimizationBackup, Save-AVDTuneOptimizationBackup, Remove-AVDTuneOptimizationBackup, ConvertTo-OptScalar, ConvertTo-OptCompare, Test-OptInt, Test-OptText
+    Get-AVDTuneOptimizationBackup, Save-AVDTuneOptimizationBackup, Remove-AVDTuneOptimizationBackup, ConvertTo-OptScalar, ConvertTo-OptCompare, Test-OptInt, Test-OptText, Test-OptPattern, Get-OptRegistryProblem, Get-OptServiceProblem, Get-OptTaskProblem, Get-OptAppxProblem, Get-OptDefenderProblem, Get-OptEntryProblem, Get-OptCreatedKeys
