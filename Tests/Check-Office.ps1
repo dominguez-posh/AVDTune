@@ -421,7 +421,7 @@ try {
     $src = Get-Content -LiteralPath (Join-Path $repo 'Modules\AVDTune.Office.psm1') -Raw
     Test-Check 'real adapter: no redirects, https only, fixed hosts, no PATH lookup, no shell start, no Invoke-WebRequest' (([regex]::Matches($src, 'AllowAutoRedirect = \$false')).Count -ge 2 -and $src -match 'download\.microsoft\.com' -and $src -match 'www\.microsoft\.com' -and $src -notmatch 'Get-Command|Invoke-WebRequest|Invoke-Expression|Start-Process|cmd\.exe|UseShellExecute = \$true') $null
     Test-Check 'real adapter: Run goes through Invoke-AVDTuneChildProcess with the clean allowlist environment' ($src -match 'Invoke-AVDTuneChildProcess -FileName \$File[^
-]*-CleanEnvironment -TempDir') $null
+]*-CleanEnvironment -Tool office -TempDir') $null
     Test-Check 'real adapter: constructs and has every member the flow uses' ((@('OdtPage', 'NewTempFolder', 'IsProtectedFolder', 'Download', 'VerifySignature', 'Run', 'FindSetup', 'HoldFile', 'ListFolder', 'WriteText', 'RemoveFolder') | Where-Object { $null -eq (New-AVDTuneOfficeAdapter).$_ }).Count -eq 0) $null
     Test-Check 'the fake has every member of the real adapter (the fake stays in step)' ((@((New-AVDTuneOfficeAdapter).PSObject.Properties.Name | Where-Object { $_ -ne 'Kind' }) | Where-Object { $null -eq (New-AVDTuneFakeOffice -Machine (New-Master)).$_ }).Count -eq 0) $null
 }
