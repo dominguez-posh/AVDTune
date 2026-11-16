@@ -188,7 +188,14 @@ function Invoke-AVDTuneLocked {
 # Every native tool AVDTune starts elevated: who must have signed it and the original file name it must carry (VersionInfo; '.mui' is ignored).
 $script:ToolTrust = @{
     'winget.exe' = 'Microsoft'; 'teamsbootstrapper.exe' = 'Microsoft'; 'OfficeC2RClient.exe' = 'Microsoft'; 'MicrosoftEdgeUpdate.exe' = 'Microsoft'
-    'Dism.exe' = 'Microsoft'; 'sfc.exe' = 'Microsoft'; 'setup.exe' = 'Microsoft'; 'officedeploymenttool.exe' = 'Microsoft'; 'choco.exe' = 'Chocolatey'; 'FSLogixAppsSetup.exe' = 'Microsoft'; 'frx.exe' = 'Microsoft'
+    'Dism.exe' = 'Microsoft'; 'sfc.exe' = 'Microsoft'; 'odt-setup' = 'Microsoft'; 'officedeploymenttool.exe' = 'Microsoft'; 'choco.exe' = 'Chocolatey'; 'FSLogixAppsSetup.exe' = 'Microsoft'; 'frx.exe' = 'Microsoft'
+}
+
+# A generic file name (setup.exe) is never in the list above: a tool like that gets its own key (one per purpose) and says more than the file name. Keys here are not file names;
+# the original file name must equal OriginalFilename, ProductName and FileDescription must match (case sensitive, anchored). The values of the ODT's setup.exe are a check point of #17
+# (read them from a real ODT on the test VM); until then they follow the documentation: setup.exe of the Office Deployment Tool, a Microsoft Office product.
+$script:ToolIdentity = @{
+    'odt-setup' = @{ OriginalFilename = 'setup.exe'; ProductName = '^Microsoft Office\b'; FileDescription = '^Microsoft Office\b' }
 }
 
 function Get-AVDTuneDnPart([string]$Dn, [string]$Key) {
@@ -232,6 +239,15 @@ function Test-AVDTuneToolTrust {
     }
     if (-not $ok) { return @{ Ok = $false; Reason = "$leaf is not signed by $publisher (signer '$($Signature.Subject)', issuer '$(Get-AVDTuneProp $Signature 'Issuer')')" } }
     $orig = ([string](Get-AVDTuneProp $Signature 'OriginalFilename')) -replace '(?i)\.mui$', ''
+    if ($script:ToolIdentity.ContainsKey($leaf)) {
+        $id = $script:ToolIdentity[$leaf]
+        if ($orig -cne $id.OriginalFilename) { return @{ Ok = $false; Reason = "$leaf carries the original file name '$orig'" } }
+        foreach ($f in 'ProductName', 'FileDescription') {
+            $v = [string](Get-AVDTuneProp $Signature $f)
+            if (-not [regex]::IsMatch($v, $id[$f], 'None', [TimeSpan]::FromMilliseconds(200))) { return @{ Ok = $false; Reason = "$leaf carries the $($f -creplace '([a-z])([A-Z])', '$1 $2') '$v', not the one of the Office Deployment Tool" } }
+        }
+        return @{ Ok = $true; Reason = '' }
+    }
     # a self-extracting package carries a version in its file name: the caller gives a pattern (anchored, case-insensitive) instead of the exact name
     if ($OriginalFilenamePattern) { if ($orig -notmatch $OriginalFilenamePattern) { return @{ Ok = $false; Reason = "$leaf carries the original file name '$orig'" } } }
     elseif ($orig -ne $leaf) { return @{ Ok = $false; Reason = "$leaf carries the original file name '$orig'" } }
@@ -806,13 +822,13 @@ function New-AVDTuneUpdateAdapter {
     $u.VerifySignature = {
         param($Path)
         $s = Get-AuthenticodeSignature -LiteralPath $Path
-        $orig = ''; $product = ''
-        try { $vi = (Get-Item -LiteralPath $Path).VersionInfo; $orig = [string]$vi.OriginalFilename; $product = [string]$vi.ProductName } catch { }
+        $orig = ''; $product = ''; $description = ''
+        try { $vi = (Get-Item -LiteralPath $Path).VersionInfo; $orig = [string]$vi.OriginalFilename; $product = [string]$vi.ProductName; $description = [string]$vi.FileDescription } catch { }
         [pscustomobject]@{
             Valid = ($s.Status -eq 'Valid'); Status = [string]$s.Status
             Subject = $(if ($s.SignerCertificate) { [string]$s.SignerCertificate.Subject } else { '' })
             Issuer = $(if ($s.SignerCertificate) { [string]$s.SignerCertificate.Issuer } else { '' })
-            OriginalFilename = $orig; ProductName = $product
+            OriginalFilename = $orig; ProductName = $product; FileDescription = $description
         }
     }
     $u.Stage = {

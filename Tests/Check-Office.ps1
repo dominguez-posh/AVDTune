@@ -46,6 +46,9 @@ try {
         (@(Test-AVDTuneOfficeConfig (With @{ Channel = 'Insider' })).Count -ge 1) -and (@(Test-AVDTuneOfficeConfig (With @{ Edition = '128' })).Count -ge 1) -and (@(Test-AVDTuneOfficeConfig (With @{ Product = 'VisioProRetail' })).Count -ge 1) -and
         (@(Test-AVDTuneOfficeConfig (With @{ Languages = @() })).Count -ge 1) -and (@(Test-AVDTuneOfficeConfig (With @{ Languages = @('de-DE"/><Evil') })).Count -ge 1) -and (@(Test-AVDTuneOfficeConfig (With @{ Languages = @(1..21 | ForEach-Object { "xx-A$_" }) })).Count -ge 1) -and
         (@(Test-AVDTuneOfficeConfig (With @{ Languages = @('de-DE', 'DE-de') })).Count -ge 1) -and (@(Test-AVDTuneOfficeConfig (With @{ ExcludeApps = @('Evil') })).Count -ge 1)) $null
+    Test-Check 'validation is exact: another case of channel, product or app ID, and a language with a trailing line break are refused' (
+        (@(Test-AVDTuneOfficeConfig (With @{ Channel = 'monthlyenterprise' })).Count -ge 1) -and (@(Test-AVDTuneOfficeConfig (With @{ Product = 'o365proplusretail' })).Count -ge 1) -and
+        (@(Test-AVDTuneOfficeConfig (With @{ ExcludeApps = @('word') })).Count -ge 1) -and (@(Test-AVDTuneOfficeConfig (With @{ Languages = @("de-DE`n") })).Count -ge 1) -and (@(Test-AVDTuneOfficeConfig (With @{ Languages = @('matchos') })).Count -ge 1)) $null
     Test-Check 'strict types: the text "false" is not $false, a number is not an edition text' ((@(Test-AVDTuneOfficeConfig (With @{ RemoveMSI = 'false' })).Count -ge 1) -and (@(Test-AVDTuneOfficeConfig (With @{ Edition = 64 })).Count -ge 1) -and (@(Test-AVDTuneOfficeConfig $null).Count -ge 1)) $null
     Test-Check 'MatchOS and ll-CC-script language IDs are valid' ((@(Test-AVDTuneOfficeConfig (With @{ Languages = @('MatchOS', 'de-DE', 'sr-Latn-RS', 'fil-PH') })).Count -eq 0)) $null
 
@@ -88,8 +91,15 @@ try {
     }
     foreach ($k in $bad.Keys) { Test-Check "link refused: $k" (-not (Get-AVDTuneOdtLink -PageText $bad[$k]).Ok) $null }
     Test-Check 'link refused: a page larger than the limit' (-not (Get-AVDTuneOdtLink -PageText ('x' * (4MB))).Ok) $null
-    $q = Get-AVDTuneOdtLink -PageText "${good}?x=1"
-    Test-Check 'link with a query: the query is not part of the link (the match ends at .exe)' ($q.Ok -and $q.Url -eq $good) $q.Url
+    foreach ($k in 'query', 'suffix', 'escaped query', 'escaped other host') {
+        $t = switch ($k) { 'query' { "${good}?x=1" } 'suffix' { "$good.zip" } 'escaped query' { ($good + '?x=1') -replace '/', '\/' } 'escaped other host' { 'https://evil.example/download/11111111-1111-1111-1111-111111111111/officedeploymenttool_20430-20146.exe' -replace '/', '\/' } }
+        Test-Check "link refused (strict rules also after unescaping): $k" (-not (Get-AVDTuneOdtLink -PageText $t).Ok) $t
+    }
+    $esc = Get-AVDTuneOdtLink -PageText ('{"url":"' + ($good -replace '/', '\/') + '","size":1}')
+    Test-Check 'link: escaped slashes in the JSON of the page (https:\/\/...) are found, same result as the plain link' ($esc.Ok -and $esc.Url -eq $good -and $esc.FileName -eq 'officedeploymenttool_20430-20146.exe') $esc.Error
+    $esc2 = Get-AVDTuneOdtLink -PageText ('{"url":"' + ($good -replace '/', '/') + '"}')
+    Test-Check 'link: / is unescaped too, and an escaped and a plain copy of the same link are one link' ($esc2.Ok -and (Get-AVDTuneOdtLink -PageText ("$good " + ($good -replace '/', '\/'))).Ok) $esc2.Error
+    Test-Check 'link: an escaped link and a different plain one are two links (refused)' (-not (Get-AVDTuneOdtLink -PageText (($good -replace '/', '\/') + ' https://download.microsoft.com/download/00000000-0000-0000-0000-000000000000/officedeploymenttool_10000-10000.exe')).Ok) $null
 
     # ---------------------------------------------------------------- signature trust
     function Sig([hashtable]$Over) { $c = $ms.Clone(); foreach ($k in $Over.Keys) { $c[$k] = $Over[$k] }; [pscustomobject]$c }
@@ -100,7 +110,22 @@ try {
         -not (Test-AVDTuneOdtPackageTrust (Sig @{ Issuer = 'CN=Evil CA, O=Evil, C=US' })).Ok -and
         -not (Test-AVDTuneOdtPackageTrust (Sig @{ Valid = $false; Status = 'NotSigned' })).Ok -and
         -not (Test-AVDTuneOdtPackageTrust (Sig @{ OriginalFilename = 'evil.exe' })).Ok) $null
-    Test-Check 'setup.exe trust: the exact original name is needed (the pattern relief is only for the package)' ((Test-AVDTuneToolTrust -Signature (Sig @{ OriginalFilename = 'setup.exe' }) -Name 'setup.exe').Ok -and -not (Test-AVDTuneToolTrust -Signature ([pscustomobject]$ms) -Name 'setup.exe').Ok) $null
+    $odtSig = @{ OriginalFilename = 'setup.exe'; ProductName = 'Microsoft Office'; FileDescription = 'Microsoft Office Deployment Tool' }
+    Test-Check 'odt-setup trust: Microsoft signature, original file name setup.exe, product and description of the ODT' ((Test-AVDTuneToolTrust -Signature (Sig $odtSig) -Name 'odt-setup').Ok) $null
+    Test-Check 'a generic setup.exe is not in the shared trust list any more: refused by name, and another Microsoft-signed setup.exe (other product, other description, other original name, other signer) is refused as odt-setup' (
+        -not (Test-AVDTuneToolTrust -Signature (Sig $odtSig) -Name 'setup.exe').Ok -and
+        -not (Test-AVDTuneToolTrust -Signature (Sig @{ OriginalFilename = 'setup.exe'; ProductName = 'Windows Installer'; FileDescription = 'Windows Installer Setup' }) -Name 'odt-setup').Ok -and
+        -not (Test-AVDTuneToolTrust -Signature (Sig @{ OriginalFilename = 'setup.exe'; ProductName = 'Microsoft Office'; FileDescription = 'Installer' }) -Name 'odt-setup').Ok -and
+        -not (Test-AVDTuneToolTrust -Signature (Sig @{ OriginalFilename = 'setup.exe' }) -Name 'odt-setup').Ok -and
+        -not (Test-AVDTuneToolTrust -Signature (Sig @{ OriginalFilename = 'SETUP.EXE'; ProductName = 'Microsoft Office'; FileDescription = 'Microsoft Office Deployment Tool' }) -Name 'odt-setup').Ok -and
+        -not (Test-AVDTuneToolTrust -Signature (Sig @{ OriginalFilename = 'cmd.exe'; ProductName = 'Microsoft Office'; FileDescription = 'Microsoft Office Deployment Tool' }) -Name 'odt-setup').Ok -and
+        -not (Test-AVDTuneToolTrust -Signature (Sig @{ Subject = 'CN=Evil Corp, O=Evil Corp, C=US'; OriginalFilename = 'setup.exe'; ProductName = 'Microsoft Office'; FileDescription = 'Microsoft Office Deployment Tool' }) -Name 'odt-setup').Ok) $null
+    Test-Check 'package original name: the pattern is anchored at the end (a line break, a suffix, a wrong build format are refused)' (
+        (Test-AVDTuneOdtPackageTrust (Sig @{ OriginalFilename = 'officedeploymenttool.exe' })).Ok -and
+        -not (Test-AVDTuneOdtPackageTrust (Sig @{ OriginalFilename = "officedeploymenttool_20430-20146.exe`n" })).Ok -and
+        -not (Test-AVDTuneOdtPackageTrust (Sig @{ OriginalFilename = 'officedeploymenttool_20430-20146.exe.bat' })).Ok -and
+        -not (Test-AVDTuneOdtPackageTrust (Sig @{ OriginalFilename = 'officedeploymenttool_1-2.exe' })).Ok -and
+        -not (Test-AVDTuneOdtPackageTrust (Sig @{ OriginalFilename = 'officedeploymenttoolx.exe' })).Ok) $null
 
     # ---------------------------------------------------------------- detection of the state and the rows
     $m = New-Master
@@ -132,6 +157,12 @@ try {
     $order = @($o.Log | Where-Object { $_ -like 'VerifySignature*' -or $_ -like 'Run *' })
     $iSetupRun = [array]::IndexOf($order, ($order | Where-Object { $_ -like 'Run *setup.exe*' } | Select-Object -First 1))
     Test-Check 'install: signature of the package before its run, of setup.exe twice and the last one directly before the start' ($order[0] -eq 'VerifySignature odt-package.exe' -and $order[1] -like 'Run *odt-package.exe*' -and $order[$iSetupRun - 1] -eq 'VerifySignature setup.exe' -and $order[$iSetupRun - 2] -eq 'VerifySignature setup.exe') ($order -join ' | ')
+    $lg = @($o.Log)
+    $iProt = [array]::IndexOf($lg, ($lg | Where-Object { $_ -like 'IsProtectedFolder *\odt' } | Select-Object -First 1))
+    $iHold = [array]::IndexOf($lg, ($lg | Where-Object { $_ -like 'HoldFile *setup.exe' } | Select-Object -First 1))
+    $iV1 = [array]::IndexOf($lg, 'VerifySignature setup.exe'); $iRunS = [array]::IndexOf($lg, ($lg | Where-Object { $_ -like 'Run *setup.exe*' } | Select-Object -First 1))
+    $iRel = [array]::IndexOf($lg, ($lg | Where-Object { $_ -like 'ReleaseFile *setup.exe' } | Select-Object -First 1)); $iRm = [array]::IndexOf($lg, ($lg | Where-Object { $_ -like 'RemoveFolder *' } | Select-Object -First 1))
+    Test-Check 'install: the unpacked folder is checked, setup.exe is held before its first check and released only after its process ended and before the folder is removed' ($iProt -ge 0 -and $iProt -lt $iHold -and $iHold -lt $iV1 -and $iV1 -lt $iRunS -and $iRunS -lt $iRel -and $iRel -lt $iRm) ($lg -join ' | ')
     Test-Check 'install: the work folder is removed at the end' (@(Get-RunLog $o 'RemoveFolder *').Count -eq 1) $null
     Test-Check 'install: the configuration handed to setup.exe is the built one (shared licensing, log folder below the state root)' ($o.Store.Texts['C:\fake\temp\office-0\configuration.xml'] -match 'SharedComputerLicensing' -and $o.Store.Texts['C:\fake\temp\office-0\configuration.xml'] -match [regex]::Escape((Join-Path $tmp 'logs\office'))) $null
     $cl = @(Get-AVDTuneChangeLog -Root $tmp | Where-Object { $_.Category -eq 'Office' })
@@ -160,6 +191,45 @@ try {
     $ru = Invoke-AVDTuneOfficeUndo -Machine $m -O $o -Root $tmp -User 'admin1' -SnapshotId 'snap-check'
     Test-Check 'undo with a known earlier configuration: reinstalled with it (monthly channel again)' ($ru.Setup.Status -eq 'Changed' -and (Get-AVDTuneOfficeInfo $m).Channel -eq 'Monthly Enterprise Channel') $ru.Setup.Message
 
+    # Reconfigure -> Remove -> Remove -> Undo must still bring back the state before the first change (the second Remove, Unchanged, must not delete the record)
+    $m = New-Master; $o = New-AVDTuneFakeOffice -Machine $m; Reset-OfficeFiles
+    Write-AVDTuneFile (Join-Path $tmp 'config\office-applied.json') ($d | ConvertTo-Json -Depth 4)
+    [void](Invoke-AVDTuneOfficeRecorded -Machine $m -O $o -Root $tmp -Mode Install -Config $cfg2 -User 'admin1' -SnapshotId 'snap-check')
+    [void](Invoke-AVDTuneOfficeRecorded -Machine $m -O $o -Root $tmp -Mode Remove -User 'admin1' -SnapshotId 'snap-check')
+    $undoFile = Join-Path $tmp 'config\office-undo.json'
+    $rm2 = Invoke-AVDTuneOfficeRecorded -Machine $m -O $o -Root $tmp -Mode Remove -User 'admin1' -SnapshotId 'snap-check'
+    Test-Check 'undo record: a second Remove (Unchanged) does not delete the record the first change wrote' ($rm2.Setup.Status -eq 'Unchanged' -and (Test-Path $undoFile) -and (Read-AVDTuneJson $undoFile).BeforeInstalled -eq $true) $null
+    $ru = Invoke-AVDTuneOfficeUndo -Machine $m -O $o -Root $tmp -User 'admin1' -SnapshotId 'snap-check'
+    Test-Check 'reconfigure, remove, remove, undo: the state before the first change is back (monthly channel), the record is gone after the successful undo' ($ru.Setup.Status -eq 'Changed' -and (Get-AVDTuneOfficeInfo $m).Channel -eq 'Monthly Enterprise Channel' -and -not (Test-Path $undoFile)) $ru.Setup.Message
+
+    # LastChange only when something is about to change; the early analysis exits (nothing to remove, invalid configuration) leave it and the undo record alone
+    $mark = '2000-01-01T00:00:00.0000000Z'
+    $m = New-Master -NoOffice; $o = New-AVDTuneFakeOffice -Machine $m; Reset-OfficeFiles
+    [void](Set-AVDTuneState -Root $tmp -Values @{ LastChange = $mark })
+    $rn = Invoke-AVDTuneOfficeRecorded -Machine $m -O $o -Root $tmp -Mode Remove -User 'admin1' -SnapshotId 'snap-check'
+    Test-Check 'LastChange: Remove with nothing installed (Unchanged) does not set it and writes no undo record' ($rn.Setup.Status -eq 'Unchanged' -and (Get-AVDTuneState $tmp).LastChange -eq $mark -and -not (Test-Path $undoFile)) (Get-AVDTuneState $tmp).LastChange
+    $rb2 = Invoke-AVDTuneOfficeRecorded -Machine $m -O $o -Root $tmp -Mode Install -Config (With @{ Languages = @('x"y') }) -User 'admin1' -SnapshotId 'snap-check'
+    Test-Check 'LastChange: an invalid configuration (nothing touched) does not set it and writes no undo record' ($rb2.Setup.Code -eq 'BadConfig' -and (Get-AVDTuneState $tmp).LastChange -eq $mark -and -not (Test-Path $undoFile)) (Get-AVDTuneState $tmp).LastChange
+    $ri2 = Invoke-AVDTuneOfficeRecorded -Machine $m -O $o -Root $tmp -Mode Install -Config $d -User 'admin1' -SnapshotId 'snap-check'
+    Test-Check 'LastChange: a real install sets it' ($ri2.Setup.Status -eq 'Changed' -and (Get-AVDTuneState $tmp).LastChange -ne $mark) $null
+
+    # the undo record is read typed: "false" is not $false
+    foreach ($bi in '"false"', '"true"', '0', '1', 'null') {
+        $m = New-Master; $o = New-AVDTuneFakeOffice -Machine $m; Reset-OfficeFiles
+        Write-AVDTuneFile $undoFile ('{"At":"2026-11-15T10:00:00.0000000Z","BeforeInstalled":' + $bi + ',"BeforeBuild":"","PreviousConfig":null}')
+        Test-Check "undo record is typed: BeforeInstalled $bi is refused, nothing is run" ((Get-ThrownText { Invoke-AVDTuneOfficeUndo -Machine $m -O $o -Root $tmp }) -like '*not usable*' -and $o.Log.Count -eq 0 -and (Get-AVDTuneOfficeInfo $m).Installed) $null
+    }
+    Reset-OfficeFiles
+
+    # what the user is told before Remove and Undo
+    $m = New-Master; & $m.RegSet $ctr 'ProductReleaseIds' 'O365ProPlusRetail,VisioProRetail' 'String'
+    $rt = Get-AVDTuneOfficeRemoveText -Machine $m
+    Test-Check 'remove text: names every product that Remove All takes off, and the limits of Undo (build, languages, RemoveMSI)' ($rt -like '*O365ProPlusRetail*' -and $rt -like '*VisioProRetail*' -and $rt -like '*ALL*' -and $rt -like '*not the earlier build*' -and $rt -like '*RemoveMSI*' -and $rt -like '*languages*') $rt
+    Write-AVDTuneFile $undoFile '{"At":"2026-11-15T10:00:00.0000000Z","BeforeInstalled":false,"BeforeBuild":"","PreviousConfig":null}'
+    $ut = Get-AVDTuneOfficeUndoText -Root $tmp
+    Test-Check 'undo text: says what happens and what it cannot bring back' ($ut -like '*removed again*' -and $ut -like '*not the earlier build*' -and $ut -like '*RemoveMSI*') $ut
+    Reset-OfficeFiles
+
     # ---------------------------------------------------------------- remove
     $m = New-Master; $o = New-AVDTuneFakeOffice -Machine $m; Reset-OfficeFiles
     $rm = Invoke-AVDTuneOfficeRecorded -Machine $m -O $o -Root $tmp -Mode Remove -User 'admin1' -SnapshotId 'snap-check'
@@ -187,6 +257,9 @@ try {
     Fail-Case 'the package is not signed: it is not started' @{ Signatures = @{ 'odt-package.exe' = @{ Valid = $false; Subject = ''; Issuer = '' } } } 'BadSignature' { param($o) @(Get-RunLog $o 'Run *').Count -eq 0 }
     Fail-Case 'the package does not unpack' @{ PackageExit = 5 } 'Unpack' { param($o) @(Get-RunLog $o 'Run *setup.exe*').Count -eq 0 }
     Fail-Case 'setup.exe is not in the package' @{ NoSetup = $true } 'NoSetup' { param($o) @(Get-RunLog $o 'Run *setup.exe*').Count -eq 0 }
+    Fail-Case 'the unpacked folder is not protected: setup.exe is neither held nor started' @{ ProtectedOdt = $false } 'NotProtected' { param($o) @(Get-RunLog $o 'Run *setup.exe*').Count -eq 0 -and @(Get-RunLog $o 'HoldFile*').Count -eq 0 }
+    Fail-Case 'setup.exe cannot be held: it is not started' @{ HoldFails = $true } 'NoSetup' { param($o) @(Get-RunLog $o 'Run *setup.exe*').Count -eq 0 -and @(Get-RunLog $o 'VerifySignature setup.exe').Count -eq 0 }
+    Fail-Case 'setup.exe is a Microsoft-signed setup.exe of another product: it is not started, and the hold is released' @{ Signatures = @{ 'setup.exe' = @{ Valid = $true; Subject = 'CN=Microsoft Corporation, O=Microsoft Corporation, C=US'; Issuer = 'CN=Microsoft Code Signing PCA 2024, O=Microsoft Corporation, C=US'; ProductName = 'Windows Installer'; FileDescription = 'Windows Installer Setup' } } } 'BadSignature' { param($o) @(Get-RunLog $o 'Run *setup.exe*').Count -eq 0 -and @(Get-RunLog $o 'ReleaseFile*').Count -eq 1 }
     Fail-Case 'setup.exe is signed by someone else: it is not started' @{ Signatures = @{ 'setup.exe' = @{ Valid = $true; Subject = 'CN=Evil Corp, O=Evil Corp, C=US'; Issuer = 'CN=Microsoft Code Signing PCA 2024, O=Microsoft Corporation, C=US' } } } 'BadSignature' { param($o) @(Get-RunLog $o 'Run *setup.exe*').Count -eq 0 }
     Fail-Case 'setup.exe carries another original file name: it is not started' @{ Signatures = @{ 'setup.exe' = @{ Valid = $true; Subject = 'CN=Microsoft Corporation, O=Microsoft Corporation, C=US'; Issuer = 'CN=Microsoft Code Signing PCA 2024, O=Microsoft Corporation, C=US'; OriginalFilename = 'cmd.exe' } } } 'BadSignature' { param($o) @(Get-RunLog $o 'Run *setup.exe*').Count -eq 0 }
     Fail-Case 'setup.exe is swapped after the first check: the check right before the start catches it' @{ SwapSetupAfterCheck = $true } 'BadSignature' { param($o) @(Get-RunLog $o 'Run *setup.exe*').Count -eq 0 -and $o.Store.SetupChecks -eq 2 }
@@ -199,10 +272,11 @@ try {
     $m = New-Master -NoOffice; $o = New-AVDTuneFakeOffice -Machine $m -Seed @{ SetupExit = 3010 }; Reset-OfficeFiles
     $rb = Invoke-AVDTuneOfficeRecorded -Machine $m -O $o -Root $tmp -Mode Install -Config $d -User 'admin1' -SnapshotId 'snap-check'
     Test-Check 'exit code 3010 is a success that asks for a restart' ($rb.Setup.Status -eq 'Changed' -and $rb.Result.Reboot -and $rb.Run.Reboot) $null
-    $m = New-Master -NoOffice; $o = New-AVDTuneFakeOffice -Machine $m; Reset-OfficeFiles
-    $o.Store.Signatures['setup.exe'] = @{ Valid = $true; Subject = 'CN=Microsoft Corporation, O=Microsoft Corporation, C=US'; Issuer = 'CN=Microsoft Code Signing PCA 2024, O=Microsoft Corporation, C=US' }
-    $leak = (Get-Content -LiteralPath (Join-Path $tmp 'changelog.json') -Raw) + (Get-Content -LiteralPath (Join-Path $tmp 'state.json') -Raw)
-    Test-Check 'no token, key or password text in the stored records' ($leak -notmatch '(?i)accountkey|bearer|password|sig=') $null
+    # a failing run whose output carries secret-looking text: nothing of it may reach any file of the state folder (run record, change log, state, undo and applied records) or the messages
+    $m = New-Master -NoOffice; $o = New-AVDTuneFakeOffice -Machine $m -Seed @{ SetupExit = 1603; SetupOutput = 'AccountKey=LEAKCANARY1 Bearer LEAKCANARY2 password=LEAKCANARY3 sig=LEAKCANARY4' }; Reset-OfficeFiles
+    $rl = Invoke-AVDTuneOfficeRecorded -Machine $m -O $o -Root $tmp -Mode Install -Config $d -User 'admin1' -SnapshotId 'snap-check'
+    $leak = (@(Get-ChildItem -LiteralPath $tmp -Recurse -File -Force | ForEach-Object { Get-Content -LiteralPath $_.FullName -Raw }) -join "`n") + ($rl | ConvertTo-Json -Depth 6)
+    Test-Check 'no token, key or password text in any stored file or message (the failing setup.exe had such output)' ($rl.Setup.Status -eq 'Failed' -and $rl.Setup.Code -eq 'Exit1603' -and $leak -notmatch '(?i)accountkey|bearer|password|sig=|LEAKCANARY') $null
 
     # ---------------------------------------------------------------- update policies (registry steps)
     $m = New-Master; $pk = 'HKLM:\SOFTWARE\Policies\Microsoft\office\16.0\common\officeupdate'; Reset-OfficeFiles
@@ -214,12 +288,51 @@ try {
     Test-Check 'policies: refused without the open gate' (Test-Throws { Set-AVDTuneOfficePolicies -Machine $m -Root $tmp }) $null
     Open-AVDTuneWriteGate -SnapshotId 'snap-check' -ConfirmedBy 'Check Runner'
     $ap = Set-AVDTuneOfficePolicies -Machine $m -Root $tmp -User 'admin1' -SnapshotId 'snap-check'
-    Test-Check 'policies: both values 1, change log entries, the earlier value 0 kept for undo' ((& $m.RegGet $pk 'hideupdatenotifications') -eq 1 -and (& $m.RegGet $pk 'hideenabledisableupdates') -eq 1 -and @(Get-AVDTuneChangeLog -Root $tmp | Where-Object { $_.Component -like 'office.policy.*' }).Count -eq 2 -and (Read-AVDTuneJson (Join-Path $tmp 'config\office-policies-undo.json')).Previous.hideupdatenotifications -eq 0) ("{0} {1} {2}" -f (& $m.RegGet $pk 'hideupdatenotifications'), @(Get-AVDTuneChangeLog -Root $tmp | Where-Object { $_.Component -like 'office.policy.*' }).Count, (Get-Content (Join-Path $tmp 'config\office-policies-undo.json') -Raw))
+    Test-Check 'policies: both values 1, change log entries, the earlier value 0 kept for undo' ((& $m.RegGet $pk 'hideupdatenotifications') -eq 1 -and (& $m.RegGet $pk 'hideenabledisableupdates') -eq 1 -and @(Get-AVDTuneChangeLog -Root $tmp | Where-Object { $_.Component -like 'office.policy.*' }).Count -eq 2 -and (Read-AVDTuneJson (Join-Path $tmp 'config\office-policies-undo.json')).Previous.hideupdatenotifications.Value -eq 0 -and (Read-AVDTuneJson (Join-Path $tmp 'config\office-policies-undo.json')).Previous.hideupdatenotifications.Type -ceq 'DWord') ("{0} {1} {2}" -f (& $m.RegGet $pk 'hideupdatenotifications'), @(Get-AVDTuneChangeLog -Root $tmp | Where-Object { $_.Component -like 'office.policy.*' }).Count, (Get-Content (Join-Path $tmp 'config\office-policies-undo.json') -Raw))
     [void](Set-AVDTuneOfficePolicies -Machine $m -Root $tmp -User 'admin1' -SnapshotId 'snap-check')
-    Test-Check 'policies: a second apply is Unchanged and does not overwrite the undo record' ((Read-AVDTuneJson (Join-Path $tmp 'config\office-policies-undo.json')).Previous.hideupdatenotifications -eq 0) $null
+    Test-Check 'policies: a second apply is Unchanged and does not overwrite the undo record' ((Read-AVDTuneJson (Join-Path $tmp 'config\office-policies-undo.json')).Previous.hideupdatenotifications.Value -eq 0) $null
     $up = Undo-AVDTuneOfficePolicies -Machine $m -Root $tmp -User 'admin1' -SnapshotId 'snap-check'
     Test-Check 'policies: undo puts back 0 and removes the value that was absent, writes LastChange and the change log' ((& $m.RegGet $pk 'hideupdatenotifications') -eq 0 -and $null -eq (& $m.RegGet $pk 'hideenabledisableupdates') -and -not (Test-Path (Join-Path $tmp 'config\office-policies-undo.json')) -and @(Get-AVDTuneChangeLog -Root $tmp | Where-Object { $_.Text -like 'Undo: Office policy*' }).Count -eq 2) (($up.Results | ForEach-Object Status) -join ',')
     Test-Check 'policies: undo with no record is refused' ((Get-ThrownText { Undo-AVDTuneOfficePolicies -Machine $m -Root $tmp }) -like '*nothing to undo*') $null
+
+    # the registry type of the earlier value is kept and put back
+    $m = New-Master; Reset-OfficeFiles
+    & $m.RegSet $pk 'hideupdatenotifications' '0' 'String'
+    [void](Set-AVDTuneOfficePolicies -Machine $m -Root $tmp -User 'admin1' -SnapshotId 'snap-check')
+    $pr = (Read-AVDTuneJson (Join-Path $tmp 'config\office-policies-undo.json')).Previous.hideupdatenotifications
+    Test-Check 'policies: the registry type of the earlier value is stored (a String stays a String)' ($pr.Type -ceq 'String' -and $pr.Value -ceq '0') ($pr | ConvertTo-Json -Compress)
+    $m.Log.Clear()
+    [void](Undo-AVDTuneOfficePolicies -Machine $m -Root $tmp -User 'admin1' -SnapshotId 'snap-check')
+    Test-Check 'policies: undo puts the earlier value back with its type' (@($m.Log | Where-Object { $_ -like 'RegSet*|hideupdatenotifications=0 (String)' }).Count -eq 1 -and (& $m.RegGet $pk 'hideupdatenotifications') -ceq '0') ($m.Log -join ' | ')
+
+    # a record that is not exactly what Set wrote changes nothing
+    $polUndo = Join-Path $tmp 'config\office-policies-undo.json'
+    $badRecords = [ordered]@{
+        'old format without type' = '{"Previous":{"hideupdatenotifications":1}}'
+        'text for a DWord' = '{"Previous":{"hideupdatenotifications":{"Value":"1","Type":"DWord"}}}'
+        'unknown type' = '{"Previous":{"hideupdatenotifications":{"Value":1,"Type":"Binary"}}}'
+        'type in another case' = '{"Previous":{"hideupdatenotifications":{"Value":1,"Type":"dword"}}}'
+        'unknown value name' = '{"Previous":{"evil":{"Value":1,"Type":"DWord"}}}'
+        'Previous is text' = '{"Previous":"x"}'
+    }
+    foreach ($k in $badRecords.Keys) {
+        $m = New-Master; Write-AVDTuneFile $polUndo $badRecords[$k]; $m.Log.Clear()
+        Test-Check "policies undo record is typed: $k is refused, nothing written" ((Get-ThrownText { Undo-AVDTuneOfficePolicies -Machine $m -Root $tmp }) -like '*not usable*' -and @($m.Log | Where-Object { $_ -like 'Reg*' }).Count -eq 0) $null
+    }
+
+    # LastChange is set before the attempt and also when a step fails; the record stays
+    $mark = '2000-01-01T00:00:00.0000000Z'
+    $m = New-Master; & $m.RegSet $pk 'hideupdatenotifications' 1 'DWord'
+    Write-AVDTuneFile $polUndo '{"At":"2026-11-15T10:00:00.0000000Z","Previous":{"hideupdatenotifications":{"Value":0,"Type":"DWord"}}}'
+    [void](Set-AVDTuneState -Root $tmp -Values @{ LastChange = $mark }); $m.Store.FailWrites = @('hideupdatenotifications')
+    $upf = Undo-AVDTuneOfficePolicies -Machine $m -Root $tmp -User 'admin1' -SnapshotId 'snap-check'
+    Test-Check 'policies undo: a failing step still sets LastChange and keeps the record' (@($upf.Results | Where-Object Status -eq 'Failed').Count -ge 1 -and (Get-AVDTuneState $tmp).LastChange -ne $mark -and (Test-Path $polUndo)) (($upf.Results | ForEach-Object Status) -join ',')
+    $m.Store.FailWrites = @()
+    Close-AVDTuneWriteGate
+    [void](Set-AVDTuneState -Root $tmp -Values @{ LastChange = $mark })
+    Test-Check 'policies undo: without the open gate it is refused and does not touch LastChange' ((Test-Throws { Undo-AVDTuneOfficePolicies -Machine $m -Root $tmp }) -and (Get-AVDTuneState $tmp).LastChange -eq $mark) $null
+    Open-AVDTuneWriteGate -SnapshotId 'snap-check' -ConfirmedBy 'Check Runner'
+    Remove-Item -LiteralPath $polUndo -Force -ErrorAction SilentlyContinue
 
     # ---------------------------------------------------------------- source of the real adapter (not run here)
     $src = Get-Content -LiteralPath (Join-Path $repo 'Modules\AVDTune.Office.psm1') -Raw

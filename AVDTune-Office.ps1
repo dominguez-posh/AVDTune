@@ -120,12 +120,12 @@ Add-Click $ui.BtnOffInstall {
 }
 Add-Click $ui.BtnOffRemove {
     Assert-FslWrite
-    if (-not (Confirm-Action 'Remove Microsoft 365 Apps from this master?' 'Office')) { return }
+    if (-not (Confirm-Action (Get-AVDTuneOfficeRemoveText -Machine $script:Machine) 'Office')) { return }
     Start-OffJob 'Remove' $null; $ui.TxtOffState.Text = 'Removing Microsoft 365 Apps ...'
 }
 Add-Click $ui.BtnOffUndo {
     Assert-FslWrite
-    if (-not (Confirm-Action 'Go back to the state found before the first Office change by AVDTune?' 'Office')) { return }
+    if (-not (Confirm-Action (Get-AVDTuneOfficeUndoText -Root $script:StateRoot) 'Office')) { return }
     Start-OffJob 'Undo' $null; $ui.TxtOffState.Text = 'Undoing the Office change ...'
 }
 Add-Click $ui.BtnOffPolicies {

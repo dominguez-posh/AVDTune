@@ -344,8 +344,8 @@
                                             <StackPanel Orientation="Horizontal" Margin="0,12,0,0">
                                                 <Button x:Name="BtnOffSave" Content="Save settings" Margin="0,0,8,0" AutomationProperties.Name="Save the configuration"/>
                                                 <Button x:Name="BtnOffInstall" Style="{DynamicResource PrimaryButton}" Content="Install or reconfigure" Margin="0,0,8,0" AutomationProperties.Name="Install or reconfigure Microsoft 365 Apps"/>
-                                                <Button x:Name="BtnOffUndo" Content="Undo last change" Margin="0,0,8,0" AutomationProperties.Name="Undo the Office change"/>
-                                                <Button x:Name="BtnOffRemove" Content="Remove Office" AutomationProperties.Name="Remove Microsoft 365 Apps"/>
+                                                <Button x:Name="BtnOffUndo" Content="Back to saved configuration" Margin="0,0,8,0" AutomationProperties.Name="Go back to the saved earlier Office configuration (build, languages and RemoveMSI are not restored)"/>
+                                                <Button x:Name="BtnOffRemove" Content="Remove all Office products" AutomationProperties.Name="Remove all Click-to-Run Office products from this master"/>
                                             </StackPanel>
                                         </StackPanel>
                                     </Border>

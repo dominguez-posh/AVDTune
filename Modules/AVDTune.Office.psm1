@@ -7,7 +7,7 @@
       * The ODT comes only from fixed Microsoft hosts over https: the download page www.microsoft.com (id 49117) names the package, the package comes from
         download.microsoft.com; no redirect is followed. It lands in a new folder below the protected state folder (Administrators and SYSTEM only), is checked
         (Authenticode: Microsoft Corporation, Microsoft code signing CA), extracted there, and setup.exe is checked by full path (subject, issuer, original file
-        name setup.exe) directly before it starts. The configuration.xml is written into the same folder; it is built from validated data only.
+        name setup.exe, product and description of the ODT: trust key odt-setup, held open until its process ended) directly before it starts. The configuration.xml is written into the same folder; it is built from validated data only.
       * Changes are recorded (run record, LastChange, change log) and sit behind the write gate. Undo goes back to the state found before the first change
         (kept in config\office-undo.json, never overwritten by a later change): remove when Office was not there, the earlier configuration when it is known.
 #>
@@ -68,24 +68,24 @@ function Test-AVDTuneOfficeConfig {
     if ($null -eq $Config) { return @('There is no configuration.') }
     $get = { param($n) Get-AVDTuneProp $Config $n }
     $channel = & $get 'Channel'
-    if ($channel -isnot [string] -or $channel -notin @($script:Channels | ForEach-Object Key)) { [void]$p.Add("Channel must be one of $((@($script:Channels | ForEach-Object Key)) -join ', ').") }
+    if ($channel -isnot [string] -or $channel -cnotin @($script:Channels | ForEach-Object Key)) { [void]$p.Add("Channel must be one of $((@($script:Channels | ForEach-Object Key)) -join ', ').") }
     $edition = & $get 'Edition'
-    if ($edition -isnot [string] -or $edition -notin '32', '64') { [void]$p.Add('Edition must be "32" or "64" (Microsoft recommends 64).') }
+    if ($edition -isnot [string] -or $edition -cnotin '32', '64') { [void]$p.Add('Edition must be "32" or "64" (Microsoft recommends 64).') }
     $product = & $get 'Product'
-    if ($product -isnot [string] -or $product -notin $script:Products) { [void]$p.Add("Product must be one of $($script:Products -join ', '): multi-session supports only these.") }
+    if ($product -isnot [string] -or $product -cnotin $script:Products) { [void]$p.Add("Product must be one of $($script:Products -join ', '): multi-session supports only these.") }
     $langs = & $get 'Languages'
     if ($null -eq $langs -or @($langs).Count -eq 0) { [void]$p.Add('At least one language (or MatchOS) is needed.') }
     elseif (@($langs).Count -gt 20) { [void]$p.Add('At most 20 languages.') }
     else {
         $seen = @{}
         foreach ($l in @($langs)) {
-            if ($l -isnot [string] -or $l.Length -gt 20 -or -not ([regex]::IsMatch($l, '^(MatchOS|[A-Za-z]{2,3}-[A-Za-z]{2,4}(-[A-Za-z0-9]{2,8})?)$', 'None', [TimeSpan]::FromMilliseconds(200)))) { [void]$p.Add("'$l' is not a language ID (like de-DE) or MatchOS."); continue }
+            if ($l -isnot [string] -or $l.Length -gt 20 -or -not ([regex]::IsMatch($l, '^(MatchOS|[A-Za-z]{2,3}-[A-Za-z]{2,4}(-[A-Za-z0-9]{2,8})?)\z', 'None', [TimeSpan]::FromMilliseconds(200)))) { [void]$p.Add("'$l' is not a language ID (like de-DE) or MatchOS."); continue }
             if ($seen.ContainsKey($l.ToLowerInvariant())) { [void]$p.Add("Language '$l' appears twice.") }
             $seen[$l.ToLowerInvariant()] = $true
         }
     }
     $ex = & $get 'ExcludeApps'
-    foreach ($e in @($ex)) { if ($null -ne $e -and ($e -isnot [string] -or $e -notin $script:ExcludableApps)) { [void]$p.Add("'$e' is not an app ID that can be excluded.") } }
+    foreach ($e in @($ex)) { if ($null -ne $e -and ($e -isnot [string] -or $e -cnotin $script:ExcludableApps)) { [void]$p.Add("'$e' is not an app ID that can be excluded.") } }
     $msi = & $get 'RemoveMSI'
     if ($msi -isnot [bool]) { [void]$p.Add('RemoveMSI must be true or false.') }
     @($p)
@@ -120,7 +120,7 @@ function Set-AVDTuneOfficeConfig {
     $c
 }
 
-function Test-AVDTuneOfficeLogPath([string]$Path) { [bool]($Path -match '^[A-Za-z]:\\[^"<>|*?\x00-\x1F]+$' -and $Path -notmatch '\.\.') }
+function Test-AVDTuneOfficeLogPath([string]$Path) { [bool]($Path -match '^[A-Za-z]:\\[^"<>|*?\x00-\x1F]+\z' -and $Path -notmatch '\.\.') }
 
 function New-AVDTuneOfficeXml {
     <#
@@ -193,12 +193,12 @@ function Get-AVDTuneOfficeState {
     $products = @($ids -split '[,;\s]+' | Where-Object { $_ })
     $langs = @()
     foreach ($p in $products) {
-        if ($p -notmatch '^[A-Za-z0-9]+$') { continue }
-        foreach ($sub in @(& $Machine.RegSubKeys "$script:ClickToRun\ProductReleaseIDs\$p")) { if ($sub -match '^[a-z]{2,3}-[a-z]{2,4}(-[a-z0-9]{2,8})?$') { $langs += $sub } }
+        if ($p -notmatch '^[A-Za-z0-9]+\z') { continue }
+        foreach ($sub in @(& $Machine.RegSubKeys "$script:ClickToRun\ProductReleaseIDs\$p")) { if ($sub -match '^[a-z]{2,3}-[a-z]{2,4}(-[a-z0-9]{2,8})?\z') { $langs += $sub } }
     }
     $channelKey = ''
     $cdn = [string](& $Machine.RegGet $key 'CDNBaseUrl')
-    if ($cdn -match '([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\s*$') { $c = @($script:Channels | Where-Object { $_.Guid -eq $Matches[1].ToLowerInvariant() }); if ($c.Count -gt 0) { $channelKey = $c[0].Key } }
+    if ($cdn -match '([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\s*\z') { $c = @($script:Channels | Where-Object { $_.Guid -eq $Matches[1].ToLowerInvariant() }); if ($c.Count -gt 0) { $channelKey = $c[0].Key } }
     $edition = [string](& $Machine.RegGet 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion' 'EditionID')
     $policy = @{}; foreach ($n in 'hideupdatenotifications', 'hideenabledisableupdates') { $policy[$n] = & $Machine.RegGet $script:PolicyKey $n }
     [pscustomobject]@{
@@ -232,7 +232,7 @@ function Get-AVDTuneOfficeRows {
     $wantPlat = if ($Config.Edition -eq '64') { 'x64' } else { 'x86' }
     if ($s.Platform -eq $wantPlat) { & $add (New-AVDTuneOfficeRow 'office.platform' '32 or 64 bit' 'green' "$($s.Platform), as configured." '' $script:Src.Avd $true) }
     else { & $add (New-AVDTuneOfficeRow 'office.platform' '32 or 64 bit' 'yellow' "Installed: $($s.Platform). Configured: $wantPlat." 'Microsoft recommends 64 bit. Switching needs the reinstall (Install or reconfigure).' $script:Src.Avd $true) }
-    if ($s.Products.Count -gt 0 -and $Config.Product -in $s.Products) { & $add (New-AVDTuneOfficeRow 'office.product' 'Product' 'green' ($s.Products -join ', ') '' $script:Src.Avd $true) }
+    if ($s.Products.Count -gt 0 -and $Config.Product -cin $s.Products) { & $add (New-AVDTuneOfficeRow 'office.product' 'Product' 'green' ($s.Products -join ', ') '' $script:Src.Avd $true) }
     else { & $add (New-AVDTuneOfficeRow 'office.product' 'Product' $(if ($s.MultiSession -and @($s.Products | Where-Object { $_ -in $script:Products }).Count -eq 0) { 'red' } else { 'yellow' }) "Installed: $(if ($s.Products.Count) { $s.Products -join ', ' } else { 'not readable' }). Configured: $($Config.Product)." 'Multi-session supports only Microsoft 365 Apps for enterprise or business.' $script:Src.Avd $true) }
     if ($s.SharedLicensing) { & $add (New-AVDTuneOfficeRow 'office.shared' 'Shared Computer Activation' 'green' 'On (SharedComputerLicensing = 1).' '' $script:Src.Shared $true) }
     else { & $add (New-AVDTuneOfficeRow 'office.shared' 'Shared Computer Activation' 'red' 'Off. Every user would need an own activation on a multi-user host.' 'Install or reconfigure sets SharedComputerLicensing = 1 (the licence is activated per user at sign-in).' $script:Src.Shared $true) }
@@ -265,8 +265,13 @@ function Get-AVDTuneOdtLink {
     param([string]$PageText)
     $none = { param($e) [pscustomobject]@{ Ok = $false; Url = ''; FileName = ''; Error = $e } }
     if (-not $PageText -or $PageText.Length -gt $script:MaxPageChars) { return & $none 'The download page is empty or too large.' }
+    # The page can carry the link inside JSON, with escaped slashes (https:\/\/...) or /: unescape first, then the same strict rules apply to every candidate.
+    $text = $PageText -replace '\\/', '/' -replace '(?i)\\u002f', '/'
     $found = @()
-    try { $found = @([regex]::Matches($PageText, 'https://download\.microsoft\.com/download/[0-9A-Fa-f-]{36}/officedeploymenttool_\d{4,6}-\d{4,6}\.exe', 'IgnoreCase', [TimeSpan]::FromSeconds(2)) | ForEach-Object { $_.Value } | Select-Object -Unique) }
+    try {
+        $candidates = @([regex]::Matches($text, 'https://download\.microsoft\.com/[^\s"''<>\\]{1,300}', 'IgnoreCase', [TimeSpan]::FromSeconds(2)) | ForEach-Object { $_.Value })
+        $found = @($candidates | Where-Object { [regex]::IsMatch($_, '\Ahttps://download\.microsoft\.com/download/[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}/officedeploymenttool_\d{4,6}-\d{4,6}\.exe\z', 'IgnoreCase', [TimeSpan]::FromSeconds(1)) } | Select-Object -Unique)
+    }
     catch { return & $none 'The download page could not be searched.' }
     if ($found.Count -eq 0) { return & $none 'The download page names no Office Deployment Tool package.' }
     if ($found.Count -gt 1) { return & $none 'The download page names more than one package; it is not clear which is meant.' }
@@ -278,7 +283,7 @@ function Get-AVDTuneOdtLink {
 function Test-AVDTuneOdtPackageTrust {
     # The self-extracting package: signed by Microsoft (subject and issuer as for every Microsoft tool), the original file name is not checked exactly because it carries a build number
     param($Signature)
-    Test-AVDTuneToolTrust -Signature $Signature -Name 'officedeploymenttool.exe' -OriginalFilenamePattern '^officedeploymenttool.*\.exe$'
+    Test-AVDTuneToolTrust -Signature $Signature -Name 'officedeploymenttool.exe' -OriginalFilenamePattern '^officedeploymenttool(_\d{4,6}-\d{4,6})?\.exe\z'
 }
 
 #endregion
@@ -324,16 +329,23 @@ function Invoke-AVDTuneOfficeSetup {
         & $say 'Unpacking the Office Deployment Tool ...'
         $ex = & $O.Run $pkg @('/quiet', "/extract:$(Join-Path $dir 'odt')") 300
         if ($ex.ExitCode -ne 0) { return & $out 'Failed' "The package could not be unpacked (exit code $($ex.ExitCode))." 'Unpack' $false $xml }
-        $setup = & $O.FindSetup (Join-Path $dir 'odt')
+        $odtDir = Join-Path $dir 'odt'
+        if (-not (& $O.IsProtectedFolder $odtDir $Root)) { return & $out 'Failed' 'The folder the package was unpacked into is not protected (Administrators and SYSTEM only): setup.exe is not started.' 'NotProtected' $false $xml }
+        $setup = & $O.FindSetup $odtDir
         if (-not $setup) { return & $out 'Failed' 'setup.exe is not in the package.' 'NoSetup' $false $xml }
-        $trust = Test-AVDTuneToolTrust -Signature (& $O.VerifySignature $setup) -Name 'setup.exe'
-        if (-not $trust.Ok) { return & $out 'Failed' "$($trust.Reason): it is not started." 'BadSignature' $false $xml }
-        $cfg = Join-Path $dir 'configuration.xml'
-        & $O.WriteText $cfg $xml
-        & $say $(if ($Mode -eq 'Remove') { 'Removing Microsoft 365 Apps (this takes a few minutes) ...' } else { 'Installing Microsoft 365 Apps (this takes a while) ...' })
-        $trust = Test-AVDTuneToolTrust -Signature (& $O.VerifySignature $setup) -Name 'setup.exe'   # again, right before the start
-        if (-not $trust.Ok) { return & $out 'Failed' "$($trust.Reason): it is not started." 'BadSignature' $false $xml }
-        $r = & $O.Run $setup @('/configure', $cfg) 3600
+        # setup.exe is held open (read share only) from the first check until its process has ended: nobody can write to it, delete it or rename it in between
+        try { $hold = & $O.HoldFile $setup } catch { return & $out 'Failed' "setup.exe cannot be held for the check: $($_.Exception.Message)" 'NoSetup' $false $xml }
+        try {
+            $trust = Test-AVDTuneToolTrust -Signature (& $O.VerifySignature $setup) -Name 'odt-setup'
+            if (-not $trust.Ok) { return & $out 'Failed' "$($trust.Reason): it is not started." 'BadSignature' $false $xml }
+            $cfg = Join-Path $dir 'configuration.xml'
+            & $O.WriteText $cfg $xml
+            & $say $(if ($Mode -eq 'Remove') { 'Removing Microsoft 365 Apps (this takes a few minutes) ...' } else { 'Installing Microsoft 365 Apps (this takes a while) ...' })
+            $trust = Test-AVDTuneToolTrust -Signature (& $O.VerifySignature $setup) -Name 'odt-setup'   # again, right before the start
+            if (-not $trust.Ok) { return & $out 'Failed' "$($trust.Reason): it is not started." 'BadSignature' $false $xml }
+            $r = & $O.Run $setup @('/configure', $cfg) 3600
+        }
+        finally { if ($hold) { $hold.Dispose() } }
         $reboot = $r.ExitCode -in 3010, 1641
         if ($r.ExitCode -notin 0, 3010, 1641) { return & $out 'Failed' "setup.exe returned $($r.ExitCode). Look at the logs in $(Join-Path $Root 'logs\office')." "Exit$($r.ExitCode)" $false $xml }
         $after = Get-AVDTuneOfficeInfo $Machine
@@ -363,23 +375,29 @@ function Invoke-AVDTuneOfficeRecorded {
     if (-not (Test-AVDTuneWriteAllowed)) { throw 'The snapshot gate is not confirmed: AVDTune is read only until a snapshot newer than its last change is confirmed on the Overview.' }
     if (-not $Config) { $Config = Get-AVDTuneOfficeConfig -Root $Root }
     $started = & $Machine.Now
-    [void](Set-AVDTuneState -Root $Root -Values @{ LastChange = $started.ToString('o') })
     $pre = Get-AVDTuneOfficeInfo $Machine
-    if (-not (Test-Path -LiteralPath (Get-AVDTuneOfficeUndoPath $Root))) {
-        $prev = Read-AVDTuneJson (Get-AVDTuneOfficeAppliedPath $Root)
-        Write-AVDTuneFile (Get-AVDTuneOfficeUndoPath $Root) ([ordered]@{ At = $started.ToString('o'); BeforeInstalled = [bool]$pre.Installed; BeforeBuild = [string]$pre.Build; PreviousConfig = $prev } | ConvertTo-Json -Depth 6)
+    # the early analysis exits of the setup (nothing to remove, configuration not valid) change nothing: no LastChange, no undo record for them
+    $analysisExit = ($Mode -eq 'Remove' -and -not $pre.Installed) -or ($Mode -eq 'Install' -and @(Test-AVDTuneOfficeConfig $Config).Count -gt 0)
+    $createdUndo = $false
+    if (-not $analysisExit) {
+        [void](Set-AVDTuneState -Root $Root -Values @{ LastChange = $started.ToString('o') })
+        if (-not (Test-Path -LiteralPath (Get-AVDTuneOfficeUndoPath $Root))) {
+            $prev = Read-AVDTuneJson (Get-AVDTuneOfficeAppliedPath $Root)
+            Write-AVDTuneFile (Get-AVDTuneOfficeUndoPath $Root) ([ordered]@{ At = $started.ToString('o'); BeforeInstalled = [bool]$pre.Installed; BeforeBuild = [string]$pre.Build; PreviousConfig = $prev } | ConvertTo-Json -Depth 6)
+            $createdUndo = $true
+        }
     }
     $r = Invoke-AVDTuneOfficeSetup -Machine $Machine -O $O -Config $Config -Mode $Mode -Root $Root -Progress $Progress
     if ($r.Status -eq 'Changed' -and $Mode -eq 'Install') { Write-AVDTuneFile (Get-AVDTuneOfficeAppliedPath $Root) ((ConvertTo-AVDTuneOfficeConfig $Config) | ConvertTo-Json -Depth 4) }
     if ($r.Status -eq 'Changed' -and $Mode -eq 'Remove') { Remove-Item -LiteralPath (Get-AVDTuneOfficeAppliedPath $Root) -Force -ErrorAction SilentlyContinue }
-    if ($r.Status -eq 'Unchanged') { Remove-Item -LiteralPath (Get-AVDTuneOfficeUndoPath $Root) -Force -ErrorAction SilentlyContinue }
+    if ($r.Status -eq 'Unchanged' -and $createdUndo) { Remove-Item -LiteralPath (Get-AVDTuneOfficeUndoPath $Root) -Force -ErrorAction SilentlyContinue }   # only the record this call wrote: an older one is the way back
     $id = if ($Mode -eq 'Remove') { 'office.remove' } else { 'office.install' }
     $title = if ($PlanName) { $PlanName } elseif ($Mode -eq 'Remove') { 'Microsoft 365 Apps removal' } else { 'Microsoft 365 Apps' }
     $res = [pscustomobject][ordered]@{ Id = $id; Section = 'Office'; Title = $title; Mode = 'Apply'; Status = $r.Status; Before = $pre.Build; After = $r.After.Build; Message = $r.Message; Reboot = ([bool]$r.Reboot -and $r.Status -eq 'Changed'); WhatIf = $false; At = $started.ToString('o'); Code = $r.Code }
     $state = Get-AVDTuneState $Root
     $run = [pscustomobject][ordered]@{ Id = $null; Plan = $(if ($Mode -eq 'Remove') { 'Office remove' } else { 'Office install' }); Started = $started.ToString('o'); Ended = (& $Machine.Now).ToString('o'); User = $User; SnapshotId = $SnapshotId; WhatIf = $false; ImageVersion = $state.ImageVersion; Reboot = $res.Reboot; Results = @($res) }
     [void](Add-AVDTuneRun -Root $Root -Run $run)
-    if ($r.Status -in 'Changed', 'Failed') { [void](Set-AVDTuneState -Root $Root -Values @{ LastChange = (& $Machine.Now).ToString('o') }) }
+    if ($r.Status -eq 'Changed' -or ($r.Status -eq 'Failed' -and -not $analysisExit)) { [void](Set-AVDTuneState -Root $Root -Values @{ LastChange = (& $Machine.Now).ToString('o') }) }
     if ($state.ImageVersion -and $r.Status -in 'Changed', 'Failed') {
         $c = $null; if ($Mode -eq 'Install' -and @(Test-AVDTuneOfficeConfig $Config).Count -eq 0) { $c = ConvertTo-AVDTuneOfficeConfig $Config }
         $detail = if ($c) { " [$($c.Channel), $($c.Edition) bit, $($c.Product), languages $($c.Languages -join '/'), excluded $(if ($c.ExcludeApps.Count) { $c.ExcludeApps -join '/' } else { 'none' })]" } else { '' }
@@ -390,20 +408,42 @@ function Invoke-AVDTuneOfficeRecorded {
     [pscustomobject]@{ Result = $res; Setup = $r; Run = $run }
 }
 
+function Get-AVDTuneOfficeRemoveText {
+    <# The confirmation text of Remove: <Remove All="TRUE"/> takes every Click-to-Run product off the master, so it names all of them (ProductReleaseIds) and what Undo can not do. #>
+    param([Parameter(Mandatory)]$Machine)
+    $s = Get-AVDTuneOfficeState $Machine
+    $what = if ($s.Products.Count -gt 0) { $s.Products -join ', ' } else { 'all Click-to-Run products (the list could not be read)' }
+    "Remove ALL Microsoft 365 / Office Click-to-Run products from this master? Found: $what. Every Click-to-Run product is removed, not only the one of the form. $(Get-AVDTuneOfficeUndoLimits)"
+}
+
+function Get-AVDTuneOfficeUndoLimits {
+    'Undo only goes back to the configuration (product, channel, bit) that AVDTune saved before its first change and installs it again: the build is then the current one of the channel, not the earlier build; languages that were installed but are not in the saved configuration, and Office versions that RemoveMSI removed, do not come back.'
+}
+
+function Get-AVDTuneOfficeUndoText {
+    param([string]$Root = (Get-AVDTuneRoot))
+    $u = Read-AVDTuneJson (Get-AVDTuneOfficeUndoPath $Root)
+    $b = if ($u) { Get-AVDTuneProp $u 'BeforeInstalled' } else { $null }
+    $goal = if ($b -is [bool] -and -not $b) { 'Microsoft 365 Apps is removed again (it was not there before)' } elseif ($b -is [bool]) { 'Microsoft 365 Apps is installed again with the saved earlier configuration' } else { 'There is no usable record of the state before the first change' }
+    "Reinstall or remove to the saved earlier configuration: $goal. $(Get-AVDTuneOfficeUndoLimits)"
+}
+
 function Invoke-AVDTuneOfficeUndo {
     <# Back to the state found before the first change: remove when Office was not there; the earlier configuration when it is known; otherwise no undo (the record says why). #>
     [CmdletBinding()]
     param([Parameter(Mandatory)]$Machine, [Parameter(Mandatory)]$O, [string]$Root = (Get-AVDTuneRoot), [string]$User, [string]$SnapshotId, [scriptblock]$Progress)
     $u = Read-AVDTuneJson (Get-AVDTuneOfficeUndoPath $Root)
     if (-not $u) { throw 'There is nothing to undo: no Office change was recorded.' }
+    $beforeInstalled = Get-AVDTuneProp $u 'BeforeInstalled'
+    if ($beforeInstalled -isnot [bool]) { throw 'The undo record of Office (config\office-undo.json) is not usable: BeforeInstalled must be true or false. Nothing was changed.' }
     $run = $null
-    if (-not [bool]$u.BeforeInstalled) { $run = Invoke-AVDTuneOfficeRecorded -Machine $Machine -O $O -Root $Root -Mode Remove -User $User -SnapshotId $SnapshotId -Progress $Progress -PlanName 'Undo: Microsoft 365 Apps' }
+    if (-not $beforeInstalled) { $run = Invoke-AVDTuneOfficeRecorded -Machine $Machine -O $O -Root $Root -Mode Remove -User $User -SnapshotId $SnapshotId -Progress $Progress -PlanName 'Undo: Microsoft 365 Apps' }
     else {
         $prev = Get-AVDTuneProp $u 'PreviousConfig'
         if ($null -eq $prev -or @(Test-AVDTuneOfficeConfig $prev).Count -gt 0) { throw 'There is no undo: Office was there before AVDTune changed it and the earlier configuration is not known. Set the earlier values in the form and press Install or reconfigure.' }
         $run = Invoke-AVDTuneOfficeRecorded -Machine $Machine -O $O -Root $Root -Mode Install -Config (ConvertTo-AVDTuneOfficeConfig $prev) -User $User -SnapshotId $SnapshotId -Progress $Progress -PlanName 'Undo: Microsoft 365 Apps'
     }
-    if ($run.Setup.Status -eq 'Changed') { Remove-Item -LiteralPath (Get-AVDTuneOfficeUndoPath $Root) -Force -ErrorAction SilentlyContinue }
+    if ($run.Setup.Status -in 'Changed', 'Unchanged') { Remove-Item -LiteralPath (Get-AVDTuneOfficeUndoPath $Root) -Force -ErrorAction SilentlyContinue }   # the undo itself worked (Unchanged: Office was already gone)
     $run
 }
 
@@ -412,21 +452,30 @@ function Invoke-AVDTuneOfficeUndo {
 #region update UI policies (registry steps)
 
 function Get-AVDTuneOfficePolicySteps {
-    # The two HKLM values of the AVD article that hide the update notifications and the update button; steps with Test/Apply/Undo (Undo puts back what was found)
+    # The two HKLM values of the AVD article that hide the update notifications and the update button; steps with Test/Apply/Undo (Undo puts back what was found, with its registry type).
+    # $Previous: name -> @{ Value; Type } (Type DWord, QWord or String).
     param([hashtable]$Previous = @{})
     foreach ($n in 'hideupdatenotifications', 'hideenabledisableupdates') {
         $name = $n; $prev = $Previous[$name]; $key = $script:PolicyKey; $src = $script:Src.Avd   # $script: does not resolve inside a closure
         $test = { param($m) $v = & $m.RegGet $key $name; @{ Compliant = ($null -ne $v -and [string]$v -eq '1'); State = $v } }.GetNewClosure()
         $apply = { param($m) & $m.RegSet $key $name 1 'DWord' }.GetNewClosure()
-        $undo = { param($m) if ($null -ne $prev) { & $m.RegSet $key $name $prev 'DWord' } else { & $m.RegRemove $key $name } }.GetNewClosure()
+        $undo = { param($m) if ($null -ne $prev) { & $m.RegSet $key $name $prev.Value $prev.Type } else { & $m.RegRemove $key $name } }.GetNewClosure()
         New-AVDTuneStep -Id "office.policy.$name" -Section Office -Title "Office policy $name = 1" -Why 'Users must not start Office updates on a multi-user host (AVD article).' -SourceUrl $src -Test $test -Apply $apply -Undo $undo
     }
+}
+
+function Get-AVDTunePolicyRegType($Value) {
+    # The registry type of a value read through the machine adapter (it gives the .NET value, not the kind)
+    if ($Value -is [int]) { return 'DWord' }
+    if ($Value -is [long]) { return 'QWord' }
+    if ($Value -is [string]) { return 'String' }
+    throw "The earlier value has a type ($($Value.GetType().Name)) that AVDTune cannot put back; nothing was changed."
 }
 
 function Set-AVDTuneOfficePolicies {
     [CmdletBinding()]
     param([Parameter(Mandatory)]$Machine, [string]$Root = (Get-AVDTuneRoot), [string]$User, [string]$SnapshotId, [switch]$WhatIf)
-    $prev = @{}; foreach ($n in 'hideupdatenotifications', 'hideenabledisableupdates') { $v = & $Machine.RegGet $script:PolicyKey $n; if ($null -ne $v) { $prev[$n] = $v } }
+    $prev = @{}; foreach ($n in 'hideupdatenotifications', 'hideenabledisableupdates') { $v = & $Machine.RegGet $script:PolicyKey $n; if ($null -ne $v) { $prev[$n] = @{ Value = $v; Type = (Get-AVDTunePolicyRegType $v) } } }
     $undoPath = Join-Path $Root 'config\office-policies-undo.json'
     if (-not $WhatIf -and (Test-AVDTuneWriteAllowed) -and -not (Test-Path -LiteralPath $undoPath)) { Write-AVDTuneFile $undoPath ([ordered]@{ At = (& $Machine.Now).ToString('o'); Previous = $prev } | ConvertTo-Json -Depth 4) }
     $steps = @(Get-AVDTuneOfficePolicySteps -Previous $prev)
@@ -439,14 +488,30 @@ function Undo-AVDTuneOfficePolicies {
     $undoPath = Join-Path $Root 'config\office-policies-undo.json'
     $u = Read-AVDTuneJson $undoPath
     if (-not $u) { throw 'There is nothing to undo: no Office policy change was recorded.' }
-    $prev = @{}; $pp = Get-AVDTuneProp $u 'Previous'; if ($pp) { foreach ($p in $pp.PSObject.Properties) { $prev[$p.Name] = [int]$p.Value } }
+    # typed read: a record that is not exactly what Set wrote changes nothing ("1" is not 1, an unknown type is not put back)
+    $prev = @{}; $pp = Get-AVDTuneProp $u 'Previous'
+    if ($null -ne $pp) {
+        if ($pp -isnot [System.Management.Automation.PSCustomObject]) { throw 'The undo record of the Office policies (config\office-policies-undo.json) is not usable. Nothing was changed.' }
+        foreach ($p in $pp.PSObject.Properties) {
+            $e = $p.Value; $type = Get-AVDTuneProp $e 'Type'; $val = Get-AVDTuneProp $e 'Value'
+            $ok = ($p.Name -cin 'hideupdatenotifications', 'hideenabledisableupdates') -and $type -is [string] -and (
+                ($type -ceq 'DWord' -and ($val -is [int] -or ($val -is [long] -and $val -ge 0 -and $val -le [uint32]::MaxValue))) -or
+                ($type -ceq 'QWord' -and ($val -is [int] -or $val -is [long])) -or ($type -ceq 'String' -and $val -is [string]))
+            if (-not $ok) { throw "The undo record of the Office policies (config\office-policies-undo.json) is not usable: '$($p.Name)' has no typed value. Nothing was changed." }
+            $prev[$p.Name] = @{ Value = $val; Type = $type }
+        }
+    }
+    if (-not $WhatIf) {
+        if (-not (Test-AVDTuneWriteAllowed)) { throw 'The snapshot gate is not confirmed: AVDTune is read only until a snapshot newer than its last change is confirmed on the Overview.' }
+        [void](Set-AVDTuneState -Root $Root -Values @{ LastChange = (& $Machine.Now).ToString('o') })   # before the attempt: a failed undo may have changed the master
+    }
     $steps = @(Get-AVDTuneOfficePolicySteps -Previous $prev)   # Mode Undo of a step puts back the value found before
     $results = foreach ($s in $steps) { Invoke-AVDTuneStep -Step $s -Machine $Machine -Mode Undo -WhatIf:$WhatIf }
     $run = [pscustomobject]@{ Plan = 'Office policies undo'; WhatIf = [bool]$WhatIf; Results = @($results) }
     if (-not $WhatIf) {
         $state = Get-AVDTuneState $Root
         $ended = (& $Machine.Now).ToString('o')
-        if (@($results | Where-Object { $_.Status -eq 'Reverted' }).Count -gt 0) { [void](Set-AVDTuneState -Root $Root -Values @{ LastChange = $ended }) }
+        [void](Set-AVDTuneState -Root $Root -Values @{ LastChange = $ended })   # also when a step failed
         $saved = [pscustomobject][ordered]@{ Id = $null; Plan = 'Office policies undo'; Started = $ended; Ended = $ended; User = $User; SnapshotId = $SnapshotId; WhatIf = $false; ImageVersion = $state.ImageVersion; Reboot = $false; Results = @($results) }
         [void](Add-AVDTuneRun -Root $Root -Run $saved)
         foreach ($r in @($results | Where-Object { $_.Status -eq 'Reverted' })) {
@@ -522,6 +587,7 @@ function New-AVDTuneOfficeAdapter {
         if (((Get-Item -LiteralPath $p -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { return $null }
         $p
     }
+    $a.HoldFile = { param($Path) [IO.File]::Open($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read) }   # nobody can write to it, delete it or rename it while it is held (Open-AVDTuneVerifiedBenchExe does the same)
     $a.WriteText = { param($Path, $Text) Write-AVDTuneFile $Path $Text }
     $a.RemoveFolder = { param($Dir) Remove-AVDTuneFolderNoFollow $Dir }
     [pscustomobject]$a
@@ -531,5 +597,5 @@ function New-AVDTuneOfficeAdapter {
 
 Export-ModuleMember -Function Get-AVDTuneOfficeChannels, Get-AVDTuneOfficeProducts, Get-AVDTuneOfficeExcludableApps, Get-AVDTuneOfficeDefaults, Test-AVDTuneOfficeConfig,
     ConvertTo-AVDTuneOfficeConfig, Get-AVDTuneOfficeConfig, Set-AVDTuneOfficeConfig, New-AVDTuneOfficeXml, Test-AVDTuneOfficeXml, Get-AVDTuneOfficeState, Get-AVDTuneOfficeRows,
-    Get-AVDTuneOdtLink, Test-AVDTuneOdtPackageTrust, Invoke-AVDTuneOfficeSetup, Invoke-AVDTuneOfficeRecorded, Invoke-AVDTuneOfficeUndo, Set-AVDTuneOfficePolicies,
+    Get-AVDTuneOdtLink, Test-AVDTuneOdtPackageTrust, Get-AVDTuneOfficeRemoveText, Get-AVDTuneOfficeUndoText, Get-AVDTuneOfficeUndoLimits, Invoke-AVDTuneOfficeSetup, Invoke-AVDTuneOfficeRecorded, Invoke-AVDTuneOfficeUndo, Set-AVDTuneOfficePolicies,
     Undo-AVDTuneOfficePolicies, New-AVDTuneOfficeAdapter
