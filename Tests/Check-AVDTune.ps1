@@ -139,6 +139,11 @@ try {
     $aclTable[(Join-Path $sec 'WebView2\Microsoft.Web.WebView2.Core.dll')] = [pscustomobject]@{ Owner = 'S-1-5-32-544'; Protected = $false; Rules = @([pscustomobject]@{ Sid = 'S-1-5-32-545'; Inherited = $false }) }
     $pr = @(Get-AVDTuneStateSecurityProblems -Root $sec -ReadAcl $readFake)
     Test-Check 'attack: a sub folder owned by a user and a file with an explicit rule for Users are found' ($pr.Count -eq 3 -and ($pr | Where-Object { $_.Path -like '*WebView2' -and $_.Problem -like "owner $foreignSid" }) -and ($pr | Where-Object { $_.Path -like '*Core.dll' -and $_.Problem -like '*S-1-5-32-545*' })) (($pr | ForEach-Object { "$($_.Path)=$($_.Problem)" }) -join '; ')
+    $keepWv = $aclTable[(Join-Path $sec 'WebView2')]
+    $aclTable[(Join-Path $sec 'WebView2')] = [pscustomobject]@{ Owner = 'S-1-5-32-544'; Protected = $true; Rules = @([pscustomobject]@{ Sid = 'S-1-5-32-545'; Inherited = $false; InheritOnly = $true; Write = $true }) }
+    $prIo = @(Get-AVDTuneStateSecurityProblems -Root $sec -ReadAcl $readFake)
+    Test-Check 'attack: a state sub folder with an explicit inherit-only rule for Users (OI)(CI)(IO)(W) is refused by the general check' (@($prIo | Where-Object { $_.Path -like '*WebView2' -and $_.Problem -like '*S-1-5-32-545*' }).Count -ge 1) (($prIo | ForEach-Object { "$($_.Path): $($_.Problem)" }) -join ' | ')
+    $aclTable[(Join-Path $sec 'WebView2')] = $keepWv
     $aclTable[$sec] = [pscustomobject]@{ Owner = 'S-1-5-32-544'; Protected = $false; Rules = @([pscustomobject]@{ Sid = 'S-1-5-32-545'; Inherited = $true }) }
     Test-Check 'inherited rules of the root count only in the final check (root must be protected, Administrators/SYSTEM only)' (@(Get-AVDTuneStateSecurityProblems -Root $sec -ReadAcl $readFake | Where-Object { $_.Path -eq $sec }).Count -eq 0 -and @(Get-AVDTuneStateSecurityProblems -Root $sec -ReadAcl $readFake -Final | Where-Object { $_.Path -eq $sec }).Count -eq 2) $null
     $aclTable.Clear()

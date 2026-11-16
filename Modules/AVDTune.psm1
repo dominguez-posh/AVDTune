@@ -225,17 +225,16 @@ function Read-AVDTuneAclReport {
 
 function Get-AVDTuneAclFindings {
     <#
-        Problems (stops) and Warnings of an ACL report. An inherit-only entry (InheritOnly) applies to the children, not to the object itself, so it never counts as write access to it
-        (general rule). -WarnWriteSids: write access of exactly these SIDs is a Warning instead of a Problem (for a folder where Windows itself gives them Modify, such as the Public
-        Desktop); write access of any other SID, a foreign owner and a link stay Problems.
+        Problems (stops) and Warnings of an ACL report. By default every write entry counts, also an inherit-only one (IO): in an admin-only folder it makes every new file writable for that SID. -IgnoreInheritOnly (only the Public Desktop check) leaves IO entries out of the question "may users write to the folder itself".
+        -WarnWriteSids: write access of exactly these SIDs is a Warning instead of a Problem (for the Public Desktop, where Windows gives them Modify); any other SID, a foreign owner and a link stay Problems.
     #>
-    param($Report, [string[]]$ExtraTrusted = @(), [string[]]$WarnWriteSids = @())
+    param($Report, [string[]]$ExtraTrusted = @(), [string[]]$WarnWriteSids = @(), [switch]$IgnoreInheritOnly)
     $p = New-Object System.Collections.ArrayList; $w = New-Object System.Collections.ArrayList
     if (-not $Report -or -not $Report.Exists) { return [pscustomobject]@{ Problems = @(); Warnings = @() } }
     $trusted = @($script:TrustedWriterSids) + @($ExtraTrusted)
     if ($Report.Link) { [void]$p.Add('is a link') }
     if ($Report.Owner -and $Report.Owner -notin $trusted) { [void]$p.Add("owner is $($Report.Owner)") }
-    $other = @($Report.Rules | Where-Object { $_.Write -and $_.Sid -notin $trusted -and -not (Get-AVDTuneProp $_ 'InheritOnly') } | ForEach-Object { $_.Sid } | Sort-Object -Unique)
+    $other = @($Report.Rules | Where-Object { $_.Write -and $_.Sid -notin $trusted -and -not ($IgnoreInheritOnly -and (Get-AVDTuneProp $_ 'InheritOnly')) } | ForEach-Object { $_.Sid } | Sort-Object -Unique)
     $stop = @($other | Where-Object { $_ -notin $WarnWriteSids }); $warn = @($other | Where-Object { $_ -in $WarnWriteSids })
     if ($stop.Count -gt 0) { [void]$p.Add("write access for $($stop -join ', ')") }
     if ($warn.Count -gt 0) { [void]$w.Add("write access for $($warn -join ', ')") }
@@ -243,7 +242,7 @@ function Get-AVDTuneAclFindings {
 }
 
 function Get-AVDTuneAclProblems {
-    # Why a path is not safe for something that users read or run: a link, an owner other than Administrators/SYSTEM/TrustedInstaller, write access for anyone else (inherit-only entries do not count). Empty = fine.
+    # Why a path is not safe for something that users read or run: a link, an owner other than Administrators/SYSTEM/TrustedInstaller, write access for anyone else. Empty = fine.
     param($Report, [string[]]$ExtraTrusted = @())
     @((Get-AVDTuneAclFindings -Report $Report -ExtraTrusted $ExtraTrusted).Problems)
 }

@@ -380,7 +380,7 @@ try {
     $strangerW = [pscustomobject]@{ Sid = 'S-1-5-21-1-2-3-1001'; Write = $true; Inherited = $false; InheritOnly = $false }
     $adminW = [pscustomobject]@{ Sid = 'S-1-5-32-544'; Write = $true; Inherited = $false; InheritOnly = $false }
     $mkRep = { param($acl, $owner = 'S-1-5-18', $link = $false) [pscustomobject]@{ Exists = $true; Link = $link; Owner = $owner; Protected = $false; Rules = @($acl) } }
-    Test-Check 'N2 ACL: an inherit-only entry (IO) is no write access to the folder itself; the same entry without IO, and an entry without the InheritOnly property (old reports), still are' (@(Get-AVDTuneAclProblems (& $mkRep @($uW))).Count -eq 0 -and (Get-AVDTuneAclProblems (& $mkRep @($uWn))) -contains 'write access for S-1-5-32-545' -and (Get-AVDTuneAclProblems (& $mkRep @($uWold))) -contains 'write access for S-1-5-32-545') $null
+    Test-Check 'N2 ACL: the general check counts an inherit-only entry (Users (OI)(CI)(IO)(W): every new file becomes writable) as write access like any other; only -IgnoreInheritOnly (Public Desktop) leaves it out' ((Get-AVDTuneAclProblems (& $mkRep @($uW))) -contains 'write access for S-1-5-32-545' -and @((Get-AVDTuneAclFindings -Report (& $mkRep @($uW)) -IgnoreInheritOnly).Problems).Count -eq 0 -and (Get-AVDTuneAclProblems (& $mkRep @($uWn))) -contains 'write access for S-1-5-32-545' -and (Get-AVDTuneAclProblems (& $mkRep @($uWold))) -contains 'write access for S-1-5-32-545') $null
     Test-Check 'N2 ACL: Get-AVDTuneAclProblems has no warning rule: Authenticated Users with Modify is a problem for every caller (rules folder, watermark, shortcut file)' ((Get-AVDTuneAclProblems (& $mkRep @($auW))) -contains 'write access for S-1-5-11') $null
     $script:deskRep = @{ 'C:\' = (& $mkRep @()); 'C:\Users' = (& $mkRep @()); 'C:\Users\Public' = (& $mkRep @()); 'C:\Users\Public\Desktop' = (& $mkRep @($auW, $inW, $uW, $adminW)) }
     $readD = { param($p) $r = $script:deskRep[$p]; if ($r) { $r } else { [pscustomobject]@{ Exists = $false; Link = $false; Owner = ''; Protected = $false; Rules = @() } } }
@@ -402,7 +402,10 @@ try {
     $rulesChain = @(Get-AVDTuneWriteChainProblems -Path 'C:\Program Files\FSLogix\Apps\Rules\x.fxr' -AllowMissingLeaf -ReadReport $read)
     $script:reports['C:\Program Files\FSLogix\Apps\Rules'].Rules = @(@{ Sid = 'S-1-5-32-545'; Write = $true; Inherited = $false; InheritOnly = $true })
     $rulesIo = @(Get-AVDTuneWriteChainProblems -Path 'C:\Program Files\FSLogix\Apps\Rules\x.fxr' -AllowMissingLeaf -ReadReport $read)
-    Test-Check 'N2 rules folder: no warning rule there (Authenticated Users with Modify stays a stop), an IO entry does not stop' (($rulesChain -join ' ') -like '*Rules:*write access for S-1-5-11*' -and $rulesIo.Count -eq 0) (($rulesChain + $rulesIo) -join ' | ')
+    Test-Check 'N2 rules folder: no warning rule there (Authenticated Users with Modify stays a stop), an IO entry for Users stops too (as before)' (($rulesChain -join ' ') -like '*Rules:*write access for S-1-5-11*' -and ($rulesIo -join ' ') -like '*Rules:*write access for S-1-5-32-545*') (($rulesChain + $rulesIo) -join ' | ')
+    $script:deskRep['C:\Users\Public\Desktop'] = (& $mkRep @($uW)); $script:deskRep['C:\Users'] = (& $mkRep @())
+    $fIo = Get-AVDTunePublicDesktopFindings -Path $dlnk -ReadReport $readD
+    Test-Check 'N2 Public Desktop: Users with (OI)(CI)(IO)(W) on the folder is at most a warning, never a stop' (@($fIo.Problems).Count -eq 0) ($fIo.Problems -join ' | ')
     $w1 = 'C:\Users\Public\Desktop: write access for S-1-5-11'
     $eW = New-Env -Seed @{ DesktopWarnings = @($w1) }
     $noOk = Get-ThrownText { Add-AVDTuneComfortShortcut -Machine $eW.Machine -M $eW.M -Root $tmp -Id logoff -User a -SnapshotId s }

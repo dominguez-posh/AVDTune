@@ -773,16 +773,17 @@ function Add-AVDTuneComfortShortcut {
 function Get-AVDTuneWriteChainFindings {
     <#
         Every component of a path from the drive root down: none may be a link; every component below -AclBelow (default: the drive root, which keeps the Windows default) must pass
-        Get-AVDTuneAclFindings (owner Administrators/SYSTEM/TrustedInstaller, no write for others; inherit-only entries do not count). -AllowMissingLeaf: the file itself does not exist yet.
+        Get-AVDTuneAclFindings (owner Administrators/SYSTEM/TrustedInstaller, no write for others; an inherit-only entry counts as write access, as everywhere else). -AllowMissingLeaf: the file itself does not exist yet.
         -WarnComponent (one folder of the chain) with -WarnWriteSids: write access of exactly these SIDs on that folder is a Warning, not a Problem (the Public Desktop, where Windows gives
         Authenticated Users, Users and Interactive Modify); a link, a foreign owner and write access of anyone else on it, and every problem of every other component stay Problems.
         Returns @{ Problems; Warnings }. $ReadReport is Read-AVDTuneAclReport (a fake in the checks).
     #>
-    param([Parameter(Mandatory)][string]$Path, [string]$AclBelow, [switch]$AllowMissingLeaf, [scriptblock]$ReadReport = { param($p) Read-AVDTuneAclReport $p }, [string]$WarnComponent, [string[]]$WarnWriteSids = @())
+    param([Parameter(Mandatory)][string]$Path, [string]$AclBelow, [switch]$AllowMissingLeaf, [scriptblock]$ReadReport = { param($p) Read-AVDTuneAclReport $p }, [string]$WarnComponent, [string[]]$WarnWriteSids = @(), [string]$IgnoreInheritOnlyAt)
     $full = [IO.Path]::GetFullPath($Path).TrimEnd('\')
     $root = [IO.Path]::GetPathRoot($full).TrimEnd('\')
     $skip = if ($AclBelow) { [IO.Path]::GetFullPath($AclBelow).TrimEnd('\') } else { $root }
     $warnAt = if ($WarnComponent) { [IO.Path]::GetFullPath($WarnComponent).TrimEnd('\') } else { $null }
+    $ioAt = if ($IgnoreInheritOnlyAt) { [IO.Path]::GetFullPath($IgnoreInheritOnlyAt).TrimEnd([char]92) } else { $null }
     $parts = @($full.Substring($root.Length).Split([char]92) | Where-Object { $_ })
     $components = New-Object System.Collections.ArrayList; [void]$components.Add($root + '\')
     $cur = $root; foreach ($p in $parts) { $cur = "$cur\$p"; [void]$components.Add($cur) }
@@ -795,7 +796,8 @@ function Get-AVDTuneWriteChainFindings {
         $below = $c.TrimEnd('\').Length -gt $skip.Length -and $c.StartsWith($skip, [StringComparison]::OrdinalIgnoreCase)
         if ($below) {
             $sids = if ($warnAt -and [string]::Equals($c.TrimEnd('\'), $warnAt, [StringComparison]::OrdinalIgnoreCase)) { $WarnWriteSids } else { @() }
-            $f = Get-AVDTuneAclFindings -Report $r -WarnWriteSids $sids
+            $io = [bool]($ioAt -and [string]::Equals($c.TrimEnd([char]92), $ioAt, [StringComparison]::OrdinalIgnoreCase))
+            $f = Get-AVDTuneAclFindings -Report $r -WarnWriteSids $sids -IgnoreInheritOnly:$io
             foreach ($x in @($f.Problems)) { [void]$problems.Add("${c}: $x") }
             foreach ($x in @($f.Warnings)) { [void]$warnings.Add("${c}: $x") }
         }
@@ -814,7 +816,7 @@ function Get-AVDTunePublicDesktopFindings {
     # (confirmed explicitly); a link, a foreign owner or write access of anyone else on the folder, or a link above it, is a stop.
     param([Parameter(Mandatory)][string]$Path, [scriptblock]$ReadReport = { param($p) Read-AVDTuneAclReport $p })
     $desk = Split-Path $Path -Parent
-    Get-AVDTuneWriteChainFindings -Path $Path -AllowMissingLeaf -AclBelow (Split-Path $desk -Parent) -ReadReport $ReadReport -WarnComponent $desk -WarnWriteSids @('S-1-5-11', 'S-1-5-32-545', 'S-1-5-4')
+    Get-AVDTuneWriteChainFindings -Path $Path -AllowMissingLeaf -AclBelow (Split-Path $desk -Parent) -ReadReport $ReadReport -WarnComponent $desk -WarnWriteSids @('S-1-5-11', 'S-1-5-32-545', 'S-1-5-4') -IgnoreInheritOnlyAt $desk
 }
 
 function New-AVDTuneMaskingAdapter {
