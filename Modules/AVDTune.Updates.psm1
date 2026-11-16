@@ -192,10 +192,11 @@ $script:ToolTrust = @{
 }
 
 # A generic file name (setup.exe) is never in the list above: a tool like that gets its own key (one per purpose) and says more than the file name. Keys here are not file names;
-# the original file name must equal OriginalFilename, ProductName and FileDescription must match (case sensitive, anchored). The values of the ODT's setup.exe are a check point of #17
-# (read them from a real ODT on the test VM); until then they follow the documentation: setup.exe of the Office Deployment Tool, a Microsoft Office product.
+# the original file name must equal OriginalFilename, the file version major must be FileMajor, ProductName and FileDescription must match exactly (case sensitive, \z).
+# PLACEHOLDER: ProductName and FileDescription below are guesses, not read from a real ODT (every Office component carries 'Microsoft Office', so a prefix would separate nothing).
+# #17 supplies the real values from the test VM; until then the exact guess fails closed. The caller additionally checks the unpacked folder (only setup.exe and configuration-*.xml).
 $script:ToolIdentity = @{
-    'odt-setup' = @{ OriginalFilename = 'setup.exe'; ProductName = '^Microsoft Office\b'; FileDescription = '^Microsoft Office\b' }
+    'odt-setup' = @{ OriginalFilename = 'setup.exe'; FileMajor = 16; ProductName = '^Microsoft Office\z'; FileDescription = '^Microsoft Office Deployment Tool\z' }
 }
 
 function Get-AVDTuneDnPart([string]$Dn, [string]$Key) {
@@ -242,6 +243,8 @@ function Test-AVDTuneToolTrust {
     if ($script:ToolIdentity.ContainsKey($leaf)) {
         $id = $script:ToolIdentity[$leaf]
         if ($orig -cne $id.OriginalFilename) { return @{ Ok = $false; Reason = "$leaf carries the original file name '$orig'" } }
+        $major = Get-AVDTuneProp $Signature 'FileMajor'
+        if ($major -isnot [int] -or $major -ne $id.FileMajor) { return @{ Ok = $false; Reason = "$leaf carries the file version major '$major', not $($id.FileMajor)" } }
         foreach ($f in 'ProductName', 'FileDescription') {
             $v = [string](Get-AVDTuneProp $Signature $f)
             if (-not [regex]::IsMatch($v, $id[$f], 'None', [TimeSpan]::FromMilliseconds(200))) { return @{ Ok = $false; Reason = "$leaf carries the $($f -creplace '([a-z])([A-Z])', '$1 $2') '$v', not the one of the Office Deployment Tool" } }
@@ -822,13 +825,13 @@ function New-AVDTuneUpdateAdapter {
     $u.VerifySignature = {
         param($Path)
         $s = Get-AuthenticodeSignature -LiteralPath $Path
-        $orig = ''; $product = ''; $description = ''
-        try { $vi = (Get-Item -LiteralPath $Path).VersionInfo; $orig = [string]$vi.OriginalFilename; $product = [string]$vi.ProductName; $description = [string]$vi.FileDescription } catch { }
+        $orig = ''; $product = ''; $description = ''; $major = 0
+        try { $vi = (Get-Item -LiteralPath $Path).VersionInfo; $orig = [string]$vi.OriginalFilename; $product = [string]$vi.ProductName; $description = [string]$vi.FileDescription; $major = [int]$vi.FileMajorPart } catch { }
         [pscustomobject]@{
             Valid = ($s.Status -eq 'Valid'); Status = [string]$s.Status
             Subject = $(if ($s.SignerCertificate) { [string]$s.SignerCertificate.Subject } else { '' })
             Issuer = $(if ($s.SignerCertificate) { [string]$s.SignerCertificate.Issuer } else { '' })
-            OriginalFilename = $orig; ProductName = $product; FileDescription = $description
+            OriginalFilename = $orig; ProductName = $product; FileDescription = $description; FileMajor = $major
         }
     }
     $u.Stage = {

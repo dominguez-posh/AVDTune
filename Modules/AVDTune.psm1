@@ -335,6 +335,20 @@ function New-AVDTuneMachine {
         $prop = $item.PSObject.Properties[$Name]
         if ($prop) { $prop.Value } else { $null }
     }
+    $m.RegGetRaw = {
+        # The value as stored: kind from GetValueKind, the text of REG_EXPAND_SZ not expanded (DoNotExpandEnvironmentNames). @{ Value; Kind } or $null. Kind: DWord, QWord, String, ExpandString, MultiString, Binary.
+        param($Path, $Name)
+        if ($Path -notmatch '^(HKLM|HKCU):\\(.+)$') { throw "RegGetRaw: unsupported path $Path" }
+        $hive = if ($Matches[1] -eq 'HKLM') { [Microsoft.Win32.Registry]::LocalMachine } else { [Microsoft.Win32.Registry]::CurrentUser }
+        $key = $hive.OpenSubKey($Matches[2], $false)
+        if ($null -eq $key) { return $null }
+        try {
+            if (@($key.GetValueNames()) -cnotcontains $Name -and @($key.GetValueNames() | Where-Object { $_ -ieq $Name }).Count -eq 0) { return $null }
+            $kind = $key.GetValueKind($Name)
+            @{ Value = $key.GetValue($Name, $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames); Kind = [string]$kind }
+        }
+        finally { $key.Dispose() }
+    }
     $m.RegSet = {
         param($Path, $Name, $Value, $Type)
         if (-not (Test-Path -LiteralPath $Path)) { New-Item -Path $Path -Force | Out-Null }

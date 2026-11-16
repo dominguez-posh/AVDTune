@@ -52,6 +52,7 @@ param($Kind, $C)
 switch ($Kind) {
     'Install' { Invoke-AVDTuneOfficeRecorded -Machine $C.Machine -O $C.O -Root $C.Root -Mode Install -Config $C.Config -User $C.User -SnapshotId $C.SnapshotId -Progress $C.Progress }
     'Remove' { Invoke-AVDTuneOfficeRecorded -Machine $C.Machine -O $C.O -Root $C.Root -Mode Remove -User $C.User -SnapshotId $C.SnapshotId -Progress $C.Progress }
+    'UndoAccept' { Invoke-AVDTuneOfficeUndo -AcceptDrift -Machine $C.Machine -O $C.O -Root $C.Root -User $C.User -SnapshotId $C.SnapshotId -Progress $C.Progress }
     'Undo' { Invoke-AVDTuneOfficeUndo -Machine $C.Machine -O $C.O -Root $C.Root -User $C.User -SnapshotId $C.SnapshotId -Progress $C.Progress }
 }
 '@
@@ -126,7 +127,10 @@ Add-Click $ui.BtnOffRemove {
 Add-Click $ui.BtnOffUndo {
     Assert-FslWrite
     if (-not (Confirm-Action (Get-AVDTuneOfficeUndoText -Root $script:StateRoot) 'Office')) { return }
-    Start-OffJob 'Undo' $null; $ui.TxtOffState.Text = 'Undoing the Office change ...'
+    $drift = Get-AVDTuneOfficeUndoDrift -Machine $script:Machine -Root $script:StateRoot
+    $kind = 'Undo'
+    if ($drift) { if (-not (Confirm-Action (($drift) + ' Go on anyway?') 'Office')) { return }; $kind = 'UndoAccept' }
+    Start-OffJob $kind $null; $ui.TxtOffState.Text = 'Undoing the Office change ...'
 }
 Add-Click $ui.BtnOffPolicies {
     Assert-FslWrite
