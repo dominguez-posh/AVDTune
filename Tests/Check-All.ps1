@@ -10,7 +10,7 @@ param([switch]$Smoke)
 $ErrorActionPreference = 'Stop'
 $powershell = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
 $env:PSModulePath = "$env:USERPROFILE\Documents\WindowsPowerShell\Modules;$env:ProgramFiles\WindowsPowerShell\Modules;$env:SystemRoot\System32\WindowsPowerShell\v1.0\Modules"
-$checks = @('Check-Shared.ps1', 'Check-AVDTune.ps1', 'Check-UpdateBlock.ps1', 'Check-Updates.ps1', 'Check-Readiness.ps1', 'Check-FSLogix.ps1', 'Check-Storage.ps1', 'Check-Start.ps1', 'Check-Protocol.ps1', 'Check-Theme.ps1', 'Check-Watermark.ps1', 'Check-Shortcut.ps1', 'Check-Release.ps1', 'Check-PublicContent.ps1', 'Check-Benchmark.ps1', 'Check-Tasks.ps1', 'Check-Software.ps1', 'Check-Office.ps1', 'Check-Masking.ps1')
+$checks = @('Check-Shared.ps1', 'Check-AVDTune.ps1', 'Check-UpdateBlock.ps1', 'Check-Updates.ps1', 'Check-Readiness.ps1', 'Check-FSLogix.ps1', 'Check-Storage.ps1', 'Check-Start.ps1', 'Check-Protocol.ps1', 'Check-Theme.ps1', 'Check-Watermark.ps1', 'Check-Shortcut.ps1', 'Check-Release.ps1', 'Check-PublicContent.ps1', 'Check-Benchmark.ps1', 'Check-Tasks.ps1', 'Check-Software.ps1', 'Check-Office.ps1', 'Check-Masking.ps1', 'Check-Finish.ps1')
 if ($Smoke) { $checks += 'Invoke-GuiSmoke.ps1' }
 $failed = @()
 foreach ($check in $checks) {

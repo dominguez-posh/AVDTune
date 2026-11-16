@@ -685,6 +685,45 @@
                             </ScrollViewer>
                         </Grid>
 
+                        <!-- ============ Cleanup and finish ============ -->
+                        <Grid x:Name="PageSeal" Visibility="Collapsed">
+                            <ScrollViewer Style="{DynamicResource PageScroll}">
+                                <StackPanel Margin="40,32,40,28" MaxWidth="1000" HorizontalAlignment="Left">
+                                    <Grid>
+                                        <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+                                        <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                                        <TextBlock Text="Cleanup and finish" Style="{DynamicResource PageTitle}"/>
+                                        <TextBlock x:Name="TxtSealSubtitle" Grid.Row="1" Grid.ColumnSpan="2" Style="{DynamicResource Subtitle}" Text="The last button of an image version. The master is never sysprepped: AVDTune cleans up, puts the update block in its end state, removes every token and closes the version; the image is made by your imaging tool afterwards."/>
+                                        <Button x:Name="BtnSealRun" Grid.Column="1" Style="{DynamicResource PrimaryButton}" Content="Finish" VerticalAlignment="Center" Margin="24,0,0,0" AutomationProperties.Name="Finish this image version"/>
+                                    </Grid>
+                                    <Border Style="{DynamicResource CardBox}" Margin="0,16,0,0" Background="{DynamicResource Card}" Padding="20,16">
+                                        <StackPanel>
+                                            <StackPanel Orientation="Horizontal">
+                                                <Border x:Name="PillSeal" Style="{DynamicResource Pill}" Padding="10,2" VerticalAlignment="Center"><TextBlock x:Name="TxtSealPill" FontSize="12" FontWeight="SemiBold"/></Border>
+                                                <TextBlock x:Name="TxtSealGate" Margin="12,0,0,0" VerticalAlignment="Center" TextWrapping="Wrap"/>
+                                            </StackPanel>
+                                            <TextBlock x:Name="TxtSealNotes" Style="{DynamicResource Hint}" Margin="0,10,0,0" TextWrapping="Wrap"/>
+                                            <TextBlock x:Name="TxtSealResult" Margin="0,10,0,0" TextWrapping="Wrap"/>
+                                        </StackPanel>
+                                    </Border>
+                                    <Border x:Name="BoxSealCrash" Visibility="Collapsed" Style="{DynamicResource CardBox}" Margin="0,16,0,0" Background="{DynamicResource ErrorBg}" Padding="20,14">
+                                        <StackPanel>
+                                            <TextBlock Text="The last finish did not end properly" FontWeight="SemiBold" Foreground="{DynamicResource Danger}"/>
+                                            <TextBlock x:Name="TxtSealCrash" TextWrapping="Wrap" Margin="0,4,0,0"/>
+                                            <Button x:Name="BtnSealRepair" Content="Repair" HorizontalAlignment="Left" Margin="0,10,0,0" AutomationProperties.Name="Repair the interrupted finish"/>
+                                        </StackPanel>
+                                    </Border>
+                                    <Border Style="{DynamicResource CardBox}" Margin="0,16,0,0" Background="{DynamicResource Card}" Padding="20,16">
+                                        <StackPanel>
+                                            <TextBlock Text="What the finish does" Style="{DynamicResource CardTitle}"/>
+                                            <StackPanel x:Name="PanelSealSteps" Margin="0,6,0,0"/>
+                                            <TextBlock x:Name="TxtSealLater" Style="{DynamicResource Hint}" Margin="0,10,0,0" TextWrapping="Wrap"/>
+                                        </StackPanel>
+                                    </Border>
+                                </StackPanel>
+                            </ScrollViewer>
+                        </Grid>
+
                         <!-- ============ Pages that come in later phases ============ -->
                         <Grid x:Name="PagePlaceholder" Visibility="Collapsed">
                             <ScrollViewer Style="{DynamicResource PageScroll}">
