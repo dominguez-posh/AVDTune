@@ -1,4 +1,4 @@
-# Checks of AVDTune on a clean Windows runner (same step as the release build, without building or publishing anything).
+# Checks of AVDTune on a clean Windows runner (same steps as the release build, including building and testing the measure program, without publishing anything).
 # Runs on a manual start and on pushes to main and ci/** branches. Read-only token, no secrets, actions pinned to a commit.
 name: checks
 
@@ -35,3 +35,15 @@ jobs:
         run: |
           $PSVersionTable.PSVersion
           .\Tests\Check-All.ps1
+
+      # actions/setup-dotnet v4.3.1 (same pin as release.yml; the measure program is built with the .NET 10 SDK, Bench\AVDTune.Bench.csproj)
+      - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9
+        with:
+          global-json-file: Bench/global.json   # exact SDK version, no roll forward
+
+      # The runner runs elevated, so the live launcher checks (selftest-launcher, issue #14 N1) run here and fail the job, not only the release build. Build and test only, nothing is uploaded.
+      - name: Build and test the measure program AVDTune.Bench.exe (unit tests incl. the elevated launcher checks)
+        shell: powershell
+        run: |
+          .\Bench\build.ps1 -Output Bench\out
+          if (-not (Test-Path -LiteralPath Bench\out\AVDTune.Bench.exe)) { throw 'AVDTune.Bench.exe was not built.' }

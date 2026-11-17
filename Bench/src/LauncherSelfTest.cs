@@ -25,6 +25,8 @@ public static class LauncherSelfTest
         {
             Apps.CreateWorkLayout(dir);
             Add("this process runs elevated", true);
+            var refusal = RestrictedLauncher.DomainAdminRefusal(RestrictedLauncher.InspectProcess(Process.GetCurrentProcess().Handle).Groups);
+            Add("this account is in no domain-privileged group (app starts only with a local admin, #84)", refusal == null, refusal ?? "");
             IntPtr token = IntPtr.Zero;
             try
             {
@@ -40,12 +42,17 @@ public static class LauncherSelfTest
             {
                 using var job = new JobGroup(0, JobGroup.ApplicationUiLimits);
                 using var p = RestrictedLauncher.Start(cmd, "/c ping -n 20 127.0.0.1 >nul", Apps.TmpDir(dir), Apps.ChildEnvironment(Apps.TmpDir(dir)), job);
+                _ = p.Handle;   // hold a handle at once, so an early end still has its exit code
                 Thread.Sleep(500);
-                Add("the started program is in the job object (kill on close, UI limits)", job.Pids().Contains(p.Id) && job.UiLimits == JobGroup.ApplicationUiLimits, $"pid {p.Id}");
-                var c = RestrictedLauncher.InspectProcess(p.Handle);
-                Check("running child", c);
-                job.Terminate();
-                Add("ending the job ends the child", p.WaitForExit(5000));
+                if (p.HasExited) Add("the started program keeps running", false, $"it ended right after the start with exit code 0x{p.ExitCode:X8}");
+                else
+                {
+                    Add("the started program is in the job object (kill on close, UI limits)", job.Pids().Contains(p.Id) && job.UiLimits == JobGroup.ApplicationUiLimits, $"pid {p.Id}");
+                    var c = RestrictedLauncher.InspectProcess(p.Handle);
+                    Check("running child", c);
+                    job.Terminate();
+                    Add("ending the job ends the child", p.WaitForExit(5000));
+                }
             }
             catch (Win32Exception e) { Add("a program could be started with the reduced token", false, e.NativeErrorCode == 1314 ? $"error 1314 (a required privilege is not held): {e.Message}" : $"error {e.NativeErrorCode}: {e.Message}"); }
             catch (InvalidOperationException e) { Add("a program could be started with the reduced token", false, e.Message); }
@@ -62,7 +69,7 @@ public static class LauncherSelfTest
             Add($"{what}: integrity Medium or lower", t.IntegrityRid <= 0x2000, $"0x{t.IntegrityRid:X}");
             var g = RestrictedLauncher.AdminGroupProblem(t.Groups);
             var admin = t.Groups.FirstOrDefault(x => x.Sid == "S-1-5-32-544");
-            Add($"{what}: the Administrators group is deny-only (TokenGroups, SE_GROUP_USE_FOR_DENY_ONLY)", g == null, g ?? (admin.Sid == null ? "not in the token" : $"S-1-5-32-544 attributes 0x{admin.Attributes:X}"));
+            Add($"{what}: the Administrators group and every other admin-like group (built-in, S-1-5-114, domain-privileged) is deny-only (TokenGroups, SE_GROUP_USE_FOR_DENY_ONLY)", g == null, g ?? (admin.Sid == null ? "not in the token" : $"S-1-5-32-544 attributes 0x{admin.Attributes:X}"));
             var extra = RestrictedLauncher.ExtraPrivileges(t.Privileges);
             Add($"{what}: only standard-user privileges (TokenPrivileges)", extra.Count == 0, extra.Count == 0 ? string.Join(", ", t.Privileges) : "extra: " + string.Join(", ", extra));
         }
