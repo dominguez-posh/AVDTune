@@ -70,7 +70,7 @@ try {
     # ---------------------------------------------------------------- the data
     $data = Get-AVDTuneReadinessData
     $crit = @($data.Criteria.PSObject.Properties)
-    Test-Check 'data: loads, 28 criteria, a Stand date, 52 families' ($crit.Count -eq 28 -and $data.Stand -match '^\d{4}-\d{2}-\d{2}$' -and $data.Families.Count -eq 52) "$($crit.Count) / $($data.Families.Count)"
+    Test-Check 'data: loads, 29 criteria, a Stand date, 52 families' ($crit.Count -eq 29 -and $data.Stand -match '^\d{4}-\d{2}-\d{2}$' -and $data.Families.Count -eq 52) "$($crit.Count) / $($data.Families.Count)"
     Test-Check 'data: every criterion has a Microsoft Learn source, a date and the Verified flag' (-not (@($crit | Where-Object { $_.Value.Source -notmatch '^https://learn\.microsoft\.com/' -or $_.Value.Stand -notmatch '^\d{4}-\d{2}-\d{2}$' -or $_.Value.Verified -isnot [bool] }))) $null
     $unverified = @($crit | Where-Object { -not $_.Value.Verified } | ForEach-Object Name)
     Test-Check 'data: what Learn does not state is marked and explained (bitlocker, reboot markers, lcu thresholds, leftovers, public shortcut, FSLogix-Test)' ((($unverified | Sort-Object) -join ',') -eq 'hy.bitlocker,hy.fslogix-test,hy.lcu-age,hy.leftovers,hy.public-shortcut,hy.reboot' -and -not (@($crit | Where-Object { -not $_.Value.Verified -and -not $_.Value.Note }))) ($unverified -join ',')
@@ -489,7 +489,21 @@ try {
     Test-Check 'an unknown fix id is refused' ((Get-ThrownText { Invoke-AVDTuneReadinessFix -Machine $m -Root $tmp -FixId 'readiness.format-c' }) -like '*Unknown fix*') $null
     $ub = Invoke-AVDTuneReadinessFix -Machine (New-Master) -Root $tmp -FixId 'readiness.updateblock-on' -WhatIf
     Test-Check 'the update block fix is the one of #6 (dry run: nothing changed)' ($ub.Status -eq 'WhatIf') $ub.Status
+    # default user profile left loaded by a crash (#40): red with a one-click fix that unloads it
+    $hm = New-Master @{ HiveLoaded = $true }
+    $hr = Invoke-AVDTuneReadiness -Machine $hm -Arm (New-Arm) -Token 'tok' -UpdateBlock $goodBlock
+    $hrow = Get-Row $hr 'hy.default-hive'
+    Test-Check 'default profile still loaded: red, says so, offers the unload fix' ($hrow.Status -eq 'red' -and $hrow.Reason -like '*still loaded*' -and $hrow.FixId -eq 'readiness.default-hive-unload') ($hrow | ConvertTo-Json -Compress)
+    Test-Check 'default profile not loaded: green' ((Get-Row (Invoke-AVDTuneReadiness -Machine (New-Master) -Arm (New-Arm) -Token 'tok' -UpdateBlock $goodBlock) 'hy.default-hive').Status -eq 'green') $null
+    $hf = Invoke-AVDTuneReadinessFix -Machine $hm -Root $tmp -FixId 'readiness.default-hive-unload' -User 'admin1' -SnapshotId 'snap1'
+    Test-Check 'the unload fix unloads the hive (one reg unload) and is idempotent' ($hf.Status -eq 'Changed' -and -not $hm.Store.Hive.Loaded -and @($hm.Store.Hive.Log).Count -eq 1 -and (Invoke-AVDTuneReadinessFix -Machine $hm -Root $tmp -FixId 'readiness.default-hive-unload' -User 'admin1' -SnapshotId 'snap1').Status -eq 'Unchanged') "$($hf.Status) $($hf.Message)"
+    $hs = New-Master @{ HiveLoaded = $true }; $hs.Store.Hive.StuckUnloads = 99
+    $hsf = Invoke-AVDTuneReadinessFix -Machine $hs -Root $tmp -FixId 'readiness.default-hive-unload' -User 'admin1' -SnapshotId 'snap1'
+    Test-Check 'an unload that keeps failing: the fix fails with the hint to restart, after a limited number of tries' ($hsf.Status -eq 'Failed' -and $hsf.Message -like '*restart*' -and @($hs.Store.Hive.Log).Count -eq 5) "$($hsf.Message) tries=$(@($hs.Store.Hive.Log).Count)"
     Close-AVDTuneWriteGate
+    Test-Check 'the unload fix needs the open write gate' ((Get-ThrownText { Invoke-AVDTuneReadinessFix -Machine (New-Master @{ HiveLoaded = $true }) -Root $tmp -FixId 'readiness.default-hive-unload' -User 'admin1' }) -like '*snapshot gate is not confirmed*') $null
+    $startSrc = Get-Content -Raw (Join-Path $repo 'Start-AVDTune.ps1')
+    Test-Check 'start: a default profile left loaded is unloaded at the start and noted in the protocol' ($startSrc -match 'Invoke-AVDTuneDefaultHiveUnload -Machine \$script:Machine' -and $startSrc -match 'Default user profile was still loaded') $null
     Test-Check 'no file of the check run touched the real state folder' (-not ($tmp -eq (Join-Path ([Environment]::GetFolderPath('CommonApplicationData')) 'AVDTune'))) $tmp
 }
 finally {

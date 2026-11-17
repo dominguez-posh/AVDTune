@@ -688,7 +688,7 @@ try {
     # crash protection: a hive left loaded is unloaded first; a failing load changes nothing; an unload that needs a second try
     $m = New-TestMachine; $m.Store.Hive.Loaded = $true
     $sum = Invoke-Hive $m @($sbx)
-    $regLog = @($m.Log | Where-Object { $_ -like 'reg *' })
+    $regLog = @($m.Store.Hive.Log)
     Test-Check 'default profile: a hive left loaded by a crash is unloaded before it is loaded again' ($sum.Changed -eq 1 -and $regLog.Count -ge 3 -and $regLog[0] -eq 'reg unload HKU\AVDTune_DefaultUser' -and $regLog[1] -like 'reg load HKU\AVDTune_DefaultUser *' -and -not $m.Store.Hive.Loaded) ($regLog -join ' | ')
     Clear-Backups
     $m = New-TestMachine; $m.Store.Hive.FailLoad = $true
@@ -719,6 +719,8 @@ try {
             @{ N = 'NTUSER.DAT writable by Users'; Raw = '%SystemDrive%\Users\Default'; A = $userWrite; P = 'not admin-only' }
             @{ N = 'a profile folder owned by a user'; Raw = '%SystemDrive%\Users\Default'; A = $foreignOwner; P = 'not admin-only' }
             @{ N = 'a missing NTUSER.DAT'; Raw = '%SystemDrive%\Users\Default'; A = $missing; P = 'does not exist' }
+            @{ N = 'a parent folder (C:\Users) writable by Users'; Raw = '%SystemDrive%\Users\Default'; A = { param($p) $r = & $okRep $p; if ($p -eq 'C:\Users') { $r.Rules = @([pscustomobject]@{ Sid = 'S-1-5-32-545'; Write = $true; Inherited = $false; InheritOnly = $false }) }; $r }.GetNewClosure(); P = 'C:\\Users is not admin-only' }
+            @{ N = 'a parent folder (C:\Users) owned by a user'; Raw = '%SystemDrive%\Users\Default'; A = { param($p) $r = & $okRep $p; if ($p -eq 'C:\Users') { $r.Owner = 'S-1-5-21-1-2-3-1001' }; $r }.GetNewClosure(); P = 'C:\\Users is not admin-only' }
             @{ N = 'another environment variable'; Raw = '%USERPROFILE%\..\Default'; A = $okRep; P = 'not a plain local path' }
             @{ N = 'a .. segment'; Raw = 'C:\Users\x\..\Default'; A = $okRep; P = '\.\. segment' }
             @{ N = 'a UNC path'; Raw = '\\server\share\Default'; A = $okRep; P = 'not a plain local path' }
@@ -730,6 +732,20 @@ try {
     $optSrc = Get-Content -Raw (Join-Path $repo 'Modules\AVDTune.Optimization.psm1')
     Test-Check 'default profile: reg.exe is started by its full path from the system folder through the adapter, the hive name is fixed' ($optSrc -match "Join-Path \(Get-AVDTuneSystemFolder System\) 'reg\.exe'" -and $optSrc -match '& \$Machine\.Run \$regExe' -and $optSrc -match "HiveName = 'AVDTune_DefaultUser'") $null
     Test-Check 'default profile: a real machine gets all Hive members' (@('HiveInfo', 'HiveKeyExists', 'HiveSet', 'HiveRemove', 'HiveKeyRemoveEmpty', 'HiveUnmount' | Where-Object { $optSrc -notmatch "'$_'" }).Count -eq 0) $null
+    # reading needs the open write gate too: loading the hive writes log files into the profile (security review of #40)
+    Close-AVDTuneWriteGate
+    $m = New-TestMachine
+    $st = Get-AVDTuneOptimizationStatus -Machine $m -Root $state
+    $hr = @($st.Rows | Where-Object Kind -eq 'UserHive')
+    Test-Check 'default profile: with the write gate closed the status does not load the hive, the rows say "not checkable" with the reason' ($hr.Count -eq 4 -and @($hr | Where-Object { -not $_.Failed -or $_.Message -notlike '*write gate is closed*' }).Count -eq 0 -and $m.Store.Hive.Loads -eq 0 -and @($m.Store.Hive.Log).Count -eq 0 -and @($st.Rows | Where-Object { $_.Kind -ne 'UserHive' -and $_.Failed }).Count -eq 0) (@($hr | ForEach-Object Message) -join ' | ')
+    $wi = Invoke-AVDTuneOptimization -Machine $m -Root $state -Ids @($sbx) -WhatIf
+    Test-Check 'default profile: a dry run with the gate closed does not load the hive either (skipped, cannot be read)' ((Get-R $wi $sbx).Status -eq 'Skipped' -and $m.Store.Hive.Loads -eq 0) (Get-R $wi $sbx | ConvertTo-Json -Compress)
+    # the unload helper of the start and of the readiness fix (AVDTune.psm1): bounded tries, no wait in the checks
+    $um = New-AVDTuneFakeMachine -Seed @{ HiveLoaded = $true }; $um.Store.Hive.StuckUnloads = 1
+    $ur = Invoke-AVDTuneDefaultHiveUnload -Machine $um -DelayMs 0
+    $um2 = New-AVDTuneFakeMachine -Seed @{ HiveLoaded = $true }; $um2.Store.Hive.StuckUnloads = 99
+    $sw = [Diagnostics.Stopwatch]::StartNew(); $ur2 = Invoke-AVDTuneDefaultHiveUnload -Machine $um2 -DelayMs 0; $sw.Stop()
+    Test-Check 'unload helper: a left hive is unloaded (second try), one that stays loaded gives up after 5 tries without hanging, an unloaded one is left alone' ($ur.WasLoaded -and $ur.Unloaded -and $ur2.WasLoaded -and -not $ur2.Unloaded -and @($um2.Store.Hive.Log).Count -eq 5 -and $sw.ElapsedMilliseconds -lt 10000 -and -not (Invoke-AVDTuneDefaultHiveUnload -Machine (New-AVDTuneFakeMachine)).WasLoaded) "$($sw.ElapsedMilliseconds) ms"
 
     # ---------------------------------------------------------------- the runspaces of the page (#66, like #67): exactly the imports of the page, the REAL machine, read only
     $pageSrc = Get-Content -Raw (Join-Path $repo 'AVDTune-Optimization.ps1')

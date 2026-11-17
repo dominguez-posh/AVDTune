@@ -11,6 +11,7 @@ function New-AVDTuneFakeMachine {
     $store = @{
         Registry = @{}; Keys = @{}; Services = @{}; Tasks = @{}; Native = @{}; Log = (New-Object System.Collections.ArrayList)
         ComputerName = $(if ($Seed.ComputerName) { $Seed.ComputerName } else { 'GM-TEST01' }); Now = $Seed.Now; Imds = $null; FailWrites = @(); Kinds = @{}
+        Hive = @{ Loaded = [bool]$Seed.HiveLoaded; StuckUnloads = 0; Unloads = 0; Log = (New-Object System.Collections.ArrayList) }   # default user profile (#40): Seed HiveLoaded = a hive left by a crash; StuckUnloads = n failing unloads
         Paths = @(@($Seed.Paths) | Where-Object { $_ }); Dirs = $(if ($Seed.Dirs) { $Seed.Dirs } else { @{} }); Hotfixes = @(@($Seed.Hotfixes) | Where-Object { $_ }); NetAdapters = @(@($Seed.NetAdapters) | Where-Object { $_ })
         Files = @{}; Folders = @{}; Acl = $(if ($Seed.Acl) { $Seed.Acl } else { @{} }); Pnp = @(@($Seed.Pnp) | Where-Object { $_ }); Arch = $(if ($Seed.Arch) { $Seed.Arch } else { 'AMD64' }); Tpm = $(if ($Seed.ContainsKey('Tpm')) { $Seed.Tpm } else { $null })
         Firmware = $(if ($Seed.ContainsKey('Firmware')) { $Seed.Firmware } else { $null })
@@ -182,5 +183,11 @@ function New-AVDTuneFakeMachine {
         $store.Tasks[$k] = [pscustomobject]@{ Path = $Path; Name = $Name; Enabled = $true; Xml = [string]$Xml }; [void]$store.Log.Add("TaskRegisterXml $Path$Name")
     }.GetNewClosure()
     $m.TaskRemove = { param($Path, $Name) $k = (([string]$Path) + ([string]$Name)).ToLowerInvariant(); $store.Tasks.Remove($k); [void]$store.Log.Add("TaskRemove $Path$Name") }.GetNewClosure()
+    $m.HiveLoaded = { [bool]$store.Hive.Loaded }.GetNewClosure()
+    $m.HiveUnload = {
+        [void]$store.Hive.Log.Add('reg unload HKU\AVDTune_DefaultUser')
+        if ($store.Hive.StuckUnloads -gt 0) { $store.Hive.StuckUnloads--; return 1 }
+        $store.Hive.Loaded = $false; $store.Hive.Unloads++; 0
+    }.GetNewClosure()
     [pscustomobject]$m
 }

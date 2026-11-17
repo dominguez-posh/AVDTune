@@ -13,7 +13,9 @@
       DefenderPref    Microsoft Defender preference (Set-MpPreference, names on a fixed list). Undo restores the earlier value.
       UserHive        value in the default user profile (NTUSER.DAT of the folder in HKLM ProfileList\Default), so every new user gets it (#40). The hive is
                       loaded as HKU\AVDTune_DefaultUser only while a read or a run needs it and unloaded in finally; a hive left loaded by a crash is unloaded
-                      first. Undo restores the earlier value (or removes it and the keys AVDTune created, as far as they are empty).
+                      first. Undo restores the earlier value (or removes it and the keys AVDTune created, as far as they are empty). Loading writes
+                      log files into the profile, so it happens only behind the open write gate, also for reading (else the rows are not checkable).
+                      Start-AVDTune.ps1 and the readiness fix hy.default-hive unload a hive left by a crash (Invoke-AVDTuneDefaultHiveUnload).
 
     Every change goes through Invoke-AVDTuneStep (write gate, Test before and after). The value found before Apply is saved in config\optimization-backup.json of the
     state folder (only when there is no backup for the entry yet, an older backup is never overwritten) and used by Undo; without a backup there is no undo, so nothing
@@ -622,8 +624,8 @@ function Get-AVDTuneDefaultHivePath {
     <#
         NTUSER.DAT of the default profile. Raw is the value Default of HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList as stored (not expanded):
         only %SystemDrive% is replaced (by the drive of the system folder, never from the environment); any other variable, a relative path or a . / .. segment is
-        refused. Every part of the path must exist and must not be a link (reparse point); the profile folder and the file must be admin-only for writing
-        (owner Administrators/SYSTEM/TrustedInstaller, no write for others). ReadAcl: path -> report like Read-AVDTuneAclReport (checks pass a fake).
+        refused. Every part of the path (C:\Users, the profile folder, the file) must exist, must not be a link (reparse point) and must be admin-only for
+        writing (owner Administrators/SYSTEM/TrustedInstaller, no write for others). ReadAcl: path -> report like Read-AVDTuneAclReport (checks pass a fake).
     #>
     param([string]$Raw, [Parameter(Mandatory)][string]$SystemDrive, [scriptblock]$ReadAcl = { param($p) Read-AVDTuneAclReport -Path $p })
     if (-not (Test-OptPattern $SystemDrive '\A[A-Za-z]:\z')) { throw 'The system drive is not a drive letter.' }
@@ -640,10 +642,9 @@ function Get-AVDTuneDefaultHivePath {
         $r = & $ReadAcl $cur
         if (-not $r -or -not $r.Exists) { throw "$cur does not exist." }
         if ($r.Link) { throw "$cur is a link (reparse point): the default profile is not loaded." }
-        if ($cur -eq $path -or $cur -eq $file) {
-            $problems = @(Get-AVDTuneAclProblems -Report $r)
-            if ($problems.Count -gt 0) { throw "$cur is not admin-only ($($problems -join '; ')): the default profile is not loaded." }
-        }
+        # every part, parents too (C:\Users): owner Administrators/SYSTEM/TrustedInstaller, no write for others (security review of #40)
+        $problems = @(Get-AVDTuneAclProblems -Report $r)
+        if ($problems.Count -gt 0) { throw "$cur is not admin-only ($($problems -join '; ')): the default profile is not loaded." }
     }
     $file
 }
@@ -909,7 +910,8 @@ function New-AVDTuneOptimizationStep {
         'UserHive' {
             # the same as Registry, in the default user profile (HKU\AVDTune_DefaultUser through the Hive members); the kind of the value counts too (MenuShowDelay is REG_SZ)
             $path = $Entry.Path; $name = [string]$Entry.Name; $type = $Entry.Type; $want = $Entry.Value
-            $present = { param($m) $true }
+            # loading the hive writes transaction logs (.LOG1/.LOG2, .blf) into the profile: it is loaded only behind the open write gate, also for reading (security review of #40)
+            $present = { param($m) if (-not (Test-AVDTuneWriteAllowed)) { throw 'Not checkable while the write gate is closed: the default user profile is loaded only after a confirmed snapshot (loading it writes log files into the profile).' }; $true }
             $test = { param($m) $i = & $m.HiveInfo $path $name; @{ Compliant = ([bool]$i.Exists -and [string]$i.Kind -eq $type -and [string]$i.Value -eq [string]$want); State = $(if (-not $i.Exists) { 'not set' } elseif ([string]$i.Kind -ne $type) { "$($i.Kind) $($i.Value)" } else { [string]$i.Value }) } }.GetNewClosure()
             $apply = {
                 param($m)

@@ -657,6 +657,12 @@ function Invoke-AVDTuneReadiness {
         else { Add-Row 'hy.public-shortcut' $hy 'green' 'No AVDTune shortcut on the Public Desktop.' }
     }
 
+    Invoke-Check 'hy.default-hive' $hy {
+        # the default user profile that the optimization list loads (#40); a crash can leave it loaded, and Sysprep must not run while it is
+        if (& $Machine.HiveLoaded) { Add-Row 'hy.default-hive' $hy 'red' 'The default user profile is still loaded (HKU\AVDTune_DefaultUser, left by an interrupted optimization run). New users and Sysprep need it unloaded.' 'Unload it with the button (or restart the master).' 'readiness.default-hive-unload' -Found 'HKU\AVDTune_DefaultUser' }
+        else { Add-Row 'hy.default-hive' $hy 'green' 'The default user profile is not loaded.' }
+    }
+
     # ---- families (needs the flags of the checks above)
     Invoke-Check 'hw.families' $hw {
         $fams = @(Get-AVDTuneReadinessFamilies -Data $Data -OsArch $osArch -StornvmeProblem $flags.Stornvme -Gen1 $flags.Gen1 -ManaMissing $flags.ManaMissing -DriveDUse $flags.DriveD)
@@ -810,8 +816,11 @@ function Get-AVDTuneReadinessFixes {
         $r = & $m.Run (Join-Path (Get-AVDTuneSystemFolder System) 'sc.exe') @('config', 'stornvme', 'start=boot')
         if ($r.ExitCode -ne 0) { throw "sc.exe config stornvme start=boot failed (exit code $($r.ExitCode)): $([string]$r.Output)" }
     }
+    $hiveTest = { param($m) $l = [bool](& $m.HiveLoaded); @{ Compliant = (-not $l); State = $(if ($l) { 'loaded' } else { 'not loaded' }) } }
+    $hiveApply = { param($m) $r = Invoke-AVDTuneDefaultHiveUnload -Machine $m; if (-not $r.Unloaded) { throw "HKU\AVDTune_DefaultUser could not be unloaded (reg unload, exit code $($r.ExitCode)); restart the master." } }
     @{
-        'readiness.stornvme-boot' = (New-AVDTuneStep -Id 'readiness.stornvme-boot' -Section Setup -Title 'NVMe driver (stornvme): start at boot' -Why "Microsoft's SCSI to NVMe conversion sets it for Windows (sc.exe config stornvme start=boot) so that the OS finds its disk on an NVMe controller. Takes effect after the next restart; the master keeps working on SCSI sizes." -Risk Medium -Reboot $true -SourceUrl 'https://learn.microsoft.com/en-us/azure/virtual-machines/nvme-linux' -Test $test -Apply $apply)
+        'readiness.default-hive-unload' = (New-AVDTuneStep -Id 'readiness.default-hive-unload' -Section Setup -Title 'Unload the default user profile (HKU\AVDTune_DefaultUser)' -Why 'An interrupted optimization run left the default user profile loaded; it is unloaded so that new users and Sysprep get the complete profile (#40).' -Risk Low -Reboot $false -SourceUrl 'https://learn.microsoft.com/en-us/windows-hardware/manufacture/desktop/sysprep--generalize--a-windows-installation' -Test $hiveTest -Apply $hiveApply)
+        'readiness.stornvme-boot' =(New-AVDTuneStep -Id 'readiness.stornvme-boot' -Section Setup -Title 'NVMe driver (stornvme): start at boot' -Why "Microsoft's SCSI to NVMe conversion sets it for Windows (sc.exe config stornvme start=boot) so that the OS finds its disk on an NVMe controller. Takes effect after the next restart; the master keeps working on SCSI sizes." -Risk Medium -Reboot $true -SourceUrl 'https://learn.microsoft.com/en-us/azure/virtual-machines/nvme-linux' -Test $test -Apply $apply)
     }
 }
 

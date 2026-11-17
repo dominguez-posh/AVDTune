@@ -1200,7 +1200,9 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         Test-Smoke 'Optimization: after the read the task ended, the rows are there and Apply is open' ($t[0].Status -eq 'succeeded' -and $script:OptStatus -and $script:OptStatus.DataValid -and $ui.PanelOptList.Children.Count -gt 10 -and $ui.BtnOptApply.IsEnabled -and $ui.BtnOptRefresh.IsEnabled) "$($t[0].Status) rows=$($ui.PanelOptList.Children.Count)"
         Test-Smoke 'Optimization: the preset buttons show their status after the read' ($ui.OptPresets['recommended'].Content -like '*in place*') $ui.OptPresets['recommended'].Content
         $hiveRows = @($script:OptStatus.Rows | Where-Object { $_.Kind -eq 'UserHive' })
-        Test-Smoke 'Optimization: the default user profile rows (#40) are read from the simulated hive, which is unloaded again' ($hiveRows.Count -ge 3 -and @($hiveRows | Where-Object Failed).Count -eq 0 -and $script:Machine.Store.Hive.Loads -ge 1 -and -not $script:Machine.Store.Hive.Loaded) "rows=$($hiveRows.Count) loads=$($script:Machine.Store.Hive.Loads) loaded=$($script:Machine.Store.Hive.Loaded)"
+        # read behind the open write gate only (loading writes log files into the profile); with the gate closed the rows say so and nothing is loaded
+        $hiveOk = if (Test-AVDTuneWriteAllowed) { @($hiveRows | Where-Object Failed).Count -eq 0 -and $script:Machine.Store.Hive.Loads -ge 1 } else { @($hiveRows | Where-Object { -not $_.Failed -or $_.Message -notlike '*write gate*' }).Count -eq 0 -and $script:Machine.Store.Hive.Loads -eq 0 }
+        Test-Smoke 'Optimization: the default user profile rows (#40) are read from the simulated hive behind the write gate, which is unloaded again' ($hiveRows.Count -ge 3 -and $hiveOk -and -not $script:Machine.Store.Hive.Loaded) "rows=$($hiveRows.Count) loads=$($script:Machine.Store.Hive.Loads) loaded=$($script:Machine.Store.Hive.Loaded) gate=$(Test-AVDTuneWriteAllowed)"
         Save-SmokeShot '56-page-optimization'
         Show-Page 'Overview'
         $true } }

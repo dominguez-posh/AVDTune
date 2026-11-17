@@ -14,13 +14,15 @@ function Add-AVDTuneOptimizationFakeMembers {
     # Default user profile (#40): loading is simulated through the real Mount-/Dismount-AVDTuneDefaultHive with fake operations. $m.Store.Hive holds Loaded, Registry
     # ('path|name' lower case -> value), Kinds, Keys, Loads, Unloads; Stale = a hive left loaded by a crash (set Loaded = $true before the first use), FailLoad = reg load
     # fails, StuckUnloads = n unload attempts fail (an open handle), PathError = the profile path check throws this text. The members refuse when the hive is not loaded.
-    $hive = @{ Loaded = $false; Registry = @{}; Kinds = @{}; Keys = @{}; Loads = 0; Unloads = 0; FailLoad = $false; StuckUnloads = 0; PathError = $null; Mounted = $false }
-    $store.Hive = $hive
+    # the same table as HiveLoaded/HiveUnload of FakeMachine.ps1 (one hive)
+    if (-not $store.Hive) { $store.Hive = @{ Loaded = $false; StuckUnloads = 0; Unloads = 0; Log = (New-Object System.Collections.ArrayList) } }
+    $hive = $store.Hive
+    foreach ($kv in @(@{ Registry = @{}; Kinds = @{}; Keys = @{}; Loads = 0; FailLoad = $false; PathError = $null; Mounted = $false }.GetEnumerator())) { $hive[$kv.Key] = $kv.Value }
     $hops = @{
         Loaded = { [bool]$hive.Loaded }.GetNewClosure()
         Reg = {
             param($Arguments)
-            [void]$store.Log.Add("reg $($Arguments -join ' ')")
+            [void]$hive.Log.Add("reg $($Arguments -join ' ')")   # loading is a read, not a write: its own log
             if ($Arguments[0] -eq 'load') { if ($hive.FailLoad) { return [pscustomobject]@{ ExitCode = 1; Output = 'fake: access denied' } }; $hive.Loaded = $true; $hive.Loads++; return [pscustomobject]@{ ExitCode = 0; Output = '' } }
             if ($hive.StuckUnloads -gt 0) { $hive.StuckUnloads--; return [pscustomobject]@{ ExitCode = 1; Output = 'fake: in use' } }
             $hive.Loaded = $false; $hive.Unloads++; [pscustomobject]@{ ExitCode = 0; Output = '' }

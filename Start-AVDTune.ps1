@@ -396,6 +396,12 @@ Add-Click $ui.BtnNewVersion { Start-NewVersion }
 # ---------------------------------------------------------------- protocol and change log
 # One journal for the whole session (Shared\PackTune-Protocol.ps1 with AVDTune groups), saved after every action to <state>\Protocols
 $script:Protocol = New-PackTuneProtocol -Admin ([string]$env:USERNAME) -Account ([string]$env:USERNAME) -Tenant ''
+# A default user profile left loaded by a crash of an optimization run (#40) is unloaded at once and noted; the readiness analysis shows it red until it is gone
+try {
+    $hiveStart = Invoke-AVDTuneDefaultHiveUnload -Machine $script:Machine
+    if ($hiveStart.WasLoaded) { [void](Add-AVDTuneProtocolNote -Protocol $script:Protocol -Group 'other' -Subject $(if ($hiveStart.Unloaded) { 'Default user profile was still loaded (HKU\AVDTune_DefaultUser) and was unloaded at the start' } else { 'Default user profile is still loaded (HKU\AVDTune_DefaultUser) and could not be unloaded at the start: unload it on the readiness page or restart the master' })) }
+}
+catch { [void](Add-AVDTuneProtocolNote -Protocol $script:Protocol -Group 'other' -Subject "Default user profile could not be checked at the start: $($_.Exception.Message)") }
 foreach ($refused in (Get-AVDTuneTestModeRefusal)) { [void](Add-AVDTuneProtocolNote -Protocol $script:Protocol -Group 'other' -Subject "Test mode refused ($($refused.Time)): $($refused.Reason)") }
 $script:LastCopied = ''
 function Set-ProtocolImage {

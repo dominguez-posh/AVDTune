@@ -533,7 +533,35 @@ function New-AVDTuneMachine {
     }
     $m.TaskRegisterXml = { param($Path, $Name, $Xml) [void](Register-ScheduledTask -TaskPath $Path -TaskName $Name -Xml $Xml -Force) }
     $m.TaskRemove = { param($Path, $Name) Unregister-ScheduledTask -TaskPath $Path -TaskName $Name -Confirm:$false }
+    # The default user profile that the optimization list loads (#40): is HKU\AVDTune_DefaultUser loaded, and one unload attempt (reg.exe by full path, exit code)
+    $m.HiveLoaded = { $k = [Microsoft.Win32.Registry]::Users.OpenSubKey('AVDTune_DefaultUser'); if ($k) { $k.Close(); $true } else { $false } }
+    $m.HiveUnload = {
+        $psi = New-AVDTuneChildStartInfo -File (Join-Path (Get-AVDTuneSystemFolder System) 'reg.exe') -Arguments @('unload', 'HKU\AVDTune_DefaultUser')
+        $p = [System.Diagnostics.Process]::Start($psi)
+        $out = $p.StandardOutput.ReadToEndAsync(); $err = $p.StandardError.ReadToEndAsync()
+        if (-not $p.WaitForExit(60000)) { try { $p.Kill() } catch { }; return -1 }
+        [void]$out.Result; [void]$err.Result
+        $p.ExitCode
+    }
     [pscustomobject]$m
+}
+
+function Invoke-AVDTuneDefaultHiveUnload {
+    <#
+        Unloads HKU\AVDTune_DefaultUser when a crash left it loaded (#40): at the start of AVDTune and as the readiness fix before Finish/Sysprep. Open handles of
+        this process are released first (garbage collection), up to -Tries attempts. Returns WasLoaded and Unloaded. Unloading writes nothing into the profile
+        that AVDTune did not write before; it does not set LastChange on its own (the readiness fix does, as every fix).
+    #>
+    param([Parameter(Mandatory)]$Machine, [ValidateRange(1, 10)][int]$Tries = 5, [ValidateRange(0, 5000)][int]$DelayMs = 500)
+    if (-not (& $Machine.HiveLoaded)) { return [pscustomobject]@{ WasLoaded = $false; Unloaded = $true; ExitCode = $null } }
+    $code = $null
+    for ($i = 0; $i -lt $Tries; $i++) {
+        [GC]::Collect(); [GC]::WaitForPendingFinalizers()
+        $code = & $Machine.HiveUnload
+        if (-not (& $Machine.HiveLoaded)) { return [pscustomobject]@{ WasLoaded = $true; Unloaded = $true; ExitCode = $code } }
+        if ($DelayMs -gt 0) { Start-Sleep -Milliseconds $DelayMs }
+    }
+    [pscustomobject]@{ WasLoaded = $true; Unloaded = $false; ExitCode = $code }
 }
 
 function Invoke-AVDTuneMachine {
@@ -2212,7 +2240,7 @@ function Get-AVDTuneOverview {
 
 #endregion
 
-Export-ModuleMember -Function Get-AVDTuneDcFromNtDomain, Get-AVDTuneSystemFolder, Get-AVDTuneSystemModulePath, Set-AVDTuneSafeModulePath, Test-AVDTuneModulePathStable, Assert-AVDTuneModulePathStable, Get-AVDTuneModulePathProblems, New-AVDTunePowerShell, New-AVDTuneRunspacePool, Get-AVDTuneChocolateyRoot, Get-AVDTuneChildTool, Initialize-AVDTuneToolTemp, Get-AVDTuneChildEnvironment, Get-AVDTuneProfilePath, Get-AVDTuneHklmValue, New-AVDTuneChildStartInfo, Get-AVDTuneProp, Get-AVDTuneWebResponse, Test-AVDTuneElevated, Get-AVDTuneRoot, Test-AVDTuneDefaultRoot, Test-AVDTuneTestMode, Resolve-AVDTuneTestScript, Get-AVDTuneLongPath, Get-AVDTuneTestModeRefusal, Confirm-AVDTuneAction, ConvertTo-AVDTuneArgument, New-AVDTuneMachine, Invoke-AVDTuneMachine, Remove-AVDTuneTreeSafe,
+Export-ModuleMember -Function Get-AVDTuneDcFromNtDomain, Get-AVDTuneSystemFolder, Get-AVDTuneSystemModulePath, Set-AVDTuneSafeModulePath, Test-AVDTuneModulePathStable, Assert-AVDTuneModulePathStable, Get-AVDTuneModulePathProblems, New-AVDTunePowerShell, New-AVDTuneRunspacePool, Get-AVDTuneChocolateyRoot, Get-AVDTuneChildTool, Initialize-AVDTuneToolTemp, Get-AVDTuneChildEnvironment, Get-AVDTuneProfilePath, Get-AVDTuneHklmValue, New-AVDTuneChildStartInfo, Get-AVDTuneProp, Get-AVDTuneWebResponse, Test-AVDTuneElevated, Get-AVDTuneRoot, Test-AVDTuneDefaultRoot, Test-AVDTuneTestMode, Resolve-AVDTuneTestScript, Get-AVDTuneLongPath, Get-AVDTuneTestModeRefusal, Confirm-AVDTuneAction, ConvertTo-AVDTuneArgument, New-AVDTuneMachine, Invoke-AVDTuneMachine, Invoke-AVDTuneDefaultHiveUnload, Remove-AVDTuneTreeSafe,
     New-AVDTuneStateSecurity, Initialize-AVDTuneState, Read-AVDTuneAclInfo, Get-AVDTuneStateSecurityProblems, Move-AVDTuneStateToQuarantine, New-AVDTuneProtectedFolder, Assert-AVDTuneStateSecurity, Get-AVDTuneStateSecurityReport, Get-AVDTuneState, Set-AVDTuneState, Test-AVDTuneImageVersion, Get-AVDTuneNextImageVersion, Start-AVDTuneImageVersion,
     Add-AVDTuneRun, Get-AVDTuneRun, Get-AVDTuneLastChange, Get-AVDTuneChangeTimes, Get-AVDTuneChangeMarker, Invoke-AVDTuneStateLock, Get-AVDTuneChangeStopError, Test-AVDTuneChangeInProgress, Resolve-AVDTuneStaleChange, Start-AVDTuneChange, Stop-AVDTuneChange, Get-AVDTuneSnapshotClockBufferMinutes, ConvertTo-AVDTuneUtc, Get-AVDTuneSnapshotWindow, Test-AVDTuneSnapshotInWindow,New-AVDTuneStep, Invoke-AVDTuneStep, New-AVDTuneStepFromData, Get-AVDTuneStepCatalog, Invoke-AVDTune,
     Add-AVDTuneChangeLogEntry, Get-AVDTuneChangeLog, Get-AVDTuneChangeLogVersions, ConvertTo-AVDTuneChangeLogDocument, Export-AVDTuneChangeLog,
