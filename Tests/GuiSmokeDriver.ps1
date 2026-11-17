@@ -640,8 +640,10 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
             return $false
         }
         if ($script:VdiHostSmoke -eq 1) {
+            Wait-SmokeIdle
             Test-Smoke 'VDI page (#77): the setting is applied: value removed, pill As recommended, change log VDI, the task finished' (-not $script:Machine.Store.Registry.ContainsKey($tsKey) -and (& $pillText 'shortpath') -ne 'Check open' -and $ui.TxtVdiState.Text -like 'RDP Shortpath: 1 changed*Restart*' -and @(Get-AVDTuneChangeLog -Root $script:StateRoot | Where-Object { $_.Category -eq 'VDI' -and $_.Component -eq 'RDP Shortpath' }).Count -ge 1 -and @(Get-AVDTuneUiTasks | Where-Object { $_.Kind -eq 'vdi-hostsettings' -and $_.Status -eq 'succeeded' }).Count -eq 1) "$(& $pillText 'shortpath') / $($ui.TxtVdiState.Text)"
             $script:VdiHostSmoke = 2
+            Wait-SmokeIdle   # the finished task starts an overview refresh; the Undo click must not read the fake machine at the same time (#80)
             $script:ConfirmAsked = ''
             & $click $script:VdiCards['shortpath'].Buttons.SettingsUndo
             Test-Smoke 'VDI page (#77): Undo settings asks first with not set -> 1' ($script:ConfirmAsked -like '*SelectTransport: not set -> 1*' -and $script:VdiJob) $script:ConfirmAsked
