@@ -350,8 +350,10 @@ try {
         @{ N = 'same as installed'; P = $okP; I = '1.54.2408.19001'; Ok = $true }
         @{ N = 'version not readable while something is installed'; P = (With-Prop @{ ProductVersion = 'x' }); I = '1.0.0.10001'; Ok = $false }
         @{ N = 'no properties'; P = $null; I = ''; Ok = $false }
+        @{ N = 'same version, installed one written with 3 parts'; P = (With-Prop @{ ProductVersion = '1.54.2408.0' }); I = '1.54.2408'; Ok = $true }
+        @{ N = 'newer, installed one with 3 parts'; P = (With-Prop @{ ProductVersion = '1.54.2409.0' }); I = '1.54.2408'; Ok = $true }
     )
-    $wrong = @($pc | Where-Object { (Test-AVDTuneMsiIdentity -Properties $_.P -Component $webC -InstalledVersion $_.I).Ok -ne $_.Ok } | ForEach-Object N)
+    $wrong = @($pc | Where-Object { (Test-AVDTuneMsiIdentity -Properties $_.P -Component $webC -Installed ([bool]$_.I) -InstalledVersion ([string]$_.I)).Ok -ne $_.Ok } | ForEach-Object N)
     Test-Check 'MSI identity: product name and manufacturer exact per component, nothing older than installed' ($wrong.Count -eq 0) ($wrong -join ', ')
     $e = New-Env -Seed @{ MsiProps = @{ 'webrtc-redirector.msi' = @{ ProductName = 'Remote Desktop Multimedia Redirection Service'; Manufacturer = 'Microsoft Corporation'; ProductVersion = '1.0.2410.0' } } }
     $x = Invoke-AVDTuneVdiRecorded -Machine $e.M -V $e.V -Key 'webrtc' -Root $tmp
@@ -361,6 +363,12 @@ try {
     $x = Invoke-AVDTuneVdiRecorded -Machine $e.M -V $e.V -Key 'webrtc' -Root $tmp
     Test-Check 'WebRTC install of an older MSI than the installed version: Downgrade, never started, no undo record left by this call' ($x.Setup.Code -eq 'Downgrade' -and (Get-Log $e.V 'Run *').Count -eq 0 -and -not (Test-Path (Join-Path $tmp 'config\vdi-webrtc-undo.json'))) $x.Setup.Message
     Reset-Files
+    Test-Check 'MSI identity: installed but with an empty version is refused (no downgrade check can be made), not installed with an empty version is fine' (-not (Test-AVDTuneMsiIdentity -Properties $okP -Component $webC -Installed $true -InstalledVersion '').Ok -and (Test-AVDTuneMsiIdentity -Properties $okP -Component $webC -Installed $false -InstalledVersion '').Ok) $null
+    $e = New-Env -MSeed @{ Registry = @{ "$uni\{11111111-1111-1111-1111-111111111111}|DisplayName" = 'Remote Desktop WebRTC Redirector Service' } }
+    $x = Invoke-AVDTuneVdiRecorded -Machine $e.M -V $e.V -Key 'webrtc' -Root $tmp
+    Test-Check 'WebRTC install over an entry without DisplayVersion: refused, never started' ($x.Setup.Code -eq 'BadPackage' -and (Get-Log $e.V 'Run *').Count -eq 0) $x.Setup.Message
+    Reset-Files
+    Test-Check 'version compare: 3 and 4 parts are padded to 4 (1.2.3 equals 1.2.3000.0, 1.2.3 is lower than 1.2.3000.1, 1.2 equals 1.2000.0.0)' ((Compare-AVDTuneVdiVersion '1.2.3000' '1.2.3000.0') -eq 0 -and (Compare-AVDTuneVdiVersion '1.2.3000.0' '1.2.3000') -eq 0 -and (Compare-AVDTuneVdiVersion '1.2.3000' '1.2.3000.1') -eq -1 -and (Compare-AVDTuneVdiVersion '1.2000' '1.2000.0.0') -eq 0 -and (Compare-AVDTuneVdiVersion '2.0.0' '1.999.9.9') -eq 1) $null
     $e = New-Env -Seed @{ MsiProps = @{ 'webrtc-redirector.msi' = $null } }
     Test-Check 'WebRTC install: a Property table that cannot be read is refused' ((Invoke-AVDTuneVdiRecorded -Machine $e.M -V $e.V -Key 'webrtc' -Root $tmp).Setup.Code -eq 'BadPackage' -and (Get-Log $e.V 'Run *').Count -eq 0) $null
     Reset-Files
@@ -442,6 +450,8 @@ try {
     $src = Get-Content -LiteralPath (Join-Path $repo 'Modules\AVDTune.Vdi.psm1') -Raw
     $real = New-AVDTuneVdiAdapter
     Test-Check 'real adapter: redirects are followed by hand (AllowAutoRedirect false), https and fixed hosts only, no PATH lookup, no shell, no Invoke-WebRequest' ($src -match 'AllowAutoRedirect = \$false' -and $src -notmatch 'AllowAutoRedirect = \$true' -and $src -notmatch 'Get-Command (?!Resolve-AVDTuneSoftwareError)|Invoke-WebRequest|Invoke-Expression|Start-Process|cmd\.exe|UseShellExecute = \$true') $null
+    $rp = [regex]::Match($src, '(?s)\$a\.ReadMsiProperties = \{.*?\r?\n    \}\r?\n').Value
+    Test-Check 'real adapter: the MSI Property table is read with the direct COM calls, every record is released at once and the view is closed (the file is not held until the garbage collection)' ($rp -match 'OpenDatabase\(\$Path, 0\)' -and $rp -match 'ReleaseComObject\(\$rec\)' -and $rp -match '\$view\.Close\(\)' -and $rp -notmatch 'InvokeMember') $null
     Test-Check 'real adapter: constructs and has every member the flow uses' ((@('Resolve', 'NewTempFolder', 'IsProtectedFolder', 'Download', 'HoldFile', 'RemoveFolder', 'VerifySignature', 'Run', 'ReadHeader', 'RunningProcesses', 'MsiexecPath', 'AppxVersion', 'FileVersion', 'Exists', 'OneDrivePath', 'U') | Where-Object { $null -eq $real.$_ }).Count -eq 0) $null
     Test-Check 'the fake has every member of the real adapter (the fake stays in step)' ((@($real.PSObject.Properties.Name | Where-Object { $_ -ne 'Kind' }) | Where-Object { $null -eq (New-AVDTuneFakeVdi -Machine (New-AVDTuneFakeMachine)).$_ }).Count -eq 0) $null
     $rr = & $real.Resolve 'https://evil.example/x' 'Msi'

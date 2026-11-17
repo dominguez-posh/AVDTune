@@ -107,8 +107,11 @@ function Get-AVDTuneVdiVersionFromUrl {
 
 function Compare-AVDTuneVdiVersion([string]$A, [string]$B) {
     # -1, 0, 1; $null when one is not a version
+    # 3 and 4 part versions are padded to 4 parts (missing parts = 0) first: [version] alone sees a 3 part version as lower than the same with a 0 appended
     $x = $null; $y = $null
     if (-not [version]::TryParse($A, [ref]$x) -or -not [version]::TryParse($B, [ref]$y)) { return $null }
+    $x = New-Object Version $x.Major, $x.Minor, ([Math]::Max($x.Build, 0)), ([Math]::Max($x.Revision, 0))
+    $y = New-Object Version $y.Major, $y.Minor, ([Math]::Max($y.Build, 0)), ([Math]::Max($y.Revision, 0))
     $x.CompareTo($y)
 }
 
@@ -491,14 +494,15 @@ function Test-AVDTuneMsiIdentity {
         Pure: the Property table of an MSI (ProductName, Manufacturer, ProductVersion) against the component: ProductName must be exactly the product of the component, Manufacturer exactly
         Microsoft Corporation, and the version must not be lower than the installed one (an unreadable version is refused when something is installed). Returns @{ Ok; Reason; Code }.
     #>
-    param($Properties, [Parameter(Mandatory)]$Component, [string]$InstalledVersion)
+    param($Properties, [Parameter(Mandatory)]$Component, [bool]$Installed = $false, [string]$InstalledVersion)
     $bad = { param($r, $c) [pscustomobject]@{ Ok = $false; Reason = $r; Code = $c } }
     if ($null -eq $Properties -or $Properties -isnot [System.Collections.IDictionary]) { return & $bad 'The Property table of the MSI could not be read' 'BadPackage' }
     $get = { param($k) if (Test-AVDTuneVdiKey $Properties $k) { [string]$Properties[$k] } else { '' } }
     $name = & $get 'ProductName'; $man = & $get 'Manufacturer'; $ver = & $get 'ProductVersion'
     if ($name -cne $Component.DisplayName) { return & $bad "The MSI is the product '$name', not '$($Component.DisplayName)'" 'BadPackage' }
     if ($man -cne 'Microsoft Corporation') { return & $bad "The MSI names the manufacturer '$man'" 'BadPackage' }
-    if ($InstalledVersion) {
+    if ($Installed) {
+        if (-not $InstalledVersion) { return & $bad 'Something is installed but its version is not readable, so the MSI cannot be checked against it' 'BadPackage' }
         $cmp = Compare-AVDTuneVdiVersion $ver $InstalledVersion
         if ($null -eq $cmp) { return & $bad "The MSI version '$ver' cannot be compared with the installed $InstalledVersion" 'BadPackage' }
         if ($cmp -lt 0) { return & $bad "The MSI is version $ver, older than the installed $InstalledVersion" 'Downgrade' }
@@ -568,7 +572,7 @@ function Invoke-AVDTuneVdiPackage {
         try {
             if ($c.Kind -eq 'Msi') {
                 # the Property table of the held MSI names the product: webrtc and mmr cannot be swapped, and nothing older than the installed version is installed
-                $pin = Test-AVDTuneMsiIdentity -Properties (& $V.ReadMsiProperties $file) -Component $c -InstalledVersion $(if ($before.Installed) { $before.Version } else { '' })
+                $pin = Test-AVDTuneMsiIdentity -Properties (& $V.ReadMsiProperties $file) -Component $c -Installed ([bool]$before.Installed) -InstalledVersion ([string]$before.Version)
                 if (-not $pin.Ok) { return & $out 'Failed' "$($pin.Reason): it is not started." $pin.Code $false }
             }
             $trust = Test-AVDTuneVdiPackageTrust -Signature (& $V.VerifySignature $file) -Component $c
@@ -751,21 +755,26 @@ function New-AVDTuneVdiAdapter {
     $a.ReadHeader = { param($Path, $Count) $fs = [IO.File]::Open($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read); try { $b = New-Object byte[] $Count; $n = $fs.Read($b, 0, $Count); if ($n -lt $Count) { [byte[]]@() } else { $b } } finally { $fs.Dispose() } }
     $a.RunningProcesses = { param($Names) @(foreach ($n in $Names) { if (@(Get-Process -Name $n -ErrorAction SilentlyContinue).Count -gt 0) { $n } }) }
     $a.ReadMsiProperties = {
-        # Property table of the (held) MSI through the Windows Installer COM object, read only; $null when it cannot be read
+        # Property table of the (held) MSI through the Windows Installer COM object, read only (tried live on a local Microsoft MSI: the reflection route gives a type mismatch, the direct COM calls work);
+        # every record is released at once and the view is closed, so the file is free again without waiting for the garbage collection. $null when it cannot be read.
         param($Path)
         $inst = $null; $db = $null; $view = $null
         try {
             $inst = New-Object -ComObject WindowsInstaller.Installer
-            $db = $inst.GetType().InvokeMember('OpenDatabase', 'InvokeMethod', $null, $inst, @($Path, 0))
-            $view = $db.GetType().InvokeMember('OpenView', 'InvokeMethod', $null, $db, @('SELECT `Property`, `Value` FROM `Property`'))
-            [void]$view.GetType().InvokeMember('Execute', 'InvokeMethod', $null, $view, $null)
+            $db = $inst.OpenDatabase($Path, 0)
+            $view = $db.OpenView('SELECT `Property`, `Value` FROM `Property`')
+            [void]$view.Execute()
             $h = @{}
             while ($true) {
-                $rec = $view.GetType().InvokeMember('Fetch', 'InvokeMethod', $null, $view, $null)
+                $rec = $view.Fetch()
                 if ($null -eq $rec) { break }
-                $k = [string]$rec.GetType().InvokeMember('StringData', 'GetProperty', $null, $rec, @(1)); $v = [string]$rec.GetType().InvokeMember('StringData', 'GetProperty', $null, $rec, @(2))
-                if ($k -in 'ProductName', 'Manufacturer', 'ProductVersion', 'UpgradeCode') { $h[$k] = $v }
+                try {
+                    $k = [string]$rec.StringData(1); $v = [string]$rec.StringData(2)
+                    if ($k -in 'ProductName', 'Manufacturer', 'ProductVersion', 'UpgradeCode') { $h[$k] = $v }
+                }
+                finally { [void][Runtime.InteropServices.Marshal]::ReleaseComObject($rec) }
             }
+            [void]$view.Close()
             $h
         }
         catch { $null }
