@@ -32,6 +32,9 @@ public static class RestrictedLauncher
 
     [DllImport("advapi32.dll", SetLastError = true)] private static extern bool CreateRestrictedToken(IntPtr existing, uint flags, uint disableCount, SidAndAttributes[] sidsToDisable, uint deleteCount, IntPtr privilegesToDelete, uint restrictCount, IntPtr sidsToRestrict, out IntPtr newToken);
     [DllImport("advapi32.dll", SetLastError = true)] private static extern bool SetTokenInformation(IntPtr token, int infoClass, ref SidAndAttributes info, int length);
+    [DllImport("advapi32.dll", SetLastError = true)] private static extern bool SetTokenInformation(IntPtr token, int infoClass, ref IntPtr info, int length);
+    [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)] private static extern bool ConvertStringSecurityDescriptorToSecurityDescriptorW(string sddl, uint revision, out IntPtr sd, IntPtr size);
+    [DllImport("advapi32.dll", SetLastError = true)] private static extern bool GetSecurityDescriptorDacl(IntPtr sd, out bool present, out IntPtr dacl, out bool defaulted);
     [DllImport("advapi32.dll", SetLastError = true)] private static extern bool GetTokenInformation(IntPtr token, int infoClass, IntPtr buffer, int length, out int returned);
     [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)] private static extern bool ConvertStringSidToSidW(string sid, out IntPtr sidPtr);
     [DllImport("advapi32.dll", SetLastError = true)] private static extern bool OpenProcessToken(IntPtr process, uint access, out IntPtr token);
@@ -49,6 +52,11 @@ public static class RestrictedLauncher
     public static bool IntegrityAcceptable(uint integrityRid, bool elevated) => !elevated && integrityRid <= MediumRid;
 
     /// <summary>One argument as CommandLineToArgvW reads it back (backslashes before a quote are doubled, the quote is escaped, blanks and quotes put the argument in quotes).</summary>
+    /// <summary>The default DACL of the reduced token: the user and SYSTEM, full access. The default DACL of an elevated admin token grants Administrators and SYSTEM only; with Administrators
+    /// deny-only the child could not open what it creates itself, and a console program ended at once with 0xC0000142 (its console host could not attach; measured on the GitHub runner, #14 N1).
+    /// SaferComputeTokenFromLevel did the same replacement, which is why the Safer token started programs.</summary>
+    public static string DefaultDaclSddl(string userSid) => $"D:(A;;GA;;;{userSid})(A;;GA;;;SY)";
+
     public static string QuoteArg(string a)
     {
         if (a.Length > 0 && a.IndexOfAny(new[] { ' ', '\t', '\n', '\v', '"' }) < 0) return a;
@@ -88,6 +96,7 @@ public static class RestrictedLauncher
                 if (!ConvertStringSidToSidW(DenyOnlySids[i], out deny[i].Sid)) throw new Win32Exception(Marshal.GetLastWin32Error());
             if (!CreateRestrictedToken(self, RestrictFlags, (uint)deny.Length, deny, 0, IntPtr.Zero, 0, IntPtr.Zero, out token)) throw new Win32Exception(Marshal.GetLastWin32Error(), "CreateRestrictedToken (LUA token) failed");
             if (!ConvertStringSidToSidW("S-1-16-8192", out sid)) throw new Win32Exception(Marshal.GetLastWin32Error());
+            SetUserDefaults(token);
             var label = new SidAndAttributes { Sid = sid, Attributes = 0x20 };   // SE_GROUP_INTEGRITY
             if (!SetTokenInformation(token, TokenIntegrityLevelClass, ref label, Marshal.SizeOf<SidAndAttributes>())) throw new Win32Exception(Marshal.GetLastWin32Error(), "the integrity level of the token could not be set");
             var (rid, elevated) = Query(token);
@@ -102,6 +111,24 @@ public static class RestrictedLauncher
             if (self != IntPtr.Zero) CloseHandle(self);
             if (token != IntPtr.Zero) CloseHandle(token);
         }
+    }
+
+    /// <summary>Owner of new objects and default DACL of the token become the user (TokenOwner, TokenDefaultDacl), as SaferComputeTokenFromLevel does; see <see cref="DefaultDaclSddl"/>.</summary>
+    private static void SetUserDefaults(IntPtr token)
+    {
+        IntPtr buf = Marshal.AllocHGlobal(256), sd = IntPtr.Zero;
+        try
+        {
+            if (!GetTokenInformation(token, 1, buf, 256, out _)) throw new Win32Exception(Marshal.GetLastWin32Error(), "the user of the token could not be read");   // TokenUser
+            IntPtr user = Marshal.ReadIntPtr(buf);
+            if (!ConvertSidToStringSidW(user, out var text)) throw new Win32Exception(Marshal.GetLastWin32Error());
+            string userSid = Marshal.PtrToStringUni(text)!; LocalFree(text);
+            if (!SetTokenInformation(token, 4, ref user, IntPtr.Size)) throw new Win32Exception(Marshal.GetLastWin32Error(), "the owner of the token could not be set");   // TokenOwner
+            if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(DefaultDaclSddl(userSid), 1, out sd, IntPtr.Zero)) throw new Win32Exception(Marshal.GetLastWin32Error());
+            if (!GetSecurityDescriptorDacl(sd, out bool present, out IntPtr dacl, out _) || !present || dacl == IntPtr.Zero) throw new Win32Exception(Marshal.GetLastWin32Error(), "the default DACL could not be built");
+            if (!SetTokenInformation(token, 6, ref dacl, IntPtr.Size)) throw new Win32Exception(Marshal.GetLastWin32Error(), "the default DACL of the token could not be set");   // TokenDefaultDacl
+        }
+        finally { Marshal.FreeHGlobal(buf); if (sd != IntPtr.Zero) LocalFree(sd); }
     }
 
     /// <summary>Integrity RID and elevation of a token (query access needed).</summary>
