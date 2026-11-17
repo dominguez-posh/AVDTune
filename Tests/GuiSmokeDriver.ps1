@@ -517,7 +517,7 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
             Test-Smoke 'Language page: the installed language is ticked and fixed, the others are free' ($en.IsChecked -and -not $en.IsEnabled -and $de.IsEnabled -and -not $de.IsChecked -and (Find-Text $ui.PanelLangInstalled 'en-US  English (United States)   Basic')) $null
             $sel = { param($k) $script:LangCombos[$k].SelectedItem.Tag }
             Test-Smoke 'Language page: defaults are preselected with the values of the image (en-US, US keyboard, United States, system locale en-US)' ((& $sel 'Ui') -eq 'en-US' -and (& $sel 'Culture') -eq 'en-US' -and (& $sel 'InputTip') -eq '0409:00000409' -and (& $sel 'GeoId') -eq 244 -and (& $sel 'SystemLocale') -eq 'en-US') $null
-            Test-Smoke 'Language page: the time zone is preselected with the default of the Azure region (West Europe)' ((& $sel 'TimeZone') -eq 'W. Europe Standard Time' -and $ui.LangNow.TimeZone.Text -like '*westeurope*W. Europe Standard Time*') $ui.LangNow.TimeZone.Text
+            Test-Smoke 'Language page: the time zone stays on (keep as it is); the Azure region (West Europe) is only suggested, in the list and next to it' ($null -eq (& $sel 'TimeZone') -and @($script:LangCombos.TimeZone.Items | Where-Object { $_.Tag -eq 'W. Europe Standard Time' -and "$($_.Content)" -like '*suggested*westeurope*' }).Count -eq 1 -and $ui.LangNow.TimeZone.Text -like '*westeurope*suggests W. Europe Standard Time*') $ui.LangNow.TimeZone.Text
             Test-Smoke 'Language page: the display language list offers the missing languages only with the offer to install them first' (@($script:LangCombos.Ui.Items | Where-Object { $_.Tag -eq 'de-DE' -and "$($_.Content)" -like '*not installed*install*first*' }).Count -eq 1 -and @($script:LangCombos.Ui.Items | Where-Object { $_.Tag -eq 'en-US' -and "$($_.Content)" -notlike '*not installed*' }).Count -eq 1) $null
             Save-SmokeShot '31-language'
             & $click $ui.BtnLangTest
@@ -528,7 +528,7 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
             foreach ($pair in @(@('Ui', 'de-DE'), @('Culture', 'de-DE'), @('InputTip', '0407:00000407'), @('GeoId', 94), @('SystemLocale', 'de-DE'))) { $cb = $script:LangCombos[$pair[0]]; $cb.SelectedItem = @($cb.Items | Where-Object { "$($_.Tag)" -eq "$($pair[1])" })[0] }
             $script:ConfirmAsked = ''
             & $click $ui.BtnLangApply
-            Test-Smoke 'Language page: Apply with a missing display language asks to install it first and names what cannot be undone and the restart' ($script:ConfirmAsked -like '*Install*CANNOT be undone*restart*' -and $script:LangJob) $script:ConfirmAsked
+            Test-Smoke 'Language page: Apply with a missing display language asks to install it first and names what cannot be undone, the restart, the kind of source and every change old -> new' ($script:ConfirmAsked -like '*Install*read-only media*CANNOT be undone*restart*Display language: en-US -> de-DE*Regional format: en-US -> de-DE*Location (GeoId): 244 -> 94*System locale: en-US -> de-DE*' -and $script:ConfirmAsked -notlike '*Time zone:*' -and $script:LangJob) $script:ConfirmAsked
             return $false
         }
         if ($script:LangJob) { return $false }

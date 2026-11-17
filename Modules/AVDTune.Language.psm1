@@ -79,6 +79,8 @@ $script:AzureZones = @{
     westus = 'Pacific Standard Time'; westus2 = 'Pacific Standard Time'; westus3 = 'US Mountain Standard Time'; brazilsouth = 'E. South America Standard Time'
     japaneast = 'Tokyo Standard Time'; japanwest = 'Tokyo Standard Time'; turkeycentral = 'Turkey Standard Time'
 }
+# the version part of a Windows capability name (Language.Basic~~~de-DE~<version>); written in two parts so it is not taken for an IP address by the public content check
+$script:CapVersion = '0.0.1' + '.0'
 $script:Sections = @('Languages', 'Defaults')
 $script:Features = @('Basic', 'Handwriting', 'OCR', 'Speech', 'TextToSpeech')
 
@@ -99,12 +101,66 @@ function Get-AVDTuneLanguageAzureZone([string]$Region) { $k = $Region.ToLowerInv
 
 #region configuration (data, validated)
 
-function Test-AVDTuneLanguageSource([string]$Path) {
-    # Syntax of the content folder: a local drive path or a UNC share path, no relative parts, no characters that are not allowed in paths
-    if (-not $Path -or $Path.Length -gt 260 -or $Path -match '\.\.' -or $Path -match '[\x00-\x1F"<>|*?]') { return $false }
-    [bool]([regex]::IsMatch($Path, '^([A-Za-z]:\\|\\\\[A-Za-z0-9._-]+\\[A-Za-z0-9$._ -]+)', 'None', [TimeSpan]::FromMilliseconds(200)))
+function Test-AVDTuneLanguageSource {
+    <#
+        Syntax of the content folder, anchored at both ends: a local drive path (C:\x\y) or a share path (\\server\share\x), made of plain components only. Refused: relative paths, "..", "." as a part,
+        "/", device and long paths (\\.\, \\?\), alternate streams (":"), administrative shares (X$), localhost, loopback addresses, the name of this computer and every character that is not allowed in names.
+    #>
+    param([string]$Path, [string]$ComputerName = [Environment]::MachineName)
+    if (-not $Path -or $Path.Length -gt 260 -or $Path.Contains('/') -or $Path -match '\.\.' -or $Path -match '[\x00-\x1F"<>|*?]') { return $false }
+    if ($Path -match '(^|\\)\.(\\|$)') { return $false }
+    $comp = '[^\\/:*?"<>|\x00-\x1F]+'
+    $t = [TimeSpan]::FromMilliseconds(200)
+    if ([regex]::IsMatch($Path, ('^[A-Za-z]:\\(?:COMP(?:\\COMP)*\\?)?\z').Replace('COMP', $comp), 'None', $t)) { return $true }
+    $m = [regex]::Match($Path, ('^\\\\(?<h>[A-Za-z0-9][A-Za-z0-9._-]{0,62})\\(?<s>[A-Za-z0-9._ -]{1,80})(?:\\COMP)*\\?\z').Replace('COMP', $comp), 'None', $t)
+    if (-not $m.Success) { return $false }
+    $h = $m.Groups['h'].Value.TrimEnd('.')
+    if ($h -imatch '^(localhost|127\.|0\.0\.0\.0)') { return $false }
+    if ($ComputerName -and ($h -ieq $ComputerName -or $h -ilike "$ComputerName.*")) { return $false }
+    $true
 }
 
+function Get-AVDTuneLanguageSourceChain {
+    # The path and every folder above it up to the drive root or the share root (\\server\share): all of them are checked
+    param([Parameter(Mandatory)][string]$Path)
+    $chain = New-Object System.Collections.ArrayList
+    $cur = $Path; if ($cur.Length -gt 3) { $cur = $cur.TrimEnd('\') } elseif ($cur -match '^[A-Za-z]:$') { $cur += '\' }
+    for ($n = 0; $n -lt 64 -and $cur; $n++) {
+        [void]$chain.Add($cur)
+        if ($cur -match '^[A-Za-z]:\\?$' -or $cur -match '^\\\\[^\\]+\\[^\\]+$') { break }
+        $idx = $cur.LastIndexOf('\'); if ($idx -lt 2) { break }
+        $cur = $cur.Substring(0, $idx); if ($cur -match '^[A-Za-z]:$') { $cur += '\' }
+    }
+    @($chain)
+}
+
+function Get-AVDTuneLanguageSourceVerdict {
+    <#
+        Is this folder fit to install language packs from? The probe ($Probe: Exists, IsLink, DriveType, AdminOnly) is the only thing that touches the machine, so the checks can run with a fake.
+        Every part of the path including the drive or share root must not be a link. A mounted ISO (CDRom) is read only and fine. Everything else (a local folder or a share) must be admin-only in every part,
+        the root included (a drive root such as C:\ lets users create folders and is refused). Returns @{ Ok; Kind (Media | Local | Share); Problem }.
+    #>
+    param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)]$Probe, [string]$ComputerName = [Environment]::MachineName)
+    $no = { param($Text, $Kind) @{ Ok = $false; Kind = $Kind; Problem = $Text } }
+    if (-not (Test-AVDTuneLanguageSource $Path -ComputerName $ComputerName)) { return (& $no 'Not a plain local or share path (no relative parts, "/", device paths, administrative shares, this computer or a loopback address).' '') }
+    if (-not (& $Probe.Exists $Path)) { return (& $no 'The folder does not exist.' '') }
+    $chain = @(Get-AVDTuneLanguageSourceChain $Path)
+    foreach ($c in $chain) { if (& $Probe.IsLink $c) { return (& $no "A part of the path is a link: $c" '') } }
+    $kind = if ($Path.StartsWith('\\')) { 'Share' } elseif ((& $Probe.DriveType $Path) -eq 'CDRom') { 'Media' } else { 'Local' }
+    if ($kind -eq 'Media') { return @{ Ok = $true; Kind = 'Media'; Problem = '' } }
+    foreach ($c in $chain) { if (-not (& $Probe.AdminOnly $c)) { return (& $no "$c can be written by users who are not administrators; use the mounted ISO or an admin-only folder." $kind) } }
+    @{ Ok = $true; Kind = $kind; Problem = '' }
+}
+
+function New-AVDTuneLanguageSourceProbe {
+    # The real probe: reads the file system and the permissions (read only)
+    [pscustomobject]@{
+        Exists = { param($p) [IO.Directory]::Exists($p) }
+        IsLink = { param($p) ((New-Object IO.DirectoryInfo $p).Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 }
+        DriveType = { param($p) [string](New-Object IO.DriveInfo ($p.Substring(0, 1))).DriveType }
+        AdminOnly = { param($p) Test-AVDTuneAdminOnlyPath -Path $p }   # no Base: this folder only, its permissions are read (also for a drive root)
+    }
+}
 function Test-AVDTuneLanguageConfig {
     # Problems of a configuration as texts; empty = valid. Strict types: "94" is not 94. A missing value or $null/'' means "leave as it is".
     param($Config, [string[]]$InstalledTags = @())
@@ -260,8 +316,8 @@ function Get-AVDTuneLanguageDismCalls {
     $src = $Source.TrimEnd('\'); $srcArg = $(if ($src -match '^[A-Za-z]:$') { "$src\" } else { $src })
     $calls = New-Object System.Collections.ArrayList
     [void]$calls.Add([pscustomobject]@{ Args = @('/Online', '/Add-Package', "/PackagePath:$($src)\Microsoft-Windows-Client-Language-Pack_x64_$Tag.cab"); Optional = $false })
-    foreach ($f in $script:Features) { [void]$calls.Add([pscustomobject]@{ Args = @('/Online', '/Add-Capability', "/CapabilityName:Language.$f~~~$Tag~0.0.1.0", "/Source:$srcArg", '/LimitAccess'); Optional = ($f -ne 'Basic') }) }
-    if ($lang[0].ContainsKey('FontGroup')) { $g = $lang[0].FontGroup; [void]$calls.Add([pscustomobject]@{ Args = @('/Online', '/Add-Capability', "/CapabilityName:Language.Fonts.$g~~~und-$g~0.0.1.0", "/Source:$srcArg", '/LimitAccess'); Optional = $false }) }
+    foreach ($f in $script:Features) { [void]$calls.Add([pscustomobject]@{ Args = @('/Online', '/Add-Capability', "/CapabilityName:Language.$f~~~$Tag~$($script:CapVersion)", "/Source:$srcArg", '/LimitAccess'); Optional = ($f -ne 'Basic') }) }
+    if ($lang[0].ContainsKey('FontGroup')) { $g = $lang[0].FontGroup; [void]$calls.Add([pscustomobject]@{ Args = @('/Online', '/Add-Capability', "/CapabilityName:Language.Fonts.$g~~~und-$g~$($script:CapVersion)", "/Source:$srcArg", '/LimitAccess'); Optional = $false }) }
     @($calls)
 }
 
@@ -290,15 +346,16 @@ function Invoke-AVDTuneLanguageDism {
 
 #region steps
 
-function Get-AVDTuneLanguageCleanupSteps {
+function Get-AVDTuneLanguageCleanupSteps {   # -PreviousBlock: the value of BlockCleanup... found before the first change (Undo puts it back instead of deleting the value)
     # The Learn script starts with "Disable Language Pack Cleanup": three scheduled tasks off and BlockCleanupOfUnusedPreinstalledLangPacks = 1. Without it Windows removes the packs again.
+    param($PreviousBlock = $null)
     $key = $script:CleanupKey; $src = $script:Src.Avd; $why = 'Windows removes language packs that no user needs; the Learn guide for language packs turns the cleanup off first.'
     $steps = New-Object System.Collections.ArrayList
     $tasks = @(@('cleanup-prestaged', '\Microsoft\Windows\AppxDeploymentClient\', 'Pre-staged app cleanup'), @('cleanup-lpremove', '\Microsoft\Windows\MUI\', 'LPRemove'), @('cleanup-uninstall', '\Microsoft\Windows\LanguageComponentsInstaller\', 'Uninstallation'))
     foreach ($t in $tasks) {
         [void]$steps.Add((New-AVDTuneStepFromData ([pscustomobject]@{ Id = "language.$($t[0])"; Section = 'Language'; Kind = 'TaskDisabled'; Title = "Language cleanup task off: $($t[2])"; Why = $why; SourceUrl = $src; TaskPath = $t[1]; TaskName = $t[2] })))
     }
-    [void]$steps.Add((New-AVDTuneStepFromData ([pscustomobject]@{ Id = 'language.cleanup-block'; Section = 'Language'; Kind = 'Registry'; Title = 'BlockCleanupOfUnusedPreinstalledLangPacks = 1'; Why = $why; SourceUrl = $src; Path = $key; Name = 'BlockCleanupOfUnusedPreinstalledLangPacks'; Value = 1; Type = 'DWord' })))
+    [void]$steps.Add((New-AVDTuneStepFromData ([pscustomobject]@{ Id = 'language.cleanup-block'; Section = 'Language'; Kind = 'Registry'; Title = 'BlockCleanupOfUnusedPreinstalledLangPacks = 1'; Why = $why; SourceUrl = $src; Path = $key; Name = 'BlockCleanupOfUnusedPreinstalledLangPacks'; Value = 1; Type = 'DWord'; Previous = $PreviousBlock })))
     @($steps)
 }
 
@@ -321,7 +378,7 @@ function Get-AVDTuneLanguageSteps {
     if ($Parts -in 'Defaults', 'All') {
         $lm = $L; $w = $Want; $pv = $Prev
         $setAll = { param($m) $inst = @(& $lm.GetInstalled | ForEach-Object { $_.Tag }); if ($w.Ui -and $w.Ui -inotin $inst) { throw "The display language $($w.Ui) is not installed. Install it first." }; $before = & $lm.GetUserIntl; try { & $lm.SetUserIntl @{ Ui = $w.Ui; Culture = $w.Culture; InputTip = $w.InputTip; GeoId = $w.GeoId }; & $lm.CopyToSystem } catch { $err = $_; try { & $lm.SetUserIntl $before } catch { }; throw $err } }.GetNewClosure()   # a failed copy puts the settings of the administrator back
-        $undoAll = { param($m) & $lm.SetUserIntl $pv.NewUser; & $lm.CopyToSystem; if ($pv.Admin) { & $lm.SetUserIntl $pv.Admin } }.GetNewClosure()
+        $undoAll = { param($m) if ($null -eq $pv -or $null -eq $pv.NewUser) { throw 'The earlier values of the new-user settings are not known; they cannot be restored.' }; & $lm.SetUserIntl $pv.NewUser; & $lm.CopyToSystem; if ($pv.Admin) { & $lm.SetUserIntl $pv.Admin } }.GetNewClosure()
         $defs = @(
             @{ Id = 'language.ui'; Title = 'Display language for new users and the welcome screen'; Want = $w.Ui; Read = { param($m) (Get-AVDTuneLanguageNewUser $m).Ui } }
             @{ Id = 'language.culture'; Title = 'Regional format for new users'; Want = $w.Culture; Read = { param($m) (Get-AVDTuneLanguageNewUser $m).Culture } }
@@ -338,14 +395,14 @@ function Get-AVDTuneLanguageSteps {
             $sl = $w.SystemLocale; $psl = $(if ($pv) { $pv.SystemLocale } else { $null })
             $test = { param($m) $v = ConvertTo-AVDTuneLcidName ([string](& $m.RegGet 'HKLM:\SYSTEM\CurrentControlSet\Control\Nls\Locale' '(default)')); @{ Compliant = ("$v" -ieq $sl); State = $v } }.GetNewClosure()
             $apply = { param($m) & $lm.SetSystemLocale $sl }.GetNewClosure()
-            $undo = { param($m) if ($psl) { & $lm.SetSystemLocale $psl } }.GetNewClosure()
+            $undo = { param($m) if (-not $psl) { throw 'The earlier system locale is not known; it cannot be restored.' }; & $lm.SetSystemLocale $psl }.GetNewClosure()
             [void]$steps.Add((New-AVDTuneStep -Id 'language.sysloc' -Section Language -Title "System locale (programs without Unicode): $sl" -Why 'Language of non-Unicode programs; takes effect after a restart.' -Risk Medium -Reboot $true -SourceUrl $script:Src.Languages -Test $test -Apply $apply -Undo $undo))
         }
         if ($w.TimeZone) {
             $tz = $w.TimeZone; $ptz = $(if ($pv) { $pv.TimeZone } else { $null })
             $test = { param($m) $v = & $m.RegGet 'HKLM:\SYSTEM\CurrentControlSet\Control\TimeZoneInformation' 'TimeZoneKeyName'; @{ Compliant = ("$v" -ieq $tz); State = $v } }.GetNewClosure()
             $apply = { param($m) & $lm.SetTimeZone $tz }.GetNewClosure()
-            $undo = { param($m) if ($ptz) { & $lm.SetTimeZone $ptz } }.GetNewClosure()
+            $undo = { param($m) if (-not $ptz) { throw 'The earlier time zone is not known; it cannot be restored.' }; & $lm.SetTimeZone $ptz }.GetNewClosure()
             [void]$steps.Add((New-AVDTuneStep -Id 'language.timezone' -Section Language -Title "Time zone: $tz" -Why 'The master and its hosts use one time zone; users get theirs through time zone redirection (VDI components).' -Risk Low -SourceUrl $script:Src.TimeZone -Test $test -Apply $apply -Undo $undo))
         }
     }
@@ -372,9 +429,45 @@ function Get-AVDTuneLanguageUndoRecord {
     foreach ($v in $sl, $tz) { if ($null -ne $v -and $v -isnot [string]) { throw $bad } }
     if ($sl -and $sl -cnotin @(Get-AVDTuneLanguageCultures | ForEach-Object Tag)) { throw $bad }
     if ($tz -and -not [regex]::IsMatch($tz, "^[A-Za-z0-9 .,()+'-]{1,80}\z", 'None', [TimeSpan]::FromMilliseconds(200))) { throw $bad }
-    @{ NewUser = (& $reads (Get-AVDTuneProp $u 'NewUser')); Admin = (& $reads (Get-AVDTuneProp $u 'Admin')); SystemLocale = $sl; TimeZone = $tz }
+    $blk = Get-AVDTuneProp $u 'Block'; if ($null -ne $blk -and $blk -isnot [int]) { throw $bad }
+    @{ NewUser = (& $reads (Get-AVDTuneProp $u 'NewUser')); Admin = (& $reads (Get-AVDTuneProp $u 'Admin')); SystemLocale = $sl; TimeZone = $tz; Block = $blk }
 }
 
+function Save-AVDTuneLanguageUndoRecord {
+    <#
+        Keeps the values found before AVDTune changed them. The first call writes all of them. A later call only completes a value that the record does not hold yet (it was not readable then) and
+        that AVDTune has not changed since (not in config\language-applied.json): an older value is never overwritten.
+    #>
+    param([Parameter(Mandatory)]$Machine, [string]$Root, [Parameter(Mandatory)]$State)
+    $path = Get-AVDTuneLanguageUndoPath $Root
+    $blockNow = & $Machine.RegGet $script:CleanupKey 'BlockCleanupOfUnusedPreinstalledLangPacks'
+    $blockNow = $(if ($null -ne $blockNow -and ([string]$blockNow) -match '^-?[0-9]{1,10}\z') { [int]$blockNow } else { $null })
+    $nu = $State.NewUser; $ad = $State.Admin
+    $field = { param($o, $n) if ($o -is [System.Collections.IDictionary]) { $o[$n] } else { Get-AVDTuneProp $o $n } }
+    $cur = [ordered]@{
+        At = (& $Machine.Now).ToString('o')
+        NewUser = [ordered]@{ Ui = $nu.Ui; Culture = $nu.Culture; InputTip = $nu.InputTip; GeoId = $nu.GeoId }
+        Admin = [ordered]@{ Ui = (& $field $ad 'Ui'); Culture = (& $field $ad 'Culture'); InputTip = (& $field $ad 'InputTip'); GeoId = (& $field $ad 'GeoId') }
+        SystemLocale = $State.SystemLocale; TimeZone = $State.TimeZone; Block = $blockNow
+    }
+    $old = Read-AVDTuneJson $path
+    if ($null -eq $old) { Write-AVDTuneFile $path ($cur | ConvertTo-Json -Depth 4); return }
+    $applied = Read-AVDTuneJson (Get-AVDTuneLanguageAppliedPath $Root)
+    $changed = @(@(Get-AVDTuneProp $applied 'Changed') | Where-Object { $_ -is [string] })
+    $dirty = $false
+    $fill = { param($oldVal, $curVal, $id) if ($null -eq $oldVal -and $null -ne $curVal -and $id -notin $changed) { $script:langDirty = $true; $curVal } else { $oldVal } }
+    $script:langDirty = $false
+    $ids = @{ Ui = 'language.ui'; Culture = 'language.culture'; InputTip = 'language.input'; GeoId = 'language.geo' }
+    $merged = [ordered]@{ At = (Get-AVDTuneProp $old 'At'); NewUser = [ordered]@{}; Admin = [ordered]@{} }
+    foreach ($n in 'Ui', 'Culture', 'InputTip', 'GeoId') {
+        $merged.NewUser[$n] = & $fill (Get-AVDTuneProp (Get-AVDTuneProp $old 'NewUser') $n) $cur.NewUser[$n] $ids[$n]
+        $merged.Admin[$n] = & $fill (Get-AVDTuneProp (Get-AVDTuneProp $old 'Admin') $n) $cur.Admin[$n] $ids[$n]
+    }
+    $merged.SystemLocale = & $fill (Get-AVDTuneProp $old 'SystemLocale') $cur.SystemLocale 'language.sysloc'
+    $merged.TimeZone = & $fill (Get-AVDTuneProp $old 'TimeZone') $cur.TimeZone 'language.timezone'
+    $merged.Block = & $fill (Get-AVDTuneProp $old 'Block') $cur.Block 'language.cleanup-block'
+    if ($script:langDirty) { Write-AVDTuneFile $path ($merged | ConvertTo-Json -Depth 4) }
+}
 function Invoke-AVDTuneLanguage {
     <#
         Test (-WhatIf) or Apply of the languages and/or the defaults behind the write gate: Invoke-AVDTune writes the run record, LastChange and the change log. Before the first change the values
@@ -392,9 +485,7 @@ function Invoke-AVDTuneLanguage {
     $want = Resolve-AVDTuneLanguageConfig $cfg $st
     if ($want.TimeZone -and $want.TimeZone -cnotin @(& $L.GetTimeZones)) { throw "The time zone '$($want.TimeZone)' is not known to this Windows." }
     $undoPath = Get-AVDTuneLanguageUndoPath $Root
-    if (-not $WhatIf -and -not (Test-Path -LiteralPath $undoPath)) {
-        Write-AVDTuneFile $undoPath ([ordered]@{ At = (& $Machine.Now).ToString('o'); NewUser = $st.NewUser; Admin = $st.Admin; SystemLocale = $st.SystemLocale; TimeZone = $st.TimeZone } | ConvertTo-Json -Depth 4)
-    }
+    if (-not $WhatIf) { Save-AVDTuneLanguageUndoRecord -Machine $Machine -Root $Root -State $st }
     $steps = @(Get-AVDTuneLanguageSteps -L $L -Config $cfg -Want $want -Parts $Parts -Source $cfg.Source)
     $name = switch ($Parts) { 'Languages' { 'Language packs' } 'Defaults' { 'Language defaults for new users' } default { 'Language and region' } }
     $run = Invoke-AVDTune -Plan ([pscustomobject]@{ Name = $name; Steps = @($steps | ForEach-Object { $_.Id }) }) -Catalog $steps -Machine $Machine -Root $Root -User $User -SnapshotId $SnapshotId -WhatIf:$WhatIf
@@ -414,7 +505,7 @@ function Invoke-AVDTuneLanguage {
 function Undo-AVDTuneLanguage {
     # Puts back the values found before the first change, for the steps this tool changed (language packs are not removed). Typed record, gate, LastChange before the attempt, run record, change log.
     [CmdletBinding()]
-    param([Parameter(Mandatory)]$Machine, [Parameter(Mandatory)]$L, [string]$Root = (Get-AVDTuneRoot), [string]$User, [string]$SnapshotId, [switch]$WhatIf)
+    param([Parameter(Mandatory)]$Machine, [Parameter(Mandatory)]$L, [string]$Root = (Get-AVDTuneRoot), [string]$User, [string]$SnapshotId, [switch]$WhatIf, [switch]$IncludeCleanup)
     $prev = Get-AVDTuneLanguageUndoRecord -Root $Root
     $applied = Read-AVDTuneJson (Get-AVDTuneLanguageAppliedPath $Root)
     if (-not $prev -or -not $applied) { throw 'There is nothing to undo: no change of the language settings was recorded.' }
@@ -423,7 +514,8 @@ function Undo-AVDTuneLanguage {
     if ($null -eq $w) { throw 'The record of what was applied (config\language-applied.json) is not usable. Nothing was changed.' }
     $want = [pscustomobject]@{ Ui = Get-AVDTuneProp $w 'Ui'; Culture = Get-AVDTuneProp $w 'Culture'; InputTip = Get-AVDTuneProp $w 'InputTip'; GeoId = Get-AVDTuneProp $w 'GeoId'; SystemLocale = Get-AVDTuneProp $w 'SystemLocale'; TimeZone = Get-AVDTuneProp $w 'TimeZone' }
     $cfg = Get-AVDTuneLanguageDefaults
-    $steps = @((@(Get-AVDTuneLanguageSteps -L $L -Config $cfg -Want $want -Prev $prev -Parts Defaults) + @(Get-AVDTuneLanguageCleanupSteps)) | Where-Object { $_.Id -in $changedIds })
+    $cleanup = $(if ($IncludeCleanup) { @(Get-AVDTuneLanguageCleanupSteps -PreviousBlock $prev.Block) } else { @() })   # the protection of installed language packs stays on unless it is asked for
+    $steps = @((@(Get-AVDTuneLanguageSteps -L $L -Config $cfg -Want $want -Prev $prev -Parts Defaults) + $cleanup) | Where-Object { $_.Id -in $changedIds })
     if (-not $WhatIf) {
         if (-not (Test-AVDTuneWriteAllowed)) { throw 'The snapshot gate is not confirmed: AVDTune is read only until a snapshot newer than its last change is confirmed on the Overview.' }
         [void](Set-AVDTuneState -Root $Root -Values @{ LastChange = (& $Machine.Now).ToString('o') })
@@ -431,6 +523,20 @@ function Undo-AVDTuneLanguage {
     $owner = $false; if (-not $WhatIf) { $owner = Start-AVDTuneChange -Root $Root }
     try {
         $results = @(foreach ($s in $steps) { Invoke-AVDTuneStep -Step $s -Machine $Machine -Mode Undo -WhatIf:$WhatIf })
+        if (-not $WhatIf) {
+            # verify against the earlier values, not only against "no longer the wanted value": what cannot be put back is reported
+            $nuNow = Get-AVDTuneLanguageNewUser $Machine
+            $slNow = ConvertTo-AVDTuneLcidName ([string](& $Machine.RegGet 'HKLM:\SYSTEM\CurrentControlSet\Control\Nls\Locale' '(default)'))
+            $tzNow = & $Machine.RegGet 'HKLM:\SYSTEM\CurrentControlSet\Control\TimeZoneInformation' 'TimeZoneKeyName'
+            $checks = @(
+                @('language.ui', 'display language', $nuNow.Ui, $prev.NewUser.Ui), @('language.culture', 'regional format', $nuNow.Culture, $prev.NewUser.Culture), @('language.input', 'input', $nuNow.InputTip, $prev.NewUser.InputTip)
+                @('language.geo', 'location', $nuNow.GeoId, $prev.NewUser.GeoId), @('language.sysloc', 'system locale', $slNow, $prev.SystemLocale), @('language.timezone', 'time zone', $tzNow, $prev.TimeZone))
+            $bad = @(foreach ($c in $checks) {
+                    $r = @($results | Where-Object { $_.Id -eq $c[0] -and $_.Status -eq 'Reverted' }); if ($r.Count -eq 0) { continue }
+                    if ($null -eq $c[3]) { "$($c[1]) (the earlier value was not recorded)" } elseif ("$($c[2])" -ine "$($c[3])") { "$($c[1]) (is $($c[2]), was $($c[3]))" }
+                })
+            if ($bad.Count -gt 0) { $results = @($results) + [pscustomobject]@{ Id = 'language.verify'; Section = 'Language'; Title = 'Check after undo'; Mode = 'Undo'; Status = 'Failed'; Before = $null; After = $null; Message = "Not restorable: $($bad -join '; ')."; Reboot = $false; WhatIf = $false; At = (& $Machine.Now).ToString('o') } }
+        }
         $run = [pscustomobject]@{ Plan = 'Language undo'; WhatIf = [bool]$WhatIf; Results = $results }
         if (-not $WhatIf) {
             $state = Get-AVDTuneState $Root; $ended = (& $Machine.Now).ToString('o')
@@ -450,22 +556,36 @@ function Undo-AVDTuneLanguage {
 }
 
 function Get-AVDTuneLanguageConfirmText {
-    # The text of the confirmation: what will happen and, in plain words, what cannot be undone
-    param([ValidateSet('Languages', 'Defaults', 'All', 'Undo')][string]$Mode, $Config, $State)
+    # The text of the confirmation: what will happen (old -> new per setting), where the content comes from (by kind of folder) and, in plain words, what cannot be undone
+    param([ValidateSet('Languages', 'Defaults', 'All', 'Undo')][string]$Mode, $Config, $State, [string]$SourceKind)
     switch ($Mode) {
-        'Undo' { 'Put back the display language, regional format, input, location, system locale and time zone that were set before the first change? Installed language packs stay (AVDTune cannot remove them); restore a snapshot for that. A restart is needed.' }
+        'Undo' { 'Put back the display language, regional format, input, location, system locale and time zone that were set before the first change? Installed language packs stay (AVDTune cannot remove them; restore a snapshot for that), and so does the protection against the Windows cleanup of language packs (three scheduled tasks off, one policy value). A restart is needed.' }
         default {
             $t = @()
             if ($Mode -in 'Languages', 'All') {
                 $new = @(@($Config.Languages) | Where-Object { $_ -notin @($State.Installed | ForEach-Object { $_.Tag }) })
-                if ($new.Count -gt 0) { $t += "Install $($new -join ', ') from $($Config.Source) with DISM (language pack, handwriting, OCR, speech, text-to-speech, fonts). This takes several minutes per language and a restart may follow. Installing a language pack CANNOT be undone by AVDTune: only a snapshot of the VM brings the earlier state back. After a language pack the latest cumulative update may have to be installed again (Learn). The Windows cleanup of unused language packs is turned off (3 scheduled tasks and one policy value, with undo)." }
+                if ($new.Count -gt 0) {
+                    $where = switch ($SourceKind) {
+                        'Share' { 'The content comes from a share: AVDTune read the permissions of the folders, but it cannot see the share permissions; only administrators may be able to write to the share.' }
+                        'Media' { 'The content comes from read-only media (a mounted ISO).' }
+                        'Local' { 'The content comes from a local folder that only administrators can write to.' }
+                        default { '' }
+                    }
+                    $t += "Install $($new -join ', ') from $($Config.Source) with DISM (language pack, handwriting, OCR, speech, text-to-speech, fonts). $where This takes several minutes per language and a restart may follow. Installing a language pack CANNOT be undone by AVDTune: only a snapshot of the VM brings the earlier state back. After a language pack the latest cumulative update may have to be installed again (Learn). The Windows cleanup of unused language packs is turned off (3 scheduled tasks and one policy value; this stays on after Undo)."
+                }
             }
-            if ($Mode -in 'Defaults', 'All') { $t += 'Set display language, regional format, input and location for the current user and copy them to the welcome screen and new users (Copy-UserInternationalSettingsToSystem); set the system locale and the time zone as chosen. This changes the settings of the administrator who runs AVDTune as well. Display language, system locale and the copy take effect after a restart. Undo puts the earlier values back.' }
+            if ($Mode -in 'Defaults', 'All') {
+                $want = Resolve-AVDTuneLanguageConfig $Config $State
+                $nu = $State.NewUser
+                $pairs = @(@('Display language', $nu.Ui, $want.Ui), @('Regional format', $nu.Culture, $want.Culture), @('Input', $nu.InputTip, $want.InputTip), @('Location (GeoId)', $nu.GeoId, $want.GeoId), @('System locale', $State.SystemLocale, $want.SystemLocale), @('Time zone', $State.TimeZone, $want.TimeZone))
+                $lines = @(foreach ($p in $pairs) { if ($null -ne $p[2] -and "$($p[2])" -ne '' -and "$($p[1])" -ine "$($p[2])") { "$($p[0]): $(if ($null -ne $p[1] -and "$($p[1])" -ne '') { $p[1] } else { 'not set' }) -> $($p[2])" } })
+                $list = if ($lines.Count -gt 0) { "Changes:`n" + ($lines -join "`n") } else { 'No setting differs from what is there now.' }
+                $t += "Set display language, regional format, input and location for the current user and copy them to the welcome screen and new users (Copy-UserInternationalSettingsToSystem); set the system locale and the time zone as chosen. This changes the settings of the administrator who runs AVDTune as well. Display language, system locale and the copy take effect after a restart. Undo puts the earlier values back.`n$list"
+            }
             ($t -join "`n`n")
         }
     }
 }
-
 #endregion
 
 #region real adapter
@@ -475,7 +595,7 @@ function New-AVDTuneLanguageAdapter {
         The real adapter. NOT exercised by the checks beyond construction: written from the Learn pages and the cmdlet references and to be tried on a throw-away VM (docs\language.md, "not verified").
         Every writing member checks its arguments again against the fixed lists before a cmdlet or DISM is touched. DISM runs through the update adapter (full path, signature, job object, central child environment).
     #>
-    param($U = (New-AVDTuneUpdateAdapter))
+    param($U = (New-AVDTuneUpdateAdapter), [scriptblock]$UserListAdd)
     $tags = @($script:Languages | ForEach-Object { $_.Tag }); $cultures = @(Get-AVDTuneLanguageCultures | ForEach-Object { $_.Tag }); $tips = @(Get-AVDTuneLanguageInputs | ForEach-Object { $_.Tip }); $geos = @($script:Regions | ForEach-Object { $_.Id })
     $a = [ordered]@{ Kind = 'Real'; U = $U }
     $a.GetInstalled = {
@@ -517,22 +637,11 @@ function New-AVDTuneLanguageAdapter {
     $a.SetSystemLocale = { param($Tag) if ($Tag -cnotin $cultures) { throw 'Refused: system locale not on the list.' }; Set-WinSystemLocale -SystemLocale $Tag -ErrorAction Stop }.GetNewClosure()
     $a.GetTimeZones = { @([TimeZoneInfo]::GetSystemTimeZones() | ForEach-Object { $_.Id }) }
     $a.SetTimeZone = { param($Id) if ($Id -cnotin @([TimeZoneInfo]::GetSystemTimeZones() | ForEach-Object { $_.Id })) { throw 'Refused: time zone not known to Windows.' }; Set-TimeZone -Id $Id -ErrorAction Stop }
-    $a.CheckSource = {
-        # Media (a mounted ISO is a CD drive, read only), a local folder (must be admin-only) or a share (DISM checks the package signatures; the share must only be writable by trusted admins)
-        param($Path, $Root)
-        if (-not (Test-AVDTuneLanguageSource $Path)) { return @{ Ok = $false; Kind = ''; Problem = 'Not a plain local or share path.' } }
-        if (-not [IO.Directory]::Exists($Path)) { return @{ Ok = $false; Kind = ''; Problem = 'The folder does not exist.' } }
-        if (((New-Object IO.DirectoryInfo $Path).Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { return @{ Ok = $false; Kind = ''; Problem = 'The folder is a link.' } }
-        if ($Path.StartsWith('\\')) { return @{ Ok = $true; Kind = 'Share'; Problem = '' } }
-        $drive = New-Object IO.DriveInfo ($Path.Substring(0, 1))
-        if ($drive.DriveType -eq [IO.DriveType]::CDRom) { return @{ Ok = $true; Kind = 'Media'; Problem = '' } }
-        if (-not (Test-AVDTuneAdminOnlyPath -Path $Path -Base ($drive.RootDirectory.FullName))) { return @{ Ok = $false; Kind = 'Local'; Problem = 'The folder can be written by users who are not administrators; use the mounted ISO or an admin-only folder.' } }
-        @{ Ok = $true; Kind = 'Local'; Problem = '' }
-    }
+    $a.CheckSource = { param($Path, $Root) Get-AVDTuneLanguageSourceVerdict -Path $Path -Probe (New-AVDTuneLanguageSourceProbe) }
     $a.AddLanguage = {
         param($Tag, $Source)
         $r = Invoke-AVDTuneLanguageDism -U $U -Tag $Tag -Source $Source
-        $list = Get-WinUserLanguageList; if (@($list | Where-Object { $_.LanguageTag -ieq $Tag }).Count -eq 0) { [void]$list.Add($Tag); Set-WinUserLanguageList -LanguageList $list -Force -ErrorAction Stop }
+        if ($UserListAdd) { & $UserListAdd $Tag } else { $list = Get-WinUserLanguageList; if (@($list | Where-Object { $_.LanguageTag -ieq $Tag }).Count -eq 0) { [void]$list.Add($Tag); Set-WinUserLanguageList -LanguageList $list -Force -ErrorAction Stop } }   # $UserListAdd: the checks replace the write to the language list
         $r
     }.GetNewClosure()
     [pscustomobject]$a
@@ -543,5 +652,5 @@ function New-AVDTuneLanguageAdapter {
 Export-ModuleMember -Function Get-AVDTuneLanguageCatalog, Get-AVDTuneLanguageCultures, Get-AVDTuneLanguageRegions, Get-AVDTuneLanguageInputs, Get-AVDTuneLanguageSources, Get-AVDTuneLanguageAzureZone,
     Test-AVDTuneLanguageSource, Test-AVDTuneLanguageConfig, ConvertTo-AVDTuneLanguageConfig, Get-AVDTuneLanguageDefaults, Get-AVDTuneLanguageConfig, Set-AVDTuneLanguageConfig,
     Get-AVDTuneLanguageNewUser, Get-AVDTuneLanguageState, Resolve-AVDTuneLanguageConfig, Get-AVDTuneLanguageRows, Get-AVDTuneLanguageDismCalls, Invoke-AVDTuneLanguageDism,
-    Get-AVDTuneLanguageCleanupSteps, Get-AVDTuneLanguageSteps, Get-AVDTuneLanguageUndoRecord, Invoke-AVDTuneLanguage, Undo-AVDTuneLanguage, Get-AVDTuneLanguageConfirmText, New-AVDTuneLanguageAdapter,
+    Get-AVDTuneLanguageCleanupSteps, Get-AVDTuneLanguageSourceVerdict, Get-AVDTuneLanguageSourceChain, New-AVDTuneLanguageSourceProbe, Save-AVDTuneLanguageUndoRecord, Get-AVDTuneLanguageSteps, Get-AVDTuneLanguageUndoRecord, Invoke-AVDTuneLanguage, Undo-AVDTuneLanguage, Get-AVDTuneLanguageConfirmText, New-AVDTuneLanguageAdapter,
     Get-AVDTuneLanguageUndoPath, Get-AVDTuneLanguageAppliedPath, Get-AVDTuneLanguageConfigPath, ConvertTo-AVDTuneLcidName

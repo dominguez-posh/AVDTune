@@ -3,14 +3,14 @@
 # and the setters write the registry values of the fake machine that the real ones write (HKEY_USERS\.DEFAULT, Nls\Locale, TimeZoneInformation). Nothing of this
 # computer is touched. Everything asked is in .Log. Switches live in .Store:
 #   Installed (tags), User (@{ Ui; Culture; InputTip; GeoId } of the administrator), TimeZones, SourceKind ('Media'|'Local'|'Share'), SourceProblem (text: the folder is refused),
-#   DismFails (exit code of the DISM call that names this text in its arguments, e.g. 'Handwriting' or 'Client-Language-Pack'), CopyFails, TzFails, Unsigned ($true = DISM signature wrong).
+#   CopyWritesGeo (a GeoId the copy writes instead of the user's, to test the check after undo), DismFails (exit code of the DISM call that names this text in its arguments, e.g. 'Handwriting' or 'Client-Language-Pack'), CopyFails, TzFails, Unsigned ($true = DISM signature wrong).
 # All names are made up.
 if (-not (Get-Command New-AVDTuneFakeUpdates -ErrorAction SilentlyContinue)) { . (Join-Path $PSScriptRoot 'FakeUpdates.ps1') }   # the DISM calls run through the fake update adapter
 function New-AVDTuneFakeLanguage {
     param([Parameter(Mandatory)]$Machine, [hashtable]$Seed = @{})
     $s = @{
         Installed = @('en-US'); User = @{ Ui = 'en-US'; Culture = 'en-US'; InputTip = '0409:00000409'; GeoId = 244 }; TimeZones = @('UTC', 'W. Europe Standard Time', 'GMT Standard Time', 'Eastern Standard Time', 'Romance Standard Time')
-        SourceKind = 'Media'; SourceProblem = ''; DismFails = @{}; CopyFails = $false; TzFails = $false; Unsigned = $false; Log = (New-Object System.Collections.ArrayList)
+        SourceKind = 'Media'; SourceProblem = ''; DismFails = @{}; CopyFails = $false; CopyWritesGeo = $null; TzFails = $false; Unsigned = $false; Log = (New-Object System.Collections.ArrayList)
     }
     foreach ($e in $Seed.GetEnumerator()) { $s[$e.Key] = $e.Value }
     $m = $Machine
@@ -33,7 +33,7 @@ function New-AVDTuneFakeLanguage {
         & $m.RegSet "$def\Control Panel\International" 'LocaleName' $s.User.Culture 'String'
         $klid = ([string]$s.User.InputTip).Split(':')[1]
         & $m.RegSet "$def\Keyboard Layout\Preload" '1' $klid 'String'
-        & $m.RegSet "$def\Control Panel\International\Geo" 'Nation' ([string]$s.User.GeoId) 'String'
+        & $m.RegSet "$def\Control Panel\International\Geo" 'Nation' ([string]$(if ($null -ne $s.CopyWritesGeo) { $s.CopyWritesGeo } else { $s.User.GeoId })) 'String'
     }.GetNewClosure()
     $a.SetSystemLocale = {
         param($Tag)

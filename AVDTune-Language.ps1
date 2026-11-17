@@ -155,8 +155,9 @@ function Update-LangView {
         Set-LangCombo 'GeoId' @(Get-AVDTuneLanguageRegions | ForEach-Object { [pscustomobject]@{ Label = "$($_.Name)  ($($_.Id))"; Value = $_.Id } }) (& $want 'GeoId' $st.NewUser.GeoId)
         Set-LangCombo 'SystemLocale' @(Get-AVDTuneLanguageCultures | ForEach-Object { [pscustomobject]@{ Label = "$($_.Tag)  $($_.Name)"; Value = $_.Tag } }) (& $want 'SystemLocale' $st.SystemLocale)
         $zones = @(& $adapter.GetTimeZones | Sort-Object)
-        $zoneWant = if ($first -and -not $saved.TimeZone -and $st.DefaultTimeZone -and $st.DefaultTimeZone -in $zones) { $st.DefaultTimeZone } else { & $want 'TimeZone' $st.TimeZone }
-        Set-LangCombo 'TimeZone' @($zones | ForEach-Object { [pscustomobject]@{ Label = [string]$_; Value = [string]$_ } }) $zoneWant
+        # the Azure region only suggests a zone (marked in the list); the default stays "(keep as it is)"
+        $zoneWant = if ($first) { $saved.TimeZone } elseif ($prev.TimeZone) { $prev.TimeZone } else { $null }
+        Set-LangCombo 'TimeZone' @($zones | ForEach-Object { [pscustomobject]@{ Label = $(if ($st.DefaultTimeZone -and $_ -eq $st.DefaultTimeZone) { "$_  (suggested for the Azure region $($st.AzureRegion))" } else { [string]$_ }); Value = [string]$_ } }) $zoneWant
         $now = $ui.LangNow
         $now.Ui.Text = "Now for new users: $(if ($st.NewUser.Ui) { $st.NewUser.Ui } else { 'not set' })"
         $now.Culture.Text = "Now: $(if ($st.NewUser.Culture) { $st.NewUser.Culture } else { 'not set' })"
@@ -257,7 +258,9 @@ Add-Click $ui.BtnLangInstall {
     $new = @($cfg.Languages | Where-Object { $_ -notin $inst })
     if ($new.Count -eq 0) { throw 'Tick at least one language that is not installed yet.' }
     $problems = @(Test-AVDTuneLanguageConfig $cfg -InstalledTags $inst); if ($problems.Count -gt 0) { throw ($problems -join ' ') }
-    if (-not (Confirm-Action (Get-AVDTuneLanguageConfirmText -Mode Languages -Config $cfg -State $script:LangState) 'Language and region: cannot be undone')) { return }
+    $chk = & (Get-LangAdapter).CheckSource $cfg.Source $script:StateRoot
+    if (-not $chk.Ok) { throw "The content folder is not usable: $($chk.Problem)" }
+    if (-not (Confirm-Action (Get-AVDTuneLanguageConfirmText -Mode Languages -Config $cfg -State $script:LangState -SourceKind $chk.Kind) 'Language and region: cannot be undone')) { return }
     Save-LangConfig $cfg
     Start-LangJob 'Languages' $cfg; $ui.TxtLangState.Text = 'Installing languages ...'
 }
@@ -274,7 +277,9 @@ Add-Click $ui.BtnLangApply {
     elseif (@($cfg.Languages | Where-Object { $_ -notin $inst }).Count -gt 0) { $kind = 'All' }
     $problems = @(Test-AVDTuneLanguageConfig $cfg -InstalledTags $inst); if ($problems.Count -gt 0) { throw ($problems -join ' ') }
     $mode = if ($kind -eq 'All') { 'All' } else { 'Defaults' }
-    if (-not (Confirm-Action (Get-AVDTuneLanguageConfirmText -Mode $mode -Config $cfg -State $script:LangState) $(if ($kind -eq 'All') { 'Language and region: cannot be undone' } else { 'Language and region' }))) { return }
+    $srcKind = ''
+    if ($kind -eq 'All') { $chk = & (Get-LangAdapter).CheckSource $cfg.Source $script:StateRoot; if (-not $chk.Ok) { throw "The content folder is not usable: $($chk.Problem)" }; $srcKind = $chk.Kind }
+    if (-not (Confirm-Action (Get-AVDTuneLanguageConfirmText -Mode $mode -Config $cfg -State $script:LangState -SourceKind $srcKind) $(if ($kind -eq 'All') { 'Language and region: cannot be undone' } else { 'Language and region' }))) { return }
     Save-LangConfig $cfg
     Start-LangJob $kind $cfg; $ui.TxtLangState.Text = 'Setting the defaults for new users ...'
 }
