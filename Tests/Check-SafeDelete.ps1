@@ -40,6 +40,14 @@ function Move-Retry([string]$From, [string]$To, [bool]$IsDir) {
     }
 }
 $script:fsInfo = "fs=$(([IO.DriveInfo]::new([IO.Path]::GetPathRoot($base))).DriveFormat) base=$base"
+function Get-MoveProbe([string]$Folder) {
+    $o = @()
+    foreach ($rel in 'f.txt', 'sub\s.txt', 'sub\deeper', 'sub') {
+        $a = Join-Path $Folder $rel
+        try { [IO.Directory]::Exists($a) | Out-Null; if (Test-Path -LiteralPath $a -PathType Container) { [IO.Directory]::Move($a, "$a.p"); [IO.Directory]::Move("$a.p", $a) } else { [IO.File]::Move($a, "$a.p"); [IO.File]::Move("$a.p", $a) }; $o += "$rel ok" } catch { $o += "$rel " + ('{0:X8}' -f $_.Exception.InnerException.HResult) + $_.Exception.Message }
+    }
+    $o -join '; '
+}
 function New-Junction([string]$Path, [string]$Target) { [void](New-Item -ItemType Junction -Path $Path -Value $Target) }
 
 function Remove-OldPathVariant([string]$Folder, [scriptblock]$AfterCheck) {
@@ -126,7 +134,7 @@ try {
         param($Stage, $Path)
         if ($Stage -ne 'listed' -or $script:swapped -or (Split-Path $Path -Leaf) -ne 't') { return }
         $sub = Join-Path $Path 'sub'
-        Move-Retry $sub "$sub.moved" $true; New-Junction $sub $c.Out; $script:swapped = $true
+        try { Move-Retry $sub "$sub.moved" $true } catch { $script:caseErr = "diag: " + (Get-MoveProbe $Path); throw }; New-Junction $sub $c.Out; $script:swapped = $true
     }
     try { $r = Remove-AVDTuneTreeSafe -Path $c.Tree } catch { $script:caseErr = $_.Exception.Message } finally { [AVDTune.Native.SafeTree]::Hook = $null }
     Test-Check 'handles, swap between listing and opening: the junction is opened itself and removed as a link, the moved folder goes too, the target is untouched' ($script:swapped -and $r.Gone -and (Test-Path -LiteralPath $c.Victim) -and -not (Test-Path -LiteralPath $c.Tree)) "swapped=$($script:swapped) gone=$($r.Gone) $($script:caseErr) [$($script:fsInfo)]"
