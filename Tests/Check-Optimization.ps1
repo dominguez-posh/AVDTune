@@ -682,7 +682,7 @@ try {
     $m = New-TestMachine
     $m.Store.Hive.Registry['control panel\desktop|menushowdelay'] = '400'; $m.Store.Hive.Kinds['control panel\desktop|menushowdelay'] = 'String'
     $m.Store.Hive.Keys[$clsid.ToLowerInvariant()] = $true
-    [void](Invoke-Hive $m @($ctx, $msd)); $u = Invoke-Opt $m @($ctx, $msd) -Mode Undo
+    [void](Invoke-Hive $m @($ctx, $msd)); $u = Invoke-Hive $m @($ctx, $msd) -Mode Undo
     Test-Check 'default profile: Undo restores the earlier MenuShowDelay 400 as REG_SZ and keeps a CLSID key that existed before' ($u.Changed -eq 2 -and $m.Store.Hive.Registry['control panel\desktop|menushowdelay'] -eq '400' -and $m.Store.Hive.Kinds['control panel\desktop|menushowdelay'] -eq 'String' -and @($m.Log | Where-Object { $_ -eq "HiveKeyRemoveEmpty $clsid" }).Count -eq 0) (@($m.Log) -join ' | ')
     Clear-Backups
     # crash protection: a hive left loaded is unloaded first; a failing load changes nothing; an unload that needs a second try
