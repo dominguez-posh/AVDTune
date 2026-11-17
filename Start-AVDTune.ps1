@@ -337,8 +337,11 @@ function Complete-OverviewRefresh {
 }
 $script:Timer = New-Object System.Windows.Threading.DispatcherTimer
 $script:Timer.Interval = [TimeSpan]::FromMilliseconds(250)
-$script:Timer.Add_Tick({ try { Complete-OverviewRefresh } catch { Show-Error $_.Exception.Message } })
-$script:Timer.Add_Tick({ try { $stopError = Get-AVDTuneChangeStopError; if ($stopError) { Show-Error $stopError } } catch { } })   # Stop-AVDTuneChange never replaces a result with its lock error; it is shown here
+# one handler: the refresh, then the error of a stop that could not get the state lock (Stop-AVDTuneChange never replaces a result with it; read once, so it is shown once)
+$script:Timer.Add_Tick({
+    try { Complete-OverviewRefresh } catch { Show-Error $_.Exception.Message }
+    try { $stopError = Get-AVDTuneChangeStopError; if ($stopError) { Show-Error $stopError } } catch { }
+})
 
 Add-Click $ui.BtnRefresh { Start-OverviewRefresh }
 function Start-NewVersion {

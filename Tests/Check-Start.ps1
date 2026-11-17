@@ -659,7 +659,7 @@ try {
         $stopErr = Get-AVDTuneChangeStopError
         Test-Check 'stop (#66): a lock that cannot be had does not throw, the marker stays and the error is kept once for the window' (-not $thrown -and $stopErr -like '*could not be recorded*' -and (Test-AVDTuneChangeInProgress -Root $rn) -and -not (Get-AVDTuneChangeStopError)) "thrown=$thrown err=$stopErr"
         $vErr = Get-ThrownText { Start-AVDTuneImageVersion -Root $rn -Date ([datetime]'2026-11-05') -User 'admin1' }
-        Test-Check 'version (#66): a new image version waits for the state lock too (here it gives up with the lock message)' ($vErr -like '*state file is in use*') $vErr
+        Test-Check 'version (#66): a new image version waits for the state lock too (here it gives up with the lock message)' ($vErr -like '*state file is in use*' -and $vErr -like '*more than 1 seconds*') $vErr
         & (Get-Module AVDTune) { $script:StateLockSeconds = 30 }
         $syncV.Release = $true; [void]$rsV.EndInvoke($hV)
         Stop-AVDTuneChange -Root $rn -Owner $kStop

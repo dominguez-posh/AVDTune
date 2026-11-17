@@ -996,7 +996,7 @@ function Invoke-AVDTuneStateLock {
     $got = $false
     try {
         try { $got = $mutex.WaitOne([TimeSpan]::FromSeconds($script:StateLockSeconds)) } catch [System.Threading.AbandonedMutexException] { $got = $true }
-        if (-not $got) { throw 'The state file is in use by another operation of AVDTune for more than $($script:StateLockSeconds) seconds. Try again.' }
+        if (-not $got) { throw "The state file is in use by another operation of AVDTune for more than $($script:StateLockSeconds) seconds. Try again." }
         & $Block
     }
     finally { if ($got) { try { $mutex.ReleaseMutex() } catch { } }; $mutex.Dispose() }
