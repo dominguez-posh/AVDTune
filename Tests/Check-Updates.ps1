@@ -461,6 +461,64 @@ try {
     Test-Check 'FSLogix run with a file that is not signed by Microsoft: Failed BadSignature, the installer is never started' ($rs.Results[0].Status -eq 'Failed' -and $rs.Results[0].Code -eq 'BadSignature' -and -not (@($xs.M.Log | Where-Object { $_ -like '*/install*' }).Count)) $rs.Results[0].Message
     Close-AVDTuneWriteGate
     Test-Check 'the check never used the real state folder' ($tmp -ne (Join-Path ([Environment]::GetFolderPath('CommonApplicationData')) 'AVDTune')) $tmp
+
+    # The lock of the REAL adapter (#78): LockEnter is a GetNewClosure block and read $script:LockNames, which there is the empty variable of the closure's
+    # own module, so no mutex was ever taken and every winget/choco call ran unlocked. A fresh runspace with exactly the imports of the Updates and Software
+    # pages builds the real adapter. The mutex test uses its own name (Global\AVDTune-Check78-<guid>), never Global\PackTune, holds it only for the probe and
+    # frees it in finally; no winget, no choco, no WUA call.
+    $pageImports = @(foreach ($page in 'AVDTune-Updates.ps1', 'AVDTune-Software.ps1') { [regex]::Matches((Get-Content -Raw (Join-Path $repo $page)), "Import-Module \(Join-Path \`$AppRoot '([^']+)'\)") | ForEach-Object { $_.Groups[1].Value } }) | Select-Object -Unique
+    $testLock = 'Global\AVDTune-Check78-' + [guid]::NewGuid().ToString('N')
+    $rs = [powershell]::Create()
+    try {
+        [void]$rs.AddScript({
+                param($Repo, $Imports, $TestLock)
+                $ErrorActionPreference = 'Stop'
+                foreach ($i in $Imports) { Import-Module (Join-Path $Repo $i) -Force }
+                $r = @{ Names = @(); Search = ''; Register = ''; TestOk = $false; TestHeld = 0; OtherThread = $null; AfterExit = -1; Empty = $null; EmptyRan = $false; EmptyLocked = $null }
+                $u = New-AVDTuneUpdateAdapter
+                try { $r.Names = @(& $u.LockEnter.Module { $lockNames }) } catch { }
+                try { $r.Search = [string](& $u.WuaSearch.Module { $muServiceId }); $r.Register = [string](& $u.WuaRegisterMicrosoftUpdate.Module { $muServiceId }) } catch { }
+                $mod = Get-Module AVDTune.Updates
+                $keep = & $mod { $script:LockNames }
+                try {
+                    # the real LockEnter with a lock name of the test: the mutex must really be held (a second thread cannot take it)
+                    & $mod { param($n) $script:LockNames = @($n) } $TestLock
+                    $t = New-AVDTuneUpdateAdapter
+                    $l = & $t.LockEnter
+                    $r.TestOk = [bool]$l.Ok
+                    $held = @(); if ($t.State.ContainsKey('Locks')) { $held = @($t.State.Locks) }
+                    $r.TestHeld = $held.Count
+                    if ($held.Count -gt 0) {
+                        $other = [runspacefactory]::CreateRunspace(); $other.ThreadOptions = 'UseNewThread'; $other.Open()
+                        $probe = [powershell]::Create(); $probe.Runspace = $other
+                        try {
+                            [void]$probe.AddScript({ param($Mx) $got = $false; try { $got = $Mx.WaitOne(0) } catch [System.Threading.AbandonedMutexException] { $got = $true }; if ($got) { $Mx.ReleaseMutex() }; $got }).AddArgument($held[0])
+                            $r.OtherThread = [bool]($probe.Invoke() | Select-Object -Last 1)
+                        }
+                        finally { $probe.Dispose(); $other.Dispose() }
+                    }
+                    & $t.LockExit
+                    $r.AfterExit = $(if ($t.State.ContainsKey('Locks')) { @($t.State.Locks).Count } else { 0 })
+                    # no names: LockEnter fails closed and Invoke-AVDTuneLocked never runs the block
+                    & $mod { $script:LockNames = @() }
+                    $e = New-AVDTuneUpdateAdapter
+                    $r.Empty = & $e.LockEnter
+                    $r.EmptyLocked = Invoke-AVDTuneLocked -U $e -Script { $r.EmptyRan = $true }
+                    if ($e.State.ContainsKey('Locks')) { & $e.LockExit }
+                }
+                finally { & $mod { param($k) $script:LockNames = $k } $keep }
+                [pscustomobject]$r
+            }).AddArgument($repo).AddArgument($pageImports).AddArgument($testLock)
+        $lk = $rs.Invoke() | Select-Object -Last 1
+        $rsErr = @($rs.Streams.Error | ForEach-Object { $_.ToString() }) -join '; '
+    }
+    catch { $lk = $null; $rsErr = $_.Exception.Message }
+    finally { $rs.Dispose() }
+    Test-Check 'lock (#78): the closure of the real LockEnter sees both lock names (Global\PackTune, Global\IntuneChocolateyDeployment) in a runspace with the page imports' ($lk -and ($lk.Names -join ',') -eq 'Global\PackTune,Global\IntuneChocolateyDeployment' -and $pageImports.Count -ge 3 -and -not $rsErr) "imports=$($pageImports -join ','); names=$(if ($lk) { $lk.Names -join ',' }); err=$rsErr"
+    Test-Check 'lock (#78): the real LockEnter really holds the mutex (another thread cannot take it) and LockExit lets it go' ($lk -and $lk.TestOk -and $lk.TestHeld -eq 1 -and $lk.OtherThread -eq $false -and $lk.AfterExit -eq 0) "ok=$(if ($lk) { $lk.TestOk }); held=$(if ($lk) { $lk.TestHeld }); other thread got it=$(if ($lk) { $lk.OtherThread }); after exit=$(if ($lk) { $lk.AfterExit })"
+    Test-Check 'lock (#78): without lock names LockEnter fails closed and Invoke-AVDTuneLocked does not run the block' ($lk -and $lk.Empty -and -not $lk.Empty.Ok -and $lk.Empty.Error -match 'no lock names' -and $lk.EmptyLocked -and -not $lk.EmptyLocked.Ok -and -not $lk.EmptyRan) "empty=$(if ($lk -and $lk.Empty) { '' + $lk.Empty.Ok + ' ' + $lk.Empty.Error }); ran=$(if ($lk) { $lk.EmptyRan })"
+    Test-Check 'Microsoft Update (#78): WuaSearch and WuaRegisterMicrosoftUpdate of the real adapter see the service ID (no call to Windows Update)' ($lk -and $lk.Search -eq '7971f918-a847-4430-9279-4a52d1efe18d' -and $lk.Register -eq $lk.Search) "search=$(if ($lk) { $lk.Search }); register=$(if ($lk) { $lk.Register })"
+
     # the real adapter exposes the same members as the fake (read only, nothing is called)
     $real = New-AVDTuneUpdateAdapter; $fake = New-AVDTuneFakeUpdates
     $missing = @($real.PSObject.Properties.Name | Where-Object { $_ -notin 'Kind', 'State' -and $_ -notin $fake.PSObject.Properties.Name })

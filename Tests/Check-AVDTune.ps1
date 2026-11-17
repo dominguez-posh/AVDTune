@@ -417,6 +417,22 @@ try {
         Where-Object { [regex]::IsMatch([IO.File]::ReadAllText($_.FullName), "`r(?!`n)") } | ForEach-Object { $_.FullName.Substring($repo.Length + 1) })
     Test-Check 'no script contains a lone CR (it splits a statement for PowerShell but not in the editor)' ($loneCr.Count -eq 0) ($loneCr -join ', ')
 
+    # ---------------------------------------------------------------- no $script: inside a GetNewClosure block (#78)
+    # GetNewClosure binds the block to a new dynamic module: $script:X there is that module's (empty) variable, not the one of the file.
+    # The winget/choco lock read $script:LockNames that way and took no mutex at all. Values go into a local variable before GetNewClosure.
+    $closureScript = @(); $closureCount = 0
+    foreach ($f in @(Get-ChildItem -LiteralPath $repo -Recurse -File -Include '*.ps1', '*.psm1' | Where-Object { $_.FullName -notmatch '\\\.git\\' })) {
+        $tokens = $null; $parseErrors = $null
+        $ast = [System.Management.Automation.Language.Parser]::ParseFile($f.FullName, [ref]$tokens, [ref]$parseErrors)
+        foreach ($call in $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.InvokeMemberExpressionAst] -and [string]$n.Member.Extent.Text -eq 'GetNewClosure' }, $true)) {
+            $closureCount++
+            foreach ($v in $call.Expression.FindAll({ param($n) $n -is [System.Management.Automation.Language.VariableExpressionAst] -and $n.VariablePath.IsScript }, $true)) {
+                $closureScript += '{0}:{1} {2}' -f $f.FullName.Substring($repo.Length + 1), $v.Extent.StartLineNumber, $v.Extent.Text
+            }
+        }
+    }
+    Test-Check 'no GetNewClosure block reads or writes a $script: variable (it would be the empty one of the closure''s own module, #78)' ($closureScript.Count -eq 0 -and $closureCount -gt 50) "closures found: $closureCount; $($closureScript -join ', ')"
+
     # ---------------------------------------------------------------- the real machine, read only
     $real = New-AVDTuneMachine
     $rw = Get-AVDTuneWindowsInfo $real
