@@ -25,6 +25,8 @@ public static class LauncherSelfTest
         {
             Apps.CreateWorkLayout(dir);
             Add("this process runs elevated", true);
+            var refusal = RestrictedLauncher.DomainAdminRefusal(RestrictedLauncher.InspectProcess(Process.GetCurrentProcess().Handle).Groups);
+            Add("this account is in no domain-privileged group (app starts only with a local admin, #84)", refusal == null, refusal ?? "");
             IntPtr token = IntPtr.Zero;
             try
             {
@@ -67,7 +69,7 @@ public static class LauncherSelfTest
             Add($"{what}: integrity Medium or lower", t.IntegrityRid <= 0x2000, $"0x{t.IntegrityRid:X}");
             var g = RestrictedLauncher.AdminGroupProblem(t.Groups);
             var admin = t.Groups.FirstOrDefault(x => x.Sid == "S-1-5-32-544");
-            Add($"{what}: the Administrators group is deny-only (TokenGroups, SE_GROUP_USE_FOR_DENY_ONLY)", g == null, g ?? (admin.Sid == null ? "not in the token" : $"S-1-5-32-544 attributes 0x{admin.Attributes:X}"));
+            Add($"{what}: the Administrators group and every other admin-like group (built-in, S-1-5-114, domain-privileged) is deny-only (TokenGroups, SE_GROUP_USE_FOR_DENY_ONLY)", g == null, g ?? (admin.Sid == null ? "not in the token" : $"S-1-5-32-544 attributes 0x{admin.Attributes:X}"));
             var extra = RestrictedLauncher.ExtraPrivileges(t.Privileges);
             Add($"{what}: only standard-user privileges (TokenPrivileges)", extra.Count == 0, extra.Count == 0 ? string.Join(", ", t.Privileges) : "extra: " + string.Join(", ", extra));
         }

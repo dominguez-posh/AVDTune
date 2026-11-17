@@ -22,7 +22,32 @@ public static class RestrictedLauncher
     public const uint RestrictFlags = 0x4 | 0x1;
     /// <summary>SIDs made deny-only (ignored when the token does not have them): Administrators, Power Users, Account, Server, Print and Backup Operators, Replicator, Network Configuration
     /// Operators, Hyper-V Administrators and "local account and member of Administrators group".</summary>
-    public static readonly string[] DenyOnlySids = { "S-1-5-32-544", "S-1-5-32-547", "S-1-5-32-548", "S-1-5-32-549", "S-1-5-32-550", "S-1-5-32-551", "S-1-5-32-552", "S-1-5-32-556", "S-1-5-32-578", "S-1-5-114" };
+    public static readonly string[] DenyOnlySids = { "S-1-5-32-544", "S-1-5-32-547", "S-1-5-32-548", "S-1-5-32-549", "S-1-5-32-550", "S-1-5-32-551", "S-1-5-32-552", "S-1-5-32-554", "S-1-5-32-556", "S-1-5-32-569", "S-1-5-32-578", "S-1-5-114" };
+    /// <summary>Domain group RIDs that UAC filters or that are admin-like (issue #84): Enterprise Read-only DCs 498, Domain Admins 512, Domain Controllers 516, Cert Publishers 517, Schema Admins 518,
+    /// Enterprise Admins 519, Group Policy Creator Owners 520, Read-only DCs 521, Key Admins 526, Enterprise Key Admins 527, RAS and IAS Servers 553. Their SIDs differ per domain, so they are found
+    /// in the TokenGroups of this process and made deny-only there.</summary>
+    public static readonly uint[] DomainPrivilegedRids = { 498, 512, 516, 517, 518, 519, 520, 521, 526, 527, 553 };
+
+    /// <summary>A domain SID (S-1-5-21-a-b-c-RID) with one of <see cref="DomainPrivilegedRids"/>.</summary>
+    public static bool IsDomainPrivileged(string sid)
+    {
+        var parts = sid.Split('-');
+        return parts.Length == 8 && sid.StartsWith("S-1-5-21-", StringComparison.Ordinal) && uint.TryParse(parts[7], out uint rid) && DomainPrivilegedRids.Contains(rid);
+    }
+
+    /// <summary>A group that must not be usable for access in the reduced token: the fixed list or a domain-privileged group.</summary>
+    public static bool IsAdminLike(string sid) => DenyOnlySids.Contains(sid, StringComparer.OrdinalIgnoreCase) || IsDomainPrivileged(sid);
+
+    /// <summary>The SIDs to make deny-only for a token with these groups: the fixed list plus every domain-privileged group the token has.</summary>
+    public static List<string> DenyOnlyFor(IEnumerable<(string Sid, uint Attributes)> groups) => DenyOnlySids.Concat(groups.Select(g => g.Sid).Where(IsDomainPrivileged)).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+
+    /// <summary>Null when app starts are allowed for this elevated token. A domain-privileged group that is usable for access (not deny-only) refuses them: the reduced token shares the logon
+    /// session, so Kerberos and NTLM single sign-on keep the admin's network identity even with the groups deny-only (issue #84, point 2). App starts only with a local admin.</summary>
+    public static string? DomainAdminRefusal(IEnumerable<(string Sid, uint Attributes)> groups)
+    {
+        var found = groups.Where(g => IsDomainPrivileged(g.Sid) && (g.Attributes & 0x10) == 0).Select(g => g.Sid).ToList();
+        return found.Count == 0 ? null : "app starts only with a local admin: this account is in a domain-privileged group (" + string.Join(", ", found) + "), and a program started with user rights would keep its network identity (single sign-on)";
+    }
     private const uint CreateSuspended = 0x4, CreateUnicodeEnvironment = 0x400, CreateNoWindow = 0x08000000;
 
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
@@ -51,12 +76,12 @@ public static class RestrictedLauncher
     /// <summary>The token is acceptable: not elevated and integrity Medium (0x2000) or lower. Pure, so the rule is checked without a token.</summary>
     public static bool IntegrityAcceptable(uint integrityRid, bool elevated) => !elevated && integrityRid <= MediumRid;
 
-    /// <summary>One argument as CommandLineToArgvW reads it back (backslashes before a quote are doubled, the quote is escaped, blanks and quotes put the argument in quotes).</summary>
     /// <summary>The default DACL of the reduced token: the user and SYSTEM, full access. The default DACL of an elevated admin token grants Administrators and SYSTEM only; with Administrators
     /// deny-only the child could not open what it creates itself, and a console program ended at once with 0xC0000142 (its console host could not attach; measured on the GitHub runner, #14 N1).
     /// SaferComputeTokenFromLevel did the same replacement, which is why the Safer token started programs.</summary>
     public static string DefaultDaclSddl(string userSid) => $"D:(A;;GA;;;{userSid})(A;;GA;;;SY)";
 
+    /// <summary>One argument as CommandLineToArgvW reads it back (backslashes before a quote are doubled, the quote is escaped, blanks and quotes put the argument in quotes).</summary>
     public static string QuoteArg(string a)
     {
         if (a.Length > 0 && a.IndexOfAny(new[] { ' ', '\t', '\n', '\v', '"' }) < 0) return a;
@@ -83,24 +108,28 @@ public static class RestrictedLauncher
         return sb.ToString();
     }
 
-    /// <summary>The token of this process, reduced to a standard user at Medium integrity. The caller closes it.</summary>
+    /// <summary>The token of this process, reduced to a standard user at Medium integrity. The caller closes it. Refused (InvalidOperationException) when this account is in a domain-privileged
+    /// group (<see cref="DomainAdminRefusal"/>), and when the reduced token still has a usable admin-like group or a privilege outside the standard-user set (read back, fail closed).</summary>
     public static IntPtr MakeToken()
     {
         IntPtr self = IntPtr.Zero, token = IntPtr.Zero, sid = IntPtr.Zero;
-        var deny = new SidAndAttributes[DenyOnlySids.Length];
+        var deny = Array.Empty<SidAndAttributes>();
         try
         {
             // TOKEN_DUPLICATE | TOKEN_QUERY | TOKEN_ASSIGN_PRIMARY | TOKEN_ADJUST_DEFAULT: the new token gets the same access as this handle (it is queried, labelled and assigned)
             if (!OpenProcessToken(Process.GetCurrentProcess().Handle, 0x2 | 0x8 | 0x1 | 0x80, out self)) throw new Win32Exception(Marshal.GetLastWin32Error(), "the token of this process could not be opened");
+            var own = Inspect(self).Groups;
+            if (DomainAdminRefusal(own) is { } refusal) throw new InvalidOperationException(refusal);
+            var denySids = DenyOnlyFor(own);   // the fixed list plus the domain-privileged groups found in TokenGroups (their SIDs differ per domain)
+            deny = new SidAndAttributes[denySids.Count];
             for (int i = 0; i < deny.Length; i++)
-                if (!ConvertStringSidToSidW(DenyOnlySids[i], out deny[i].Sid)) throw new Win32Exception(Marshal.GetLastWin32Error());
+                if (!ConvertStringSidToSidW(denySids[i], out deny[i].Sid)) throw new Win32Exception(Marshal.GetLastWin32Error());
             if (!CreateRestrictedToken(self, RestrictFlags, (uint)deny.Length, deny, 0, IntPtr.Zero, 0, IntPtr.Zero, out token)) throw new Win32Exception(Marshal.GetLastWin32Error(), "CreateRestrictedToken (LUA token) failed");
             if (!ConvertStringSidToSidW("S-1-16-8192", out sid)) throw new Win32Exception(Marshal.GetLastWin32Error());
             SetUserDefaults(token);
             var label = new SidAndAttributes { Sid = sid, Attributes = 0x20 };   // SE_GROUP_INTEGRITY
             if (!SetTokenInformation(token, TokenIntegrityLevelClass, ref label, Marshal.SizeOf<SidAndAttributes>())) throw new Win32Exception(Marshal.GetLastWin32Error(), "the integrity level of the token could not be set");
-            var (rid, elevated) = Query(token);
-            if (!IntegrityAcceptable(rid, elevated)) throw new InvalidOperationException($"the reduced token is still too strong (integrity 0x{rid:X}, elevated {elevated})");
+            if (TokenProblem(Inspect(token)) is { } problem) throw new InvalidOperationException("the reduced token is still too strong: " + problem);
             IntPtr result = token; token = IntPtr.Zero;
             return result;
         }
@@ -174,8 +203,7 @@ public static class RestrictedLauncher
                 throw new Win32Exception(Marshal.GetLastWin32Error(), "CreateProcessAsUser failed");
             created = true;
             job.AssignHandle(pi.Process);
-            var (rid, elevated) = QueryProcess(pi.Process);
-            if (!IntegrityAcceptable(rid, elevated)) throw new InvalidOperationException($"the started program is not reduced (integrity 0x{rid:X}, elevated {elevated}); it was ended");
+            if (TokenProblem(InspectProcess(pi.Process)) is { } problem) throw new InvalidOperationException($"the started program is not reduced ({problem}); it was ended");
             var p = Process.GetProcessById(pi.ProcessId);
             if (ResumeThread(pi.Thread) == uint.MaxValue) throw new Win32Exception(Marshal.GetLastWin32Error(), "the new process could not be resumed");
             return p;
@@ -208,16 +236,27 @@ public static class RestrictedLauncher
     /// <summary>Privileges outside the standard-user set (empty = fine).</summary>
     public static List<string> ExtraPrivileges(IEnumerable<string> held) => held.Where(p => !StandardPrivileges.Contains(p, StringComparer.OrdinalIgnoreCase)).ToList();
 
-    /// <summary>Null when the group list is fine: the Administrators group (S-1-5-32-544) is either not there or has SE_GROUP_USE_FOR_DENY_ONLY (0x10) and is not enabled for access.</summary>
+    /// <summary>Null when the group list is fine: every admin-like group (<see cref="IsAdminLike"/>: Administrators, the other built-in admin-like groups, S-1-5-114 and the domain-privileged
+    /// groups such as Domain Admins) is either not there or has SE_GROUP_USE_FOR_DENY_ONLY (0x10) and is not enabled for access.</summary>
     public static string? AdminGroupProblem(IEnumerable<(string Sid, uint Attributes)> groups)
     {
         foreach (var (sid, attr) in groups)
         {
-            if (sid != "S-1-5-32-544") continue;
-            if ((attr & 0x10) == 0) return $"the Administrators group is not deny-only (attributes 0x{attr:X})";
-            if ((attr & 0x4) != 0) return $"the Administrators group is deny-only but also enabled (attributes 0x{attr:X})";
+            if (!IsAdminLike(sid)) continue;
+            string name = sid == "S-1-5-32-544" ? "the Administrators group" : "the admin-like group " + sid;
+            if ((attr & 0x10) == 0) return $"{name} is not deny-only (attributes 0x{attr:X})";
+            if ((attr & 0x4) != 0) return $"{name} is deny-only but also enabled (attributes 0x{attr:X})";
         }
         return null;
+    }
+
+    /// <summary>Null when the facts of a reduced token are acceptable: not elevated, Medium or lower, no usable admin-like group, only standard-user privileges. Pure, so it is checked with fakes.</summary>
+    public static string? TokenProblem(TokenFacts t)
+    {
+        if (!IntegrityAcceptable(t.IntegrityRid, t.Elevated)) return $"integrity 0x{t.IntegrityRid:X}, elevated {t.Elevated}";
+        if (AdminGroupProblem(t.Groups) is { } g) return g;
+        var extra = ExtraPrivileges(t.Privileges);
+        return extra.Count == 0 ? null : "privileges outside the standard-user set: " + string.Join(", ", extra);
     }
 
     public sealed record TokenFacts(uint IntegrityRid, bool Elevated, List<(string Sid, uint Attributes)> Groups, List<string> Privileges);
