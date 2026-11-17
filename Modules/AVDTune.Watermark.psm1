@@ -33,6 +33,10 @@ function Get-AVDTuneWatermarkPaths {
     $pf = & $Machine.KnownFolder 'ProgramFiles'
     $pd = & $Machine.KnownFolder 'CommonAppData'
     $sys = & $Machine.KnownFolder 'System'
+    # IO.Path.Combine takes a relative or empty folder as it is (the task would start a relative powershell.exe): only full paths with a drive (#83)
+    foreach ($kf in @(@('ProgramFiles', $pf), @('CommonAppData', $pd), @('System', $sys))) {
+        if (-not ([string]$kf[1] -match '\A[A-Za-z]:\\' -and [IO.Path]::IsPathRooted([string]$kf[1]))) { throw "The known folder $($kf[0]) is not a full path ('$($kf[1])')." }
+    }
     # plain string joins: Join-Path of Windows PowerShell 5.1 needs the drive to exist, the paths of a fake machine (X:\Fake) only exist as text
     $j = { param($a, $b) [IO.Path]::Combine([string]$a, [string]$b) }
     $dir = & $j (& $j $pf 'AVDTune') 'Watermark'

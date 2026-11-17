@@ -429,16 +429,41 @@ try {
     Test-Check 'a bad SID in the builder, an unparsable SDDL' ((Test-Throws { New-AVDTuneFSLogixRecommendedSddl -UsersSid 'Users' -AdminsSid $sddlAdmins }) -and (Test-Throws { Compare-AVDTuneFSLogixAcl -Sddl 'not sddl' })) $null
     # a master outside a domain (Entra only, before the join) cannot resolve DU, DA, ... : the recommendation has none, a found SDDL with them is still read
     Test-Check 'the recommended SDDL has no domain-relative alias (readable on a master outside a domain)' ($rs -notmatch '(?<=[OG]:)(DA|DU|DG|DC|DD|CA|SA|EA|PA|RO|CN|AP|KA|EK|RS)(?=[OGDS]:)' -and $rs -notmatch ';(DA|DU|DG|DC|DD|CA|SA|EA|PA|RO|CN|AP|KA|EK|RS)\)') $rs
-    $noDom = ConvertTo-AVDTuneSddlWithoutDomainAliases -Sddl 'O:DAG:DUD:PAI(A;OICI;FA;;;DA)(A;;0x1301bf;;;du)(A;OICI;FA;;;SY)(A;OICIIO;0x1301bf;;;CO)' -DomainSid 'S-1-5-21-1-2-3'
+    $fslMod = Get-Module AVDTune.FSLogix
+    $noDom = & $fslMod { ConvertTo-AVDTuneSddlWithoutDomainAliases -Sddl 'O:DAG:DUD:PAI(A;OICI;FA;;;DA)(A;;0x1301bf;;;du)(A;OICI;FA;;;SY)(A;OICIIO;0x1301bf;;;CO)' -DomainSid 'S-1-5-21-1-2-3' }
     Test-Check 'domain aliases in owner, group and trustees become SIDs of the given domain; other aliases and the rights (FA) stay' ($noDom -ceq 'O:S-1-5-21-1-2-3-512G:S-1-5-21-1-2-3-513D:PAI(A;OICI;FA;;;S-1-5-21-1-2-3-512)(A;;0x1301bf;;;S-1-5-21-1-2-3-513)(A;OICI;FA;;;SY)(A;OICIIO;0x1301bf;;;CO)') $noDom
-    $noDom2 = ConvertTo-AVDTuneSddlWithoutDomainAliases -Sddl 'O:BAG:DUD:PAI(A;OICI;FA;;;DU)' -DomainSid 'not a sid'
+    $noDom2 = & $fslMod { ConvertTo-AVDTuneSddlWithoutDomainAliases -Sddl 'O:BAG:DUD:PAI(A;OICI;FA;;;DU)' -DomainSid 'not a sid' }
     Test-Check 'without a valid domain SID the placeholder domain S-1-5-21-0-0-0 is used (matches no real group)' ($noDom2 -ceq 'O:BAG:S-1-5-21-0-0-0-513D:PAI(A;OICI;FA;;;S-1-5-21-0-0-0-513)') $noDom2
-    Test-Check 'an SDDL over 64 KB is refused before any regex runs' (Test-Throws { ConvertTo-AVDTuneSddlWithoutDomainAliases -Sddl ('O:DU' + ('(A;;FA;;;DU)' * 6000)) }) $null
+    Test-Check 'an SDDL over 64 KB is refused before any regex runs' (Test-Throws { & $fslMod { ConvertTo-AVDTuneSddlWithoutDomainAliases -Sddl ('O:DU' + ('(A;;FA;;;DU)' * 6000)) } }) $null
     Test-Check 'the domain part of the first domain SID (Entra SIDs and builtin groups have none)' ((Get-AVDTuneDomainSidOf @('S-1-12-1-1-2-3-4', 'S-1-5-32-544', $sddlAdmins)) -eq 'S-1-5-21-1-2-3' -and (Get-AVDTuneDomainSidOf @('S-1-5-32-545')) -eq '') $null
     $viaPlain = ConvertFrom-AVDTuneSddl $noDom
     Test-Check 'the replaced SDDL is read without a domain (owner and trustees as full SIDs)' ($viaPlain.Owner -eq 'S-1-5-21-1-2-3-512' -and @($viaPlain.Aces | Where-Object Sid -eq 'S-1-5-21-1-2-3-513').Count -eq 1) $viaPlain.Owner
     $foundDu = Compare-AVDTuneFSLogixAcl -Sddl "O:BAG:DUD:PAI(A;OICIIO;0x1301bf;;;CO)(A;OICI;FA;;;$sddlAdmins)(A;;0x1301bf;;;$sddlUsers)(A;OICI;FA;;;SY)" -UsersSids @($sddlUsers) -AdminsSids @($sddlAdmins)
     Test-Check 'a found SDDL with group DU is compared on any machine (in a domain or not): compliant' ($foundDu.Compliant) (($foundDu.Findings | ForEach-Object Text) -join ';')
+    # #83: Domain Users (-513) and Domain Computers (-515), as SID or alias, are broad when the users group is another AVD group; the owner and callback entries count
+    $avdUsers = 'S-1-5-21-1-2-3-1105'
+    $base83 = "(A;OICIIO;0x1301bf;;;CO)(A;OICI;FA;;;$sddlAdmins)(A;;0x1301bf;;;$avdUsers)(A;OICI;FA;;;SY)"
+    $cmp83 = { param($Sddl) Compare-AVDTuneFSLogixAcl -Sddl $Sddl -UsersSids @($avdUsers) -AdminsSids @($sddlAdmins) }
+    $redBroad = { param($c) -not $c.Compliant -and @($c.Findings | Where-Object { $_.Status -eq 'red' -and $_.Id -like 'broad-*' }).Count -ge 1 }
+    $clean83 = & $cmp83 "O:BAG:SYD:PAI$base83"
+    $du83 = & $cmp83 "O:BAG:SYD:PAI$base83(A;OICI;0x1301bf;;;S-1-5-21-1-2-3-513)"
+    $dc83 = & $cmp83 "O:BAG:SYD:PAI$base83(A;OICI;0x1200a9;;;S-1-5-21-4-5-6-515)"
+    $duAlias = & $cmp83 "O:BAG:SYD:PAI$base83(A;OICI;0x1301bf;;;DU)"
+    $dcAlias = & $cmp83 "O:BAG:SYD:PAI$base83(A;OICI;0x1200a9;;;DC)"
+    Test-Check 'ACL (#83): Domain Users or Domain Computers (SID of any domain or alias DU/DC) down the tree are broad: red; the same root without them is compliant' ($clean83.Compliant -and (& $redBroad $du83) -and (& $redBroad $dc83) -and (& $redBroad $duAlias) -and (& $redBroad $dcAlias)) "clean=$($clean83.Compliant) $((@($du83, $dc83, $duAlias, $dcAlias) | ForEach-Object { ($_.Findings | ForEach-Object Id) -join '+' }) -join ' | ')"
+    $ownDu = & $cmp83 "O:S-1-5-21-1-2-3-513G:SYD:PAI$base83"
+    $ownUser = & $cmp83 "O:S-1-5-21-1-2-3-1200G:SYD:PAI$base83"
+    $ownOk = @(foreach ($o in 'BA', 'SY', $sddlAdmins) { (& $cmp83 "O:$($o)G:SYD:PAI$base83").Compliant })
+    Test-Check 'ACL (#83): an owner outside Administrators, SYSTEM and the admins group is a finding (Domain Users red, another account yellow); BA, SY and the admins group are fine' (@($ownDu.Findings | Where-Object { $_.Id -eq 'owner' -and $_.Status -eq 'red' }).Count -eq 1 -and @($ownUser.Findings | Where-Object { $_.Id -eq 'owner' -and $_.Status -eq 'yellow' }).Count -eq 1 -and -not $ownUser.Compliant -and ($ownOk -notcontains $false)) "$(($ownDu.Findings | ForEach-Object { "$($_.Id)/$($_.Status)" }) -join ',') | $(($ownUser.Findings | ForEach-Object { "$($_.Id)/$($_.Status)" }) -join ',') | $($ownOk -join ',')"
+    $xaWide = & $cmp83 "O:BAG:SYD:PAI$base83(XA;OICI;FA;;;WD;(Member_of {SID(BA)}))"
+    $xaNarrow = & $cmp83 "O:BAG:SYD:PAI$base83(XA;;0x1200a9;;;S-1-5-21-1-2-3-1300;(Member_of {SID(BA)}))"
+    Test-Check 'ACL (#83): a callback (XA, conditional) entry counts as allow: Everyone down the tree red, another one yellow "check by hand", never compliant' ((& $redBroad $xaWide) -and -not $xaNarrow.Compliant -and @($xaNarrow.Findings | Where-Object { $_.Status -eq 'yellow' -and $_.Id -like 'conditional-*' }).Count -eq 1 -and @($xaNarrow.Findings | Where-Object Status -eq 'red').Count -eq 0) "$(($xaWide.Findings | ForEach-Object Id) -join ',') | $(($xaNarrow.Findings | ForEach-Object { "$($_.Id)/$($_.Status)" }) -join ',')"
+    $inUse = & $fslMod { @((Test-AVDTuneSddlDomainAliasInUse 'O:DUG:BAD:(A;;FA;;;BA)'), (Test-AVDTuneSddlDomainAliasInUse 'O:BAG:BAD:(A;;FA;;;du)'), (Test-AVDTuneSddlDomainAliasInUse 'O:BAG:DUD:(A;;FA;;;BA)')) }
+    $machineInDomain = $true; try { [void](New-Object System.Security.AccessControl.RawSecurityDescriptor 'O:BAG:BAD:(A;;FA;;;DU)') } catch { $machineInDomain = $false }
+    $guess = & $cmp83 "O:BAG:SYD:PAI$base83(A;;0x1200a9;;;DA)"
+    $guessOk = if ($machineInDomain) { -not $guess.Findings.Where({ $_.Id -eq 'domain-guessed' }) } else { -not $guess.Compliant -and @($guess.Findings | Where-Object { $_.Id -eq 'domain-guessed' -and $_.Status -eq 'yellow' }).Count -eq 1 }
+    Test-Check 'ACL (#83): an alias as owner or trustee read with a guessed domain is a yellow finding (never green); only the group alias needs no guess' ($inUse[0] -and $inUse[1] -and -not $inUse[2] -and $guessOk) "inUse=$($inUse -join ',') inDomain=$machineInDomain $(($guess.Findings | ForEach-Object Id) -join ',')"
+    Test-Check 'ACL (#83): ConvertTo-AVDTuneSddlWithoutDomainAliases is not exported (for reading only)' ($null -eq (Get-Command ConvertTo-AVDTuneSddlWithoutDomainAliases -ErrorAction SilentlyContinue) -and $null -ne (Get-Command Test-AVDTuneBroadSid -ErrorAction SilentlyContinue)) $null
 
     # ---------------------------------------------------------------- function test
     $goodF = { New-AVDTuneFakeFSLogix -Seed @{ Acl = @{ $share = $rs }; Probe = @{}; Defender = @{ Paths = @(); Processes = @() } } }

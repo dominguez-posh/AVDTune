@@ -481,7 +481,7 @@ function Invoke-AVDTuneStorageCheck {
                     $fr = Get-AVDTuneStorageShareAcl -Files $Files -Account $share.Account -Share $share.Share -Path $fo -Token $StorageToken
                     if (-not $fr.Ok) { continue }
                     $acl = ConvertFrom-AVDTuneSddl $fr.Sddl -DomainSid (Get-AVDTuneDomainSidOf (@($AdminsSids) + @($UsersSids)))
-                    $bad = @($acl.Aces | Where-Object { $_.Type -eq 'AccessAllowed' -and ($_.Sid -in (@('S-1-1-0', 'S-1-5-11', 'S-1-5-32-545') + @($UsersSids))) })
+                    $bad = @($acl.Aces | Where-Object { (Test-AVDTuneAllowAce $_) -and (Test-AVDTuneBroadSid $_.Sid $UsersSids) })   # also Domain Users/Computers and callback entries (#83)
                     if ($bad.Count -gt 0) { [void]$broadFolders.Add($fo) }
                 }
                 if ($broadFolders.Count -gt 0) { Add (New-AVDTuneStRow 'st.acl.folders' 5 'NTFS rights of the profile folders' 'red' "Users or Everyone have access to the profile folder(s) $($broadFolders -join ', '): other users could open them." 'Remove the broad entries from the folders; each folder belongs to its owner (CREATOR OWNER) and the administrators only.' -Source $aclSource -Verified $false -Note 'A sample of at most 5 folders is read.') }

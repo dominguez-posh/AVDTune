@@ -1600,6 +1600,16 @@ function Test-AVDTuneChangeInProgress {
     [bool]($m -and $m.Live)
 }
 
+function Assert-AVDTuneNoForeignChange {
+    # A repair at the start (interrupted finish, maintenance mode, benchmark) first asks the state lock: when another AVDTune process holds a live marker, its
+    # operation still runs (it is no crash) and nothing is repaired under it (#49)
+    param([string]$Root = (Get-AVDTuneRoot))
+    Invoke-AVDTuneStateLock {
+        $m = Get-AVDTuneChangeMarker -Root $Root
+        if ($m -and $m.Live -and $m.Pid -ne $PID) { throw "Another AVDTune process (ID $($m.Pid), since $($m.Started.ToLocalTime().ToString('yyyy-MM-dd HH:mm'))) is changing the master: its operation still runs. Repair only when it has ended." }
+    }
+}
+
 function Resolve-AVDTuneStaleChange {
     # A marker whose process is gone (crash): the end of that change is unknown, so the time of this detection counts as its last change; the marker is cleared
     param([string]$Root = (Get-AVDTuneRoot))
@@ -2236,7 +2246,7 @@ function Get-AVDTuneOverview {
 
 Export-ModuleMember -Function Get-AVDTuneDcFromNtDomain, Get-AVDTuneSystemFolder, Get-AVDTuneSystemModulePath, Set-AVDTuneSafeModulePath, Test-AVDTuneModulePathStable, Assert-AVDTuneModulePathStable, Get-AVDTuneModulePathProblems, New-AVDTunePowerShell, New-AVDTuneRunspacePool, Get-AVDTuneChocolateyRoot, Get-AVDTuneChildTool, Initialize-AVDTuneToolTemp, Get-AVDTuneChildEnvironment, Get-AVDTuneProfilePath, Get-AVDTuneHklmValue, New-AVDTuneChildStartInfo, Get-AVDTuneProp, Get-AVDTuneWebResponse, Test-AVDTuneElevated, Get-AVDTuneRoot, Test-AVDTuneDefaultRoot, Test-AVDTuneTestMode, Resolve-AVDTuneTestScript, Get-AVDTuneLongPath, Get-AVDTuneTestModeRefusal, Confirm-AVDTuneAction, ConvertTo-AVDTuneArgument, New-AVDTuneMachine, Invoke-AVDTuneMachine, Invoke-AVDTuneDefaultHiveUnload, Remove-AVDTuneTreeSafe,
     New-AVDTuneStateSecurity, Initialize-AVDTuneState, Read-AVDTuneAclInfo, Get-AVDTuneStateSecurityProblems, Move-AVDTuneStateToQuarantine, New-AVDTuneProtectedFolder, Assert-AVDTuneStateSecurity, Get-AVDTuneStateSecurityReport, Get-AVDTuneState, Set-AVDTuneState, Test-AVDTuneImageVersion, Get-AVDTuneNextImageVersion, Start-AVDTuneImageVersion,
-    Add-AVDTuneRun, Get-AVDTuneRun, Get-AVDTuneLastChange, Get-AVDTuneChangeTimes, Get-AVDTuneChangeMarker, Invoke-AVDTuneStateLock, Get-AVDTuneChangeStopError, Test-AVDTuneChangeInProgress, Resolve-AVDTuneStaleChange, Start-AVDTuneChange, Stop-AVDTuneChange, Get-AVDTuneSnapshotClockBufferMinutes, ConvertTo-AVDTuneUtc, Get-AVDTuneSnapshotWindow, Test-AVDTuneSnapshotInWindow,New-AVDTuneStep, Invoke-AVDTuneStep, New-AVDTuneStepFromData, Get-AVDTuneStepCatalog, Invoke-AVDTune,
+    Add-AVDTuneRun, Get-AVDTuneRun, Get-AVDTuneLastChange, Get-AVDTuneChangeTimes, Get-AVDTuneChangeMarker, Invoke-AVDTuneStateLock, Get-AVDTuneChangeStopError, Test-AVDTuneChangeInProgress, Assert-AVDTuneNoForeignChange, Resolve-AVDTuneStaleChange, Start-AVDTuneChange, Stop-AVDTuneChange, Get-AVDTuneSnapshotClockBufferMinutes, ConvertTo-AVDTuneUtc, Get-AVDTuneSnapshotWindow, Test-AVDTuneSnapshotInWindow,New-AVDTuneStep, Invoke-AVDTuneStep, New-AVDTuneStepFromData, Get-AVDTuneStepCatalog, Invoke-AVDTune,
     Add-AVDTuneChangeLogEntry, Get-AVDTuneChangeLog, Get-AVDTuneChangeLogVersions, ConvertTo-AVDTuneChangeLogDocument, Export-AVDTuneChangeLog,
     Get-AVDTuneWindowsInfo, Get-AVDTuneOfficeInfo, Get-AVDTuneSourceImage, Get-AVDTuneHealth, Get-AVDTuneOverview, Write-AVDTuneFile, Read-AVDTuneJson,
     Open-AVDTuneWriteGate, Close-AVDTuneWriteGate, Set-AVDTuneWriteBlock, Clear-AVDTuneWriteBlock, Get-AVDTuneWriteBlock, Get-AVDTuneWriteGate, Test-AVDTuneWriteAllowed, Remove-AVDTuneControlCharacters, ConvertTo-AVDTuneTestResult,

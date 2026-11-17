@@ -310,6 +310,17 @@ try {
     Close-AVDTuneWriteGate
     Test-Check 'repair needs the open write gate' ((Test-Throws { Repair-AVDTuneFinishCrash -Machine $m4b -Root $root4 -User 'admin1' }) -and $m4b.Log.Count -eq 0) $null
     Open-AVDTuneWriteGate -SnapshotId 'snap-check' -ConfirmedBy 'Check Runner'
+    # #49: a live marker of another AVDTune process: the finish repair refuses before anything (its finish still runs), the record stays Active
+    $psiF = New-Object System.Diagnostics.ProcessStartInfo (Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'); $psiF.Arguments = '-NoProfile -NonInteractive -Command Start-Sleep -Seconds 60'; $psiF.UseShellExecute = $false; $psiF.CreateNoWindow = $true
+    $foreign = [Diagnostics.Process]::Start($psiF)
+    try {
+        Start-Sleep -Milliseconds 500
+        [void](Set-AVDTuneState -Root $root4 -Values @{ ChangeInProgress = [ordered]@{ Started = [datetime]::UtcNow.ToString('o'); Pid = $foreign.Id; ProcessStart = $foreign.StartTime.ToUniversalTime().ToString('o'); ProcessName = $foreign.ProcessName } })
+        $tForeign = Get-ThrownText { Repair-AVDTuneFinishCrash -Machine $m4b -Root $root4 -User 'admin1' }
+        $tForeignMaint = Get-ThrownText { Repair-AVDTuneMaintenanceCrash -Machine $m4b -Root $root4 -User 'admin1' }
+        Test-Check 'repair (#49): while another AVDTune process holds the change marker the finish and the maintenance repair are refused with that reason, nothing is changed, the record stays Active' ($tForeign -like '*Another AVDTune process*still runs*' -and $tForeignMaint -like '*Another AVDTune process*still runs*' -and $m4b.Log.Count -eq 0 -and (Get-AVDTuneFinishCrash -Root $root4)) "$tForeign | $tForeignMaint"
+    }
+    finally { [void](Set-AVDTuneState -Root $root4 -Values @{ ChangeInProgress = $null }); try { if (-not $foreign.HasExited) { $foreign.Kill() } } catch { } }
     $rep = Repair-AVDTuneFinishCrash -Machine $m4b -Root $root4 -User 'admin1'
     Test-Check 'repair: stopped services run again, record closed (repaired), change log entry, the finish can be run again' ($rep.Repaired -and (& $m4b.ServiceGet 'wuauserv').Status -eq 'Running' -and (& $m4b.ServiceGet 'bits').Status -eq 'Running' -and -not (Get-AVDTuneFinishCrash -Root $root4) -and (Get-AVDTuneFinishRecord $root4).Phase -eq 'repaired' -and @(Get-AVDTuneChangeLog -Root $root4 | Where-Object { $_.Category -eq 'Finish' -and $_.Text -like '*did not end properly*' }).Count -eq 1) $rep.Message
 
@@ -418,6 +429,7 @@ exit 0
     $pageAst = [Management.Automation.Language.Parser]::ParseInput($page, [ref]$null, [ref]$null)
     $startFn = $pageAst.Find({ param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Start-SealJob' }, $true)
     Invoke-Expression $startFn.Extent.Text
+    $tasksText = [IO.File]::ReadAllText((Join-Path $repo 'AVDTune-Tasks.ps1')); Invoke-Expression $tasksText.Substring($tasksText.IndexOf('$script:WriterJobVariables'))   # Assert-NoOtherWriter (#49)
     function Start-AVDTuneUiTask { param($Kind, $Title, $Step) [pscustomobject]@{ Kind = $Kind } }
     function Set-ShutdownBlock { param($On) }
     function Set-SealBusy { param($Busy) }
@@ -431,6 +443,37 @@ exit 0
         if ($t -like 'Another operation is still running.*') { $blocked += $jn }
     }
     Test-Check 'page behavior: a running finish, update, benchmark, readiness, overview, FSLogix, optimization read or optimization run job each blocks the start' ($blocked.Count -eq 8) ($blocked -join ',')
+    # #49: the finish asks the central writer list too (a language run or an install of AVDTune was not in its own list), and the finish and the sign-in exclude each other
+    $blocked49 = @()
+    foreach ($w in @(@('LangJob', @{ Kind = 'Install' }), @('VdiJob', @{ Kind = 'Install' }), @('OffJob', @{ Kind = 'Apply' }), @('RelJob', @{ Kind = 'Install' }))) {
+        Set-Variable -Scope Script -Name $w[0] -Value $w[1]
+        $t = Get-ThrownText { Start-SealJob }
+        Remove-Variable -Scope Script -Name $w[0]
+        if ($t -like "*($($w[0]))*") { $blocked49 += $w[0] }
+    }
+    $script:SignInBusy = $true; $tSign = Get-ThrownText { Start-SealJob }; $script:SignInBusy = $false
+    Test-Check 'page behavior (#49): a running language, VDI, Office or AVDTune install job and a running sign-in each block the start of the finish' ($blocked49.Count -eq 4 -and $tSign -like '*sign-in is running*') "$($blocked49 -join ',') / $tSign"
+    $startAst49 = [Management.Automation.Language.Parser]::ParseFile((Join-Path $repo 'AVDTune-Start.ps1'), [ref]$null, [ref]$null)
+    foreach ($fnName in 'Invoke-SignIn', 'Invoke-SignOut') { Invoke-Expression ($startAst49.Find({ param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $fnName }, $true).Extent.Text) }
+    $sign = @{ Msg = ''; Core = 0; BusyInCore = $false; Out = 0 }
+    function T([string]$Key) { $Key }
+    function Set-StageMessage($Text, $Kind) { $sign.Msg = $Text }
+    function Invoke-SignInCore([switch]$Setup) { $sign.Core++; $sign.BusyInCore = [bool]$script:SignInBusy }
+    function Disconnect-AVDTuneSession($S) { $sign.Out++ }
+    function Get-AVDTuneSignInLeftovers { @() }
+    function Get-StartTempRoot { 'x' }
+    function Add-StartProtocol { }
+    function Show-Toast { }
+    function Close-Stage { }
+    function Update-StartView { }
+    $script:StartContext = @{ Session = 'session' }
+    $script:SealJob = @{ Running = $true }
+    Invoke-SignIn; Invoke-SignOut
+    $refused = ($sign.Core -eq 0 -and $sign.Out -eq 0 -and $sign.Msg -eq 'stage.signin.sealbusy')
+    $script:SealJob = $null
+    Invoke-SignIn
+    Test-Check 'sign-in (#49): sign-in and sign-out are refused while the finish runs (its session stays), without a finish the sign-in runs and counts as running until it ends' ($refused -and $sign.Core -eq 1 -and $sign.BusyInCore -and -not $script:SignInBusy) "refused=$refused core=$($sign.Core) busy=$($sign.BusyInCore)/$($script:SignInBusy)"
+    $script:StartContext = @{ Session = $null }
     $rootJ = New-Root; [void](Save-Healthcheck -Root $rootJ)
     $script:StateRoot = $rootJ; $script:AppRoot = $repo; $script:TestMode = $true
     $script:TestInfo = @{ FakeScript = (Join-Path $PSScriptRoot 'Fakes\FakeMachine.ps1') }

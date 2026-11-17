@@ -94,6 +94,11 @@ try {
 
     # ---------------------------------------------------------------- task definition
     $paths = Get-AVDTuneWatermarkPaths (New-AVDTuneFakeMachine)
+    # #83: an empty or relative known folder is refused (IO.Path.Combine would build a relative path for the task)
+    $kfBad = @(foreach ($v in '', 'Program Files', '\Program Files', 'C:Program Files') {
+            $mk = New-AVDTuneFakeMachine; $mk.KnownFolder = { param($Name) if ($Name -eq 'ProgramFiles') { $v } else { 'X:\Fake\ProgramData' } }.GetNewClosure()
+            try { [void](Get-AVDTuneWatermarkPaths $mk); "accepted '$v'" } catch { if ($_.Exception.Message -notlike '*not a full path*') { "other error for '$v': $($_.Exception.Message)" } } })
+    Test-Check 'paths (#83): an empty, relative or drive-relative known folder is refused, the full paths of the fake machine are taken' ($kfBad.Count -eq 0 -and $paths.PowerShell -eq 'X:\Fake\Windows\System32\WindowsPowerShell\v1.0\powershell.exe') ($kfBad -join '; ')
     $xml = New-AVDTuneWatermarkTaskXml -Paths $paths
     $info = Get-AVDTuneTaskInfoFromXml $xml
     Test-Check 'task xml: logon trigger, principal is the group Users by SID, no user, enabled' ($info.Logon -and $info.GroupSid -eq 'S-1-5-32-545' -and -not $info.UserSid -and $info.Enabled -and $xml -like '*<GroupId>S-1-5-32-545</GroupId>*') $null

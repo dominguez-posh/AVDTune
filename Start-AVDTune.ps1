@@ -581,7 +581,7 @@ function Get-ShutdownReasonText { T 'shell.shutdownreason' }
 function Get-WindowHandle { (New-Object System.Windows.Interop.WindowInteropHelper $window).Handle }
 function Set-ShutdownBlock([bool]$On) {
     # Off only when no job is left: an ending search must not take the block away from a run that still goes (#66)
-    if (-not $On) { foreach ($jobName in $script:WriterJobVariables) { if ($jobName -ne 'ReadyJob' -and (Get-Variable -Scope Script -Name $jobName -ValueOnly -ErrorAction SilentlyContinue)) { return } } }
+    if (-not $On) { foreach ($jobName in $script:WriterJobVariables) { if ($jobName -notin 'ReadyJob', 'RelJob' -and (Get-Variable -Scope Script -Name $jobName -ValueOnly -ErrorAction SilentlyContinue)) { return } } }
     try {
         $h = Get-WindowHandle
         if ($h -eq [IntPtr]::Zero) { return }

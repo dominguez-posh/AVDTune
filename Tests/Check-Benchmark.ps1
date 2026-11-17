@@ -132,6 +132,16 @@ try {
     $crash = Get-AVDTuneBenchmarkCrash -Root $tmp
     Test-Check 'crash: a journal at the next start is found (run id, services)' ($crash.RunId -eq 'r1' -and $crash.Services.Count -eq 3) $null
     Test-Check 'cleanliness check names the leftovers' ((Get-Leftover -Bench $b -Root $tmp).Count -ge 2) $null
+    # #49: another live AVDTune process holds the change marker (a short sleeping process of this check stands in for it): the repair refuses and changes nothing
+    $psiF = New-Object System.Diagnostics.ProcessStartInfo (Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'); $psiF.Arguments = '-NoProfile -NonInteractive -Command Start-Sleep -Seconds 60'; $psiF.UseShellExecute = $false; $psiF.CreateNoWindow = $true
+    $foreign = [Diagnostics.Process]::Start($psiF)
+    try {
+        Start-Sleep -Milliseconds 500
+        [void](Set-AVDTuneState -Root $tmp -Values @{ ChangeInProgress = [ordered]@{ Started = [datetime]::UtcNow.ToString('o'); Pid = $foreign.Id; ProcessStart = $foreign.StartTime.ToUniversalTime().ToString('o'); ProcessName = $foreign.ProcessName } })
+        $tForeign = $(try { [void](Repair-AVDTuneBenchmarkCrash -Machine $m -Bench $b -Root $tmp -User 'admin1'); '' } catch { $_.Exception.Message })
+        Test-Check 'repair (#49): while another AVDTune process holds the change marker the repair is refused, services stay stopped, the journal stays' ($tForeign -like '*Another AVDTune process*' -and (& $svc 'wuauserv') -eq 'Stopped' -and (Test-Path (Get-AVDTuneBenchmarkJournalPath $tmp))) $tForeign
+    }
+    finally { [void](Set-AVDTuneState -Root $tmp -Values @{ ChangeInProgress = $null }); try { if (-not $foreign.HasExited) { $foreign.Kill() } } catch { } }
     $fix = Repair-AVDTuneBenchmarkCrash -Machine $m -Bench $b -Root $tmp -User 'admin1'
     Test-Check 'repair: services running again, journal, script and task gone, change log note' ($fix.Repaired -and (& $svc 'wuauserv') -eq 'Running' -and (& $svc 'WSearch') -eq 'Running' -and -not (Test-Path (Get-AVDTuneBenchmarkJournalPath $tmp)) -and -not $b.Store.Tasks.ContainsKey('AVDTune-BenchmarkRestore') -and @(Get-AVDTuneChangeLog -Root $tmp | Where-Object { $_.Category -eq 'Benchmark' -and $_.Text -like 'Restored*' }).Count -eq 1) $fix.Message
     Test-Check 'repair without a journal does nothing' (-not (Repair-AVDTuneBenchmarkCrash -Machine $m -Bench $b -Root $tmp).Repaired) $null

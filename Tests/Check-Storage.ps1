@@ -204,6 +204,11 @@ try {
     Test-Check 'without the group SIDs the diff is not offered (the groups must be known)' ($null -eq $nog.AclDiff -and (Get-Row $nog 'st.acl.root').Fix -like '*users and administrators group*') $null
     $broad = New-Env -FilesSeed @{ Acls = @{ '' = $goodSddl; 'S-1-5-21-1-2-3-1600_alice' = "O:BAG:DUD:PAI(A;OICI;FA;;;S-1-5-21-1-2-3-512)(A;OICI;0x1301bf;;;$usersSid)" }; Folders = @('S-1-5-21-1-2-3-1600_alice') }
     Test-Check 'a profile folder that the users group can open: red' ((Get-Row (Invoke-Check $broad) 'st.acl.folders').Status -eq 'red') $null
+    # #83: Domain Computers of another domain and a callback entry for Everyone on a profile folder are broad too
+    $dcF = New-Env -FilesSeed @{ Acls = @{ '' = $goodSddl; 'S-1-5-21-1-2-3-1600_alice' = "O:BAG:DUD:PAI(A;OICI;FA;;;S-1-5-21-1-2-3-512)(A;OICI;0x1200a9;;;S-1-5-21-7-8-9-515)" }; Folders = @('S-1-5-21-1-2-3-1600_alice') }
+    $xaF = New-Env -FilesSeed @{ Acls = @{ '' = $goodSddl; 'S-1-5-21-1-2-3-1600_alice' = "O:BAG:DUD:PAI(A;OICI;FA;;;S-1-5-21-1-2-3-512)(XA;OICI;0x1200a9;;;WD;(Member_of {SID(BA)}))" }; Folders = @('S-1-5-21-1-2-3-1600_alice') }
+    $okF = New-Env -FilesSeed @{ Acls = @{ '' = $goodSddl; 'S-1-5-21-1-2-3-1600_alice' = "O:BAG:DUD:PAI(A;OICI;FA;;;S-1-5-21-1-2-3-512)(A;OICI;FA;;;S-1-5-21-1-2-3-1600)" }; Folders = @('S-1-5-21-1-2-3-1600_alice') }
+    Test-Check 'profile folders (#83): Domain Computers of any domain and a callback entry for Everyone are red, the owner and the admins alone green' ((Get-Row (Invoke-Check $dcF) 'st.acl.folders').Status -eq 'red' -and (Get-Row (Invoke-Check $xaF) 'st.acl.folders').Status -eq 'red' -and (Get-Row (Invoke-Check $okF) 'st.acl.folders').Status -eq 'green') $null
     $fb = Invoke-Check (New-Env -FilesSeed @{ Forbidden = $true })
     Test-Check '403 on the ACL read: yellow row names the role (Privileged Reader), the key is NOT used without confirmation' ((Get-Row $fb 'st.acl.role').Status -eq 'yellow' -and (Get-Row $fb 'st.acl.role').Reason -like '*403*' -and (Get-Row $fb 'st.acl.role').Fix -like '*Privileged Reader*' -and (Get-Row $fb 'st.acl.key').Status -eq 'info' -and $fb.KeyUsed -eq $false -and $fb.Overall -eq 'yellow') $null
     $efb = New-Env -FilesSeed @{ Forbidden = $true }

@@ -36,6 +36,8 @@ function Update-SealView {
 }
 function Start-SealJob {
     foreach ($other in 'SealJob', 'UpdJob', 'BenchJob', 'ReadyJob', 'OverviewJob', 'FslJob', 'OptJob', 'OptRun') { if (Get-Variable -Scope Script -Name $other -ValueOnly -ErrorAction SilentlyContinue) { throw 'Another operation is still running.' } }
+    Assert-NoOtherWriter   # the central list too (release, language, VDI, Office, software jobs, #49)
+    if ($script:SignInBusy) { throw 'A sign-in is running: start the finish when it is done.' }   # the finish uses its session (#49)
     # the gate again, directly before the first write, on the UI thread (a change between display and click blocks here)
     $gate = Test-AVDTuneFinishGate -Root $script:StateRoot
     if (-not $gate.Allowed) { Update-SealView; throw "The finish is not allowed: $(@($gate.Reasons) -join ' ')" }

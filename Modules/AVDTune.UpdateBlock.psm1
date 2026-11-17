@@ -328,6 +328,7 @@ function Repair-AVDTuneMaintenanceCrash {
     [CmdletBinding()]
     param([Parameter(Mandatory)]$Machine, [string]$Root = (Get-AVDTuneRoot), [string]$User)
     if (-not (Test-AVDTuneWriteAllowed)) { throw 'The snapshot gate is not confirmed: AVDTune is read only until a snapshot of today is confirmed on the Overview.' }
+    Assert-AVDTuneNoForeignChange -Root $Root   # a maintenance mode of another AVDTune process still runs: no crash (#49)
     $record = Get-AVDTuneMaintenanceCrash -Root $Root
     $changeOwner = $false; if ($true) { $changeOwner = Start-AVDTuneChange -Root $Root }   # marker: the first change of the version starts here, no new version or snapshot counts while it runs (#27)
     try {

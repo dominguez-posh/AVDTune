@@ -929,6 +929,7 @@ function ConvertTo-AVDTuneSddlWithoutDomainAliases {
         Replaces the domain-relative SDDL aliases (DU, DA, DD, ...) in the owner, the group and the ACE trustees by full SIDs of -DomainSid (S-1-5-21-a-b-c).
         Windows resolves these aliases only with the domain of the machine: on a master that is not (yet) in a domain (Entra only, before the join) the SDDL
         cannot be read at all. Without -DomainSid the placeholder domain S-1-5-21-0-0-0 is used: such an entry then matches no real group (unknown domain).
+        For reading only, never to set an ACL: the domain is a guess (ConvertFrom-AVDTuneSddl says so with DomainGuessed). Not exported (#83).
     #>
     param([Parameter(Mandatory)][string]$Sddl, [string]$DomainSid = '')
     if ($Sddl.Length -gt 65536) { throw 'The SDDL is too long (over 64 KB).' }   # data from Azure: length limit and regex timeouts
@@ -950,6 +951,16 @@ function ConvertTo-AVDTuneSddlWithoutDomainAliases {
     (New-Object System.Text.RegularExpressions.Regex("(?<=\([^()]*;)(?:$names)(?=\))", [System.Text.RegularExpressions.RegexOptions]::IgnoreCase, $limit)).Replace($s, $eval)
 }
 
+function Test-AVDTuneSddlDomainAliasInUse([string]$Sddl) {
+    # A domain-relative alias as the owner or as the trustee of an entry (the group of the SDDL grants nothing on NTFS): then a guessed domain changes what the check sees (#83)
+    if ($Sddl.Length -gt 65536) { return $true }
+    $names = ($script:DomainSddlAliases.Keys | Sort-Object) -join '|'
+    $limit = [TimeSpan]::FromMilliseconds(500)
+    $owner = (New-Object System.Text.RegularExpressions.Regex("\A\s*O:(?:$names)(?=G:|D:|S:|\z)", [System.Text.RegularExpressions.RegexOptions]::IgnoreCase, $limit)).IsMatch($Sddl)
+    $trustee = (New-Object System.Text.RegularExpressions.Regex("(?<=\([^()]*;)(?:$names)(?=\))", [System.Text.RegularExpressions.RegexOptions]::IgnoreCase, $limit)).IsMatch($Sddl)
+    $owner -or $trustee
+}
+
 function Get-AVDTuneDomainSidOf([string[]]$Sids) {
     <# The domain part (S-1-5-21-a-b-c) of the first domain SID in the list, or ''. #>
     foreach ($s in @($Sids)) { if ([string]$s -match '\A(S-1-5-21-[0-9]{1,10}-[0-9]{1,10}-[0-9]{1,10})-[0-9]{1,10}\z') { return $Matches[1] } }
@@ -959,22 +970,40 @@ function Get-AVDTuneDomainSidOf([string[]]$Sids) {
 function ConvertFrom-AVDTuneSddl {
     <#
         Allow and Deny entries of an SDDL (aliases like BA, SY, CO are resolved by Windows): @{ Sid; Type; Mask; ObjectInherit; ContainerInherit; InheritOnly; NoPropagate; Inherited }
-        Domain-relative aliases (DU, DA, ...) that this machine cannot resolve (not in a domain) are read as SIDs of -DomainSid (see ConvertTo-AVDTuneSddlWithoutDomainAliases).
+        Type is the ACE type of Windows (AccessAllowed, AccessDenied, AccessAllowedCallback for XA, AccessAllowedObject, ...); an entry Windows cannot name has Type 'Unknown' (#83).
+        Domain-relative aliases (DU, DA, ...) that this machine cannot resolve (not in a domain) are read as SIDs of -DomainSid (see ConvertTo-AVDTuneSddlWithoutDomainAliases);
+        DomainGuessed says that an owner or trustee was read that way (the domain is a guess, the result is never clean).
     #>
     param([Parameter(Mandatory)][string]$Sddl, [string]$DomainSid = '')
+    $guessed = $false
     try { $sd = New-Object System.Security.AccessControl.RawSecurityDescriptor $Sddl }
     catch {
         $plain = ConvertTo-AVDTuneSddlWithoutDomainAliases -Sddl $Sddl -DomainSid $DomainSid
         if ($plain -ceq $Sddl) { throw }
         $sd = New-Object System.Security.AccessControl.RawSecurityDescriptor $plain
+        $guessed = Test-AVDTuneSddlDomainAliasInUse $Sddl
     }
     $owner = if ($sd.Owner) { $sd.Owner.Value } else { '' }
     $aces = @(foreach ($a in @($sd.DiscretionaryAcl)) {
-            if ($a -isnot [System.Security.AccessControl.CommonAce]) { continue }
+            if ($null -eq $a) { continue }
+            # every entry, not only the plain ones: a callback (XA, conditional) or object entry also grants access (#83)
             $fl = [int]$a.AceFlags
-            [pscustomobject]@{ Sid = $a.SecurityIdentifier.Value; Type = [string]$a.AceType; Mask = [int]$a.AccessMask; ObjectInherit = [bool]($fl -band 1); ContainerInherit = [bool]($fl -band 2); NoPropagate = [bool]($fl -band 4); InheritOnly = [bool]($fl -band 8); Inherited = [bool]($fl -band 16) }
+            $known = $a -is [System.Security.AccessControl.KnownAce]
+            [pscustomobject]@{ Sid = $(if ($known) { $a.SecurityIdentifier.Value } else { '' }); Type = $(if ($known) { [string]$a.AceType } else { 'Unknown' }); Mask = $(if ($known) { [int]$a.AccessMask } else { 0 })
+                ObjectInherit = [bool]($fl -band 1); ContainerInherit = [bool]($fl -band 2); NoPropagate = [bool]($fl -band 4); InheritOnly = [bool]($fl -band 8); Inherited = [bool]($fl -band 16) }
         })
-    [pscustomobject]@{ Owner = $owner; Aces = $aces }
+    [pscustomobject]@{ Owner = $owner; Aces = $aces; DomainGuessed = [bool]$guessed }
+}
+
+$script:AclBroadSids = @('S-1-1-0', 'S-1-5-11', 'S-1-5-32-545')
+function Test-AVDTuneBroadSid([string]$Sid, [string[]]$UsersSids = @()) {
+    <# Everyone, Authenticated Users, BUILTIN\Users, Domain Users (-513), Domain Computers (-515) of any domain, or one of the users groups (#83) #>
+    ($Sid -in $script:AclBroadSids) -or ($Sid -in @($UsersSids)) -or ($Sid -match '\AS-1-5-21-[0-9]{1,10}-[0-9]{1,10}-[0-9]{1,10}-51[35]\z')
+}
+
+function Test-AVDTuneAllowAce($Ace) {
+    <# An entry that can grant access: plain allow, callback (XA, conditional) and object allow; an entry Windows cannot name counts too (#83) #>
+    $Ace.Type -like 'AccessAllowed*' -or $Ace.Type -eq 'Unknown'
 }
 
 function Format-AVDTuneAce($A) {
@@ -1001,7 +1030,9 @@ function Compare-AVDTuneFSLogixAcl {
     param([Parameter(Mandatory)][string]$Sddl, [string[]]$UsersSids = @(), [string[]]$AdminsSids = @())
     $p = ConvertFrom-AVDTuneSddl $Sddl -DomainSid (Get-AVDTuneDomainSidOf (@($AdminsSids) + @($UsersSids)))
     $findings = New-Object System.Collections.ArrayList
+    # the required entries count only as plain allow entries; every entry that can grant access counts for the broad check (#83)
     $allow = @($p.Aces | Where-Object { $_.Type -eq 'AccessAllowed' })
+    $grants = @($p.Aces | Where-Object { Test-AVDTuneAllowAce $_ })
     $hasMask = { param($a, $m) ($a.Mask -band $m) -eq $m }
     $co = @($allow | Where-Object { $_.Sid -eq 'S-1-3-0' -and (& $hasMask $_ $script:AclModify) -and $_.InheritOnly -and $_.ObjectInherit -and $_.ContainerInherit })
     if ($co.Count -eq 0) { [void]$findings.Add([pscustomobject]@{ Id = 'creator-owner'; Status = 'red'; Text = 'CREATOR OWNER needs Modify on subfolders and files only: it gives each user his own folder and nobody else.' }) }
@@ -1015,9 +1046,19 @@ function Compare-AVDTuneFSLogixAcl {
         if ($us.Count -eq 0) { [void]$findings.Add([pscustomobject]@{ Id = 'users'; Status = 'red'; Text = 'The users group needs Modify on this folder only (so users can create their folder, not browse others).' }) }
     }
     else { [void]$findings.Add([pscustomobject]@{ Id = 'users'; Status = 'yellow'; Text = 'The users group is not known (no domain information): check by hand that it has Modify on this folder only.' }) }
-    $broad = @('S-1-1-0', 'S-1-5-11', 'S-1-5-32-545') + @($UsersSids)
-    foreach ($a in @($allow | Where-Object { $_.Sid -in $broad -and ($_.ObjectInherit -or $_.ContainerInherit) })) {
+    foreach ($a in @($grants | Where-Object { (Test-AVDTuneBroadSid $_.Sid $UsersSids) -and ($_.ObjectInherit -or $_.ContainerInherit) })) {
         [void]$findings.Add([pscustomobject]@{ Id = "broad-$($a.Sid)"; Status = 'red'; Text = "$($a.Sid) reaches the subfolders and files ($(Format-AVDTuneAce $a)): users could see the containers of others." })
+    }
+    foreach ($a in @($grants | Where-Object { $_.Type -ne 'AccessAllowed' -and -not ((Test-AVDTuneBroadSid $_.Sid $UsersSids) -and ($_.ObjectInherit -or $_.ContainerInherit)) })) {
+        [void]$findings.Add([pscustomobject]@{ Id = "conditional-$($a.Sid)"; Status = 'yellow'; Text = "An entry with a condition or of another kind ($(Format-AVDTuneAce $a)) may grant access: AVDTune cannot evaluate it, check it by hand." })
+    }
+    # the owner may always read and change the rights (READ_CONTROL, WRITE_DAC): only the administrators, SYSTEM or the administrators group (#83)
+    if ($p.Owner -and $p.Owner -notin @('S-1-5-32-544', 'S-1-5-18') -and $p.Owner -notin @($AdminsSids)) {
+        $ownerBroad = Test-AVDTuneBroadSid $p.Owner $UsersSids
+        [void]$findings.Add([pscustomobject]@{ Id = 'owner'; Status = $(if ($ownerBroad) { 'red' } else { 'yellow' }); Text = "The owner of the root is $($p.Owner): the owner can always change the rights$(if ($ownerBroad) { ', and this group includes the users' }). Make Administrators (BA) the owner." })
+    }
+    if ($p.DomainGuessed) {
+        [void]$findings.Add([pscustomobject]@{ Id = 'domain-guessed'; Status = 'yellow'; Text = 'The SDDL has domain aliases (DU, DA, ...) that this master cannot resolve: the domain was guessed from the group SIDs, check the entries by hand.' })
     }
     $red = @($findings | Where-Object Status -eq 'red').Count; $yellow = @($findings | Where-Object Status -eq 'yellow').Count
     $expected = @('Allow CREATOR OWNER (S-1-3-0): Modify, subfolders and files only', 'Allow <administrators group>: Full, this folder, subfolders and files', 'Allow <users group>: Modify, this folder only', 'Allow SYSTEM: Full, this folder, subfolders and files')
@@ -1424,5 +1465,5 @@ Export-ModuleMember -Function Get-AVDTuneFSLogixSettingCatalog, Test-AVDTuneFSLo
     Get-AVDTuneFSLogixGroupChoices, Set-AVDTuneFSLogixGroupMember, Get-AVDTuneRedirectionTemplate, Test-AVDTuneRedirectionPath, New-AVDTuneRedirectionsXml,
     Test-AVDTuneRedirectionsXml, Get-AVDTuneRedirectionsTarget, Get-AVDTuneRedirectionsDefaultFolder, Get-AVDTuneRedirectionsFolderState, Assert-AVDTuneRedirectionsPath, Write-AVDTuneUndoFile, Split-AVDTuneLogonName, Save-AVDTuneRedirections, Undo-AVDTuneRedirections, Get-AVDTuneFSLogixDefenderList,
     Get-AVDTuneFSLogixDefenderState, Get-AVDTuneFSLogixDefenderHash, Get-AVDTuneFSLogixListPlanHash, Set-AVDTuneFSLogixDefender, Undo-AVDTuneFSLogixDefender, Get-AVDTuneFSLogixLatest, Invoke-AVDTuneFSLogixInstall, Invoke-AVDTuneFSLogixInstallRecorded,
-    ConvertFrom-AVDTuneSddl, ConvertTo-AVDTuneSddlWithoutDomainAliases, Get-AVDTuneDomainSidOf, New-AVDTuneFSLogixRecommendedSddl, Compare-AVDTuneFSLogixAcl, Get-AVDTuneFSLogixLocations, Format-AVDTuneAce, Invoke-AVDTuneFSLogixTest,
+    ConvertFrom-AVDTuneSddl, Get-AVDTuneDomainSidOf, Test-AVDTuneBroadSid, Test-AVDTuneAllowAce, New-AVDTuneFSLogixRecommendedSddl, Compare-AVDTuneFSLogixAcl, Get-AVDTuneFSLogixLocations, Format-AVDTuneAce, Invoke-AVDTuneFSLogixTest,
     Invoke-AVDTuneFSLogixVhdxTest, Save-AVDTuneFSLogixTestRun, Get-AVDTuneFSLogixTestRecord, New-AVDTuneFSLogixAdapter

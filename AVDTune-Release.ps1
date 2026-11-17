@@ -4,7 +4,8 @@
 # A failed integrity check sets the write block of the engine (Modules\AVDTune.psm1): the write gate stays shut and AVDTune is read only until it is repaired
 # and started again. Test mode: fake HTTP adapter (Tests\Fakes\FakeRelease.ps1) and an install folder inside the test state, never GitHub or Program Files.
 
-$script:Rel = @{ ComputerName = [string](& $script:Machine.ComputerName); Status = $null; Latest = $null; CheckError = ''; Job = $null; Restart = ''; Info = $null }
+$script:Rel = @{ ComputerName = [string](& $script:Machine.ComputerName); Status = $null; Latest = $null; CheckError = ''; Restart = ''; Info = $null }
+$script:RelJob = $null   # the release job: a writer for install, repair and back (AVDTune-Tasks.ps1 WriterJobVariables, #49)
 $script:RelFakeHttp = $null   # test hook: a fake HTTP adapter for the smoke driver
 $script:RelInstallRoot = $(if ($script:TestMode) { Join-Path $script:StateRoot 'install-test' } else { Get-AVDTuneInstallRoot })
 $script:RelPill = @{   # the text of a pill is rel.pill.<key>
@@ -52,7 +53,7 @@ $script:RelWork = {
     [pscustomobject]$out
 }
 
-function Test-RelRunActive { [bool]($script:UpdJob -or ($script:ReadyJob -and $script:ReadyJob.Kind -eq 'Fix')) }
+function Test-RelRunActive { [bool](Get-AVDTuneRunningWriter) }   # the central check of AVDTune-Tasks.ps1 (#49): every job that changes the master
 
 function Set-RelBusy([bool]$Busy) {
     foreach ($b in $ui.BtnRelCheck, $ui.BtnRelRepair, $ui.BtnRelInstall, $ui.BtnRelBack, $ui.ChkRelEarly) { $b.IsEnabled = -not $Busy }
@@ -65,7 +66,8 @@ function Get-RelTaskTitle([string]$Kind, [string]$Argument) {
     }
 }
 function Start-RelJob([string]$Kind, [string]$Argument = '') {
-    if ($script:Rel.Job) { throw (T 'rel.err.busy') }
+    if ($script:RelJob) { throw (T 'rel.err.busy') }
+    if ($Kind -notin 'Start', 'Check') { Assert-NoOtherWriter }   # install, repair and back change AVDTune: never next to another writer (#49)
     $ctx = @{
         Kind = $Kind; Argument = $Argument; AppRoot = $script:AppRoot; InstallRoot = $script:RelInstallRoot; StateRoot = $script:StateRoot; User = [string]$env:USERNAME
         Version = $(if ($script:Rel.Info.Version) { $script:Rel.Info.Version } else { [string]$script:ToolVersion }); EarlyAccess = [bool](Get-AVDTuneReleaseSettings $script:StateRoot).EarlyAccess
@@ -78,12 +80,12 @@ function Start-RelJob([string]$Kind, [string]$Argument = '') {
         # inline: the fakes are closures of this runspace (same reason as the readiness check)
         $res = $null; $err = ''
         try { $res = & $script:RelWork $ctx } catch { $err = $_.Exception.Message }
-        $script:Rel.Job = @{ Inline = $true; Result = $res; Err = $err; Kind = $Kind; Task = $task }
+        $script:RelJob = @{ Inline = $true; Result = $res; Err = $err; Kind = $Kind; Task = $task }
         return
     }
     $ps = New-AVDTunePowerShell
     [void]$ps.AddScript($script:RelWork.ToString()).AddArgument($ctx)
-    $script:Rel.Job = @{ PS = $ps; Handle = $ps.BeginInvoke(); Kind = $Kind; Task = $task }
+    $script:RelJob = @{ PS = $ps; Handle = $ps.BeginInvoke(); Kind = $Kind; Task = $task }
 }
 
 function Add-RelProtocol([string]$Subject, [string]$Note, [string]$Result = 'ok') {
@@ -143,7 +145,7 @@ function Update-ReleaseView {
 }
 
 function Complete-RelResult($Job, $Res, [string]$Err) {
-    $script:Rel.Job = $null
+    $script:RelJob = $null
     Set-RelBusy $false
     $kind = $Job.Kind
     if ($Err) {
@@ -181,7 +183,7 @@ function Complete-RelResult($Job, $Res, [string]$Err) {
 }
 
 function Complete-RelJob {
-    $job = $script:Rel.Job
+    $job = $script:RelJob
     if (-not $job) { return }
     if ($job.Inline) { Complete-RelResult $job $job.Result $job.Err; return }
     if (-not $job.Handle.IsCompleted) { return }
@@ -200,23 +202,23 @@ $script:RelTimer = New-Object System.Windows.Threading.DispatcherTimer
 $script:RelTimer.Interval = [TimeSpan]::FromMilliseconds(300)
 $script:RelTimer.Add_Tick({ try { Complete-RelJob } catch { Show-Error $_.Exception.Message } })
 $script:RelTimer.Start()
-$window.Add_Closed({ $script:RelTimer.Stop(); if ($script:Rel.Job -and -not $script:Rel.Job.Inline) { try { [void]$script:Rel.Job.PS.BeginStop($null, $null) } catch { } } })
+$window.Add_Closed({ $script:RelTimer.Stop(); if ($script:RelJob -and -not $script:RelJob.Inline) { try { [void]$script:RelJob.PS.BeginStop($null, $null) } catch { } } })
 
-Add-Click $ui.BtnRelCheck { Start-RelJob 'Check'; if ($script:Rel.Job -and $script:Rel.Job.Inline) { Complete-RelJob } }
-$ui.ChkRelEarly.Add_Click({ try { [void](Set-AVDTuneReleaseSettings $script:StateRoot ([bool]$ui.ChkRelEarly.IsChecked)); Start-RelJob 'Check'; if ($script:Rel.Job -and $script:Rel.Job.Inline) { Complete-RelJob } } catch { Show-Error $_.Exception.Message } })
+Add-Click $ui.BtnRelCheck { Start-RelJob 'Check'; if ($script:RelJob -and $script:RelJob.Inline) { Complete-RelJob } }
+$ui.ChkRelEarly.Add_Click({ try { [void](Set-AVDTuneReleaseSettings $script:StateRoot ([bool]$ui.ChkRelEarly.IsChecked)); Start-RelJob 'Check'; if ($script:RelJob -and $script:RelJob.Inline) { Complete-RelJob } } catch { Show-Error $_.Exception.Message } })
 Add-Click $ui.BtnRelInstall {
     $v = [string]$script:Rel.Latest.Version
     if (-not (Confirm-Action (T 'rel.ask.install' $v) (T 'rel.install'))) { return }
-    Start-RelJob 'Install' $v; if ($script:Rel.Job.Inline) { Complete-RelJob }
+    Start-RelJob 'Install' $v; if ($script:RelJob.Inline) { Complete-RelJob }
 }
 Add-Click $ui.BtnRelRepair {
     if (-not (Confirm-Action (T 'rel.ask.repair' $script:Rel.Info.Version) (T 'rel.ask.repair.title'))) { return }
-    Start-RelJob 'Repair'; if ($script:Rel.Job.Inline) { Complete-RelJob }
+    Start-RelJob 'Repair'; if ($script:RelJob.Inline) { Complete-RelJob }
 }
 Add-Click $ui.BtnRelBack {
     $p = [string](Get-AVDTuneInstallState $script:RelInstallRoot).Previous
     if (-not (Confirm-Action (T 'rel.ask.back' $p) (T 'rel.ask.back.title'))) { return }
-    Start-RelJob 'Back'; if ($script:Rel.Job.Inline) { Complete-RelJob }
+    Start-RelJob 'Back'; if ($script:RelJob.Inline) { Complete-RelJob }
 }
 Add-Click $ui.BtnRelSkip {
     $r = Confirm-AVDTuneUnverified -StateRoot $script:StateRoot -Name $ui.TxtRelSkipName.Text -Expected $script:Rel.ComputerName -User ([string]$env:USERNAME)
