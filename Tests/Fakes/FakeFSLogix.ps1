@@ -3,7 +3,7 @@
 #   Latest (@{ Ok; Url; Error }), DownloadFails, ExpandFails, NoInstaller, Protected ($false = download folder not protected), InstallerVersion,
 #   Signatures (hashtable file name -> @{ Valid; Subject; Issuer; OriginalFilename }), Files (hashtable path -> text), FailWrite (paths that cannot be written),
 #   Dns (host -> @{ Ok; Addresses; Error }), Tcp (host -> $true/$false), Probe (unc -> 'Ok' | 'Denied' | 'Failed'), WriteFail (name of the step that fails), Acl (unc -> SDDL),
-#   Tickets (strings), Defender (@{ Paths; Processes } or $null = not readable), Groups (name -> array of SIDs; a missing name = group not there), FrxMissing,
+#   Tickets (strings), TicketsError (text: klist cannot be run, KerberosTickets throws it), Defender (@{ Paths; Processes } or $null = not readable), Groups (name -> array of SIDs; a missing name = group not there), FrxMissing,
 #   MasterDomainSid (domain SID the master resolves for <NetBIOS>\Domain Admins; '' = cannot be resolved), LocalGroupAddFails (SIDs whose LocalGroupAdd throws).
 # All names and addresses are made up (example.test, contoso).
 function New-AVDTuneFakeFSLogix {
@@ -66,7 +66,7 @@ function New-AVDTuneFakeFSLogix {
         if ($s.AsUser) { return $s.AsUser }
         @{ LogonFailed = $false; Error = ''; Steps = @('create folder', 'write file', 'read file', 'delete file', 'delete folder' | ForEach-Object { @{ Name = $_; Ok = $true; Error = '' } }) }
     }.GetNewClosure()
-    $a.KerberosTickets = { @($s.Tickets) }.GetNewClosure()
+    $a.KerberosTickets = { if ($s.TicketsError) { throw $s.TicketsError }; @($s.Tickets) }.GetNewClosure()
     $a.DefenderGet = { $s.Defender }.GetNewClosure()
     $a.DefenderAdd = { param($Kind, $Value) [void]$s.Log.Add("DefenderAdd $Kind $Value"); if ($Kind -eq 'Process') { $s.Defender.Processes = @($s.Defender.Processes) + $Value } else { $s.Defender.Paths = @($s.Defender.Paths) + $Value } }.GetNewClosure()
     $a.DefenderRemove = { param($Kind, $Value) [void]$s.Log.Add("DefenderRemove $Kind $Value"); if ($Kind -eq 'Process') { $s.Defender.Processes = @($s.Defender.Processes | Where-Object { $_ -ne $Value }) } else { $s.Defender.Paths = @($s.Defender.Paths | Where-Object { $_ -ne $Value }) } }.GetNewClosure()

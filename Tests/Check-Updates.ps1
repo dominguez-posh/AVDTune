@@ -478,6 +478,28 @@ try {
         Test-Check 'central start (#76): with -WaitForTree the timeout covers the child the program left behind: TimedOut, exit -1, the tree is ended' ($ck2 -gt 0 -and $cr2.TimedOut -and $cr2.ExitCode -eq -1 -and -not $cAlive2 -and $sw.Elapsed.TotalSeconds -lt 50) "kid=$ck2 alive=$cAlive2 took $($sw.Elapsed.TotalSeconds) s"
         $shellPsi = New-Object Diagnostics.ProcessStartInfo $ps; $shellPsi.UseShellExecute = $true
         Test-Check 'central start (#76): a start with shell or window is refused before anything starts' ((Get-ThrownText { Invoke-AVDTuneChildProcess -StartInfo $shellPsi }) -like '*without shell and window*' -and (Get-ThrownText { Invoke-AVDTuneChildProcess -FileName 'ping.exe' }) -like '*full path*') $null
+        # #26 (review B1): the program is in the job from its first instruction. cmd.exe starts a sleeping grandchild (ping with a count only this check uses) as its very
+        # first command; both ways (job list, and suspended -> assign -> resume) must end the grandchild at the timeout and count it with -WaitForTree
+        $pingExe = Join-Path ([Environment]::SystemDirectory) 'PING.EXE'; $cmdExe = Join-Path ([Environment]::SystemDirectory) 'cmd.exe'
+        $gc = { param($n) @(Get-CimInstance -ClassName Win32_Process -Filter "Name = 'PING.EXE'" | Where-Object { $_.CommandLine -like "* -n $n 127.0.0.1*" }) }
+        $b1 = foreach ($force in $false, $true) {
+            $n = Get-Random -Minimum 700 -Maximum 799
+            & $psmAVDTune { param($f) Initialize-AVDTuneProcessJob; [AVDTune.Native.ChildJob]::ForceSuspendedPath = $f } $force
+            try {
+                $sw = [Diagnostics.Stopwatch]::StartNew()
+                $r1 = Invoke-AVDTuneChildProcess -FileName $cmdExe -Arguments "/d /c start `"`" /b `"$pingExe`" -n $n 127.0.0.1 & `"$pingExe`" -n $n 127.0.0.1" -TimeoutMs 3000
+                $sw.Stop(); Start-Sleep -Milliseconds 300
+                $left = @(& $gc $n)
+                $sw2 = [Diagnostics.Stopwatch]::StartNew()
+                $r2 = Invoke-AVDTuneChildProcess -FileName $cmdExe -Arguments "/d /c start `"`" /b `"$pingExe`" -n 4 127.0.0.1" -TimeoutMs 60000 -WaitForTree
+                $sw2.Stop()
+            }
+            finally { & $psmAVDTune { [AVDTune.Native.ChildJob]::ForceSuspendedPath = $false }; foreach ($x in @(& $gc $n)) { Stop-Process -Id $x.ProcessId -Force -ErrorAction SilentlyContinue } }
+            [pscustomobject]@{ Force = $force; Mode1 = $r1.JobMode; TimedOut = $r1.TimedOut; Left = $left.Count; Took = $sw.Elapsed.TotalSeconds; Mode2 = $r2.JobMode; Waited = $sw2.Elapsed.TotalSeconds; Exit2 = $r2.ExitCode }
+        }
+        $b1Text = ($b1 | ForEach-Object { "force=$($_.Force) mode=$($_.Mode1)/$($_.Mode2) timedOut=$($_.TimedOut) left=$($_.Left) took=$([int]$_.Took) waited=$([math]::Round($_.Waited, 1)) exit2=$($_.Exit2)" }) -join ' | '
+        Test-Check 'central start (#26): the program is in the job from its creation (job list; where Windows refuses it: suspended, assigned, resumed); a grandchild started as the first command is ended at the timeout' ($b1[0].Mode1 -eq 'joblist' -and $b1[1].Mode1 -eq 'suspended' -and @($b1 | Where-Object { -not $_.TimedOut -or $_.Left -ne 0 -or $_.Took -gt 40 }).Count -eq 0) $b1Text
+        Test-Check 'central start (#26): with -WaitForTree the grandchild of the first command counts (the call returns only after it, about 3 s)' (@($b1 | Where-Object { $_.Waited -lt 2.5 -or $_.Exit2 -ne 0 }).Count -eq 0) $b1Text
     }
     finally { foreach ($k in $cPids) { Get-Process -Id $k -ErrorAction SilentlyContinue | Where-Object { $_.ProcessName -eq 'PING' } | Stop-Process -Force -ErrorAction SilentlyContinue } }
     # #71: Windows programs only with the Windows signature, held while they run
@@ -500,8 +522,29 @@ try {
         # held while it runs: a held file cannot be replaced
         $held = Open-AVDTuneSystemProgram -Path $catCopy
         $swapRefused = $false; try { [IO.File]::WriteAllBytes($catCopy, [byte[]](1)) } catch { $swapRefused = $true } finally { $held.Dispose() }
+        # review B2: only an .exe; the start is the checked file (a path with '..' is resolved to the same file and runs)
+        $cmdLike = Join-Path $fakeSys 'fltmc.cmd'; [IO.File]::WriteAllText($cmdLike, '@echo ran')
+        $b2Ext = Get-ThrownText { Invoke-AVDTuneProgram -File $cmdLike -TimeoutSeconds 30 }
+        $b2Dots = Invoke-AVDTuneProgram -File (Join-Path $fakeSys '..\System32\fltmc.exe') -Arguments @('filters') -TimeoutSeconds 30
+        # review B3: the icacls of the quarantine only after its Windows signature: an unsigned icacls.exe (it would write ran.txt) is not run, the folder is still set aside
+        $markerSrc = 'public static class IcaclsStandIn { public static int Main(string[] a) { System.IO.File.WriteAllText(System.IO.Path.Combine(System.AppDomain.CurrentDomain.BaseDirectory, "ran.txt"), "ran"); return 0; } }'
+        Add-Type -TypeDefinition $markerSrc -OutputAssembly (Join-Path $fakeSys 'icacls.exe') -OutputType ConsoleApplication
+        $qRoot = Join-Path $tmp 'quarantine-me'; [void](New-Item -ItemType Directory -Path $qRoot -Force)
+        $qAside = & $psmAVDTune { param($r) Move-AVDTuneStateToQuarantine -Root $r } $qRoot
     }
     finally { & $psmAVDTune { $script:ChildEnvHooks.Windows = '' } }
+    Test-Check 'Windows program (#71 review B2): a program of the Windows folder only starts as an .exe; a path with .. runs as the one checked file' ($b2Ext -like '*not an .exe*not started*' -and $null -ne $b2Dots -and $b2Dots.Output -ne 'timeout') "$b2Ext | $($b2Dots.ExitCode)"
+    Test-Check 'quarantine (#71 review B3): an icacls.exe without the Windows signature is not run, the prepared folder is still set aside' (-not (Test-Path -LiteralPath (Join-Path $fakeSys 'ran.txt')) -and $qAside -like '*quarantine-me.untrusted-*' -and -not (Test-Path -LiteralPath $qRoot)) "$qAside ran=$(Test-Path -LiteralPath (Join-Path $fakeSys 'ran.txt'))"
+    # review B5: a folder that is there before AVDTune creates it (DirectoryInfo.Create keeps it) is refused, with its owner or inherited rules as the reason
+    $preMade = Join-Path $tmp 'premade'; [void](New-Item -ItemType Directory -Path $preMade -Force)
+    $b5 = Get-ThrownText { New-AVDTuneOwnFolder -Path $preMade }
+    $b5New = Join-Path $tmp ('own-' + [guid]::NewGuid().ToString('N')); $b5Ok = Get-ThrownText { New-AVDTuneOwnFolder -Path $b5New }
+    $ownAcl = { param($o, $p, $rules) [pscustomobject]@{ Owner = $o; Protected = $p; Link = $false; Rules = $rules } }
+    $ok5 = @(Test-AVDTuneOwnFolder -Acl (& $ownAcl 'S-1-5-32-544' $true @(@{ Sid = 'S-1-5-32-544'; Allow = $true; Inherited = $false }, @{ Sid = 'S-1-5-18'; Allow = $true; Inherited = $false })) -Owner 'S-1-5-32-544' -Allowed 'S-1-5-32-544', 'S-1-5-18')
+    $bad5 = @(Test-AVDTuneOwnFolder -Acl (& $ownAcl 'S-1-5-21-1-2-3-1001' $true @(@{ Sid = 'S-1-5-32-545'; Allow = $true; Inherited = $false })) -Owner 'S-1-5-32-544' -Allowed 'S-1-5-32-544', 'S-1-5-18')
+    Test-Check 'own folder (#54/#79 review B5): a folder made first by someone else is refused after the create (inherited rules), a new one passes; the pure check names a foreign owner and a foreign rule' ($b5 -like "*premade is not AVDTune's own folder*inherit*stopped*" -and -not $b5Ok -and $ok5.Count -eq 0 -and $bad5.Count -eq 2) "$b5 | $b5Ok | $($bad5 -join '; ')"
+    $srcCore = [IO.File]::ReadAllText((Join-Path $repo 'Modules\AVDTune.psm1'))
+    Test-Check 'own folder (review B5): every folder AVDTune makes for itself goes through New-AVDTuneOwnFolder (tool TEMP, <state>\temp, download folders), and the start folder of Start-AVDTune.ps1 is read back' (([regex]::Matches($srcCore, '\.Create\(\(New-AVDTuneOwnFolderSecurity\)\)')).Count -eq 1 -and ([regex]::Matches($srcCore, 'New-AVDTuneOwnFolder -Path \$(dir|parent)')).Count -eq 3 -and [IO.File]::ReadAllText((Join-Path $repo 'Start-AVDTune.ps1')) -match 'GetAccessControl\(\$script:BootTemp\)[\s\S]*is not AVDTune''s own[\s\S]*foreach \(\$n in ''TEMP''') $null
     Test-Check 'Windows signature (#71): an unsigned program in the Windows folder is not started by the machine Run (fail closed, clear message)' ($u71 -like '*sc.exe has no valid signature*not started*' -and $p71 -like '*not started*') "$u71 | $p71"
     Test-Check 'Windows signature (#71): a copy of a catalog-signed Windows program is found in the catalog and runs; the file is held without write sharing until the run ends' ($null -ne $c71 -and $c71.Output -ne 'timeout' -and $swapRefused) "$($c71.ExitCode) $swapRefused"
     Test-Check 'Windows signature (#71): a Windows program outside the Windows folder is not one (Test-AVDTuneSystemProgramPath), System32 is' (-not (Test-AVDTuneSystemProgramPath -Path $unsigned) -and (Test-AVDTuneSystemProgramPath -Path (Join-Path $sys 'sc.exe'))) $null

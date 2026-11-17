@@ -1181,7 +1181,10 @@ function Invoke-AVDTuneFSLogixTest {
             else { Add (New-AVDTuneFsRow "$tag.smb" 3 "$t : SMB session" 'red' "The share could not be opened: $($p.Error)" 'Check the share name, the storage account and the network.' -Verified $false) }
         }
         Guard "$tag.kerberos" 3 "$t : Kerberos ticket" {
-            $tickets = @(& $F.KerberosTickets)
+            # klist that cannot be run (no Windows signature, timeout, start error) is a row with its reason, not "no ticket" (#53 review B4)
+            $tickets = $null; $why = ''
+            try { $tickets = @(& $F.KerberosTickets) } catch { $why = $_.Exception.Message }
+            if ($why) { Add (New-AVDTuneFsRow "$tag.kerberos" 3 "$t : Kerberos ticket" 'yellow' "The Kerberos tickets could not be read: $why" -Verified $false); return }
             if ($tickets | Where-Object { $_ -like "*cifs/$h*" }) { Add (New-AVDTuneFsRow "$tag.kerberos" 3 "$t : Kerberos ticket" 'green' "A Kerberos ticket for cifs/$h exists." -Verified $false) }
             else { Add (New-AVDTuneFsRow "$tag.kerberos" 3 "$t : Kerberos ticket" 'info' "No ticket for cifs/$h in this session. A not joined master has none; the session hosts get it at the user's sign-in." -Verified $false) }
         }
@@ -1453,8 +1456,13 @@ function New-AVDTuneFSLogixAdapter {
         }
         finally { if ($id) { $id.Dispose() }; [void][AVDTune.Logon]::CloseHandle($token) }
     }
-    # klist through the central start (#53): clean environment, Windows signature checked and the file held (#71), job object with timeout (#76)
-    $a.KerberosTickets = { try { $r = Invoke-AVDTuneProgram -File (Join-Path (Get-AVDTuneSystemFolder System) 'klist.exe') -TimeoutSeconds 30; @(([string]$r.Output -split "\r?\n") | Where-Object { $_ -match 'cifs/' }) } catch { @() } }
+    # klist through the central start (#53): clean environment, Windows signature checked and the file held (#71), job object with timeout (#76). A failed start, a timeout
+    # or an exit code other than 0 throws with the reason (the check shows it as its row instead of "no ticket")
+    $a.KerberosTickets = {
+        $r = Invoke-AVDTuneProgram -File (Join-Path (Get-AVDTuneSystemFolder System) 'klist.exe') -TimeoutSeconds 30
+        if ($r.ExitCode -ne 0) { throw "klist.exe ended with $($r.ExitCode) ($(([string]$r.Output).Trim() -replace '\s+', ' ' | ForEach-Object { if ($_.Length -gt 200) { $_.Substring(0, 200) } else { $_ } }))" }
+        @(([string]$r.Output -split "\r?\n") | Where-Object { $_ -match 'cifs/' })
+    }
     $a.DefenderGet = { try { $p = Get-MpPreference -ErrorAction Stop; @{ Paths = @($p.ExclusionPath | Where-Object { $_ -and $_ -notmatch 'Administrators' }); Processes = @($p.ExclusionProcess | Where-Object { $_ -and $_ -notmatch 'Administrators' }) } } catch { $null } }
     $a.DefenderAdd = { param($Kind, $Value) if ($Kind -eq 'Process') { Add-MpPreference -ExclusionProcess $Value -ErrorAction Stop } else { Add-MpPreference -ExclusionPath $Value -ErrorAction Stop } }
     $a.DefenderRemove = { param($Kind, $Value) if ($Kind -eq 'Process') { Remove-MpPreference -ExclusionProcess $Value -ErrorAction Stop } else { Remove-MpPreference -ExclusionPath $Value -ErrorAction Stop } }
