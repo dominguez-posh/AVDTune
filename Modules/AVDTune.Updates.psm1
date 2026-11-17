@@ -189,7 +189,7 @@ function Invoke-AVDTuneLocked {
 # Every native tool AVDTune starts elevated: who must have signed it and the original file name it must carry (VersionInfo; '.mui' is ignored).
 $script:ToolTrust = @{
     'winget.exe' = 'Microsoft'; 'teamsbootstrapper.exe' = 'Microsoft'; 'OfficeC2RClient.exe' = 'Microsoft'; 'MicrosoftEdgeUpdate.exe' = 'Microsoft'
-    'Dism.exe' = 'Microsoft'; 'sfc.exe' = 'Microsoft'; 'odt-setup' = 'Microsoft'; 'officedeploymenttool.exe' = 'Microsoft'; 'choco.exe' = 'Chocolatey'; 'FSLogixAppsSetup.exe' = 'Microsoft'; 'frx.exe' = 'Microsoft'; 'WINWORD.EXE' = 'Microsoft'; 'EXCEL.EXE' = 'Microsoft'; 'msedge.exe' = 'Microsoft'; 'explorer.exe' = 'Microsoft'; 'powershell.exe' = 'Microsoft'
+    'Dism.exe' = 'Microsoft'; 'sfc.exe' = 'Microsoft'; 'msiexec.exe' = 'Microsoft'; 'vdi-msi' = 'Microsoft'; 'odt-setup' = 'Microsoft'; 'officedeploymenttool.exe' = 'Microsoft'; 'choco.exe' = 'Chocolatey'; 'FSLogixAppsSetup.exe' = 'Microsoft'; 'frx.exe' = 'Microsoft'; 'WINWORD.EXE' = 'Microsoft'; 'EXCEL.EXE' = 'Microsoft'; 'msedge.exe' = 'Microsoft'; 'explorer.exe' = 'Microsoft'; 'powershell.exe' = 'Microsoft'
 }
 
 # A generic file name (setup.exe) is never in the list above: a tool like that gets its own key (one per purpose) and says more than the file name. Keys here are not file names;
@@ -484,7 +484,18 @@ function Update-AVDTuneNativeItem {
         'teams' {
             # only from config\tools; it runs as a copy in a private folder that is checked right before it starts (no swap between check and start)
             $tools = Join-Path $Root 'config\tools'
-            if (-not (& $U.FindTool 'teamsbootstrapper.exe' $tools)) { return & $new 'Failed' 'teamsbootstrapper.exe was not found.' 'ToolMissing' '' $false "Download it from Microsoft (Teams bulk install page) into ${tools}; AVDTune checks the signature before it runs it." }
+            if (-not (& $U.FindTool 'teamsbootstrapper.exe' $tools)) {
+                # not in config\tools: the VDI components download it from Microsoft (fixed host, redirects checked by hand, signature, file held until the start) and run it (issue 56, #59)
+                $vdi = $U.PSObject.Properties['GetVdi']
+                if ($vdi -and (Get-Command Invoke-AVDTuneVdiPackage -ErrorAction SilentlyContinue)) {
+                    $v = & $U.GetVdi
+                    if ($v) {
+                        $r = Invoke-AVDTuneVdiPackage -Machine $Machine -V $v -Key 'teams' -Mode Install -Root $Root -Progress $Progress
+                        return & $new $r.Status $r.Message $r.Code ([string]$r.After.Version) ([bool]$r.Reboot) $(if ($r.Status -eq 'Failed') { 'Nothing was changed by the failed step. Check the message and the network, then try again (VDI components page).' } else { '' })
+                    }
+                }
+                return & $new 'Failed' 'teamsbootstrapper.exe was not found.' 'ToolMissing' '' $false "Download it from Microsoft (Teams bulk install page) into ${tools}; AVDTune checks the signature before it runs it."
+            }
             $t = Resolve-AVDTuneTool -U $U -Name 'teamsbootstrapper.exe' -ExtraFolder $tools -Root $Root -Stage
             if (-not $t.Path) { return & $new 'Failed' "teamsbootstrapper.exe is not signed by Microsoft Corporation ($($t.Error))" $t.Code '' $false 'Download the file again from Microsoft.' }
             $before = [string](& $U.AppxVersion 'MSTeams')
@@ -932,6 +943,7 @@ function New-AVDTuneUpdateAdapter {
         catch { @{ Ok = $false; ResultCode = 4; HResult = $_.Exception.HResult; RebootRequired = $false } }
     }.GetNewClosure()
     $u.GetFSLogix = { New-AVDTuneFSLogixAdapter }
+    $u.GetVdi = { New-AVDTuneVdiAdapter }
     $u.DefenderStatus = {
         try { $s = Get-MpComputerStatus -ErrorAction Stop; @{ Version = [string]$s.AntivirusSignatureVersion; LastUpdated = [datetime]$s.AntivirusSignatureLastUpdated } } catch { $null }
     }

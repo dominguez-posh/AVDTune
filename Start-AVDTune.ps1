@@ -27,7 +27,7 @@ Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, Sys
 $script:AppRoot = $PSScriptRoot
 $script:ToolVersion = (Get-Content -LiteralPath (Join-Path $PSScriptRoot 'VERSION') -Raw -Encoding UTF8).Trim()   # the file VERSION is also the version of the release
 Import-Module (Join-Path $PSScriptRoot 'Modules\AVDTune.psm1') -Force
-foreach ($part in 'Trust', 'Session', 'Snapshot', 'Directory', 'Start', 'UpdateBlock', 'Updates', 'Readiness', 'Watermark', 'Benchmark', 'Shortcut', 'FSLogix', 'Storage', 'Software', 'Office', 'Masking', 'Finish', 'Environment', 'Optimization', 'Language') { Import-Module (Join-Path $PSScriptRoot "Modules\AVDTune.$part.psm1") -Force }
+foreach ($part in 'Trust', 'Session', 'Snapshot', 'Directory', 'Start', 'UpdateBlock', 'Updates', 'Readiness', 'Watermark', 'Benchmark', 'Shortcut', 'FSLogix', 'Storage', 'Software', 'Office', 'Vdi', 'Masking', 'Finish', 'Environment', 'Optimization', 'Language') { Import-Module (Join-Path $PSScriptRoot "Modules\AVDTune.$part.psm1") -Force }
 Import-Module (Join-Path $PSScriptRoot 'Modules\AVDTune.Release.psm1') -Force
 . (Join-Path $PSScriptRoot 'AVDTune-Theme.ps1')
 . (Join-Path $PSScriptRoot 'AVDTune-UiText.ps1')   # the texts of the window (UI\Strings.en.json, UI\Strings.de.json)
@@ -175,7 +175,7 @@ $script:PageTable = @(
     @{ Key = 'FSLogix'; Title = 'FSLogix'; Glyph = 0xE8B7; Phase = 3 }
     @{ Key = 'Environment'; Title = 'Environment'; Glyph = 0xE774; Phase = 3 }
     @{ Key = 'AppMasking'; Title = 'App Masking'; Glyph = 0xE7B3; Phase = 3; Text = 'FSLogix hiding rules for icons and apps, with groups from the domain or Microsoft Entra ID.' }
-    @{ Key = 'VdiComponents'; Title = 'VDI components'; Glyph = 0xE7F4; Phase = 6; Text = 'Defender onboarding for non-persistent VDI, new Teams for VDI, multimedia redirection, RDP Shortpath, time zone redirection and OneDrive per machine.' }
+    @{ Key = 'VdiComponents'; Title = 'VDI components'; Glyph = 0xE7F4; Phase = 6; Text = 'New Teams for VDI, the WebRTC Redirector Service, multimedia redirection and OneDrive per machine: detection, install, update, remove, undo and the recommended settings. Defender onboarding, RDP Shortpath and time zone redirection follow later.' }
     @{ Key = 'UserExperience'; Title = 'User experience'; Glyph = 0xE771; Phase = 6; Text = 'Wallpaper, watermark, Start and taskbar layout and default apps for new profiles, public desktop shortcuts and web apps with App Masking rules per group.' }
     @{ Key = 'UpdateBlock'; Title = 'Update block'; Glyph = 0xE72E; Phase = 2 }
     @{ Key = 'Benchmark'; Title = 'Benchmark'; Glyph = 0xE9D2; Phase = 5; Text = 'Measures CPU, memory, disk, remote display and network and compares with the baseline.' }
@@ -215,7 +215,7 @@ foreach ($page in $script:PageTable) {
 
 function Show-Page([string]$Key) {
     $script:CurrentPage = $Key
-    $isPlaceholder = $Key -notin 'Overview', 'Protocol', 'Updates', 'UpdateBlock', 'UserExperience', 'Benchmark', 'FSLogix', 'Software', 'Office', 'AppMasking', 'Seal', 'Environment', 'Optimization', 'Language'
+    $isPlaceholder = $Key -notin 'Overview', 'Protocol', 'Updates', 'UpdateBlock', 'UserExperience', 'Benchmark', 'FSLogix', 'Software', 'Office', 'VdiComponents', 'AppMasking', 'Seal', 'Environment', 'Optimization', 'Language'
     $ui.PageOverview.Visibility = ConvertTo-Vis ($Key -eq 'Overview')
     $ui.PageProtocol.Visibility = ConvertTo-Vis ($Key -eq 'Protocol')
     $ui.PageUpdates.Visibility = ConvertTo-Vis ($Key -eq 'Updates')
@@ -225,6 +225,7 @@ function Show-Page([string]$Key) {
     $ui.PageFSLogix.Visibility = ConvertTo-Vis ($Key -eq 'FSLogix')
     $ui.PageSoftware.Visibility = ConvertTo-Vis ($Key -eq 'Software')
     $ui.PageOffice.Visibility = ConvertTo-Vis ($Key -eq 'Office')
+    if ($ui.ContainsKey('PageVdiComponents')) { $ui.PageVdiComponents.Visibility = ConvertTo-Vis ($Key -eq 'VdiComponents') }
     if ($ui.PageAppMasking) { $ui.PageAppMasking.Visibility = ConvertTo-Vis ($Key -eq 'AppMasking') }
     $ui.PageSeal.Visibility = ConvertTo-Vis ($Key -eq 'Seal')
     if ($ui.PageEnvironment) { $ui.PageEnvironment.Visibility = ConvertTo-Vis ($Key -eq 'Environment') }
@@ -248,6 +249,7 @@ function Show-Page([string]$Key) {
     elseif ($Key -eq 'FSLogix') { Update-FslView }
     elseif ($Key -eq 'Software') { Show-SoftwarePage }
     elseif ($Key -eq 'Office') { Update-OffView }
+    elseif ($Key -eq 'VdiComponents') { Update-VdiView }
     elseif ($Key -eq 'AppMasking') { Update-MaskView }
     elseif ($Key -eq 'Seal') { Update-SealView }
     elseif ($Key -eq 'Environment') { Update-EnvView }
@@ -471,6 +473,7 @@ $script:ReadyFakeArm = $(if ($script:TestMode) { $script:Services.Arm } else { $
 . (Join-Path $PSScriptRoot 'AVDTune-FSLogix.ps1')
 . (Join-Path $PSScriptRoot 'AVDTune-Software.ps1')   # the Software page (issue 31): its own XAML, module and task handling
 . (Join-Path $PSScriptRoot 'AVDTune-Office.ps1')
+. (Join-Path $PSScriptRoot 'AVDTune-Vdi.ps1')   # the VDI components page (issue 56): its own XAML and module
 . (Join-Path $PSScriptRoot 'AVDTune-AppMasking.ps1')
 . (Join-Path $PSScriptRoot 'AVDTune-Seal.ps1')
 . (Join-Path $PSScriptRoot 'AVDTune-Environment.ps1')
