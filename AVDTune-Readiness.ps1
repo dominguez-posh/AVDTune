@@ -48,16 +48,16 @@ function Update-ReadyGallery {
     $ui.BtnReadyGallery.IsEnabled = ($items.Count -gt 0)
     $ui.BtnReadyGalleryClear.Visibility = ConvertTo-Vis ([bool]$saved)
     $ui.TxtReadyGalleryState.Text = $(
-        if ($saved) { "Chosen: $(Format-ReadyGalleryName $saved) (saved in environment.json). Clear it to let AVDTune find the definition again." }
-        elseif ($r -and $r.GallerySource -eq 'Matched' -and $r.GalleryMatch) { "Found automatically: $($r.GalleryMatch.Label), version $($r.GalleryMatch.VersionName) was $($r.GalleryMatch.How)." }
-        elseif ($r -and $r.GallerySource -eq 'ImageReference') { "Found automatically: $(Format-ReadyGalleryName $r.GalleryImageId), the gallery image this VM was created from." }
-        elseif ($items.Count -gt 0) { 'Choose the definition the image will be captured into and press Use. AVDTune found these in the galleries the signed-in account can read (Windows, Generation 2).' }
-        elseif ($r -and $r.Arm.Ok) { 'No image definition found in the galleries the signed-in account can read. Run the analysis again once the gallery and the definition exist.' }
-        else { 'Sign in and run the analysis: AVDTune searches the Azure Compute Galleries for the image definition (read only).' })
+        if ($saved) { T 'ready.gal.chosen' (Format-ReadyGalleryName $saved) }
+        elseif ($r -and $r.GallerySource -eq 'Matched' -and $r.GalleryMatch) { T 'ready.gal.matched' $r.GalleryMatch.Label $r.GalleryMatch.VersionName $r.GalleryMatch.How }
+        elseif ($r -and $r.GallerySource -eq 'ImageReference') { T 'ready.gal.imageref' (Format-ReadyGalleryName $r.GalleryImageId) }
+        elseif ($items.Count -gt 0) { T 'ready.gal.choose' }
+        elseif ($r -and $r.Arm.Ok) { T 'ready.gal.none' }
+        else { T 'ready.gal.signin' })
 }
 function Get-ReadyToken {
     $s = $script:StartContext.Session
-    if (-not $s -or -not $s.Connected) { return @{ Token = ''; Reason = 'Not signed in: sign in on the Overview to read the VM settings from Azure.' } }
+    if (-not $s -or -not $s.Connected) { return @{ Token = ''; Reason = (T 'ready.err.nosignin') } }
     try { @{ Token = (Get-AVDTuneAccessToken -Session $s -Audience Arm); Reason = '' } } catch { @{ Token = ''; Reason = $_.Exception.Message } }
 }
 function Get-ReadyKind {
@@ -71,9 +71,9 @@ function Set-ReadyBusy([bool]$Busy) {
 }
 function New-ReadyTask([string]$Kind, [string]$FixId) {
     # the analysis is read only and can be started again from the list; a fix changes the master and is started on the card (with its confirmation)
-    $title = switch ($Kind) { 'Fix' { "Readiness fix $FixId" } 'Healthcheck' { 'Healthcheck of the master' } 'Erstanalyse' { 'Initial analysis of the master' } 'Start' { 'Readiness analysis at start' } default { 'Readiness analysis' } }
+    $title = switch ($Kind) { 'Fix' { T 'ready.task.fix' $FixId } 'Healthcheck' { T 'ready.task.healthcheck' } 'Erstanalyse' { T 'ready.task.initial' } 'Start' { T 'ready.task.start' } default { T 'ready.task.manual' } }
     $retry = if ($Kind -ne 'Fix') { @{ Command = 'Start-ReadyJob'; Arguments = @($Kind, '') } }
-    Start-AVDTuneUiTask -Kind "readiness-$($Kind.ToLower())" -Title $title -Step $(if ($Kind -eq 'Fix') { 'Applying the fix' } else { 'Checking the master against the readiness list' }) -Retry $retry
+    Start-AVDTuneUiTask -Kind "readiness-$($Kind.ToLower())" -Title $title -Step $(if ($Kind -eq 'Fix') { T 'ready.task.step.fix' } else { T 'ready.task.step.check' }) -Retry $retry
 }
 function Start-ReadyJob([string]$Kind, [string]$FixId) {
     # Kind: Start | Erstanalyse | Healthcheck | Manual (analysis) or Fix. A request while one runs is queued (the newest one wins).
@@ -133,11 +133,11 @@ function Complete-ReadyJob {
         finally { $job.PS.Dispose() }
     }
     Set-ReadyBusy $false
-    if ($err -or -not $result) { Complete-AVDTuneUiTask $job.Task -Failed -Summary $(if ($job.Kind -eq 'Fix') { "The fix failed: $err" } else { "The analysis failed: $err" }) }
+    if ($err -or -not $result) { Complete-AVDTuneUiTask $job.Task -Failed -Summary $(if ($job.Kind -eq 'Fix') { T 'ready.err.fix' $err } else { T 'ready.err.analysis' $err }) }
     elseif ($job.Kind -eq 'Fix') { Complete-AVDTuneUiTask $job.Task -Failed:([bool]($result.Status -eq 'Failed')) -Summary "$($result.FixId): $($result.Status). $($result.Message)" }
-    else { Complete-AVDTuneUiTask $job.Task -Summary "$($result.Overall): $($result.Counts.Red) red, $($result.Counts.Yellow) yellow, $($result.Counts.Unknown) not checkable, $($result.Counts.Green) green" }
+    else { Complete-AVDTuneUiTask $job.Task -Summary (T 'ready.counts' $result.Overall $result.Counts.Red $result.Counts.Yellow $result.Counts.Unknown $result.Counts.Green) }
     if ($job.Kind -eq 'Fix') {
-        if ($err -or -not $result) { Show-Error "The fix failed: $err" }
+        if ($err -or -not $result) { Show-Error (T 'ready.err.fix' $err) }
         else {
             if (@($result.Results).Count -eq 1 -and $result.FixId -ne 'readiness.updateblock-on') { Register-StepResult $result.Results[0] }
             $text = "$($result.FixId): $($result.Status). $($result.Message)$(if ($result.Reboot) { ' A restart is needed.' })"
@@ -148,12 +148,12 @@ function Complete-ReadyJob {
             $script:ReadyQueued = @{ Kind = (Get-ReadyKind); FixId = '' }   # the analysis is stale after a fix
         }
     }
-    elseif ($err -or -not $result) { $ui.TxtReadySummary.Text = "The analysis failed: $err"; Show-Error "The readiness analysis failed: $err" }
+    elseif ($err -or -not $result) { $ui.TxtReadySummary.Text = T 'ready.err.analysis' $err; Show-Error (T 'ready.err.analysis.toast' $err) }
     else {
         $script:Ready = $result
         $gate = Get-AVDTuneWriteGate
         try { [void](Save-AVDTuneReadinessRun -Root $script:StateRoot -Result $result -Kind $job.Kind -User ([string]$env:USERNAME) -SnapshotId $(if ($gate) { [string]$gate.SnapshotId } else { '' })) }
-        catch { Show-Error "The result could not be stored: $($_.Exception.Message)" }
+        catch { Show-Error (T 'ready.err.store' $_.Exception.Message) }
         if ($job.Kind -ne 'Start') {
             $note = "$($result.Overall): $($result.Counts.Red) red, $($result.Counts.Yellow) yellow, $($result.Counts.Unknown) not checkable, $($result.Counts.Green) green"
             [void](Add-AVDTuneProtocolNote -Protocol $script:Protocol -Group 'setup' -Subject "Readiness analysis ($($job.Kind))" -Note $note)
@@ -170,11 +170,11 @@ function Format-ReadyFamilies($Families) {
     if ($f.Count -eq 0) { return '' }
     $ready = @($f | Where-Object Status -eq 'ready'); $fix = @($f | Where-Object Status -eq 'after-fix'); $no = @($f | Where-Object Status -eq 'not-possible')
     $lines = @()
-    if ($ready.Count -gt 0) { $lines += "Ready ($($ready.Count)): " + (($ready | ForEach-Object { $_.Name }) -join ', ') }
-    if ($fix.Count -gt 0) { $lines += "After fixing the items above ($($fix.Count)): " + (($fix | ForEach-Object { $_.Name }) -join ', ') }
+    if ($ready.Count -gt 0) { $lines += (T 'ready.fam.ready' $ready.Count) + (($ready | ForEach-Object { $_.Name }) -join ', ') }
+    if ($fix.Count -gt 0) { $lines += (T 'ready.fam.afterfix' $fix.Count) + (($fix | ForEach-Object { $_.Name }) -join ', ') }
     if ($no.Count -gt 0) {
         $reasons = @($no | ForEach-Object { ($_.Needs | Select-Object -First 1) } | Group-Object | ForEach-Object { "$($_.Count) x $($_.Name)" })
-        $lines += "Not possible with this master ($($no.Count)): " + ($reasons -join '; ')
+        $lines += (T 'ready.fam.no' $no.Count) + ($reasons -join '; ')
     }
     $lines -join "`r`n"
 }
@@ -188,7 +188,7 @@ function New-ReadyRow($Row) {
     Set-Brush $pill ([System.Windows.Controls.Border]::StyleProperty) 'Pill'
     $pill.Padding = '10,2'; $pill.VerticalAlignment = 'Top'; $pill.HorizontalAlignment = 'Left'; $pill.Margin = '0,2,0,0'
     Set-Brush $pill ([System.Windows.Controls.Border]::BackgroundProperty) $pair[0]
-    $pt = New-Object System.Windows.Controls.TextBlock; $pt.Text = $pair[2]; $pt.FontSize = 12; $pt.FontWeight = 'SemiBold'
+    $pt = New-Object System.Windows.Controls.TextBlock; $pt.Text = T "ready.pill.$([string]$Row.Status)"; $pt.FontSize = 12; $pt.FontWeight = 'SemiBold'
     Set-Brush $pt ([System.Windows.Controls.TextBlock]::ForegroundProperty) $pair[1]
     $pill.Child = $pt
     $title = New-Object System.Windows.Controls.TextBlock; $title.Text = [string]$Row.Title; $title.FontWeight = 'SemiBold'; $title.TextWrapping = 'Wrap'; $title.Margin = '0,3,10,0'; $title.SetValue([System.Windows.Controls.Grid]::ColumnProperty, 1)
@@ -197,27 +197,27 @@ function New-ReadyRow($Row) {
     $buttons = New-Object System.Windows.Controls.StackPanel; $buttons.Orientation = 'Horizontal'; $buttons.VerticalAlignment = 'Top'; $buttons.SetValue([System.Windows.Controls.Grid]::ColumnProperty, 3)
     $safe = ([string]$Row.Id) -replace '[^A-Za-z0-9]', '_'
     if ($Row.FixId -and $Row.Status -in 'red', 'yellow') {
-        $fixBtn = New-Object System.Windows.Controls.Button; $fixBtn.Content = 'Fix'; $fixBtn.Margin = '0,0,6,0'; $fixBtn.Name = "BtnReadyFix_$safe"; $fixBtn.DataContext = [string]$Row.FixId
+        $fixBtn = New-Object System.Windows.Controls.Button; $fixBtn.Content = T 'ready.fix'; $fixBtn.Margin = '0,0,6,0'; $fixBtn.Name = "BtnReadyFix_$safe"; $fixBtn.DataContext = [string]$Row.FixId
         $fixBtn.IsEnabled = (Test-AVDTuneWriteAllowed)
-        if (-not $fixBtn.IsEnabled) { $fixBtn.ToolTip = 'Read only: confirm a snapshot of today first.' }
-        [System.Windows.Automation.AutomationProperties]::SetName($fixBtn, "Fix: $($Row.Title)")
+        if (-not $fixBtn.IsEnabled) { $fixBtn.ToolTip = T 'ready.fix.readonly' }
+        [System.Windows.Automation.AutomationProperties]::SetName($fixBtn, (T 'ready.fix.name' $Row.Title))
         $fixBtn.Add_Click({ param($src) try { Start-ReadyFix ([string]$src.DataContext) } catch { Show-Error $_.Exception.Message } })
         [void]$buttons.Children.Add($fixBtn); $ui[$fixBtn.Name] = $fixBtn
     }
     $open = [bool]$script:ReadyOpen[[string]$Row.Id]
-    $more = New-Object System.Windows.Controls.Button; $more.Content = $(if ($open) { 'Hide' } else { 'Details' }); $more.Name = "BtnReadyMore_$safe"; $more.DataContext = [string]$Row.Id
-    [System.Windows.Automation.AutomationProperties]::SetName($more, "Details: $($Row.Title)")
+    $more = New-Object System.Windows.Controls.Button; $more.Content = $(if ($open) { T 'ready.hide' } else { T 'ready.details' }); $more.Name = "BtnReadyMore_$safe"; $more.DataContext = [string]$Row.Id
+    [System.Windows.Automation.AutomationProperties]::SetName($more, (T 'ready.details.name' $Row.Title))
     $more.Add_Click({ param($src) $id = [string]$src.DataContext; $script:ReadyOpen[$id] = -not [bool]$script:ReadyOpen[$id]; Update-ReadyView })
     [void]$buttons.Children.Add($more); $ui[$more.Name] = $more
     foreach ($e in $pill, $title, $reason, $buttons) { [void]$grid.Children.Add($e) }
     [void]$wrap.Children.Add($grid)
     if ($open) {
         $lines = @()
-        if ($Row.Found) { $lines += "Found: $($Row.Found)" }
-        if ($Row.Fix) { $lines += "What to do: $($Row.Fix)" }
-        $lines += "Source: $($Row.Source) (read $($Row.Stand))"
-        $lines += $(if ($Row.Verified) { 'Learn states this criterion.' } else { 'NOT verified on Microsoft Learn.' })
-        if ($Row.Note) { $lines += "Note: $($Row.Note)" }
+        if ($Row.Found) { $lines += T 'ready.row.found' $Row.Found }
+        if ($Row.Fix) { $lines += T 'ready.row.fix' $Row.Fix }
+        $lines += T 'ready.row.source' $Row.Source $Row.Stand
+        $lines += $(if ($Row.Verified) { T 'ready.row.verified' } else { T 'ready.row.unverified' })
+        if ($Row.Note) { $lines += T 'ready.row.note' $Row.Note }
         $d = New-Object System.Windows.Controls.TextBlock; $d.Text = ($lines -join "`r`n"); $d.TextWrapping = 'Wrap'; $d.Margin = '120,6,0,2'; $d.FontSize = 12
         Set-Brush $d ([System.Windows.Controls.TextBlock]::ForegroundProperty) 'MutedText'
         $d.Name = "TxtReadyDetail_$safe"; $ui[$d.Name] = $d
@@ -230,39 +230,39 @@ function Update-ReadyView {
     $ui.PanelReadyRows.Children.Clear()
     Update-ReadyGallery
     $finish = Get-AVDTuneFinishReadiness -Root $script:StateRoot
-    $pair = if ($script:ReadyJob) { @('AccentSubtle', 'Primary', 'Running') } elseif (-not $r) { @('Hover', 'MutedText', 'Not run') } else { $script:ReadyPill[[string]$r.Overall] }
+    $pair = if ($script:ReadyJob) { @('AccentSubtle', 'Primary') } elseif (-not $r) { @('Hover', 'MutedText') } else { $script:ReadyPill[[string]$r.Overall] }
     Set-Brush $ui.PillReady ([System.Windows.Controls.Border]::BackgroundProperty) $pair[0]
-    $ui.TxtReadyPill.Text = $pair[2]; Set-Brush $ui.TxtReadyPill ([System.Windows.Controls.TextBlock]::ForegroundProperty) $pair[1]
-    $ui.TxtReadyGate.Text = $(if ($finish.Allowed) { 'Finish: allowed. The healthcheck is green or confirmed, and nothing changed after it.' } else { 'Finish: locked. ' + (@($finish.Reasons) -join ' ') })
+    $ui.TxtReadyPill.Text = $(if ($script:ReadyJob) { T 'ready.pill.running' } elseif (-not $r) { T 'ready.pill.notrun' } else { T "ready.pill.$([string]$r.Overall)" }); Set-Brush $ui.TxtReadyPill ([System.Windows.Controls.TextBlock]::ForegroundProperty) $pair[1]
+    $ui.TxtReadyGate.Text = $(if ($finish.Allowed) { T 'ready.gate.allowed' } else { (T 'ready.gate.locked') + (@($finish.Reasons) -join ' ') })
     Set-Brush $ui.TxtReadyGate ([System.Windows.Controls.TextBlock]::ForegroundProperty) $(if ($finish.Allowed) { 'Success' } else { 'Danger' })
     $rec = Get-AVDTuneReadinessRecord -Root $script:StateRoot
     if (-not $r) {
-        $ui.TxtReadySummary.Text = $(if ($script:ReadyJob) { 'Analysing ...' } else { 'Not run in this window yet.' })
+        $ui.TxtReadySummary.Text = $(if ($script:ReadyJob) { T 'ready.analysing' } else { T 'ready.notrun' })
         $ui.TxtReadyFamilies.Text = ''
         $ui.PanelReadyAck.Visibility = 'Collapsed'
         return
     }
-    $azure = if ($r.Arm.Ok) { 'Azure was read.' } else { "Azure was not read: $($r.Arm.Problem)" }
-    $ui.TxtReadySummary.Text = "Run at $(([datetime]$r.At).ToString('HH:mm:ss')): $($r.Counts.Red) red, $($r.Counts.Yellow) yellow, $($r.Counts.Unknown) not checkable, $($r.Counts.Green) green. Criteria of $($r.Stand). $azure"
+    $azure = if ($r.Arm.Ok) { T 'ready.azure.ok' } else { T 'ready.azure.no' $r.Arm.Problem }
+    $ui.TxtReadySummary.Text = T 'ready.summary' (([datetime]$r.At).ToString('HH:mm:ss')) $r.Counts.Red $r.Counts.Yellow $r.Counts.Unknown $r.Counts.Green $r.Stand $azure
     Set-Brush $ui.TxtReadySummary ([System.Windows.Controls.TextBlock]::ForegroundProperty) 'Text'
     $order = @{}; $i = 0; foreach ($row in $r.Rows) { $order[$row.Id] = $i++ }
     foreach ($group in 'Hardware generation', 'Image hygiene') {
         $rows = @($r.Rows | Where-Object { $_.Group -eq $group } | Sort-Object { $script:ReadyRank[[string]$_.Status] }, { $order[$_.Id] })
         if ($rows.Count -eq 0) { continue }
-        [void]$ui.PanelReadyRows.Children.Add((New-UpdGroupHead $group))
+        [void]$ui.PanelReadyRows.Children.Add((New-UpdGroupHead $(if ($group -ceq 'Hardware generation') { T 'ready.group.hardware' } else { T 'ready.group.hygiene' })))
         foreach ($row in $rows) { [void]$ui.PanelReadyRows.Children.Add((New-ReadyRow $row)) }
     }
     $ui.TxtReadyFamilies.Text = Format-ReadyFamilies $r.Families
     $open = if ($rec) { @($rec.OpenIds) } else { @() }
     $needAck = ($rec -and [int]$rec.Red -eq 0 -and $open.Count -gt 0 -and @($open | Where-Object { $_ -notin @($rec.Acknowledged) }).Count -gt 0)
     $ui.PanelReadyAck.Visibility = ConvertTo-Vis $needAck
-    if ($needAck) { $ui.TxtReadyAckHint.Text = "To finish, confirm every yellow and not checkable item by typing its name (separated by spaces or commas): $($open -join ', ')" }
+    if ($needAck) { $ui.TxtReadyAckHint.Text = T 'ready.ackhint' ($open -join ', ') }
 }
 function Start-ReadyFix([string]$FixId) {
-    if (-not (Test-AVDTuneWriteAllowed)) { throw 'Read only: confirm a snapshot of today on the Overview first.' }
+    if (-not (Test-AVDTuneWriteAllowed)) { throw (T 'ready.err.readonly') }
     $row = @($script:Ready.Rows | Where-Object { $_.FixId -eq $FixId } | Select-Object -First 1)
-    $ask = if ($FixId -eq 'readiness.updateblock-on') { 'Switch the update block on?' } else { "$($row[0].Title)?`nIt takes effect after the next restart of the master." }
-    if (-not (Confirm-Action $ask 'Fix')) { return }
+    $ask = if ($FixId -eq 'readiness.updateblock-on') { T 'ready.ask.updateblock' } else { T 'ready.ask.fix' $row[0].Title }
+    if (-not (Confirm-Action $ask (T 'ready.fix'))) { return }
     Start-ReadyJob 'Fix' $FixId
 }
 
@@ -272,7 +272,7 @@ Add-Click $ui.BtnReadyAck {
     [void](Add-AVDTuneProtocolNote -Protocol $script:Protocol -Group 'setup' -Subject 'Readiness: open items confirmed' -Note ((@($rec.Acknowledged)) -join ', '))
     Save-Protocol
     $ui.TxtReadyAck.Text = ''
-    Show-Toast 'Open items confirmed by name.'
+    Show-Toast (T 'ready.toast.acked')
     Update-ReadyView
 }
 function Save-ReadyGallery([string]$Id) {
@@ -280,12 +280,12 @@ function Save-ReadyGallery([string]$Id) {
     $text = Set-AVDTuneEnvironmentGallery -Root $script:StateRoot -DefinitionId $Id -Label $(if ($item.Count -gt 0) { [string]$item[0].Label } else { '' }) -User ([string]$env:USERNAME)
     if (-not $Id -and (Test-Path -LiteralPath $script:ReadySettingsPath)) { Write-AVDTuneFile $script:ReadySettingsPath ([ordered]@{ GalleryImageId = '' } | ConvertTo-Json) }   # the older setting must not come back
     if ($text) { [void](Add-AVDTuneProtocolNote -Protocol $script:Protocol -Group 'setup' -Subject 'Readiness: image definition' -Note $text); Save-Protocol }
-    Show-Toast $(if ($Id) { "Image definition $(Format-ReadyGalleryName $Id) saved. Running the analysis again." } else { 'Image definition cleared. Running the analysis again.' })
+    Show-Toast $(if ($Id) { T 'ready.toast.saved' (Format-ReadyGalleryName $Id) } else { T 'ready.toast.cleared' })
     Start-ReadyJob 'Start' ''
 }
 Add-Click $ui.BtnReadyGallery {
     $id = Get-ReadyGallerySelection
-    if (-not $id) { throw 'Choose an image definition from the list first.' }
+    if (-not $id) { throw (T 'ready.err.choose') }
     Save-ReadyGallery $id
 }
 Add-Click $ui.BtnReadyGalleryClear { Save-ReadyGallery '' }

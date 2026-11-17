@@ -36,27 +36,28 @@
 
             <!-- Title row -->
             <Grid Grid.Row="0">
-                <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
                 <StackPanel Orientation="Horizontal" VerticalAlignment="Center" Margin="20,0,0,0">
                     <Border Width="26" Height="26" CornerRadius="6" Background="{DynamicResource Primary}" Margin="0,0,10,0">
                         <TextBlock Text="&#xE770;" FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" FontSize="14" Foreground="White" HorizontalAlignment="Center" VerticalAlignment="Center"/>
                     </Border>
                     <StackPanel VerticalAlignment="Center">
                         <TextBlock Text="AVDTune" FontWeight="SemiBold" LineHeight="18"/>
-                        <TextBlock Text="Golden Master for Azure Virtual Desktop" FontSize="11" Foreground="{DynamicResource MutedText}" Margin="0,-1,0,0"/>
+                        <TextBlock Uid="title.subtitle" FontSize="11" Foreground="{DynamicResource MutedText}" Margin="0,-1,0,0"/>
                     </StackPanel>
                 </StackPanel>
-                <Border x:Name="ChipImage" Grid.Column="1" Height="34" CornerRadius="17" Background="{DynamicResource Card}" BorderBrush="{DynamicResource CardBorder}" BorderThickness="1" Padding="14,0" Margin="0,0,12,0" VerticalAlignment="Center" shell:WindowChrome.IsHitTestVisibleInChrome="True" AutomationProperties.Name="Image">
+                <Border x:Name="ChipImage" Uid="title.image" Grid.Column="1" Height="34" CornerRadius="17" Background="{DynamicResource Card}" BorderBrush="{DynamicResource CardBorder}" BorderThickness="1" Padding="14,0" Margin="0,0,12,0" VerticalAlignment="Center" shell:WindowChrome.IsHitTestVisibleInChrome="True">
                     <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
                         <TextBlock x:Name="TxtChipName" FontSize="13" FontWeight="SemiBold" VerticalAlignment="Center"/>
                         <TextBlock x:Name="TxtChipVersion" FontSize="13" Foreground="{DynamicResource MutedText}" Margin="8,0,0,0" VerticalAlignment="Center"/>
                     </StackPanel>
                 </Border>
-                <Button x:Name="BtnTheme" Grid.Column="2" Style="{DynamicResource IconButton}" Content="&#xE706;" Margin="0,0,8,0" VerticalAlignment="Center" shell:WindowChrome.IsHitTestVisibleInChrome="True" AutomationProperties.Name="Switch between light and dark" ToolTip="Light or dark"/>
-                <StackPanel Grid.Column="3" Orientation="Horizontal" VerticalAlignment="Top" Height="40" shell:WindowChrome.IsHitTestVisibleInChrome="True">
-                    <Button x:Name="BtnMinimize" Style="{DynamicResource CaptionButton}" Content="&#xE921;" AutomationProperties.Name="Minimize" ToolTip="Minimize"/>
-                    <Button x:Name="BtnMaximize" Style="{DynamicResource CaptionButton}" Content="&#xE922;" AutomationProperties.Name="Maximize" ToolTip="Maximize"/>
-                    <Button x:Name="BtnClose" Style="{DynamicResource CloseCaptionButton}" Content="&#xE8BB;" AutomationProperties.Name="Close" ToolTip="Close"/>
+                <Button x:Name="BtnLang" Uid="title.lang" Grid.Column="2" Style="{DynamicResource IconButton}" FontFamily="Segoe UI Variable Text, Segoe UI" FontSize="12" FontWeight="SemiBold" MinWidth="34" Margin="0,0,4,0" VerticalAlignment="Center" shell:WindowChrome.IsHitTestVisibleInChrome="True"/>
+                <Button x:Name="BtnTheme" Uid="title.theme" Grid.Column="3" Style="{DynamicResource IconButton}" Margin="0,0,8,0" VerticalAlignment="Center" shell:WindowChrome.IsHitTestVisibleInChrome="True"/>
+                <StackPanel Grid.Column="4" Orientation="Horizontal" VerticalAlignment="Top" Height="40" shell:WindowChrome.IsHitTestVisibleInChrome="True">
+                    <Button x:Name="BtnMinimize" Uid="title.minimize" Content="&#xE921;" Style="{DynamicResource CaptionButton}"/>
+                    <Button x:Name="BtnMaximize" Uid="title.maximize" Content="&#xE922;" Style="{DynamicResource CaptionButton}"/>
+                    <Button x:Name="BtnClose" Uid="title.close" Content="&#xE8BB;" Style="{DynamicResource CloseCaptionButton}"/>
                 </StackPanel>
             </Grid>
 
@@ -77,8 +78,8 @@
                         <Border x:Name="BoxReadOnly" Grid.Row="0" Visibility="Collapsed" Background="{DynamicResource WarningBg}" Padding="40,10">
                             <Grid>
                                 <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-                                <TextBlock x:Name="TxtReadOnly" TextWrapping="Wrap" VerticalAlignment="Center" Foreground="{DynamicResource Warning}" FontWeight="SemiBold" Text="Read only: confirm a snapshot of today on the Overview first. Nothing on this page changes the master until then."/>
-                                <Button x:Name="BtnReadOnlyGo" Grid.Column="1" Content="Go to the Overview" Margin="16,0,0,0" AutomationProperties.Name="Go to the Overview to finish the start sequence"/>
+                                <TextBlock x:Name="TxtReadOnly" Uid="shell.readonly" TextWrapping="Wrap" VerticalAlignment="Center" Foreground="{DynamicResource Warning}" FontWeight="SemiBold"/>
+                                <Button x:Name="BtnReadOnlyGo" Uid="shell.readonlygo" Grid.Column="1" Margin="16,0,0,0"/>
                             </Grid>
                         </Border>
                         <Grid Grid.Row="1">
@@ -93,48 +94,48 @@
                                     <Grid>
                                         <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
                                         <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-                                        <TextBlock Text="Overview" Style="{DynamicResource PageTitle}"/>
-                                        <TextBlock Grid.Row="1" Grid.ColumnSpan="2" x:Name="TxtOverviewSubtitle" Style="{DynamicResource Subtitle}" Text="This Golden Master at a glance: image, builds and what stands in the way of finishing the version."/>
+                                        <TextBlock Uid="ov.title" Style="{DynamicResource PageTitle}"/>
+                                        <TextBlock Grid.Row="1" Grid.ColumnSpan="2" x:Name="TxtOverviewSubtitle" Uid="ov.subtitle" Style="{DynamicResource Subtitle}"/>
                                         <StackPanel x:Name="PanelOverviewHead" Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center" Margin="24,0,0,0">
-                                            <Button x:Name="BtnNewVersion" Content="Start new version" Margin="0,0,8,0" AutomationProperties.Name="Start new image version"/>
-                                            <Button x:Name="BtnRefresh" Style="{DynamicResource PrimaryButton}" Content="Refresh" Tag="&#xE72C;" AutomationProperties.Name="Refresh the overview"/>
+                                            <Button x:Name="BtnNewVersion" Uid="ov.newversion" Margin="0,0,8,0"/>
+                                            <Button x:Name="BtnRefresh" Uid="ov.refresh" Style="{DynamicResource PrimaryButton}" Tag="&#xE72C;"/>
                                         </StackPanel>
                                     </Grid>
                                     <TextBlock x:Name="TxtOverviewState" Style="{DynamicResource Hint}" Margin="0,12,0,0"/>
                                     <Border x:Name="BoxRelease" Style="{DynamicResource CardBox}" Margin="0,16,0,0" Background="{DynamicResource Card}" Padding="20,16">
                                         <StackPanel>
                                             <StackPanel Orientation="Horizontal">
-                                                <TextBlock Text="Integrity and updates" Style="{DynamicResource CardTitle}" VerticalAlignment="Center"/>
+                                                <TextBlock Uid="rel.title" Style="{DynamicResource CardTitle}" VerticalAlignment="Center"/>
                                                 <Border x:Name="PillRelease" Style="{DynamicResource Pill}" Padding="10,2" Margin="12,0,0,0" VerticalAlignment="Center"><TextBlock x:Name="TxtRelStatus" FontSize="12" FontWeight="SemiBold"/></Border>
                                             </StackPanel>
                                             <TextBlock x:Name="TxtRelDetail" Margin="0,8,0,0" TextWrapping="Wrap"/>
-                                            <TextBox x:Name="TxtRelFiles" Visibility="Collapsed" IsReadOnly="True" TextWrapping="NoWrap" AcceptsReturn="True" MaxHeight="150" Margin="0,8,0,0" Padding="8,6" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto" AutomationProperties.Name="Files that differ from the release"/>
+                                            <TextBox x:Name="TxtRelFiles" Uid="rel.files" Visibility="Collapsed" IsReadOnly="True" TextWrapping="NoWrap" AcceptsReturn="True" MaxHeight="150" Margin="0,8,0,0" Padding="8,6" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto"/>
                                             <TextBlock x:Name="TxtRelNotes" Margin="0,10,0,0" TextWrapping="Wrap"/>
                                             <StackPanel x:Name="PanelRelSkip" Visibility="Collapsed" Margin="0,10,0,0">
                                                 <TextBlock x:Name="TxtRelSkipHint" TextWrapping="Wrap" Margin="0,0,0,6"/>
                                                 <StackPanel Orientation="Horizontal">
-                                                    <TextBox x:Name="TxtRelSkipName" Width="260" Margin="0,0,8,0" Padding="8,6" AutomationProperties.Name="Computer name to continue without the check"/>
-                                                    <Button x:Name="BtnRelSkip" Content="Continue without check" AutomationProperties.Name="Continue without the integrity check"/>
+                                                    <TextBox x:Name="TxtRelSkipName" Uid="rel.skipname" Width="260" Margin="0,0,8,0" Padding="8,6"/>
+                                                    <Button x:Name="BtnRelSkip" Uid="rel.skip"/>
                                                 </StackPanel>
                                             </StackPanel>
                                             <StackPanel Orientation="Horizontal" Margin="0,12,0,0">
-                                                <Button x:Name="BtnRelRepair" Style="{DynamicResource PrimaryButton}" Content="Repair" Visibility="Collapsed" Margin="0,0,8,0" AutomationProperties.Name="Repair the files of AVDTune from the release"/>
-                                                <Button x:Name="BtnRelInstall" Style="{DynamicResource PrimaryButton}" Content="Install update" Visibility="Collapsed" Margin="0,0,8,0" AutomationProperties.Name="Install the newer version side by side"/>
-                                                <Button x:Name="BtnRelBack" Content="Back to the previous version" Visibility="Collapsed" Margin="0,0,8,0" AutomationProperties.Name="Switch back to the previous version"/>
-                                                <Button x:Name="BtnRelCheck" Content="Check for updates" Margin="0,0,16,0" AutomationProperties.Name="Check GitHub for a newer version"/>
-                                                <CheckBox x:Name="ChkRelEarly" Content="Include early access releases" VerticalAlignment="Center" AutomationProperties.Name="Include early access releases in the update check"/>
+                                                <Button x:Name="BtnRelRepair" Uid="rel.repair" Style="{DynamicResource PrimaryButton}" Visibility="Collapsed" Margin="0,0,8,0"/>
+                                                <Button x:Name="BtnRelInstall" Uid="rel.install" Style="{DynamicResource PrimaryButton}" Visibility="Collapsed" Margin="0,0,8,0"/>
+                                                <Button x:Name="BtnRelBack" Uid="rel.back" Visibility="Collapsed" Margin="0,0,8,0"/>
+                                                <Button x:Name="BtnRelCheck" Uid="rel.check" Margin="0,0,16,0"/>
+                                                <CheckBox x:Name="ChkRelEarly" Uid="rel.early" VerticalAlignment="Center"/>
                                             </StackPanel>
-                                            <TextBlock x:Name="TxtRelLimit" Style="{DynamicResource Hint}" Margin="0,10,0,0" TextWrapping="Wrap" Text="Limit: the check proves that the files are the ones published on GitHub for this version and unchanged on this master. It does not protect against a compromised GitHub account or repository. Updates are installed only when you click, never during a run or the maintenance mode."/>
+                                            <TextBlock x:Name="TxtRelLimit" Uid="rel.limit" Style="{DynamicResource Hint}" Margin="0,10,0,0" TextWrapping="Wrap"/>
                                             <StackPanel x:Name="PanelRelShortcut" Orientation="Horizontal" Margin="0,12,0,0">
-                                                <Button x:Name="BtnRelShortcut" Content="Create desktop shortcut" Margin="0,0,12,0" AutomationProperties.Name="Create or remove the AVDTune shortcut on your desktop"/>
+                                                <Button x:Name="BtnRelShortcut" Uid="rel.shortcut" Margin="0,0,12,0"/>
                                                 <TextBlock x:Name="TxtRelShortcut" VerticalAlignment="Center" TextWrapping="Wrap" MaxWidth="640"/>
                                             </StackPanel>
                                         </StackPanel>
                                     </Border>
                                     <Border x:Name="BoxStart" Style="{DynamicResource CardBox}" Margin="0,16,0,0" Background="{DynamicResource Card}" Padding="20,16">
                                         <StackPanel>
-                                            <TextBlock Text="Start sequence" Style="{DynamicResource CardTitle}"/>
-                                            <TextBlock x:Name="TxtStartHint" Style="{DynamicResource Hint}" Margin="0,4,0,0" Text="Nothing changes the master before these steps are done. Every page stays read only until the snapshot is confirmed."/>
+                                            <TextBlock Uid="start.title" Style="{DynamicResource CardTitle}"/>
+                                            <TextBlock x:Name="TxtStartHint" Uid="start.hint" Style="{DynamicResource Hint}" Margin="0,4,0,0"/>
                                             <StackPanel x:Name="PanelStages" Margin="0,8,0,0"/>
                                         </StackPanel>
                                     </Border>
@@ -147,25 +148,25 @@
                                             <StackPanel Orientation="Horizontal" Margin="0,14,0,0">
                                                 <Button x:Name="BtnStageAction" Style="{DynamicResource PrimaryButton}" Margin="0,0,8,0"/>
                                                 <Button x:Name="BtnStageAction2" Margin="0,0,8,0" Visibility="Collapsed"/>
-                                                <Button x:Name="BtnStageClose" Content="Close"/>
+                                                <Button x:Name="BtnStageClose" Uid="common.close"/>
                                             </StackPanel>
                                         </StackPanel>
                                     </Border>
                                     <Border x:Name="BoxRollback" Visibility="Collapsed" Style="{DynamicResource CardBox}" Margin="0,16,0,0" Background="{DynamicResource Card}" Padding="20,16">
                                         <StackPanel>
-                                            <TextBlock Text="Rollback" Style="{DynamicResource CardTitle}"/>
+                                            <TextBlock Uid="ov.rollback" Style="{DynamicResource CardTitle}"/>
                                             <TextBlock x:Name="TxtRollback" TextWrapping="Wrap" Margin="0,8,0,0"/>
                                         </StackPanel>
                                     </Border>
                                     <Border Style="{DynamicResource CardBox}" Margin="0,16,0,0" Background="{DynamicResource Card}" Padding="20,16">
                                         <StackPanel>
-                                            <TextBlock Text="Image" Style="{DynamicResource CardTitle}"/>
+                                            <TextBlock Uid="ov.image" Style="{DynamicResource CardTitle}"/>
                                             <StackPanel x:Name="PanelIdentity" Margin="0,10,0,0"/>
                                         </StackPanel>
                                     </Border>
                                     <Border Style="{DynamicResource CardBox}" Margin="0,16,0,0" Background="{DynamicResource Card}" Padding="20,16">
                                         <StackPanel>
-                                            <TextBlock Text="Health" Style="{DynamicResource CardTitle}"/>
+                                            <TextBlock Uid="ov.health" Style="{DynamicResource CardTitle}"/>
                                             <StackPanel x:Name="PanelHealth" Margin="0,6,0,0"/>
                                         </StackPanel>
                                     </Border>
@@ -174,12 +175,12 @@
                                             <Grid>
                                                 <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
                                                 <StackPanel Orientation="Horizontal">
-                                                    <TextBlock Text="Readiness" Style="{DynamicResource CardTitle}" VerticalAlignment="Center"/>
+                                                    <TextBlock Uid="ready.title" Style="{DynamicResource CardTitle}" VerticalAlignment="Center"/>
                                                     <Border x:Name="PillReady" Style="{DynamicResource Pill}" Padding="10,2" Margin="12,0,0,0" VerticalAlignment="Center"><TextBlock x:Name="TxtReadyPill" FontSize="12" FontWeight="SemiBold"/></Border>
                                                 </StackPanel>
-                                                <Button x:Name="BtnReadyRun" Grid.Column="1" Style="{DynamicResource PrimaryButton}" Content="Run analysis" AutomationProperties.Name="Run the readiness analysis"/>
+                                                <Button x:Name="BtnReadyRun" Uid="ready.run" Grid.Column="1" Style="{DynamicResource PrimaryButton}"/>
                                             </Grid>
-                                            <TextBlock x:Name="TxtReadyIntro" Style="{DynamicResource Hint}" Margin="0,4,0,0" TextWrapping="Wrap" Text="Is this master ready for the current VM sizes (v6/v7) and clean enough to become an image? Read only; every finding has its reason, its Microsoft Learn source and a fix hint."/>
+                                            <TextBlock x:Name="TxtReadyIntro" Uid="ready.intro" Style="{DynamicResource Hint}" Margin="0,4,0,0" TextWrapping="Wrap"/>
                                             <TextBlock x:Name="TxtReadySummary" Margin="0,10,0,0" TextWrapping="Wrap"/>
                                             <TextBlock x:Name="TxtReadyGate" Margin="0,4,0,0" TextWrapping="Wrap"/>
                                             <StackPanel x:Name="PanelReadyRows" Margin="0,8,0,0"/>
@@ -187,15 +188,15 @@
                                             <StackPanel x:Name="PanelReadyAck" Visibility="Collapsed" Margin="0,14,0,0">
                                                 <TextBlock x:Name="TxtReadyAckHint" TextWrapping="Wrap" Margin="0,0,0,6"/>
                                                 <StackPanel Orientation="Horizontal">
-                                                    <TextBox x:Name="TxtReadyAck" Width="520" Margin="0,0,8,0" Padding="8,6" AutomationProperties.Name="Names of the open items to confirm"/>
-                                                    <Button x:Name="BtnReadyAck" Content="Confirm" AutomationProperties.Name="Confirm the open items by name"/>
+                                                    <TextBox x:Name="TxtReadyAck" Uid="ready.ackbox" Width="520" Margin="0,0,8,0" Padding="8,6"/>
+                                                    <Button x:Name="BtnReadyAck" Uid="ready.ack"/>
                                                 </StackPanel>
                                             </StackPanel>
                                             <StackPanel Orientation="Horizontal" Margin="0,14,0,0">
-                                                <TextBlock Text="Image definition" VerticalAlignment="Center" Margin="0,0,10,0"/>
-                                                <ComboBox x:Name="CmbReadyGallery" Width="520" Margin="0,0,8,0" AutomationProperties.Name="Image definition in the Azure Compute Gallery"/>
-                                                <Button x:Name="BtnReadyGallery" Content="Use" Margin="0,0,8,0" AutomationProperties.Name="Use the chosen image definition"/>
-                                                <Button x:Name="BtnReadyGalleryClear" Content="Clear" Visibility="Collapsed" AutomationProperties.Name="Clear the chosen image definition"/>
+                                                <TextBlock Uid="ready.imagedef" VerticalAlignment="Center" Margin="0,0,10,0"/>
+                                                <ComboBox x:Name="CmbReadyGallery" Uid="ready.gallery" Width="520" Margin="0,0,8,0"/>
+                                                <Button x:Name="BtnReadyGallery" Uid="ready.use" Margin="0,0,8,0"/>
+                                                <Button x:Name="BtnReadyGalleryClear" Uid="ready.clear" Visibility="Collapsed"/>
                                             </StackPanel>
                                             <TextBlock x:Name="TxtReadyGalleryState" Style="{DynamicResource Hint}" Margin="0,4,0,0" TextWrapping="Wrap"/>
                                         </StackPanel>
@@ -210,32 +211,31 @@
                             <Grid>
                                 <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
                                 <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-                                <TextBlock Text="Protocol and change log" Style="{DynamicResource PageTitle}"/>
+                                <TextBlock Uid="prot.title" Style="{DynamicResource PageTitle}"/>
                                 <TextBlock Grid.Row="1" Grid.ColumnSpan="2" x:Name="TxtProtocolSubtitle" Style="{DynamicResource Subtitle}"/>
                                 <StackPanel x:Name="PanelProtocolHead" Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center" Margin="24,0,0,0">
-                                    <ComboBox x:Name="CmbProtocolLanguage" Width="120" Margin="0,0,8,0" AutomationProperties.Name="Language of the protocol"/>
-                                    <ComboBox x:Name="CmbVersion" Width="140" Margin="0,0,8,0" Visibility="Collapsed" AutomationProperties.Name="Image version"/>
-                                    <Button x:Name="BtnProtocolSave" Content="Save as file" Margin="0,0,8,0"/>
-                                    <Button x:Name="BtnProtocolCopy" Style="{DynamicResource PrimaryButton}" Content="Copy" Tag="&#xE8C8;"/>
+                                    <ComboBox x:Name="CmbVersion" Uid="prot.version" Width="140" Margin="0,0,8,0" Visibility="Collapsed"/>
+                                    <Button x:Name="BtnProtocolSave" Uid="prot.save" Margin="0,0,8,0"/>
+                                    <Button x:Name="BtnProtocolCopy" Uid="prot.copy" Style="{DynamicResource PrimaryButton}" Tag="&#xE8C8;"/>
                                 </StackPanel>
                             </Grid>
                             <Grid Grid.Row="1" Margin="0,14,0,0">
                                 <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
-                                <Border Style="{DynamicResource Segmented}" Background="{DynamicResource Card}" AutomationProperties.Name="View">
+                                <Border Style="{DynamicResource Segmented}" Background="{DynamicResource Card}" Uid="prot.view">
                                     <StackPanel Orientation="Horizontal">
-                                        <RadioButton x:Name="SegSession" GroupName="ProtocolView" Style="{DynamicResource SegmentItem}" Content="Session protocol" IsChecked="True"/>
-                                        <RadioButton x:Name="SegChange" GroupName="ProtocolView" Style="{DynamicResource SegmentItem}" Content="Change log"/>
+                                        <RadioButton x:Name="SegSession" Uid="prot.session" GroupName="ProtocolView" Style="{DynamicResource SegmentItem}" IsChecked="True"/>
+                                        <RadioButton x:Name="SegChange" Uid="prot.change" GroupName="ProtocolView" Style="{DynamicResource SegmentItem}"/>
                                     </StackPanel>
                                 </Border>
                                 <StackPanel x:Name="PanelNote" Grid.Column="1" Orientation="Horizontal" HorizontalAlignment="Right" Visibility="Collapsed">
-                                    <ComboBox x:Name="CmbNoteCategory" Width="150" Margin="0,0,8,0" AutomationProperties.Name="Category of the note"/>
-                                    <ComboBox x:Name="CmbNoteType" Width="100" Margin="0,0,8,0" AutomationProperties.Name="Change type"/>
-                                    <TextBox x:Name="TxtNote" Width="320" Margin="0,0,8,0" Padding="8,6" MaxLength="500" AutomationProperties.Name="Note for the change log"/>
-                                    <Button x:Name="BtnAddNote" Content="Add note"/>
+                                    <ComboBox x:Name="CmbNoteCategory" Uid="prot.category" Width="150" Margin="0,0,8,0"/>
+                                    <ComboBox x:Name="CmbNoteType" Uid="prot.type" Width="100" Margin="0,0,8,0"/>
+                                    <TextBox x:Name="TxtNote" Uid="prot.note" Width="320" Margin="0,0,8,0" Padding="8,6" MaxLength="500"/>
+                                    <Button x:Name="BtnAddNote" Uid="prot.addnote"/>
                                 </StackPanel>
                             </Grid>
                             <Border Grid.Row="2" Style="{DynamicResource CardBox}" Background="{DynamicResource Card}" Margin="0,14,0,0" VerticalAlignment="Stretch">
-                                <TextBox x:Name="TxtProtocol" Style="{DynamicResource SelectableText}" VerticalAlignment="Stretch" AcceptsReturn="True" VerticalScrollBarVisibility="Auto" Foreground="{DynamicResource Text}" FontFamily="Cascadia Mono, Consolas" FontSize="13" Padding="16,14" AutomationProperties.Name="Protocol text"/>
+                                <TextBox x:Name="TxtProtocol" Uid="prot.text" Style="{DynamicResource SelectableText}" VerticalAlignment="Stretch" AcceptsReturn="True" VerticalScrollBarVisibility="Auto" Foreground="{DynamicResource Text}" FontFamily="Cascadia Mono, Consolas" FontSize="13" Padding="16,14"/>
                             </Border>
                             <TextBlock x:Name="TxtProtocolState" Grid.Row="3" Style="{DynamicResource Hint}" Margin="0,10,0,18"/>
                         </Grid>
@@ -759,8 +759,7 @@
             </Grid>
 
             <!-- Task bar (like the busy bar of PackTune): what runs now, with the step and the progress; a click opens the list of the tasks of this session -->
-            <Border x:Name="BoxTaskBar" Grid.Row="2" Background="{DynamicResource AccentFaint}" BorderBrush="{DynamicResource SurfaceBorder}" BorderThickness="0,1,0,0" Cursor="Hand" Focusable="True" ToolTip="Show the tasks of this session"
-                    AutomationProperties.Name="Tasks: what AVDTune is doing now">
+            <Border x:Name="BoxTaskBar" Uid="task.bar" Grid.Row="2" Background="{DynamicResource AccentFaint}" BorderBrush="{DynamicResource SurfaceBorder}" BorderThickness="0,1,0,0" Cursor="Hand" Focusable="True">
                 <StackPanel>
                     <ProgressBar x:Name="PbTask" Height="3" BorderThickness="0" Background="Transparent" Foreground="{DynamicResource Primary}" Minimum="0" Maximum="100" Visibility="Hidden"/>
                     <Grid Margin="20,4,16,5" MinHeight="22">
@@ -782,22 +781,22 @@
             </Border>
 
             <!-- List of the tasks of this session, opened from the bar (rows are made in code, AVDTune-TaskBar.ps1) -->
-            <Border x:Name="BoxTaskList" Grid.Row="1" Grid.RowSpan="2" Panel.ZIndex="70" Visibility="Collapsed" VerticalAlignment="Bottom" HorizontalAlignment="Right" Margin="0,0,16,36" Width="780" MaxHeight="460"
-                    Background="{DynamicResource Card}" BorderBrush="{DynamicResource CardBorder}" BorderThickness="1" CornerRadius="8" AutomationProperties.Name="Tasks of this session">
+            <Border x:Name="BoxTaskList" Uid="task.list" Grid.Row="1" Grid.RowSpan="2" Panel.ZIndex="70" Visibility="Collapsed" VerticalAlignment="Bottom" HorizontalAlignment="Right" Margin="0,0,16,36" Width="780" MaxHeight="460"
+                    Background="{DynamicResource Card}" BorderBrush="{DynamicResource CardBorder}" BorderThickness="1" CornerRadius="8">
                 <Border.Effect><DropShadowEffect BlurRadius="24" ShadowDepth="4" Opacity="0.25" Direction="270"/></Border.Effect>
                 <DockPanel>
                     <Grid DockPanel.Dock="Top" Margin="18,12,10,8">
                         <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
                         <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
-                            <TextBlock Text="Tasks of this session" FontWeight="SemiBold" FontSize="15"/>
+                            <TextBlock Uid="task.list.title" FontWeight="SemiBold" FontSize="15"/>
                             <TextBlock x:Name="TxtTaskSummary" Style="{DynamicResource Hint}" Margin="12,2,0,0" VerticalAlignment="Center"/>
                         </StackPanel>
-                        <Button x:Name="BtnTaskClose" Grid.Column="1" Style="{DynamicResource IconButton}" Content="&#xE711;" AutomationProperties.Name="Close the list of tasks" ToolTip="Close"/>
+                        <Button x:Name="BtnTaskClose" Uid="task.close" Content="&#xE711;" Grid.Column="1" Style="{DynamicResource IconButton}"/>
                     </Grid>
                     <Border DockPanel.Dock="Top" BorderBrush="{DynamicResource Divider}" BorderThickness="0,1,0,0"/>
                     <ScrollViewer Style="{DynamicResource PageScroll}" MaxHeight="400">
                         <StackPanel>
-                            <TextBlock x:Name="TxtTaskEmpty" Style="{DynamicResource Hint}" Margin="18,14,18,16" Text="Nothing has run in this session yet."/>
+                            <TextBlock x:Name="TxtTaskEmpty" Uid="task.empty" Style="{DynamicResource Hint}" Margin="18,14,18,16"/>
                             <StackPanel x:Name="PanelTaskList"/>
                         </StackPanel>
                     </ScrollViewer>

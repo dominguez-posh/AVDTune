@@ -30,6 +30,10 @@ Import-Module (Join-Path $PSScriptRoot 'Modules\AVDTune.psm1') -Force
 foreach ($part in 'Trust', 'Session', 'Snapshot', 'Directory', 'Start', 'UpdateBlock', 'Updates', 'Readiness', 'Watermark', 'Benchmark', 'Shortcut', 'FSLogix', 'Storage', 'Software', 'Office', 'Masking', 'Finish', 'Environment', 'Optimization') { Import-Module (Join-Path $PSScriptRoot "Modules\AVDTune.$part.psm1") -Force }
 Import-Module (Join-Path $PSScriptRoot 'Modules\AVDTune.Release.psm1') -Force
 . (Join-Path $PSScriptRoot 'AVDTune-Theme.ps1')
+. (Join-Path $PSScriptRoot 'AVDTune-UiText.ps1')   # the texts of the window (UI\Strings.en.json, UI\Strings.de.json)
+$script:LanguageInit = Initialize-AVDTuneLanguage -Folder (Join-Path $PSScriptRoot 'UI')
+foreach ($problem in $script:LanguageInit.Problems) { [Console]::Error.WriteLine("AVDTune: $problem") }
+Set-AVDTuneLanguage $(if ([System.Globalization.CultureInfo]::CurrentUICulture.TwoLetterISOLanguageName -eq 'de') { 'de' } else { 'en' })   # until the settings are read: the language of Windows
 
 # ---------------------------------------------------------------- test mode, elevation, one instance
 $script:StateRoot = Get-AVDTuneRoot
@@ -51,7 +55,7 @@ function Stop-WithMessage([string]$Text) {
     exit 1
 }
 if (-not $script:TestMode -and -not (Test-AVDTuneElevated)) {
-    Stop-WithMessage "AVDTune changes the Golden Master and must run as administrator.`nStart it again with 'Run as administrator'."
+    Stop-WithMessage (T 'shell.err.admin')
 }
 # Test runs of several checkouts can run at the same time: one test mutex per test state folder
 $mutexName = if ($script:TestMode) {
@@ -63,7 +67,7 @@ $script:MutexName = $mutexName
 $script:Mutex = New-Object System.Threading.Mutex($false, $mutexName)
 $script:MutexOwned = $false
 try { $script:MutexOwned = $script:Mutex.WaitOne(0) } catch [System.Threading.AbandonedMutexException] { $script:MutexOwned = $true }
-if (-not $script:MutexOwned) { Stop-WithMessage 'AVDTune is already running on this computer (one instance at a time).' }
+if (-not $script:MutexOwned) { Stop-WithMessage (T 'shell.err.running') }
 
 if ($script:TestMode) {
     . $script:TestInfo.FakeScript; $script:Machine = New-AVDTuneFakeMachine
@@ -101,13 +105,17 @@ function Get-UiSettings {
     try { $s = Read-AVDTuneJson $script:SettingsPath } catch { }
     [pscustomobject]@{
         Theme = $(if ($s -and (Get-AVDTuneProp $s 'Theme') -in 'Light', 'Dark') { [string]$s.Theme } else { Get-AVDTuneSystemTheme })
-        ProtocolLanguage = $(if ($s -and (Get-AVDTuneProp $s 'ProtocolLanguage') -eq 'de') { 'de' } else { 'en' })
+        # one switch for the window and the protocol: an older file has only ProtocolLanguage; without any choice the language of Windows (as the theme follows Windows)
+        Language = $(if ($s -and (Get-AVDTuneProp $s 'Language') -in 'en', 'de') { [string]$s.Language } elseif ($s -and (Get-AVDTuneProp $s 'ProtocolLanguage') -in 'en', 'de') { [string]$s.ProtocolLanguage } else { Get-AVDTuneLanguage })
+        ProtocolLanguage = 'en'
     }
 }
 function Save-UiSettings {
-    try { Write-AVDTuneFile $script:SettingsPath ([ordered]@{ Theme = $script:Settings.Theme; ProtocolLanguage = $script:Settings.ProtocolLanguage } | ConvertTo-Json) } catch { }
+    try { Write-AVDTuneFile $script:SettingsPath ([ordered]@{ Theme = $script:Settings.Theme; Language = $script:Settings.Language; ProtocolLanguage = $script:Settings.Language } | ConvertTo-Json) } catch { }
 }
 $script:Settings = Get-UiSettings
+$script:Settings.ProtocolLanguage = $script:Settings.Language   # the protocol follows the switch of the window
+Set-AVDTuneLanguage $script:Settings.Language
 
 # ---------------------------------------------------------------- window
 if (-not [System.Windows.Application]::Current) { [void](New-Object System.Windows.Application) }
@@ -120,6 +128,8 @@ foreach ($node in $xaml.SelectNodes("//*[@*[local-name()='Name']]")) {
     $name = $node.Attributes | Where-Object LocalName -eq 'Name' | Select-Object -ExpandProperty Value
     $ui[$name] = $window.FindName($name)
 }
+[void](Register-AVDTuneLocalized $window)   # elements with a Uid get their texts from the language files (again after every switch)
+Update-AVDTuneLocalized
 $window.Title = "AVDTune $script:ToolVersion"
 $ui.TxtVersion.Text = "AVDTune $script:ToolVersion"
 
@@ -173,20 +183,24 @@ $script:PageTable = @(
 )
 $script:PageKeys = @($script:PageTable | ForEach-Object { $_.Key })
 $script:CurrentPage = 'Overview'
+$script:NavLabels = @{}
+# The title of a page in the chosen language (nav.<key>); the English title of the table when the language files have no key for a new page yet
+function Get-PageTitle($Page) { $k = "nav.$($Page.Key.ToLowerInvariant())"; if (Test-AVDTuneHasText $k) { T $k } else { [string]$Page.Title } }
 
 foreach ($page in $script:PageTable) {
     $rb = New-Object System.Windows.Controls.RadioButton
     Set-Brush $rb ([System.Windows.Controls.Control]::StyleProperty) 'NavItem'
     $rb.GroupName = 'Nav'
     $rb.Name = "Nav$($page.Key)"
-    [System.Windows.Automation.AutomationProperties]::SetName($rb, $page.Title)
+    [System.Windows.Automation.AutomationProperties]::SetName($rb, (Get-PageTitle $page))
     $row = New-Object System.Windows.Controls.StackPanel
     $row.Orientation = 'Horizontal'
     $glyph = New-Object System.Windows.Controls.TextBlock
     $glyph.Style = $window.Resources['NavGlyph']
     $glyph.Text = [string][char]$page.Glyph
     $label = New-Object System.Windows.Controls.TextBlock
-    $label.Text = $page.Title
+    $label.Text = Get-PageTitle $page
+    $script:NavLabels[$page.Key] = @{ Radio = $rb; Label = $label }
     [void]$row.Children.Add($glyph); [void]$row.Children.Add($label)
     $rb.Content = $row
     [void]$ui.NavList.Children.Add($rb)
@@ -219,8 +233,8 @@ function Show-Page([string]$Key) {
     Update-ReadOnlyBanner
     if ($isPlaceholder) {
         $page = $script:PageTable | Where-Object { $_.Key -eq $Key } | Select-Object -First 1
-        $ui.TxtPhTitle.Text = $page.Title
-        $ui.TxtPhPhase.Text = "Planned for phase $($page.Phase)"
+        $ui.TxtPhTitle.Text = Get-PageTitle $page
+        $ui.TxtPhPhase.Text = T 'shell.phase' $page.Phase
         $ui.TxtPhText.Text = $page.Text
     }
     elseif ($Key -eq 'Overview') { Update-OverviewView; Update-StartView; Update-ReadyView }
@@ -241,7 +255,6 @@ function Show-Page([string]$Key) {
 # ---------------------------------------------------------------- Overview
 $script:Overview = $null
 $script:OverviewJob = $null
-$script:StatusLabel = @{ ok = 'OK'; warn = 'Attention'; bad = 'Must fix'; info = 'Info' }
 $script:StatusBrush = @{ ok = @('SuccessBg', 'Success'); warn = @('WarningBg', 'Warning'); bad = @('ErrorBg', 'Danger'); info = @('Hover', 'Text') }
 
 function New-InfoRow([string]$Label, [string]$Value) {
@@ -267,11 +280,11 @@ function New-HealthRow($Item) {
     $pill.Padding = '10,2'; $pill.VerticalAlignment = 'Center'
     $pair = $script:StatusBrush[[string]$Item.Status]
     Set-Brush $pill ([System.Windows.Controls.Border]::BackgroundProperty) $pair[0]
-    $pt = New-Object System.Windows.Controls.TextBlock; $pt.Text = $script:StatusLabel[[string]$Item.Status]; $pt.FontSize = 12; $pt.FontWeight = 'SemiBold'
+    $pt = New-Object System.Windows.Controls.TextBlock; $pt.Text = T "status.$([string]$Item.Status)"; $pt.FontSize = 12; $pt.FontWeight = 'SemiBold'
     Set-Brush $pt ([System.Windows.Controls.TextBlock]::ForegroundProperty) $pair[1]
     $pill.Child = $pt
-    $title = New-Object System.Windows.Controls.TextBlock; $title.Text = [string]$Item.Title; $title.FontWeight = 'SemiBold'; $title.VerticalAlignment = 'Center'; $title.SetValue([System.Windows.Controls.Grid]::ColumnProperty, 1)
-    $detail = New-Object System.Windows.Controls.TextBlock; $detail.Text = [string]$Item.Detail; $detail.TextWrapping = 'Wrap'; $detail.VerticalAlignment = 'Center'; $detail.SetValue([System.Windows.Controls.Grid]::ColumnProperty, 2)
+    $title = New-Object System.Windows.Controls.TextBlock; $title.Text = Convert-AVDTuneEngineText 'health.title.' ([string]$Item.Title); $title.FontWeight = 'SemiBold'; $title.VerticalAlignment = 'Center'; $title.SetValue([System.Windows.Controls.Grid]::ColumnProperty, 1)
+    $detail = New-Object System.Windows.Controls.TextBlock; $detail.Text = Convert-AVDTuneEngineText 'health.detail.' ([string]$Item.Detail); $detail.TextWrapping = 'Wrap'; $detail.VerticalAlignment = 'Center'; $detail.SetValue([System.Windows.Controls.Grid]::ColumnProperty, 2)
     Set-Brush $detail ([System.Windows.Controls.TextBlock]::ForegroundProperty) 'MutedText'
     [void]$grid.Children.Add($pill); [void]$grid.Children.Add($title); [void]$grid.Children.Add($detail)
     $grid
@@ -279,34 +292,34 @@ function New-HealthRow($Item) {
 function Update-Chip {
     $state = Get-AVDTuneState $script:StateRoot
     $ui.TxtChipName.Text = $(if ($script:Overview) { [string]$script:Overview.ComputerName } else { [string](& $script:Machine.ComputerName) })
-    $ui.TxtChipVersion.Text = $(if ($state.ImageVersion) { [string]$state.ImageVersion } else { 'no image version' })
+    $ui.TxtChipVersion.Text = $(if ($state.ImageVersion) { [string]$state.ImageVersion } else { T 'ov.chip.noversion' })
     # no new version while AVDTune changes the master: the first change of a version and its snapshot must not overlap (#27)
     $busy = Test-AVDTuneChangeInProgress -Root $script:StateRoot
     $ui.BtnNewVersion.IsEnabled = -not $busy
-    $ui.BtnNewVersion.ToolTip = $(if ($busy) { 'AVDTune is changing the master right now.' } else { $null })
+    $ui.BtnNewVersion.ToolTip = $(if ($busy) { T 'ov.busy.tip' } else { $null })
 }
 function Update-OverviewView {
     Update-Chip
     $ov = $script:Overview
     $ui.PanelIdentity.Children.Clear(); $ui.PanelHealth.Children.Clear()
-    if (-not $ov) { $ui.TxtOverviewState.Text = 'Reading the machine ...'; return }
-    $ui.TxtOverviewState.Text = "Read at $((Get-Date).ToString('HH:mm:ss'))."
+    if (-not $ov) { $ui.TxtOverviewState.Text = T 'ov.reading'; return }
+    $ui.TxtOverviewState.Text = T 'ov.readat' (Get-Date).ToString('HH:mm:ss')
     $src = $ov.SourceImage
-    $sourceText = if ($src.Available -and $src.Text) { $src.Text } elseif ($src.Available) { 'Azure VM without image reference' } else { 'Not an Azure VM (no instance metadata)' }
+    $sourceText = if ($src.Available -and $src.Text) { $src.Text } elseif ($src.Available) { T 'ov.val.noimageref' } else { T 'ov.val.notazure' }
     $azure = if ($src.Available) { (@($src.VmName, $src.Location, $src.VmSize) | Where-Object { $_ }) -join ', ' } else { '' }
-    $office = if ($ov.Office.Installed) { "$($ov.Office.Build), $($ov.Office.Channel)" + $(if ($ov.Office.Platform) { ", $($ov.Office.Platform)" }) } else { 'Not installed' }
-    $windows = $ov.Windows.Name + $(if ($ov.Windows.DisplayVersion) { " $($ov.Windows.DisplayVersion)" }) + $(if ($ov.Windows.FullBuild) { ", build $($ov.Windows.FullBuild)" })
+    $office = if ($ov.Office.Installed) { "$($ov.Office.Build), $($ov.Office.Channel)" + $(if ($ov.Office.Platform) { ", $($ov.Office.Platform)" }) } else { T 'ov.val.notinstalled' }
+    $windows = $ov.Windows.Name + $(if ($ov.Windows.DisplayVersion) { " $($ov.Windows.DisplayVersion)" }) + $(if ($ov.Windows.FullBuild) { T 'ov.val.build' $ov.Windows.FullBuild })
     $rows = @(
-        @('Image name', $ov.ComputerName), @('Image version', $(if ($ov.ImageVersion) { $ov.ImageVersion } else { 'none yet (Start new version)' })),
-        @('Source image', $sourceText), @('Azure VM', $azure), @('Windows', $windows), @('Microsoft 365 Apps', $office),
-        @('Last update', $(if ($ov.LastUpdate) { $ov.LastUpdate } else { 'none recorded' })), @('Last benchmark', $(if ($ov.LastBenchmark) { $ov.LastBenchmark } else { 'none recorded' }))
+        @('imagename', $ov.ComputerName), @('imageversion', $(if ($ov.ImageVersion) { $ov.ImageVersion } else { T 'ov.val.noversion' })),
+        @('source', $sourceText), @('azurevm', $azure), @('windows', $windows), @('m365', $office),
+        @('lastupdate', $(if ($ov.LastUpdate) { $ov.LastUpdate } else { T 'ov.val.norecord' })), @('lastbenchmark', $(if ($ov.LastBenchmark) { $ov.LastBenchmark } else { T 'ov.val.norecord' }))
     )
-    foreach ($r in $rows) { if ($r[0] -eq 'Azure VM' -and -not $r[1]) { continue }; [void]$ui.PanelIdentity.Children.Add((New-InfoRow $r[0] ([string]$r[1]))) }
+    foreach ($r in $rows) { if ($r[0] -eq 'azurevm' -and -not $r[1]) { continue }; [void]$ui.PanelIdentity.Children.Add((New-InfoRow (T "ov.row.$($r[0])") ([string]$r[1]))) }
     foreach ($h in $ov.Health) { [void]$ui.PanelHealth.Children.Add((New-HealthRow $h)) }
 }
 function Start-OverviewRefresh {
     if ($script:OverviewJob) { return }
-    $ui.TxtOverviewState.Text = 'Reading the machine ...'
+    $ui.TxtOverviewState.Text = T 'ov.reading'
     $ps = [powershell]::Create()
     [void]$ps.AddScript({
             param($Module, $FakeScript, $Root, $SharedMachine)
@@ -316,7 +329,7 @@ function Start-OverviewRefresh {
             if ($FakeScript) { . $FakeScript; $m = $SharedMachine; if (-not $m) { $m = New-AVDTuneFakeMachine } } else { $m = New-AVDTuneMachine }
             Get-AVDTuneOverview -Machine $m -Root $Root -UpdateBlock (Get-AVDTuneUpdateBlockStatus $m)
         }).AddArgument((Join-Path $script:AppRoot 'Modules\AVDTune.psm1')).AddArgument($(if ($script:TestMode) { $script:TestInfo.FakeScript } else { '' })).AddArgument($script:StateRoot).AddArgument($(if ($script:TestMode) { $script:Machine } else { $null }))
-    $task = Start-AVDTuneUiTask -Kind 'overview' -Title 'Reading the machine' -Step 'Reading Windows, Office, source image and health checks' -Retry @{ Command = 'Start-OverviewRefresh'; Arguments = @() }
+    $task = Start-AVDTuneUiTask -Kind 'overview' -Title (T 'task.ov.title') -Step (T 'task.ov.step') -Retry @{ Command = 'Start-OverviewRefresh'; Arguments = @() }
     $script:OverviewJob = @{ PS = $ps; Handle = $ps.BeginInvoke(); Task = $task }
 }
 function Complete-OverviewRefresh {
@@ -327,9 +340,9 @@ function Complete-OverviewRefresh {
         $result = @($job.PS.EndInvoke($job.Handle))
         if ($job.PS.HadErrors -and $job.PS.Streams.Error.Count -gt 0) { throw $job.PS.Streams.Error[0].Exception.Message }
         $script:Overview = $result | Select-Object -Last 1
-        Complete-AVDTuneUiTask $job.Task -Summary 'Machine read'
+        Complete-AVDTuneUiTask $job.Task -Summary (T 'task.ov.done')
     }
-    catch { Complete-AVDTuneUiTask $job.Task -Failed -Summary "The machine could not be read: $($_.Exception.Message)"; Show-Error "The machine could not be read: $($_.Exception.Message)" }
+    catch { $why = T 'task.ov.failed' $_.Exception.Message; Complete-AVDTuneUiTask $job.Task -Failed -Summary $why; Show-Error $why }
     finally { $job.PS.Dispose() }
     if ($script:CurrentPage -eq 'Overview') { Update-OverviewView } else { Update-Chip }
 }
@@ -339,18 +352,18 @@ $script:Timer.Add_Tick({ try { Complete-OverviewRefresh } catch { Show-Error $_.
 
 Add-Click $ui.BtnRefresh { Start-OverviewRefresh }
 function Start-NewVersion {
-    if (Test-AVDTuneChangeInProgress -Root $script:StateRoot) { Show-Error 'AVDTune is changing the master right now. Start the new image version when it has finished.'; return }
+    if (Test-AVDTuneChangeInProgress -Root $script:StateRoot) { Show-Error (T 'ov.newversion.busy'); return }
     $state = Get-AVDTuneState $script:StateRoot
     $next = Get-AVDTuneNextImageVersion -Root $script:StateRoot
-    $ask = if ($state.ImageVersion) { "Start image version $($next)? The current version $($state.ImageVersion) stays in the change log." } else { "Start image version $($next)?" }
-    if (-not (Confirm-Action $ask 'Start new version')) { return }
+    $ask = if ($state.ImageVersion) { T 'ov.newversion.ask.next' $next $state.ImageVersion } else { T 'ov.newversion.ask.first' $next }
+    if (-not (Confirm-Action $ask (T 'ov.newversion'))) { return }
     $user = [string]$env:USERNAME
     try { $version = Start-AVDTuneImageVersion -Root $script:StateRoot -User $user } catch { Show-Error $_.Exception.Message; return }
     [void](Add-AVDTuneChangeLogEntry -Root $script:StateRoot -Version $version -Category 'Setup' -Component 'Image version' -ChangeType Note -Text "Image version $version started" -User $user)
     [void](Add-AVDTuneProtocolNote -Protocol $script:Protocol -Group 'setup' -Subject "Image version $version started")
     Save-Protocol
     Set-ProtocolImage
-    Show-Toast "Image version $version started."
+    Show-Toast (T 'ov.newversion.done' $version)
     Start-OverviewRefresh
     Update-Chip
     if ($script:CurrentPage -eq 'Protocol') { Update-ProtocolView }
@@ -375,7 +388,7 @@ function Get-ChangeLogVersion { if ($ui.CmbVersion.SelectedItem) { [string]$ui.C
 function Get-ProtocolShownText {
     if ($ui.SegChange.IsChecked) {
         $version = Get-ChangeLogVersion
-        if (-not $version) { return "No image version yet. Start a new version on the Overview.`r`n" }
+        if (-not $version) { return (T 'prot.noversion') + "`r`n" }
         return ConvertTo-AVDTuneChangeLogDocument -Root $script:StateRoot -Version $version -Format Markdown -ImageName ([string](& $script:Machine.ComputerName))
     }
     ConvertTo-PackTuneProtocolText -Protocol $script:Protocol -Language $script:Settings.ProtocolLanguage -Format Text -End (Get-Date)
@@ -384,7 +397,6 @@ function Update-ProtocolView {
     $change = [bool]$ui.SegChange.IsChecked
     $ui.CmbVersion.Visibility = ConvertTo-Vis $change
     $ui.PanelNote.Visibility = ConvertTo-Vis $change
-    $ui.CmbProtocolLanguage.Visibility = ConvertTo-Vis (-not $change)
     if ($change) {
         $keep = Get-ChangeLogVersion
         $versions = @(Get-AVDTuneChangeLogVersions -Root $script:StateRoot)
@@ -392,22 +404,15 @@ function Update-ProtocolView {
         $state = Get-AVDTuneState $script:StateRoot
         $want = if ($keep -and $keep -in $versions) { $keep } elseif ($state.ImageVersion) { [string]$state.ImageVersion } else { $null }
         if ($want) { $ui.CmbVersion.SelectedItem = $want }
-        $ui.TxtProtocolSubtitle.Text = 'Every change of an image version: written automatically by the steps, plus your own notes. Exports as Markdown or HTML.'
-        $ui.TxtProtocolState.Text = "Kept in $(Join-Path $script:StateRoot 'changelog.json')."
+        $ui.TxtProtocolSubtitle.Text = T 'prot.sub.change'
+        $ui.TxtProtocolState.Text = T 'prot.state.change' (Join-Path $script:StateRoot 'changelog.json')
     }
     else {
-        $ui.TxtProtocolSubtitle.Text = 'Everything you did since AVDTune started, ready to paste into a ticket or a time sheet.'
-        $ui.TxtProtocolState.Text = "Saved after every action in $(Get-PackTuneProtocolFolder)."
+        $ui.TxtProtocolSubtitle.Text = T 'prot.sub.session'
+        $ui.TxtProtocolState.Text = T 'prot.state.session' (Get-PackTuneProtocolFolder)
     }
     $ui.TxtProtocol.Text = Get-ProtocolShownText
 }
-$ui.CmbProtocolLanguage.ItemsSource = @('English', 'Deutsch')
-$ui.CmbProtocolLanguage.SelectedIndex = $(if ($script:Settings.ProtocolLanguage -eq 'de') { 1 } else { 0 })
-$ui.CmbProtocolLanguage.Add_SelectionChanged({
-        $script:Settings.ProtocolLanguage = $(if ($ui.CmbProtocolLanguage.SelectedIndex -eq 1) { 'de' } else { 'en' })
-        Save-UiSettings
-        if ($script:CurrentPage -eq 'Protocol') { Update-ProtocolView }
-    })
 $ui.CmbNoteCategory.ItemsSource = @('Windows', 'Office', 'Software', 'Optimization', 'FSLogix', 'VDI', 'User experience', 'Update block', 'Benchmark', 'Finish', 'Other')
 $ui.CmbNoteCategory.SelectedIndex = 10
 $ui.CmbNoteType.ItemsSource = @('Note', 'Added', 'Changed', 'Updated', 'Removed')
@@ -417,22 +422,22 @@ $ui.SegSession.Add_Checked({ if ($script:CurrentPage -eq 'Protocol') { Update-Pr
 $ui.SegChange.Add_Checked({ if ($script:CurrentPage -eq 'Protocol') { Update-ProtocolView } })
 function Add-ChangeNote {
     $version = Get-ChangeLogVersion
-    if (-not $version) { throw 'Start an image version first (Overview, Start new version).' }
+    if (-not $version) { throw (T 'prot.err.noversion') }
     $text = Remove-PackTuneProtocolSecrets ([string]$ui.TxtNote.Text) 500
-    if (-not $text) { throw 'Write the note first.' }
+    if (-not $text) { throw (T 'prot.err.nonote') }
     $category = [string]$ui.CmbNoteCategory.SelectedItem
     [void](Add-AVDTuneChangeLogEntry -Root $script:StateRoot -Version $version -Category $category -ChangeType ([string]$ui.CmbNoteType.SelectedItem) -Text $text -User ([string]$env:USERNAME) -Source Note)
     [void](Add-AVDTuneProtocolNote -Protocol $script:Protocol -Group 'other' -Subject "Change log note ($category)" -Note $text)
     Save-Protocol
     $ui.TxtNote.Text = ''
     Update-ProtocolView
-    Show-Toast 'Note added to the change log.'
+    Show-Toast (T 'prot.noteadded')
 }
 Add-Click $ui.BtnAddNote { Add-ChangeNote }
 function Save-ProtocolFile([string]$Path) {
     if ($ui.SegChange.IsChecked) {
         $version = Get-ChangeLogVersion
-        if (-not $version) { throw 'No image version to export.' }
+        if (-not $version) { throw (T 'prot.err.noexport') }
         [void](Export-AVDTuneChangeLog -Root $script:StateRoot -Version $version -Path $Path -ImageName ([string](& $script:Machine.ComputerName)))
     }
     else {
@@ -442,14 +447,14 @@ function Save-ProtocolFile([string]$Path) {
 }
 Add-Click $ui.BtnProtocolSave {
     $dlg = New-Object Microsoft.Win32.SaveFileDialog
-    if ($ui.SegChange.IsChecked) { $dlg.Title = 'Export the change log'; $dlg.Filter = 'Markdown (*.md)|*.md|HTML (*.html)|*.html'; $dlg.FileName = "AVDTune-changelog-$(Get-ChangeLogVersion).md" }
-    else { $dlg.Title = 'Save the protocol'; $dlg.Filter = 'Text (*.txt)|*.txt|Markdown (*.md)|*.md'; $dlg.FileName = "AVDTune-protocol-$($script:Protocol.Id).txt" }
-    if ($dlg.ShowDialog()) { Save-ProtocolFile $dlg.FileName; Show-Toast "Saved: $($dlg.FileName)" }
+    if ($ui.SegChange.IsChecked) { $dlg.Title = T 'prot.dlg.export'; $dlg.Filter = 'Markdown (*.md)|*.md|HTML (*.html)|*.html'; $dlg.FileName = "AVDTune-changelog-$(Get-ChangeLogVersion).md" }
+    else { $dlg.Title = T 'prot.dlg.save'; $dlg.Filter = 'Text (*.txt)|*.txt|Markdown (*.md)|*.md'; $dlg.FileName = "AVDTune-protocol-$($script:Protocol.Id).txt" }
+    if ($dlg.ShowDialog()) { Save-ProtocolFile $dlg.FileName; Show-Toast (T 'prot.saved' $dlg.FileName) }
 }
 Add-Click $ui.BtnProtocolCopy {
     $text = Get-ProtocolShownText
     if ($script:SmokeOn) { $script:LastCopied = $text } else { [System.Windows.Clipboard]::SetText($text) }
-    Show-Toast 'Copied.'
+    Show-Toast (T 'prot.copied')
 }
 
 . (Join-Path $PSScriptRoot 'AVDTune-TaskBar.ps1')   # the bar at the bottom and the list of tasks; the pages below start and finish their tasks through AVDTune-Tasks.ps1
@@ -470,6 +475,32 @@ $script:ReadyFakeArm = $(if ($script:TestMode) { $script:Services.Arm } else { $
 
 # ---------------------------------------------------------------- theme switch
 function Update-ThemeButton { $ui.BtnTheme.Content = [string][char]$(if ($script:Settings.Theme -eq 'Dark') { 0xE706 } else { 0xE708 }) }
+function Update-LangButton { $ui.BtnLang.Content = (Get-AVDTuneLanguage).ToUpperInvariant() }
+function Update-Localized {
+    # Everything of the shell that is made in code is made again in the chosen language; pages that are not translated yet keep their texts
+    Update-AVDTuneLocalized
+    Update-LangButton
+    foreach ($page in $script:PageTable) {
+        $nav = $script:NavLabels[$page.Key]
+        if ($nav) { $nav.Label.Text = Get-PageTitle $page; [System.Windows.Automation.AutomationProperties]::SetName($nav.Radio, (Get-PageTitle $page)) }
+    }
+    Update-WindowState
+    Show-TaskList $script:TaskListOpen
+    Update-TaskBar
+    Update-ReleaseView; Update-ShortcutRow
+    Update-StartView; Update-ReadyView
+    Update-Chip
+    if ($script:CurrentPage -eq 'Overview') { Update-OverviewView }
+    elseif ($script:CurrentPage -eq 'Protocol') { Update-ProtocolView }
+    elseif ($ui.PagePlaceholder.Visibility -eq 'Visible') { Show-Page $script:CurrentPage }
+}
+function Switch-Language {
+    $script:Settings.Language = if ((Get-AVDTuneLanguage) -eq 'de') { 'en' } else { 'de' }
+    $script:Settings.ProtocolLanguage = $script:Settings.Language
+    Set-AVDTuneLanguage $script:Settings.Language
+    Save-UiSettings
+    Update-Localized
+}
 function Switch-Theme {
     $script:Settings.Theme = if ($script:Settings.Theme -eq 'Dark') { 'Light' } else { 'Dark' }
     Set-AVDTuneTheme -Mode $script:Settings.Theme
@@ -478,12 +509,14 @@ function Switch-Theme {
 }
 Add-Click $ui.BtnTheme { Switch-Theme }
 Update-ThemeButton
+Add-Click $ui.BtnLang { Switch-Language }
+Update-LangButton
 
 # ---------------------------------------------------------------- own title bar (WindowChrome)
 function Update-WindowState {
     $max = $window.WindowState -eq 'Maximized'
     $ui.BtnMaximize.Content = [string]$(if ($max) { [char]0xE923 } else { [char]0xE922 })
-    $ui.BtnMaximize.ToolTip = if ($max) { 'Restore' } else { 'Maximize' }
+    $ui.BtnMaximize.ToolTip = if ($max) { T 'title.restore.tip' } else { T 'title.maximize.tip' }
     # A maximized chrome window reaches over the screen edge by the size of its resize frame: keep the content inside
     $ui.RootGrid.Margin = if ($max) { [System.Windows.SystemParameters]::WindowResizeBorderThickness } else { New-Object System.Windows.Thickness 0 }
 }
@@ -500,8 +533,8 @@ $window.Add_Closing({
     if (-not $script:UpdJob -and -not $script:BenchJob -and -not $script:SealJob) { return }
     $e.Cancel = $true
     $script:CloseWhenDone = $true
-    $what = if ($script:SealJob) { 'The finish is still running' } elseif ($script:BenchJob) { 'The benchmark is still running' } elseif ($script:UpdJob.Kind -eq 'Scan') { 'The update search is still running' } else { 'An update operation is still running' }
-    Show-Toast "$what. AVDTune closes by itself when it is done (what was paused or lifted is put back first)."
+    $what = if ($script:SealJob) { T 'shell.close.finish' } elseif ($script:BenchJob) { T 'shell.close.bench' } elseif ($script:UpdJob.Kind -eq 'Scan') { T 'shell.close.scan' } else { T 'shell.close.update' }
+    Show-Toast (T 'shell.close.toast' $what)
 })
 
 # Log off or shut down during an update operation would end it the same way: Windows is asked to wait (SessionEnding is cancelled) and shows
@@ -513,13 +546,13 @@ if (-not ('AVDTune.ShutdownBlock' -as [type])) {
 [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern bool ShutdownBlockReasonQuery(IntPtr hWnd, System.Text.StringBuilder buffer, ref uint size);
 '@
 }
-$script:ShutdownReason = 'AVDTune runs an operation (update or benchmark). Wait until it is done: what was paused or lifted (update block, Windows Update, indexer) is put back at the end.'
+function Get-ShutdownReasonText { T 'shell.shutdownreason' }
 function Get-WindowHandle { (New-Object System.Windows.Interop.WindowInteropHelper $window).Handle }
 function Set-ShutdownBlock([bool]$On) {
     try {
         $h = Get-WindowHandle
         if ($h -eq [IntPtr]::Zero) { return }
-        if ($On) { [void][AVDTune.ShutdownBlock]::ShutdownBlockReasonCreate($h, $script:ShutdownReason) } else { [void][AVDTune.ShutdownBlock]::ShutdownBlockReasonDestroy($h) }
+        if ($On) { [void][AVDTune.ShutdownBlock]::ShutdownBlockReasonCreate($h, (Get-ShutdownReasonText)) } else { [void][AVDTune.ShutdownBlock]::ShutdownBlockReasonDestroy($h) }
     }
     catch { }
 }
@@ -532,7 +565,7 @@ function Get-ShutdownBlockReason {
 function Invoke-SessionEnding($EventArgs) {
     if (-not $script:UpdJob -and -not $script:BenchJob -and -not $script:SealJob) { return }
     $EventArgs.Cancel = $true
-    Show-Toast 'Log off or shut down was held back: an operation (update or benchmark) is still running. Try again when it is done.'
+    Show-Toast (T 'shell.sessionend')
 }
 $script:SessionEndingHandler = [System.Windows.SessionEndingCancelEventHandler]{ param($src, $e) Invoke-SessionEnding $e }
 [System.Windows.Application]::Current.add_SessionEnding($script:SessionEndingHandler)
@@ -554,7 +587,7 @@ Set-ProtocolImage
 $stateRepair = Get-AVDTuneStateSecurityReport
 if ($stateRepair -and @($stateRepair.Quarantined).Count -gt 0) {
     # N2: a prepared state folder was set aside unread; the first run starts again. The administrator is told in the protocol and in a dialog.
-    $asideText = "The state folder $($script:StateRoot) had been prepared by someone else ($(@($stateRepair.Problems | Select-Object -First 3 | ForEach-Object { $_.Problem }) -join '; ')). It was set aside unread as $(@($stateRepair.Quarantined) -join ', ') and a new one was created: the first-run questions, the domain controller pin and the sign-in start again. Check who prepared it, then delete the set-aside folder."
+    $asideText = T 'shell.aside' $script:StateRoot (@($stateRepair.Problems | Select-Object -First 3 | ForEach-Object { $_.Problem }) -join '; ') (@($stateRepair.Quarantined) -join ', ')
     Add-StartProtocol 'Warning: manipulated state folder set aside' $asideText 'failed'
     if (-not $script:SmokeOn) { [void][System.Windows.MessageBox]::Show($asideText, 'AVDTune', 'OK', 'Warning') } else { $script:StateAsideNotice = $asideText }
 }
@@ -567,8 +600,8 @@ Start-OverviewRefresh
 Update-ReleaseView; Start-RelJob 'Start'   # integrity of the tool against its release and the update check, at every start (AVDTune-Release.ps1)
 Start-ReadyJob 'Start' ''   # the readiness analysis runs at every start (read only; Azure checks need the sign-in and run again after it)
 # A maintenance mode that never ended (closed or crashed in the middle) is reported at once; the repair is on the Update block page
-if (Get-AVDTuneFinishCrash -Root $script:StateRoot) { Show-Toast 'The last finish did not end properly: Windows Update or BITS may still be stopped. Open Cleanup and finish and repair it.' }
-if (Get-AVDTuneMaintenanceCrash -Root $script:StateRoot) { Show-Toast 'The last maintenance mode did not end properly: the update block may be lifted. Open Update block and repair it.' }
+if (Get-AVDTuneFinishCrash -Root $script:StateRoot) { Show-Toast (T 'shell.crash.finish') }
+if (Get-AVDTuneMaintenanceCrash -Root $script:StateRoot) { Show-Toast (T 'shell.crash.maint') }
 # Test hook: AVDTUNE_SMOKE names a script that drives the window off-screen and renders every page (only in test mode).
 if ($script:SmokeOn) { . $script:TestInfo.SmokeScript }
 $window.Show()
