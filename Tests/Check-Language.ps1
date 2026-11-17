@@ -76,7 +76,7 @@ try {
     Test-Check 'dism: German = the client pack plus five features, nothing else' ($calls.Count -eq 6 -and $calls[0].Args[1] -eq '/Add-Package' -and @($calls[1..5] | Where-Object { $_.Args[1] -ne '/Add-Capability' }).Count -eq 0) $calls.Count
     Test-Check 'dism: every capability call has /LimitAccess and a /Source (no Windows Update, no internet)' (@($calls[1..5] | Where-Object { $_.Args -notcontains '/LimitAccess' -or -not ($_.Args | Where-Object { $_ -like '/Source:*' }) }).Count -eq 0) $null
     Test-Check 'dism: the root of a drive keeps its backslash (E: alone means the current folder of drive E)' (($calls[1].Args -contains '/Source:E:\') -and ($calls[0].Args[2] -eq '/PackagePath:E:\Microsoft-Windows-Client-Language-Pack_x64_de-DE.cab')) ($calls[1].Args -join ' ')
-    $cv = '0.0.1' + '.0'
+    $cv = '0.0.1.0'   # public-content-ok: version part of a Windows capability name, not an IP address
     $ja = @(Get-AVDTuneLanguageDismCalls -Tag 'ja-JP' -Source 'D:\LOF\')
     Test-Check 'dism: Japanese gets the font package; a folder source is trimmed' ($ja.Count -eq 7 -and ($ja[6].Args -contains "/CapabilityName:Language.Fonts.Jpan~~~und-Jpan~$cv") -and ($ja[0].Args[2] -eq '/PackagePath:D:\LOF\Microsoft-Windows-Client-Language-Pack_x64_ja-JP.cab')) $ja.Count
     Test-Check 'dism: counter-tests: a tag that is not on the list and a source with a quote throw before anything is built' ((Test-Throws { Get-AVDTuneLanguageDismCalls -Tag 'de-DE /x' -Source 'E:\' }) -and (Test-Throws { Get-AVDTuneLanguageDismCalls -Tag 'de-DE' -Source 'E:\a"b' })) $null
@@ -195,13 +195,15 @@ try {
     Test-Check 'source: the name of this computer is a parameter (the check passes it, a share of another computer is fine)' ((-not (Test-AVDTuneLanguageSource '\\gm-test01\x' -ComputerName 'GM-TEST01')) -and (Test-AVDTuneLanguageSource '\\gm-test02\x' -ComputerName 'GM-TEST01')) $null
     Test-Check 'config: the same refusals apply to a saved or entered source' (@(Test-AVDTuneLanguageConfig (New-Cfg @{ Languages = @('de-DE'); Source = '\\localhost\c$' })).Count -gt 0 -and @(Test-AVDTuneLanguageConfig (New-Cfg @{ Languages = @('de-DE'); Source = 'E:/x' })).Count -gt 0) $null
     Test-Check 'chain: a folder is checked with every folder above it up to the drive root or the share root' ((@(Get-AVDTuneLanguageSourceChain 'D:\a\b') -join '|') -eq 'D:\a\b|D:\a|D:\' -and (@(Get-AVDTuneLanguageSourceChain 'E:\') -join '|') -eq 'E:\' -and (@(Get-AVDTuneLanguageSourceChain '\\h\s\a\') -join '|') -eq '\\h\s\a|\\h\s' -and (@(Get-AVDTuneLanguageSourceChain '\\h\s') -join '|') -eq '\\h\s') (@(Get-AVDTuneLanguageSourceChain '\\h\s\a\') -join '|')
-    function New-Probe([string]$Drive = 'Fixed', [string[]]$Links = @(), [string[]]$NotAdmin = @(), [string[]]$Missing = @()) {
+    function New-Probe([string]$Drive = 'Fixed', [string[]]$Links = @(), [string[]]$NotAdmin = @(), [string[]]$Missing = @(), [bool]$Subst = $false, [bool]$Iso = $true) {
         $log = New-Object System.Collections.ArrayList
         $p = [pscustomobject]@{
             Log = $log
             Exists = { param($x) [void]$log.Add("Exists $x"); $x -notin $Missing }.GetNewClosure()
             IsLink = { param($x) $x -in $Links }.GetNewClosure()
             DriveType = { param($x) $Drive }.GetNewClosure()
+            IsSubst = { param($x) $Subst }.GetNewClosure()
+            IsMountedIso = { param($x) $Iso }.GetNewClosure()
             AdminOnly = { param($x) [void]$log.Add("AdminOnly $x"); $x -notin $NotAdmin }.GetNewClosure()
         }
         $p
@@ -227,7 +229,7 @@ try {
     $pr = New-Probe; $v = Get-AVDTuneLanguageSourceVerdict -Path '\\gm-test01\lang' -Probe $pr -ComputerName 'GM-TEST01'
     Test-Check 'verdict: counter-test: a share of this computer is refused before the file system is touched' ((-not $v.Ok) -and @($pr.Log).Count -eq 0) $null
     $realProbe = New-AVDTuneLanguageSourceProbe
-    Test-Check 'verdict: the real probe has the four members the verdict uses (it is built without touching anything)' (@('Exists', 'IsLink', 'DriveType', 'AdminOnly' | Where-Object { $realProbe.PSObject.Properties[$_].Value -isnot [scriptblock] }).Count -eq 0) $null
+    Test-Check 'verdict: the real probe has the four members the verdict uses (it is built without touching anything)' (@('Exists', 'IsLink', 'IsSubst', 'DriveType', 'IsMountedIso', 'AdminOnly' | Where-Object { $realProbe.PSObject.Properties[$_].Value -isnot [scriptblock] }).Count -eq 0) $null
 
     # ---------------------------------------------------------------- confirmation by kind and old -> new
     $wst = New-World; $stC = Get-AVDTuneLanguageState -Machine $wst.M -L $wst.L
@@ -301,7 +303,8 @@ try {
     }
     $bodyAdapter = @'
 $u = New-AVDTuneFakeUpdates -Seed @{ Native = @{ '*Dism.exe *' = @{ ExitCode = 0; Output = 'ok' } }; Tools = @('Dism.exe') }
-$l = New-AVDTuneLanguageAdapter -U $u -UserListAdd { param($t) }
+$probe = [pscustomobject]@{ Exists = { $true }; IsLink = { $false }; IsSubst = { $false }; DriveType = { 'CDRom' }; IsMountedIso = { $true }; AdminOnly = { $true } }
+$l = New-AVDTuneLanguageAdapter -U $u -UserListAdd { param($t) } -SourceProbe $probe
 $r = & $l.AddLanguage 'de-DE' 'E:\'
 $zones = @(& $l.GetTimeZones).Count
 $c = & $l.CheckSource 'E:\no\such\folder' $Root
@@ -323,6 +326,30 @@ try { & ([scriptblock]::Create($WorkerText)) 'Undo' $C } catch { "ERR: $($_.Exce
     $bad2 = Invoke-WorkerProbe $brokenParts $bodyWorker
     Test-Check 'worker: counter-test: without the Language import the worker text goes red too' (($bad2.Err + $bad2.Out) -match 'not recognized|wurde nicht als Name') "$($bad2.Out) | $($bad2.Err)"
 
+
+    # ---------------------------------------------------------------- second review: drive kinds, optical drives, check before every language
+    $pr = New-Probe -Drive 'Network'; $v = Get-AVDTuneLanguageSourceVerdict -Path 'Z:\LOF' -Probe $pr -ComputerName 'GM-TEST01'
+    Test-Check 'drive kind: a mapped network drive is a Share and its permissions are read in every part, the root included' ($v.Ok -and $v.Kind -eq 'Share' -and (@($pr.Log | Where-Object { $_ -like 'AdminOnly*' }) -join '|') -eq 'AdminOnly Z:\LOF|AdminOnly Z:\') (@($pr.Log) -join '|')
+    $pr = New-Probe -Drive 'Network' -NotAdmin @('Z:\'); $v = Get-AVDTuneLanguageSourceVerdict -Path 'Z:\LOF' -Probe $pr -ComputerName 'GM-TEST01'
+    Test-Check 'drive kind: counter-test: a mapped network drive is not trusted as a local one (a root users can write is refused, kind Share)' ((-not $v.Ok) -and $v.Kind -eq 'Share') ($v | ConvertTo-Json -Compress)
+    $pr = New-Probe -Subst $true; $v = Get-AVDTuneLanguageSourceVerdict -Path 'S:\LOF' -Probe $pr -ComputerName 'GM-TEST01'
+    Test-Check 'drive kind: counter-test: a substituted drive (subst) is refused, also when it points to an admin-only folder' ((-not $v.Ok) -and $v.Problem -like '*subst*' -and @($pr.Log | Where-Object { $_ -like 'AdminOnly*' }).Count -eq 0) ($v | ConvertTo-Json -Compress)
+    $pr = New-Probe -Drive 'CDRom' -Iso $false -NotAdmin @('E:\'); $v = Get-AVDTuneLanguageSourceVerdict -Path 'E:\' -Probe $pr -ComputerName 'GM-TEST01'
+    Test-Check 'media: counter-test: a CD drive that is not an ISO mounted by Windows is not read-only media: it is checked like a local folder (permissions read, here not admin-only: refused)' ((-not $v.Ok) -and $v.Kind -eq 'Local' -and @($pr.Log | Where-Object { $_ -eq 'AdminOnly E:\' }).Count -eq 1) ($v | ConvertTo-Json -Compress)
+    $pr = New-Probe -Drive 'CDRom' -Iso $true; $v = Get-AVDTuneLanguageSourceVerdict -Path 'E:\' -Probe $pr -ComputerName 'GM-TEST01'
+    Test-Check 'media: an ISO mounted by Windows is read-only media without a permission check' ($v.Ok -and $v.Kind -eq 'Media' -and @($pr.Log | Where-Object { $_ -like 'AdminOnly*' }).Count -eq 0) $null
+    Test-Check 'media: the confirmation says the ISO must be mounted by the administrator and its origin is not checked; docs say the same' (($tMedia -like '*mounted yourself*does not check where the ISO file came from*') -and ((Get-Content (Join-Path $repo 'docs\language.md') -Raw) -match 'mounted by the administrator')) $tMedia
+    $fu = New-AVDTuneFakeUpdates -Seed @{ Native = @{ '*Dism.exe *' = @{ ExitCode = 0; Output = 'ok' } }; Tools = @('Dism.exe') }
+    $pr = New-Probe -Drive 'CDRom'
+    $realA = New-AVDTuneLanguageAdapter -U $fu -UserListAdd { param($t) } -SourceProbe $pr
+    [void](& $realA.AddLanguage 'de-DE' 'E:\'); [void](& $realA.AddLanguage 'fr-FR' 'E:\')
+    Test-Check 'install: the content folder is checked again before every language (two languages, two checks), before DISM starts' (@($pr.Log | Where-Object { $_ -eq 'Exists E:\' }).Count -eq 2 -and @($fu.Log | Where-Object { $_ -like 'Run *' }).Count -eq 12) (@($pr.Log) -join '|')
+    $fu2 = New-AVDTuneFakeUpdates -Seed @{ Native = @{ '*Dism.exe *' = @{ ExitCode = 0; Output = 'ok' } }; Tools = @('Dism.exe') }
+    $badProbe = New-Probe -Drive 'Fixed' -Links @('D:\Lang')
+    $realB = New-AVDTuneLanguageAdapter -U $fu2 -UserListAdd { param($t) } -SourceProbe $badProbe
+    Test-Check 'install: counter-test: a folder that became a link after the check on the page stops AddLanguage before DISM' ((Test-Throws { & $realB.AddLanguage 'de-DE' 'D:\Lang\LOF' }) -and @($fu2.Log | Where-Object { $_ -like 'Run *' }).Count -eq 0) $null
+    $wq = New-World -LangSeed @{ SourceProblem = 'fake: folder changed' }
+    Test-Check 'install: the fake adapter checks the source before every language as well' ((Test-Throws { & $wq.L.AddLanguage 'de-DE' 'D:\x' }) -and @($wq.L.Log | Where-Object { $_ -eq 'CheckSource D:\x' }).Count -eq 1) $null
 
     # ---------------------------------------------------------------- the module itself
     $modText = Get-Content (Join-Path $repo 'Modules\AVDTune.Language.psm1') -Raw

@@ -79,8 +79,8 @@ $script:AzureZones = @{
     westus = 'Pacific Standard Time'; westus2 = 'Pacific Standard Time'; westus3 = 'US Mountain Standard Time'; brazilsouth = 'E. South America Standard Time'
     japaneast = 'Tokyo Standard Time'; japanwest = 'Tokyo Standard Time'; turkeycentral = 'Turkey Standard Time'
 }
-# the version part of a Windows capability name (Language.Basic~~~de-DE~<version>); written in two parts so it is not taken for an IP address by the public content check
-$script:CapVersion = '0.0.1' + '.0'
+# the version part of a Windows capability name (Language.Basic~~~de-DE~<version>)
+$script:CapVersion = '0.0.1.0'   # public-content-ok: version part of a Windows capability name, not an IP address
 $script:Sections = @('Languages', 'Defaults')
 $script:Features = @('Basic', 'Handwriting', 'OCR', 'Speech', 'TextToSpeech')
 
@@ -136,8 +136,8 @@ function Get-AVDTuneLanguageSourceChain {
 
 function Get-AVDTuneLanguageSourceVerdict {
     <#
-        Is this folder fit to install language packs from? The probe ($Probe: Exists, IsLink, DriveType, AdminOnly) is the only thing that touches the machine, so the checks can run with a fake.
-        Every part of the path including the drive or share root must not be a link. A mounted ISO (CDRom) is read only and fine. Everything else (a local folder or a share) must be admin-only in every part,
+        Is this folder fit to install language packs from? The probe ($Probe: Exists, IsLink, IsSubst, DriveType, IsMountedIso, AdminOnly) is the only thing that touches the machine, so the checks can run with a fake.
+        Every part of the path including the drive or share root must not be a link. A substituted drive (subst) is refused. A mapped network drive counts as a share. Only an ISO that Windows mounted itself (a CD drive that belongs to a virtual disk image) counts as read-only media and is fine; a physical optical drive is checked like a local folder. Everything else (a local folder or a share) must be admin-only in every part,
         the root included (a drive root such as C:\ lets users create folders and is refused). Returns @{ Ok; Kind (Media | Local | Share); Problem }.
     #>
     param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)]$Probe, [string]$ComputerName = [Environment]::MachineName)
@@ -146,7 +146,12 @@ function Get-AVDTuneLanguageSourceVerdict {
     if (-not (& $Probe.Exists $Path)) { return (& $no 'The folder does not exist.' '') }
     $chain = @(Get-AVDTuneLanguageSourceChain $Path)
     foreach ($c in $chain) { if (& $Probe.IsLink $c) { return (& $no "A part of the path is a link: $c" '') } }
-    $kind = if ($Path.StartsWith('\\')) { 'Share' } elseif ((& $Probe.DriveType $Path) -eq 'CDRom') { 'Media' } else { 'Local' }
+    $kind = 'Share'
+    if (-not $Path.StartsWith('\\')) {
+        if (& $Probe.IsSubst $Path) { return (& $no 'The drive letter is a substituted drive (subst); name the real folder.' '') }
+        $dt = & $Probe.DriveType $Path
+        $kind = if ($dt -eq 'Network') { 'Share' } elseif ($dt -eq 'CDRom' -and (& $Probe.IsMountedIso $Path)) { 'Media' } else { 'Local' }
+    }
     if ($kind -eq 'Media') { return @{ Ok = $true; Kind = 'Media'; Problem = '' } }
     foreach ($c in $chain) { if (-not (& $Probe.AdminOnly $c)) { return (& $no "$c can be written by users who are not administrators; use the mounted ISO or an admin-only folder." $kind) } }
     @{ Ok = $true; Kind = $kind; Problem = '' }
@@ -158,6 +163,13 @@ function New-AVDTuneLanguageSourceProbe {
         Exists = { param($p) [IO.Directory]::Exists($p) }
         IsLink = { param($p) ((New-Object IO.DirectoryInfo $p).Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 }
         DriveType = { param($p) [string](New-Object IO.DriveInfo ($p.Substring(0, 1))).DriveType }
+        IsSubst = {
+            # a drive made with subst has a DOS device target that starts with \??\ (a mapped network drive points to the redirector, a real drive to a volume)
+            param($p)
+            if (-not ('AVDTuneLang.Dos' -as [type])) { Add-Type -TypeDefinition 'using System; using System.Text; using System.Runtime.InteropServices; namespace AVDTuneLang { public static class Dos { [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] static extern uint QueryDosDevice(string name, StringBuilder buffer, int max); public static string Target(string drive) { var sb = new StringBuilder(1024); return QueryDosDevice(drive, sb, 1024) == 0 ? "" : sb.ToString(); } } }' }
+            ([AVDTuneLang.Dos]::Target($p.Substring(0, 2))).StartsWith('\??\')
+        }
+        IsMountedIso = { param($p) try { $di = Get-Volume -DriveLetter $p.Substring(0, 1) -ErrorAction Stop | Get-DiskImage -ErrorAction Stop; [bool]$di.ImagePath } catch { $false } }   # an ISO mounted by Windows (virtual disk), not a physical drive
         AdminOnly = { param($p) Test-AVDTuneAdminOnlyPath -Path $p }   # no Base: this folder only, its permissions are read (also for a drive root)
     }
 }
@@ -567,7 +579,7 @@ function Get-AVDTuneLanguageConfirmText {
                 if ($new.Count -gt 0) {
                     $where = switch ($SourceKind) {
                         'Share' { 'The content comes from a share: AVDTune read the permissions of the folders, but it cannot see the share permissions; only administrators may be able to write to the share.' }
-                        'Media' { 'The content comes from read-only media (a mounted ISO).' }
+                        'Media' { 'The content comes from read-only media: an ISO that you mounted yourself with Windows. AVDTune does not check where the ISO file came from; use the ISO of Microsoft.' }
                         'Local' { 'The content comes from a local folder that only administrators can write to.' }
                         default { '' }
                     }
@@ -595,7 +607,7 @@ function New-AVDTuneLanguageAdapter {
         The real adapter. NOT exercised by the checks beyond construction: written from the Learn pages and the cmdlet references and to be tried on a throw-away VM (docs\language.md, "not verified").
         Every writing member checks its arguments again against the fixed lists before a cmdlet or DISM is touched. DISM runs through the update adapter (full path, signature, job object, central child environment).
     #>
-    param($U = (New-AVDTuneUpdateAdapter), [scriptblock]$UserListAdd)
+    param($U = (New-AVDTuneUpdateAdapter), [scriptblock]$UserListAdd, $SourceProbe)
     $tags = @($script:Languages | ForEach-Object { $_.Tag }); $cultures = @(Get-AVDTuneLanguageCultures | ForEach-Object { $_.Tag }); $tips = @(Get-AVDTuneLanguageInputs | ForEach-Object { $_.Tip }); $geos = @($script:Regions | ForEach-Object { $_.Id })
     $a = [ordered]@{ Kind = 'Real'; U = $U }
     $a.GetInstalled = {
@@ -640,6 +652,9 @@ function New-AVDTuneLanguageAdapter {
     $a.CheckSource = { param($Path, $Root) Get-AVDTuneLanguageSourceVerdict -Path $Path -Probe (New-AVDTuneLanguageSourceProbe) }
     $a.AddLanguage = {
         param($Tag, $Source)
+        # checked again before every language: the folder may have changed since the check on the page (a link, a permission)
+        $v = Get-AVDTuneLanguageSourceVerdict -Path $Source -Probe $(if ($SourceProbe) { $SourceProbe } else { New-AVDTuneLanguageSourceProbe })
+        if (-not $v.Ok) { throw "The content folder is not usable: $($v.Problem)" }
         $r = Invoke-AVDTuneLanguageDism -U $U -Tag $Tag -Source $Source
         if ($UserListAdd) { & $UserListAdd $Tag } else { $list = Get-WinUserLanguageList; if (@($list | Where-Object { $_.LanguageTag -ieq $Tag }).Count -eq 0) { [void]$list.Add($Tag); Set-WinUserLanguageList -LanguageList $list -Force -ErrorAction Stop } }   # $UserListAdd: the checks replace the write to the language list
         $r

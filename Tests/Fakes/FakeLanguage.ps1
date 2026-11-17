@@ -56,6 +56,8 @@ function New-AVDTuneFakeLanguage {
     $a.AddLanguage = {
         param($Tag, $Source)
         [void]$s.Log.Add("AddLanguage $Tag from $Source")
+        [void]$s.Log.Add("CheckSource $Source")
+        if ($s.SourceProblem) { throw "The content folder is not usable: $($s.SourceProblem)" }   # like the real adapter: checked again before every language
         $n = [ordered]@{}   # failing calls first: the first match answers
         foreach ($k in @($s.DismFails.Keys)) { $n["*Dism.exe *$k*"] = @{ ExitCode = [int]$s.DismFails[$k]; Output = "Error: $k" } }
         $n['*Dism.exe *'] = @{ ExitCode = 0; Output = 'The operation completed successfully.' }
