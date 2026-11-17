@@ -429,7 +429,7 @@ function Read-JoinState {
         return
     }
     $task = Start-AVDTuneUiTask -Kind 'join-state' -Title 'Reading the join state of this master' -Step 'Win32_ComputerSystem, dsregcmd /status, DC locator (read only)' -Retry @{ Command = 'Read-JoinState'; Arguments = @() }
-    $ps = [powershell]::Create()
+    $ps = New-AVDTunePowerShell
     [void]$ps.AddScript({
             param($AppRoot)
             $ErrorActionPreference = 'Stop'

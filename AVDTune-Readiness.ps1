@@ -97,7 +97,7 @@ function Start-ReadyJob([string]$Kind, [string]$FixId) {
         Update-ReadyView
         return
     }
-    $ps = [powershell]::Create()
+    $ps = New-AVDTunePowerShell
     [void]$ps.AddScript({
             param($AppRoot, $Root, $Kind, $FixId, $Token, $Reason, $Gallery, $Gate, $User, $FslApplies, $FslTest)
             $ErrorActionPreference = 'Stop'

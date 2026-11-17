@@ -18,17 +18,22 @@
 [CmdletBinding()]
 param([switch]$HideConsole)
 
+# First statement, before any cmdlet (#73): modules only from the system folders, never from the admin's Documents or HKCU\Environment. Even Join-Path or
+# New-Object would be autoloaded through the inherited path, from any module there that exports that name. Same value as Get-AVDTuneSystemModulePath.
+[Environment]::SetEnvironmentVariable('PSModulePath', [IO.Path]::Combine([Environment]::GetFolderPath('Windows'), 'System32\WindowsPowerShell\v1.0\Modules') + ';' + [IO.Path]::Combine([Environment]::GetFolderPath('ProgramFiles'), 'WindowsPowerShell\Modules'), 'Process')
 $ErrorActionPreference = 'Stop'
 if ($PSVersionTable.PSEdition -ne 'Desktop') {
-    throw "This WPF tool requires Windows PowerShell 5.1: powershell.exe -ExecutionPolicy Bypass -File `"$PSCommandPath`""
+    throw "This WPF tool requires Windows PowerShell 5.1: powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`""
 }
+Import-Module ([IO.Path]::Combine($PSScriptRoot, 'Modules', 'AVDTune.psm1')) -Force
+[void](Set-AVDTuneSafeModulePath)   # the same value; every worker gets it through New-AVDTunePowerShell / New-AVDTuneRunspacePool
+# The module folders are checked before anything else is loaded (the message follows once the texts are there): a module someone without admin rights
+# could have changed, or a path that Windows PowerShell would change when a runspace opens, stops the start
+$script:ModulePathProblems = @(Get-AVDTuneModulePathProblems)
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, System.Windows.Forms
 
 $script:AppRoot = $PSScriptRoot
 $script:ToolVersion = (Get-Content -LiteralPath (Join-Path $PSScriptRoot 'VERSION') -Raw -Encoding UTF8).Trim()   # the file VERSION is also the version of the release
-Import-Module (Join-Path $PSScriptRoot 'Modules\AVDTune.psm1') -Force
-foreach ($part in 'Trust', 'Session', 'Snapshot', 'Directory', 'Start', 'UpdateBlock', 'Updates', 'Readiness', 'Watermark', 'Benchmark', 'Shortcut', 'FSLogix', 'Storage', 'Software', 'Office', 'Vdi', 'Masking', 'Finish', 'Environment', 'Optimization', 'Language') { Import-Module (Join-Path $PSScriptRoot "Modules\AVDTune.$part.psm1") -Force }
-Import-Module (Join-Path $PSScriptRoot 'Modules\AVDTune.Release.psm1') -Force
 . (Join-Path $PSScriptRoot 'AVDTune-Theme.ps1')
 . (Join-Path $PSScriptRoot 'AVDTune-UiText.ps1')   # the texts of the window (UI\Strings.en.json, UI\Strings.de.json)
 $script:LanguageInit = Initialize-AVDTuneLanguage -Folder (Join-Path $PSScriptRoot 'UI')
@@ -57,6 +62,13 @@ function Stop-WithMessage([string]$Text) {
 if (-not $script:TestMode -and -not (Test-AVDTuneElevated)) {
     Stop-WithMessage (T 'shell.err.admin')
 }
+# A module folder that is not admin-only, or a module path that Windows PowerShell would change (#73): AVDTune does not start (checked above, before the other modules load)
+if ($script:ModulePathProblems.Count -gt 0) {
+    $shown = @($script:ModulePathProblems | Select-Object -First 8) + @($(if ($script:ModulePathProblems.Count -gt 8) { "... ($($script:ModulePathProblems.Count - 8) more)" }))
+    Stop-WithMessage (T 'shell.err.modulepath' ($shown -join "`n"))
+}
+foreach ($part in 'Trust', 'Session', 'Snapshot', 'Directory', 'Start', 'UpdateBlock', 'Updates', 'Readiness', 'Watermark', 'Benchmark', 'Shortcut', 'FSLogix', 'Storage', 'Software', 'Office', 'Vdi', 'Masking', 'Finish', 'Environment', 'Optimization', 'Language') { Import-Module (Join-Path $PSScriptRoot "Modules\AVDTune.$part.psm1") -Force }
+Import-Module (Join-Path $PSScriptRoot 'Modules\AVDTune.Release.psm1') -Force
 # Test runs of several checkouts can run at the same time: one test mutex per test state folder
 $mutexName = if ($script:TestMode) {
     $sha = [System.Security.Cryptography.SHA256]::Create()
@@ -327,7 +339,7 @@ function Update-OverviewView {
 function Start-OverviewRefresh {
     if ($script:OverviewJob) { return }
     $ui.TxtOverviewState.Text = T 'ov.reading'
-    $ps = [powershell]::Create()
+    $ps = New-AVDTunePowerShell
     [void]$ps.AddScript({
             param($Module, $FakeScript, $Root, $SharedMachine)
             $ErrorActionPreference = 'Stop'

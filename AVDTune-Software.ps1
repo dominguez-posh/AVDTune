@@ -114,7 +114,7 @@ function Start-SwJob([string]$Kind, $Argument) {
     $tokens = if ($siteUrl -and $Kind -in 'Scan', 'Run') { Get-SwTokens } else { @{ Sites = ''; Graph = ''; Reason = '' } }
     $sync = [hashtable]::Synchronized(@{ Text = '' })
     $gate = Get-AVDTuneWriteGate
-    $ps = [powershell]::Create()
+    $ps = New-AVDTunePowerShell
     [void]$ps.AddScript($script:SwWorkerText).AddArgument($script:AppRoot).AddArgument($script:SwFakeDir).AddArgument($script:StateRoot).AddArgument($Kind).AddArgument($Argument).AddArgument($gate).AddArgument($sync).AddArgument((Get-SwUser)).AddArgument($tokens).AddArgument($siteUrl).AddArgument([string]$settings.StoreLibrary).AddArgument($(if ($script:TestMode) { $script:Machine } else { $null })).AddArgument($script:SwFakeNative).AddArgument($script:SwFakeRegistry)
     # reading and searching are safe to run again from the list; everything that changes the master is started on the page, with its confirmation
     $retry = $(if ($Kind -eq 'Scan') { @{ Command = 'Start-SwJob'; Arguments = @('Scan', $null) } })

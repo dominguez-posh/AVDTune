@@ -439,11 +439,11 @@ function New-AVDTuneBenchAdapter {
         # N containers at the same time (users logging on together): wall time of all cycles. Each cycle runs in its own runspace (the function text is passed on)
         param([string]$ShareFolder, [string]$MountRoot, [int]$Count, [int]$SizeGiB, [int]$WriteMB)
         $text = (Get-Command Invoke-AVDTuneVhdCycle).ScriptBlock.ToString()
-        $pool = [runspacefactory]::CreateRunspacePool(1, $Count); $pool.Open()
+        $pool = (New-AVDTuneRunspacePool -Min 1 -Max $Count); $pool.Open()
         $jobs = @(); $sw = [Diagnostics.Stopwatch]::StartNew()
         try {
             for ($i = 2; $i -lt 2 + $Count; $i++) {
-                $ps = [powershell]::Create(); $ps.RunspacePool = $pool
+                $ps = New-AVDTunePowerShell; $ps.RunspacePool = $pool
                 [void]$ps.AddScript($text).AddParameter('ShareFolder', $ShareFolder).AddParameter('MountRoot', $MountRoot).AddParameter('Index', $i).AddParameter('SizeGiB', $SizeGiB).AddParameter('WriteMB', $WriteMB)
                 $jobs += [pscustomobject]@{ PS = $ps; Handle = $ps.BeginInvoke() }
             }
@@ -571,11 +571,11 @@ namespace AVDTuneBenchNative {
                 catch { [void][System.Threading.Interlocked]::Increment([ref]$Errs[0]); break }
             }
         }
-        $pool = [runspacefactory]::CreateRunspacePool(1, $Streams); $pool.Open()
+        $pool = (New-AVDTuneRunspacePool -Min 1 -Max $Streams); $pool.Open()
         $jobs = @()
         $t0 = [DateTime]::UtcNow
         for ($i = 0; $i -lt $Streams; $i++) {
-            $ps = [powershell]::Create(); $ps.RunspacePool = $pool
+            $ps = New-AVDTunePowerShell; $ps.RunspacePool = $pool
             [void]$ps.AddScript($work).AddArgument($Url).AddArgument($i * $part).AddArgument(($i + 1) * $part - 1).AddArgument($bytes).AddArgument($errs).AddArgument($stop)
             $jobs += [pscustomobject]@{ PS = $ps; Handle = $ps.BeginInvoke() }
         }

@@ -258,13 +258,18 @@ function Set-AVDTuneInstallState([string]$InstallRoot, [string]$Version, [string
     Write-AVDTuneFile (Join-Path $InstallRoot 'current.json') ([ordered]@{ Schema = 1; Version = $Version; Previous = $Previous } | ConvertTo-Json)
 }
 
+# The first statement sets the module path with .NET alone (#73): before it no cmdlet may run, Join-Path or Get-Content would be autoloaded through the
+# inherited path (Documents, HKCU\Environment) from any module that exports that name. Same expression as the first statement of Start-AVDTune.ps1.
 $script:LauncherText = @'
 # AVDTune launcher. Written by AVDTune, not part of a release: starts the version named in current.json (one level up from the version folders).
+[Environment]::SetEnvironmentVariable('PSModulePath', [IO.Path]::Combine([Environment]::GetFolderPath('Windows'), 'System32\WindowsPowerShell\v1.0\Modules') + ';' + [IO.Path]::Combine([Environment]::GetFolderPath('ProgramFiles'), 'WindowsPowerShell\Modules'), 'Process')
 $ErrorActionPreference = 'Stop'
 $current = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'current.json') -Raw -Encoding UTF8 | ConvertFrom-Json
 if ([string]$current.Version -notmatch '^\d+\.\d+\.\d+(-ea\.\d+)?\z') { throw 'current.json does not name a valid version.' }
 & (Join-Path $PSScriptRoot "$($current.Version)\Start-AVDTune.ps1") @args
 '@
+# The launcher before #73 (without the module path line): an install that still has it counts as changed until Repair writes the new one; it gets its own text
+$script:LauncherTextBefore73 = ($script:LauncherText -split "`n" | Where-Object { $_ -notlike '`[Environment`]::SetEnvironmentVariable(*' }) -join "`n"
 
 function Write-AVDTuneLauncher([string]$InstallRoot) {
     $path = Join-Path $InstallRoot 'Start-AVDTune.ps1'
@@ -381,7 +386,7 @@ function Get-AVDTuneIntegrityStatus {
     #>
     param([Parameter(Mandatory)][string]$AppRoot, [Parameter(Mandatory)][string]$InstallRoot, [Parameter(Mandatory)][string]$StateRoot, [Parameter(Mandatory)]$Http, [switch]$AllowDevelopment)
     $info = Get-AVDTuneInstallInfo -AppRoot $AppRoot -InstallRoot $InstallRoot -AllowDevelopment:$AllowDevelopment
-    $r = [ordered]@{ Status = ''; Mode = $info.Mode; Version = $info.Version; Commit = ''; Source = ''; Missing = @(); Changed = @(); Extra = @(); Acl = @(); Warnings = @(); Blocked = $false; Message = '' }
+    $r = [ordered]@{ Status = ''; Mode = $info.Mode; Version = $info.Version; Commit = ''; Source = ''; Missing = @(); Changed = @(); Extra = @(); Acl = @(); Warnings = @(); Blocked = $false; OldLauncher = $false; Message = '' }
     if ($info.Mode -eq 'Development') { $r.Status = 'dev'; $r.Message = 'Development copy (git checkout, test mode): the files are not checked against a release.'; return [pscustomobject]$r }
     if ($info.Mode -eq 'Unprotected') {
         $problems = @(Get-AVDTuneAclProblems -Folder $info.AppRoot -Enforce)
@@ -424,7 +429,12 @@ function Get-AVDTuneIntegrityStatus {
     $changed = New-Object System.Collections.ArrayList; foreach ($c in $t.Changed) { [void]$changed.Add($c) }
     # the launcher in the install folder is not part of a release: it is written by AVDTune and must be exactly what AVDTune writes
     $launcher = Join-Path $info.InstallRoot 'Start-AVDTune.ps1'
-    if (Test-Path -LiteralPath $launcher -PathType Leaf) { if ([IO.File]::ReadAllText($launcher) -cne $script:LauncherText) { [void]$changed.Add('../Start-AVDTune.ps1 (launcher)') } }
+    if (Test-Path -LiteralPath $launcher -PathType Leaf) {
+        $lt = [IO.File]::ReadAllText($launcher)
+        # (line ends normalized: the old launcher may come from a copy with the other line ends)
+        if (($lt -replace "`r`n", "`n") -ceq ($script:LauncherTextBefore73 -replace "`r`n", "`n")) { $r.OldLauncher = $true; [void]$changed.Add('../Start-AVDTune.ps1 (launcher of an older AVDTune without the module path protection, #73: Repair writes the new one)') }
+        elseif ($lt -cne $script:LauncherText) { [void]$changed.Add('../Start-AVDTune.ps1 (launcher)') }
+    }
     elseif (Test-Path -LiteralPath $launcher) { [void]$changed.Add('../Start-AVDTune.ps1 (launcher)') }
     $r.Missing = @($t.Missing); $r.Changed = @($changed); $r.Extra = @($t.Extra); $r.Warnings = @($warn)
     if ($t.Ok -and $changed.Count -eq 0 -and $acl.Count -eq 0) { $r.Status = 'ok'; $r.Message = "All $(@($use.Files).Count) files are as released in version $($info.Version) (commit $(([string]$use.Commit).Substring(0, 7)))." }

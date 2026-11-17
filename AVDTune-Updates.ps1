@@ -40,7 +40,7 @@ function Start-UpdJob([string]$Kind, $Argument) {
     if ($script:OptRun) { throw 'An optimization run is going. Wait until it is done.' }
     $sync = [hashtable]::Synchronized(@{ Text = ''; Done = $false })
     $gate = Get-AVDTuneWriteGate
-    $ps = [powershell]::Create()
+    $ps = New-AVDTunePowerShell
     [void]$ps.AddScript({
             param($AppRoot, $Fake, $FakeUpd, $Root, $Kind, $Argument, $Gate, $Sync, $User, $Seed, $Wua, $Native, $SharedMachine)
             $ErrorActionPreference = 'Stop'

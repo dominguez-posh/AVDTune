@@ -707,6 +707,217 @@ try {
     $markerWrong = @($markerCases | Where-Object { $x = $(if ($_.X) { $_.X } else { @{} }); ((& $markerSample $_.S $x) -join ',') -ne $_.E } | ForEach-Object { $x = $(if ($_.X) { $_.X } else { @{} }); "$($_.N): got '$((& $markerSample $_.S $x) -join ',')'" })
     Test-Check 'change marker rules (#81): LastChange (also through a variable), steps, installers, adapter writes, Start-Process, helper chains, Stop outside the finally around the write, a conditional Start, write before Start, write outside a function are found; clean examples stay green' ($markerWrong.Count -eq 0) ($markerWrong -join ' | ')
 
+    # ---------------------------------------------------------------- module path only from the system folders (#73)
+    $winDir = [Environment]::GetFolderPath('Windows'); $pfDir = [Environment]::GetFolderPath('ProgramFiles')
+    $sysModules = (Join-Path $winDir 'System32\WindowsPowerShell\v1.0\Modules') + ';' + (Join-Path $pfDir 'WindowsPowerShell\Modules')
+    $keepPf = $env:ProgramFiles
+    try { $env:ProgramFiles = 'C:\evil-programfiles'; $modPath = Get-AVDTuneSystemModulePath } finally { $env:ProgramFiles = $keepPf }
+    Test-Check 'module path (#73): System32 first, then Program Files, from the Windows folders (an evil $env:ProgramFiles is not used), no Documents folder' ($modPath -eq $sysModules -and $modPath -notlike '*evil*' -and $modPath.IndexOf([Environment]::GetFolderPath('MyDocuments'), [StringComparison]::OrdinalIgnoreCase) -lt 0) $modPath
+    Test-Check 'module path (#73): the child environment of every tool has exactly this module path' (@('base', 'winget', 'choco', 'msiexec', 'bench', 'office', 'apps' | Where-Object { (Get-AVDTuneChildEnvironment -Tool $_ -TempDir 'C:\x')['PSModulePath'] -ne $sysModules }).Count -eq 0) $null
+    function Get-ThrownText73([scriptblock]$Block) { try { & $Block | Out-Null; '' } catch { $_.Exception.Message } }
+    # the folders of the path: real ones are admin-only; a prepared folder (write for Users, link) is found; the walk stops at the Windows / Program Files folder
+    $realModProblems = @(Get-AVDTuneModulePathProblems)
+    # (this check turns red ON PURPOSE on a computer where a third-party module in Program Files\WindowsPowerShell\Modules is writable for others: AVDTune would not start there either)
+    Test-Check 'module path (#73): the real module folders, the folders above them and the modules in them are admin-only on this computer, and the path is stable (red on purpose where a third-party module is writable for others)' ($realModProblems.Count -eq 0) ($realModProblems -join ' | ')
+    $noList = { param($Path) @() }; $stableYes = { $true }
+    $readPaths = New-Object System.Collections.ArrayList
+    $okReport = { param($Path) [void]$readPaths.Add($Path); [pscustomobject]@{ Exists = $true; Link = $false; Owner = 'S-1-5-32-544'; Protected = $true; Rules = @([pscustomobject]@{ Sid = 'S-1-5-32-545'; Write = $false; Inherited = $false; InheritOnly = $false }) } }.GetNewClosure()
+    $cleanProblems = @(Get-AVDTuneModulePathProblems -ReadAcl $okReport -List $noList -TestStable $stableYes)
+    $pfPs = Join-Path $pfDir 'WindowsPowerShell'
+    $usersWrite = { param($Path) $w = ($Path -eq $pfPs); [pscustomobject]@{ Exists = $true; Link = $false; Owner = 'S-1-5-32-544'; Protected = $true; Rules = @([pscustomobject]@{ Sid = 'S-1-5-32-545'; Write = $w; Inherited = $false; InheritOnly = $false }) } }.GetNewClosure()
+    $s32Mod = Join-Path $winDir 'System32\WindowsPowerShell\v1.0\Modules'
+    $linked = { param($Path) [pscustomobject]@{ Exists = $true; Link = ($Path -eq $s32Mod); Owner = 'S-1-5-32-544'; Protected = $true; Rules = @() } }.GetNewClosure()
+    $writeProblems = @(Get-AVDTuneModulePathProblems -ReadAcl $usersWrite -List $noList -TestStable $stableYes); $linkProblems = @(Get-AVDTuneModulePathProblems -ReadAcl $linked -List $noList -TestStable $stableYes)
+    Test-Check 'module path (#73): a parent folder with write for Users and a module folder that is a link are problems; the walk reads up to the Windows and Program Files folder, not the drive root' ($cleanProblems.Count -eq 0 -and $writeProblems.Count -eq 1 -and $writeProblems[0] -like "${pfPs}: write access for S-1-5-32-545" -and $linkProblems.Count -eq 1 -and $linkProblems[0] -like "${s32Mod}: is a link" -and @($readPaths).Count -eq 8 -and $readPaths -contains $winDir -and $readPaths -contains $pfDir -and -not ($readPaths -contains [IO.Path]::GetPathRoot($winDir))) "$($writeProblems -join ' | ') / $($linkProblems -join ' | ') / $($readPaths -join ', ')"
+    # the modules in the path (F3, N2): a temp tree stands in for System32\...\Modules; every folder (also bin\ below a version) and the module files are
+    # read, a link is a problem and not entered, other file types are not read
+    $tree = Join-Path $tmp 'modtree'
+    foreach ($d in 'EvilMod\1.0\bin\x64', 'Plain', 'Outside') { [void](New-Item -ItemType Directory -Path (Join-Path $tree $d) -Force) }
+    foreach ($f in 'EvilMod\1.0\EvilMod.psd1', 'EvilMod\1.0\EvilMod.psm1', 'EvilMod\1.0\readme.txt', 'EvilMod\1.0\bin\x64\Native.dll', 'EvilMod\1.0\bin\notes.md', 'EvilMod\EvilMod.dll', 'Plain\Plain.cdxml', 'Plain\Plain.ps1xml', 'top.psm1') { [IO.File]::WriteAllText((Join-Path $tree $f), 'x') }
+    [void](& (Join-Path ([Environment]::GetFolderPath('System')) 'cmd.exe') /c mklink /J (Join-Path $tree 'Linked') (Join-Path $tree 'Outside'))
+    $treeList = { param($Path) if ($Path -eq $s32Mod) { $Path = $tree } elseif ($Path -notlike "$tree*") { return @() }; (New-Object IO.DirectoryInfo $Path).GetFileSystemInfos() }.GetNewClosure()
+    $treeRead = New-Object System.Collections.ArrayList
+    $treeAcl = { param($Path) [void]$treeRead.Add($Path); $w = ($Path -like '*\EvilMod.psd1' -or $Path -like '*\bin\x64\Native.dll'); [pscustomobject]@{ Exists = $true; Link = $false; Owner = 'S-1-5-32-544'; Protected = $true; Rules = @([pscustomobject]@{ Sid = 'S-1-5-11'; Write = $w; Inherited = $false; InheritOnly = $false }) } }.GetNewClosure()
+    $treeProblems = @(Get-AVDTuneModulePathProblems -ReadAcl $treeAcl -List $treeList -TestStable $stableYes)
+    $rel = @($treeRead | Where-Object { $_ -like "$tree\*" } | ForEach-Object { $_.Substring($tree.Length + 1) } | Sort-Object)
+    $wantRel = @('EvilMod', 'EvilMod\1.0', 'EvilMod\1.0\bin', 'EvilMod\1.0\bin\x64', 'EvilMod\1.0\bin\x64\Native.dll', 'EvilMod\1.0\EvilMod.psd1', 'EvilMod\1.0\EvilMod.psm1', 'EvilMod\EvilMod.dll', 'Outside', 'Plain', 'Plain\Plain.cdxml', 'Plain\Plain.ps1xml', 'top.psm1')
+    Test-Check 'module path (#73, F3/N2): everything below the module path is read recursively (module, version, bin\x64; .psd1/.psm1/.dll/.cdxml/.ps1xml), module files with write for Authenticated Users (also in bin\x64) and a link are problems; .txt/.md are not read' (($rel -join ',') -eq (($wantRel | Sort-Object) -join ',') -and $treeProblems.Count -eq 3 -and @($treeProblems | Where-Object { $_ -like "*\EvilMod\1.0\EvilMod.psd1: write access for S-1-5-11" }).Count -eq 1 -and @($treeProblems | Where-Object { $_ -like "*\EvilMod\1.0\bin\x64\Native.dll: write access for S-1-5-11" }).Count -eq 1 -and @($treeProblems | Where-Object { $_ -like "*\Linked: is a link" }).Count -eq 1) "read: $($rel -join ','); problems: $($treeProblems -join ' | ')"
+    $capProblems = @(Get-AVDTuneModulePathProblems -ReadAcl $okReport -List $treeList -TestStable $stableYes -MaxEntries 6)
+    $noCap = @(Get-AVDTuneModulePathProblems -ReadAcl $okReport -List $treeList -TestStable $stableYes -MaxEntries 50 | Where-Object { $_ -notlike '*: is a link' })
+    Test-Check 'module path (#73, N2): more entries than the limit (default 5000) is a problem that says not everything was checked; under the limit no such problem' (@($capProblems | Where-Object { $_ -like "${s32Mod}: more than 6 entries in the module folder, not every module file was checked" }).Count -eq 1 -and $noCap.Count -eq 0 -and ((Get-Command Get-AVDTuneModulePathProblems).Parameters['MaxEntries'].Attributes.Count -ge 0) -and ([IO.File]::ReadAllText((Join-Path $repo 'Modules\AVDTune.psm1')) -match '\[int\]\$MaxEntries = 5000\)')) "$($capProblems -join ' | ') / $($noCap -join ' | ')"
+    [IO.Directory]::Delete((Join-Path $tree 'Linked'))
+    # F4: Windows PowerShell's own computation; a machine value equal to ours would bring the Documents folder back when a runspace opens
+    $machineNow = [Environment]::GetEnvironmentVariable('PSModulePath', 'Machine')
+    Test-Check 'module path (#73, F4): the path is stable with the machine value of this computer, unstable (red) when the machine value equals it (any case); a problem and a refused worker then' ((Test-AVDTuneModulePathStable) -and (Test-AVDTuneModulePathStable -Machine $machineNow -User $null) -and -not (Test-AVDTuneModulePathStable -Machine $sysModules.ToLowerInvariant() -User $null) -and @(Get-AVDTuneModulePathProblems -ReadAcl $okReport -List $noList -TestStable { $false } | Where-Object { $_ -like "PSModulePath: Windows PowerShell would change the module path when a runspace opens (checked value: $sysModules; machine value: *" }).Count -eq 1) $machineNow
+    $avdMod = Get-Module AVDTune
+    $origStable = & $avdMod { ${function:script:Test-AVDTuneModulePathStable} }
+    try {
+        & $avdMod { ${function:script:Test-AVDTuneModulePathStable} = { $false } }
+        $refusedPs = Get-ThrownText73 { New-AVDTunePowerShell }; $refusedPool = Get-ThrownText73 { New-AVDTuneRunspacePool -Min 1 -Max 1 }
+    }
+    finally { & $avdMod { param($b) ${function:script:Test-AVDTuneModulePathStable} = $b } $origStable }
+    $okPs = New-AVDTunePowerShell; $okPs.Dispose()
+    Test-Check 'module path (#73, F4): New-AVDTunePowerShell and New-AVDTuneRunspacePool refuse when Windows PowerShell would change the path (fail closed)' ($refusedPs -like '*would change the module path*' -and $refusedPool -like '*would change the module path*') "$refusedPs / $refusedPool"
+    $startSrc = [IO.File]::ReadAllText((Join-Path $repo 'Start-AVDTune.ps1'))
+    Test-Check 'module path (#73): Start-AVDTune.ps1 checks the module folders right after AVDTune.psm1 (before Add-Type and the other modules) and stops with shell.err.modulepath' ($startSrc -match '\[void\]\(Set-AVDTuneSafeModulePath\)[^\r\n]*\r?\n(#[^\r\n]*\r?\n)*\$script:ModulePathProblems = @\(Get-AVDTuneModulePathProblems\)\r?\nAdd-Type ' -and $startSrc -match 'if \(\$script:ModulePathProblems\.Count -gt 0\) \{[\s\S]{0,300}Stop-WithMessage \(T ''shell\.err\.modulepath''[\s\S]{0,40}\r?\n\}\r?\nforeach \(\$part in ') $null
+
+    # source (F1): the first statement of Start-AVDTune.ps1 and of the launcher sets the path with .NET alone, no command before it; both are the same
+    # statement and give exactly Get-AVDTuneSystemModulePath
+    $tk = $null; $pe = $null
+    $startAst = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $repo 'Start-AVDTune.ps1'), [ref]$tk, [ref]$pe)
+    $relAst = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $repo 'Modules\AVDTune.Release.psm1'), [ref]$tk, [ref]$pe)
+    $launcherText = @($relAst.FindAll({ param($n) $n -is [System.Management.Automation.Language.AssignmentStatementAst] -and $n.Left.Extent.Text -eq '$script:LauncherText' }, $false))[0].Right.Expression.Value
+    $launcherOld = ($launcherText -split "`n" | Where-Object { $_ -notlike '`[Environment`]::SetEnvironmentVariable(*' }) -join "`n"
+    $launcherAst = [System.Management.Automation.Language.Parser]::ParseInput($launcherText, [ref]$tk, [ref]$pe)
+    $firstOf = {
+        param($Ast)
+        $first = @($Ast.EndBlock.Statements)[0]
+        $before = @($Ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] }, $true) | Where-Object { $_.Extent.StartOffset -lt $first.Extent.EndOffset })
+        $isSet = ($first.Extent.Text -match '\A\[Environment\]::SetEnvironmentVariable\(''PSModulePath'', ' -and @($first.FindAll({ param($n) $n -is [System.Management.Automation.Language.VariableExpressionAst] }, $true)).Count -eq 0)
+        [pscustomobject]@{ Text = $first.Extent.Text; Ok = ($isSet -and $before.Count -eq 0) }
+    }
+    $fs = & $firstOf $startAst; $fl = & $firstOf $launcherAst
+    $keepMp = $env:PSModulePath
+    try { $env:PSModulePath = 'C:\x'; & ([scriptblock]::Create($fs.Text)); $setBy = $env:PSModulePath } finally { $env:PSModulePath = $keepMp }
+    Test-Check 'module path (#73, F1): the first statement of Start-AVDTune.ps1 and of the launcher sets PSModulePath with .NET only (no command, no variable before or in it), the same text in both, and gives Get-AVDTuneSystemModulePath' ($fs.Ok -and $fl.Ok -and $fs.Text -ceq $fl.Text -and $setBy -eq $sysModules) "$($fs.Ok) $($fl.Ok) $setBy"
+    $redAst = [System.Management.Automation.Language.Parser]::ParseInput("param(`$x = (Join-Path a b))`r`n" + $fs.Text, [ref]$tk, [ref]$pe)
+    $redAst2 = [System.Management.Automation.Language.Parser]::ParseInput("`$ErrorActionPreference = 'Stop'`r`n" + $fs.Text, [ref]$tk, [ref]$pe)
+    Test-Check 'module path (#73, F1): the rule is red for a command in the param block and for another first statement' (-not (& $firstOf $redAst).Ok -and -not (& $firstOf $redAst2).Ok -and -not (& $firstOf ([System.Management.Automation.Language.Parser]::ParseInput($launcherOld, [ref]$tk, [ref]$pe))).Ok) $null
+    function Get-RunspaceCreation {
+        # [powershell]::Create*, [runspacefactory]::* (any spelling of the type) outside New-AVDTunePowerShell / New-AVDTuneRunspacePool of AVDTune.psm1
+        param([System.Management.Automation.Language.Ast]$Ast, [bool]$IsCore)
+        $out = @(); $ok = 0
+        foreach ($m in $Ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.InvokeMemberExpressionAst] -and $n.Static -and $n.Expression -is [System.Management.Automation.Language.TypeExpressionAst] }, $true)) {
+            $t = $m.Expression.TypeName.FullName -as [type]
+            $member = [string]$m.Member.Extent.Text
+            $hit = ($t -eq [System.Management.Automation.PowerShell] -and $member -like 'Create*') -or ($t -eq [System.Management.Automation.Runspaces.RunspaceFactory])
+            if (-not $hit) { continue }
+            $fn = $m.Parent; while ($fn -and $fn -isnot [System.Management.Automation.Language.FunctionDefinitionAst]) { $fn = $fn.Parent }
+            if ($IsCore -and $fn -and $fn.Name -in 'New-AVDTunePowerShell', 'New-AVDTuneRunspacePool') { $ok++; continue }
+            $out += '{0} {1}' -f $m.Extent.StartLineNumber, $m.Extent.Text
+        }
+        [pscustomobject]@{ Findings = $out; Central = $ok }
+    }
+    $rsFindings = @(); $rsCentral = 0; $rsUses = 0
+    foreach ($f in @(Get-ChildItem -LiteralPath $repo -Recurse -File -Include '*.ps1', '*.psm1' | Where-Object { $_.FullName -notmatch '\\(\.git|Tests)\\' })) {
+        $tk = $null; $pe = $null
+        $ast = [System.Management.Automation.Language.Parser]::ParseFile($f.FullName, [ref]$tk, [ref]$pe)
+        $res = Get-RunspaceCreation -Ast $ast -IsCore ($f.FullName -eq (Join-Path $repo 'Modules\AVDTune.psm1'))
+        $rsCentral += $res.Central
+        foreach ($x in $res.Findings) { $rsFindings += '{0}:{1}' -f $f.FullName.Substring($repo.Length + 1), $x }
+        $rsUses += @($ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] -and $n.GetCommandName() -in 'New-AVDTunePowerShell', 'New-AVDTuneRunspacePool' }, $true)).Count
+    }
+    Test-Check 'module path (#73): no script creates a runspace itself; workers come from New-AVDTunePowerShell / New-AVDTuneRunspacePool (source, Tests excluded)' ($rsFindings.Count -eq 0 -and $rsCentral -eq 2 -and $rsUses -ge 18) "central $rsCentral, uses $rsUses; $($rsFindings -join ' | ')"
+    $rsSample = { param([string]$Source, [bool]$IsCore) $tk = $null; $pe = $null; @((Get-RunspaceCreation -Ast ([System.Management.Automation.Language.Parser]::ParseInput($Source, [ref]$tk, [ref]$pe)) -IsCore $IsCore).Findings).Count }
+    $rsCases = @(
+        @{ S = 'function F { [powershell]::Create() }'; C = $false; E = 1 }
+        @{ S = 'function F { [System.Management.Automation.PowerShell]::Create([System.Management.Automation.RunspaceMode]::NewRunspace) }'; C = $false; E = 1 }
+        @{ S = '$p = [runspacefactory]::CreateRunspacePool(1, 4)'; C = $false; E = 1 }
+        @{ S = '[System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspace()'; C = $false; E = 1 }
+        @{ S = 'function New-AVDTunePowerShell { [powershell]::Create() }'; C = $false; E = 1 }
+        @{ S = 'function New-AVDTunePowerShell { [powershell]::Create() }'; C = $true; E = 0 }
+        @{ S = '[Security.Cryptography.SHA256]::Create(); New-AVDTunePowerShell'; C = $false; E = 0 }
+    )
+    $rsWrong = @($rsCases | Where-Object { (& $rsSample $_.S $_.C) -ne $_.E } | ForEach-Object { $_.S })
+    Test-Check 'module path (#73): the runspace rule finds each spelling ([powershell], full type name, [runspacefactory], pool) and allows only the two functions of AVDTune.psm1' ($rsWrong.Count -eq 0) ($rsWrong -join ' | ')
+
+    # counter-test in fresh processes: a module named ScheduledTasks in a user module folder (temp, never the real Documents) in front of the system folders
+    $modTmp = Join-Path $tmp 'modpath'
+    $fakeMods = Join-Path $modTmp 'UserModules'
+    [void](New-Item -ItemType Directory -Path (Join-Path $fakeMods 'ScheduledTasks') -Force)
+    [IO.File]::WriteAllText((Join-Path $fakeMods 'ScheduledTasks\ScheduledTasks.psm1'), 'function Get-ScheduledTask { [IO.File]::AppendAllText($env:AVDTUNE_TEST_MARKER, "loaded`r`n"); @() }' + "`r`n")
+    $childScript = Join-Path $modTmp 'child.ps1'
+    [IO.File]::WriteAllText($childScript, @'
+param([string]$Mode, [string]$Module)
+$ErrorActionPreference = 'Stop'
+$probe = { [void](Get-ScheduledTask -TaskPath '\AVDTune-no-such-path\' -ErrorAction SilentlyContinue) }
+if ($Mode -eq 'red') { & $probe; $ps = [powershell]::Create(); [void]$ps.AddScript($probe.ToString()); [void]$ps.Invoke(); $ps.Dispose(); 'PATH=' + $env:PSModulePath; return }
+Import-Module $Module -Force
+[void](Set-AVDTuneSafeModulePath)
+& $probe
+$ps = New-AVDTunePowerShell; [void]$ps.AddScript($probe.ToString()); [void]$ps.Invoke(); $ps.Dispose()
+$pool = New-AVDTuneRunspacePool -Min 1 -Max 2; $pool.Open()
+try { $ps = [powershell]::Create(); $ps.RunspacePool = $pool; [void]$ps.AddScript($probe.ToString()); [void]$ps.Invoke(); $ps.Dispose() } finally { $pool.Dispose() }
+$iss = [initialsessionstate]::CreateDefault(); $rs = [runspacefactory]::CreateRunspace($iss); $rs.Open()
+try { $ps = [powershell]::Create(); $ps.Runspace = $rs; [void]$ps.AddScript($probe.ToString()); [void]$ps.Invoke(); $ps.Dispose() } finally { $rs.Dispose() }
+'PATH=' + $env:PSModulePath
+'@)
+    $psExe = Join-Path ([Environment]::GetFolderPath('System')) 'WindowsPowerShell\v1.0\powershell.exe'
+    $runChild = {
+        param([string]$Mode, [string]$Marker, $Environment)
+        $psi = New-Object System.Diagnostics.ProcessStartInfo $psExe
+        $psi.Arguments = (@('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $childScript, $Mode, (Join-Path $repo 'Modules\AVDTune.psm1')) | ForEach-Object { ConvertTo-AVDTuneArgument $_ }) -join ' '
+        $psi.UseShellExecute = $false; $psi.CreateNoWindow = $true; $psi.RedirectStandardOutput = $true; $psi.RedirectStandardError = $true
+        if ($Environment) { $psi.EnvironmentVariables.Clear(); foreach ($k in $Environment.Keys) { $psi.EnvironmentVariables[$k] = [string]$Environment[$k] } }
+        else { $psi.EnvironmentVariables['PSModulePath'] = "$fakeMods;$pfDir\WindowsPowerShell\Modules;$winDir\System32\WindowsPowerShell\v1.0\Modules"; $psi.EnvironmentVariables['AVDTUNE_TEST_MARKER'] = $Marker }
+        $p = [System.Diagnostics.Process]::Start($psi)
+        $errTask = $p.StandardError.ReadToEndAsync(); $out = $p.StandardOutput.ReadToEnd()
+        if (-not $p.WaitForExit(120000)) { $p.Kill(); throw "child $Mode did not end" }
+        [pscustomobject]@{ Exit = $p.ExitCode; Out = $out; Err = $errTask.Result; Loaded = (Test-Path -LiteralPath $Marker) }
+    }.GetNewClosure()
+    $red = & $runChild 'red' (Join-Path $modTmp 'red.marker') $null
+    Test-Check 'module path (#73) red: without the cleanup a fresh process and a fresh runspace load the fake ScheduledTasks from the user module folder' ($red.Exit -eq 0 -and $red.Loaded -and @([IO.File]::ReadAllLines((Join-Path $modTmp 'red.marker'))).Count -eq 2) "exit $($red.Exit) loaded $($red.Loaded) $($red.Err)"
+    $green = & $runChild 'green' (Join-Path $modTmp 'green.marker') $null
+    Test-Check 'module path (#73): after Set-AVDTuneSafeModulePath neither the process, a worker (New-AVDTunePowerShell), a pool nor a runspace of its own loads the fake, and the path stays the system path after these opens' ($green.Exit -eq 0 -and -not $green.Loaded -and $green.Out -match ('(?m)^PATH=' + [regex]::Escape($sysModules) + '\r?$')) "exit $($green.Exit) loaded $($green.Loaded) $($green.Out) $($green.Err)"
+    # F1/F2: the commands that the launcher and the head of Start-AVDTune.ps1 use, offered by fakes in front of the system folders: the real names
+    # Microsoft.PowerShell.Utility / .Management and a module of a foreign name (EvilMod). Each fake exports the commands and writes a marker when loaded.
+    $coreFakes = Join-Path $modTmp 'CoreFakes'
+    $fakeDefs = @{
+        'Microsoft.PowerShell.Utility'    = @('Add-Type', 'New-Object', 'ConvertFrom-Json')
+        'Microsoft.PowerShell.Management' = @('Join-Path', 'Test-Path', 'Get-Content', 'Split-Path')
+        'EvilMod'                         = @('Join-Path', 'New-Object', 'Add-Type', 'Get-Content', 'ConvertFrom-Json', 'Test-Path', 'Split-Path')
+    }
+    foreach ($name in $fakeDefs.Keys) {
+        [void](New-Item -ItemType Directory -Path (Join-Path $coreFakes $name) -Force)
+        $body = @($fakeDefs[$name] | ForEach-Object { "function $_ { [IO.File]::AppendAllText(`$env:AVDTUNE_TEST_MARKER, '$name $_' + [Environment]::NewLine) }" }) + ('Export-ModuleMember -Function ' + ($fakeDefs[$name] -join ', '))
+        [IO.File]::WriteAllText((Join-Path $coreFakes "$name\$name.psm1"), ($body -join "`r`n") + "`r`n")
+    }
+    $runScript = {
+        param([string]$Script, [string]$Marker, [string]$Started)
+        $psi = New-Object System.Diagnostics.ProcessStartInfo $psExe
+        $psi.Arguments = (@('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $Script) | ForEach-Object { ConvertTo-AVDTuneArgument $_ }) -join ' '
+        $psi.UseShellExecute = $false; $psi.CreateNoWindow = $true; $psi.RedirectStandardOutput = $true; $psi.RedirectStandardError = $true
+        $psi.EnvironmentVariables['PSModulePath'] = "$coreFakes;$pfDir\WindowsPowerShell\Modules;$winDir\System32\WindowsPowerShell\v1.0\Modules"
+        $psi.EnvironmentVariables['AVDTUNE_TEST_MARKER'] = $Marker; $psi.EnvironmentVariables['AVDTUNE_TEST_STARTED'] = $Started
+        $p = [System.Diagnostics.Process]::Start($psi)
+        $errTask = $p.StandardError.ReadToEndAsync(); $out = $p.StandardOutput.ReadToEnd()
+        if (-not $p.WaitForExit(120000)) { $p.Kill(); throw "$Script did not end" }
+        [pscustomobject]@{ Exit = $p.ExitCode; Out = $out; Err = $errTask.Result; Marker = $(if (Test-Path -LiteralPath $Marker) { [IO.File]::ReadAllText($Marker).Trim() } else { '' }); Started = $(if (Test-Path -LiteralPath $Started) { [IO.File]::ReadAllText($Started) } else { '' }) }
+    }.GetNewClosure()
+    # the launcher of the install folder (text of AVDTune.Release.psm1) in a temp install folder; the version it starts only records the module path it got
+    $runLauncher = {
+        param([string]$Name, [string]$Text)
+        $inst = Join-Path $modTmp $Name
+        [void](New-Item -ItemType Directory -Path (Join-Path $inst '9.9.9') -Force)
+        [IO.File]::WriteAllText((Join-Path $inst 'Start-AVDTune.ps1'), $Text)
+        [IO.File]::WriteAllText((Join-Path $inst 'current.json'), '{"Version":"9.9.9"}')
+        [IO.File]::WriteAllText((Join-Path $inst '9.9.9\Start-AVDTune.ps1'), '[IO.File]::WriteAllText($env:AVDTUNE_TEST_STARTED, $env:PSModulePath)' + "`r`n")
+        & $runScript (Join-Path $inst 'Start-AVDTune.ps1') (Join-Path $modTmp "$Name.marker") (Join-Path $modTmp "$Name.started")
+    }.GetNewClosure()
+    $lGreen = & $runLauncher 'launcher-new' $launcherText
+    $lRed = & $runLauncher 'launcher-old' $launcherOld
+    Test-Check 'module path (#73, F1/F2) red: the launcher without the first line loads the fakes for Join-Path / Get-Content / ConvertFrom-Json from the inherited path' ($lRed.Marker -ne '') "marker: $($lRed.Marker) | $($lRed.Err)"
+    Test-Check 'module path (#73, F1/F2): the launcher loads no fake (EvilMod, Utility, Management) and starts the version with exactly the system module path' ($lGreen.Exit -eq 0 -and $lGreen.Marker -eq '' -and $lGreen.Started -eq $sysModules) "exit $($lGreen.Exit) marker '$($lGreen.Marker)' started '$($lGreen.Started)' $($lGreen.Err)"
+    # the head of Start-AVDTune.ps1 up to the module check: the statements as they are, $PSScriptRoot pointing at this copy, then the loaded modules
+    $stmts = @($startAst.EndBlock.Statements)
+    $upTo = -1; for ($i = 0; $i -lt $stmts.Count; $i++) { if ($stmts[$i].Extent.Text -like '$script:ModulePathProblems = *') { $upTo = $i; break } }
+    $headLines = @($stmts[0..$upTo] | ForEach-Object { $_.Extent.Text.Replace('$PSScriptRoot', "'" + $repo.Replace("'", "''") + "'") })
+    $tail = "`r`n" + '[IO.File]::WriteAllText($env:AVDTUNE_TEST_STARTED, ((Get-Module | ForEach-Object { $_.Name + ''@'' + $_.ModuleBase }) -join ''|''))' + "`r`n"
+    [IO.File]::WriteAllText((Join-Path $modTmp 'head-new.ps1'), ($headLines -join "`r`n") + $tail)
+    [IO.File]::WriteAllText((Join-Path $modTmp 'head-old.ps1'), (@($headLines | Select-Object -Skip 1) -join "`r`n") + $tail)
+    $hGreen = & $runScript (Join-Path $modTmp 'head-new.ps1') (Join-Path $modTmp 'head-new.marker') (Join-Path $modTmp 'head-new.started')
+    $hRed = & $runScript (Join-Path $modTmp 'head-old.ps1') (Join-Path $modTmp 'head-old.marker') (Join-Path $modTmp 'head-old.started')
+    Test-Check 'module path (#73, F1/F2) red: the head of Start-AVDTune.ps1 without its first statement loads a fake while AVDTune.psm1 loads' ($upTo -ge 3 -and $hRed.Marker -ne '') "upTo $upTo marker: $($hRed.Marker) | $($hRed.Err)"
+    Test-Check 'module path (#73, F1/F2): the head of Start-AVDTune.ps1 (path, AVDTune.psm1, module check) loads no fake and no module outside the system folders' ($hGreen.Exit -eq 0 -and $hGreen.Marker -eq '' -and $hGreen.Started -like '*AVDTune@*' -and @($hGreen.Started -split '\|' | Where-Object { $_ -notlike 'AVDTune@*' -and $_ -notlike "*@$winDir\System32\WindowsPowerShell\v1.0*" }).Count -eq 0) "exit $($hGreen.Exit) marker '$($hGreen.Marker)' modules '$($hGreen.Started)' $($hGreen.Err)"
+    # a Windows PowerShell child started with the child environment (#47) gets the system path; without the variable it would start with the Documents folder
+    $childEnv = Get-AVDTuneChildEnvironment -Tool base -TempDir $modTmp
+    $childEnv['AVDTUNE_TEST_MARKER'] = Join-Path $modTmp 'child.marker'
+    $withPath = & $runChild 'red' (Join-Path $modTmp 'child.marker') $childEnv
+    $noPathEnv = [ordered]@{}; foreach ($k in $childEnv.Keys) { if ($k -ne 'PSModulePath') { $noPathEnv[$k] = $childEnv[$k] } }
+    $withoutPath = & $runChild 'red' (Join-Path $modTmp 'child2.marker') $noPathEnv
+    $docs = Join-Path ([Environment]::GetFolderPath('MyDocuments')) 'WindowsPowerShell\Modules'
+    Test-Check 'module path (#73): a powershell.exe child with the child environment keeps the system path; without PSModulePath Windows would put the Documents folder first (red)' ($withPath.Out -match ('(?m)^PATH=' + [regex]::Escape($sysModules) + '\r?$') -and $withoutPath.Out -match ('(?m)^PATH=' + [regex]::Escape($docs) + ';')) "$($withPath.Out) / $($withoutPath.Out) $($withPath.Err)"
+
     # ---------------------------------------------------------------- the real machine, read only
     $real = New-AVDTuneMachine
     $rw = Get-AVDTuneWindowsInfo $real

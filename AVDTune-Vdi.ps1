@@ -160,7 +160,7 @@ function Start-VdiJob([string]$Kind, [string]$Key) {
     }
     else {
         $sync = [hashtable]::Synchronized(@{ Text = '' })
-        $ps = [powershell]::Create()
+        $ps = New-AVDTunePowerShell
         [void]$ps.AddScript({
                 param($AppRoot, $Kind, $Common, $Gate, $Sync, $WorkerText)
                 $ErrorActionPreference = 'Stop'

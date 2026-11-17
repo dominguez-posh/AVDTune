@@ -18,6 +18,7 @@ $script:LangDisplayName = @{ en = 'English'; de = 'Deutsch' }
 $script:LangHard = @{
     'shell.err.admin' = "AVDTune changes the Golden Master and must run as administrator.`nStart it again with 'Run as administrator'."
     'shell.err.running' = 'AVDTune is already running on this computer (one instance at a time).'
+    'shell.err.modulepath' = "AVDTune does not start: a folder that Windows PowerShell loads modules from can be changed without administrator rights.`n{0}`nRestore the permissions of the folder (owner and write access only Administrators, SYSTEM or TrustedInstaller), then start AVDTune again."
     'shell.readonly' = 'Read only: confirm a snapshot of today on the Overview first. Nothing on this page changes the master until then.'
     'shell.aside' = 'The state folder {0} had been prepared by someone else ({1}). It was set aside unread as {2} and a new one was created: the first-run questions, the domain controller pin and the sign-in start again. Check who prepared it, then delete the set-aside folder.'
     'shell.crash.finish' = 'The last finish did not end properly: Windows Update or BITS may still be stopped. Open Cleanup and finish and repair it.'
