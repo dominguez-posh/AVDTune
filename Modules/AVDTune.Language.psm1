@@ -530,10 +530,10 @@ function Undo-AVDTuneLanguage {
     $steps = @((@(Get-AVDTuneLanguageSteps -L $L -Config $cfg -Want $want -Prev $prev -Parts Defaults) + $cleanup) | Where-Object { $_.Id -in $changedIds })
     if (-not $WhatIf) {
         if (-not (Test-AVDTuneWriteAllowed)) { throw 'The snapshot gate is not confirmed: AVDTune is read only until a snapshot newer than its last change is confirmed on the Overview.' }
-        [void](Set-AVDTuneState -Root $Root -Values @{ LastChange = (& $Machine.Now).ToString('o') })
     }
     $owner = $false; if (-not $WhatIf) { $owner = Start-AVDTuneChange -Root $Root }
     try {
+        if (-not $WhatIf) { [void](Set-AVDTuneState -Root $Root -Values @{ LastChange = (& $Machine.Now).ToString('o') }) }   # under the marker (#81): before the attempt, a failed undo may have changed the master
         $results = @(foreach ($s in $steps) { Invoke-AVDTuneStep -Step $s -Machine $Machine -Mode Undo -WhatIf:$WhatIf })
         if (-not $WhatIf) {
             # verify against the earlier values, not only against "no longer the wanted value": what cannot be put back is reported

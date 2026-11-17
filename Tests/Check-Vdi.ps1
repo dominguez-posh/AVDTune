@@ -305,6 +305,47 @@ try {
     Test-Check 'MMR policy: Chrome with its own extension id and update address when asked for' ((Test-AVDTuneVdiExtensionEntry -Existing ([string](& $e.M.RegGet 'HKLM:\SOFTWARE\Policies\Google\Chrome' 'ExtensionSettings')) -ExtensionId 'lfmemoeeciijgkjkgbgikoonlkabmlno' -UpdateUrl 'https://clients2.google.com/service/update2/crx')) $null
     Reset-Files
 
+    # ---------------------------------------------------------------- the change marker (#81): set while the master is written, gone afterwards, LastChange also after an abort
+    function Add-MarkerProbe($Env, $Probe) {
+        # every write (msiexec/bootstrapper run, registry value) records whether the marker is set; once armed, the clock of the machine throws (an abort after the write)
+        $origRun = $Env.V.Run; $origSet = $Env.M.RegSet; $origRemove = $Env.M.RegRemove; $origNow = $Env.M.Now
+        $Env.M.RegRemove = { param($k, $n) $Probe.Seen += (Test-AVDTuneChangeInProgress -Root $tmp); $Probe.At = [datetime]::UtcNow; & $origRemove $k $n }.GetNewClosure()
+        $Env.V.Run = { param($File, [string[]]$Arguments, [int]$TimeoutSeconds = 600) $Probe.Seen += (Test-AVDTuneChangeInProgress -Root $tmp); $Probe.At = [datetime]::UtcNow; & $origRun $File $Arguments $TimeoutSeconds }.GetNewClosure()
+        $Env.M.RegSet = { param($k, $n, $v, $t) $Probe.Seen += (Test-AVDTuneChangeInProgress -Root $tmp); $Probe.At = [datetime]::UtcNow; & $origSet $k $n $v $t }.GetNewClosure()
+        $Env.M.Now = { if ($Probe.Abort -and $Probe.At) { throw 'fake: the clock failed' }; & $origNow }.GetNewClosure()
+    }
+    Reset-Files
+    $p81 = @{ Seen = @(); At = $null; Abort = $false }
+    $e = New-Env; Add-MarkerProbe $e $p81
+    $x = Invoke-AVDTuneVdiRecorded -Machine $e.M -V $e.V -Key 'webrtc' -Root $tmp -User 'admin1' -SnapshotId 'snap-1'
+    Test-Check '81 install: the change marker is set while msiexec runs and gone afterwards' ($x.Setup.Status -eq 'Changed' -and $p81.Seen.Count -ge 1 -and @($p81.Seen | Where-Object { -not $_ }).Count -eq 0 -and -not (Test-AVDTuneChangeInProgress -Root $tmp) -and $null -eq (Get-AVDTuneProp (Get-AVDTuneState $tmp) 'ChangeInProgress')) ($p81.Seen -join ',')
+    $p81.Seen = @()
+    $x = Invoke-AVDTuneVdiUndo -Machine $e.M -V $e.V -Key 'webrtc' -Root $tmp -User 'admin1' -SnapshotId 'snap-1'
+    Test-Check '81 undo (remove): the change marker is set while msiexec runs and gone afterwards' ($x.Setup.Status -eq 'Changed' -and $p81.Seen.Count -ge 1 -and @($p81.Seen | Where-Object { -not $_ }).Count -eq 0 -and -not (Test-AVDTuneChangeInProgress -Root $tmp)) ($p81.Seen -join ',')
+    Reset-Files
+    $p81 = @{ Seen = @(); At = $null; Abort = $true }
+    $e = New-Env; Add-MarkerProbe $e $p81
+    $t81 = Get-ThrownText { Invoke-AVDTuneVdiRecorded -Machine $e.M -V $e.V -Key 'webrtc' -Root $tmp -User 'admin1' -SnapshotId 'snap-1' }
+    $lc81 = ConvertTo-AVDTuneUtc (Get-AVDTuneState $tmp).LastChange
+    Test-Check '81 install aborted after msiexec ran: the error comes through, the marker is gone, LastChange is after the write' ($t81 -like '*clock failed*' -and $p81.Seen.Count -ge 1 -and $p81.Seen[0] -and -not (Test-AVDTuneChangeInProgress -Root $tmp) -and $lc81 -and $lc81 -ge $p81.At) "thrown=$t81; LastChange=$lc81"
+    Reset-Files
+    $p81 = @{ Seen = @(); At = $null; Abort = $false }
+    $e = New-Env; Add-MarkerProbe $e $p81
+    $run = Invoke-AVDTuneVdiSettings -Machine $e.M -V $e.V -Key 'teams' -Root $tmp -User 'admin1' -SnapshotId 'snap-1'
+    Test-Check '81 settings apply: the change marker is set while the value is written and gone afterwards' (@($run.Results | Where-Object Status -eq 'Changed').Count -eq 1 -and $p81.Seen.Count -ge 1 -and @($p81.Seen | Where-Object { -not $_ }).Count -eq 0 -and -not (Test-AVDTuneChangeInProgress -Root $tmp)) ($p81.Seen -join ',')
+    $p81.Seen = @()
+    $und = Invoke-AVDTuneVdiSettings -Machine $e.M -V $e.V -Key 'teams' -Mode Undo -Root $tmp -User 'admin1' -SnapshotId 'snap-1'
+    Test-Check '81 settings undo: the change marker is set during the undo and gone afterwards' (@($und.Results | Where-Object Status -eq 'Reverted').Count -eq 1 -and $p81.Seen.Count -ge 1 -and @($p81.Seen | Where-Object { -not $_ }).Count -eq 0 -and -not (Test-AVDTuneChangeInProgress -Root $tmp) -and $null -eq (Get-AVDTuneProp (Get-AVDTuneState $tmp) 'ChangeInProgress')) ($p81.Seen -join ',')
+    $dry = Invoke-AVDTuneVdiSettings -Machine $e.M -V $e.V -Key 'teams' -Root $tmp -WhatIf
+    Test-Check '81 settings WhatIf: no marker is left' (-not (Test-AVDTuneChangeInProgress -Root $tmp) -and $null -eq (Get-AVDTuneProp (Get-AVDTuneState $tmp) 'ChangeInProgress')) $null
+    Reset-Files
+    $p81 = @{ Seen = @(); At = $null; Abort = $true }
+    $e = New-Env; Add-MarkerProbe $e $p81
+    $t81 = Get-ThrownText { Invoke-AVDTuneVdiSettings -Machine $e.M -V $e.V -Key 'teams' -Root $tmp -User 'admin1' -SnapshotId 'snap-1' }
+    $lc81 = ConvertTo-AVDTuneUtc (Get-AVDTuneState $tmp).LastChange
+    Test-Check '81 settings aborted after the write: the error comes through, the marker is gone, LastChange is after the write' ($t81 -like '*clock failed*' -and $p81.Seen.Count -ge 1 -and $p81.Seen[0] -and -not (Test-AVDTuneChangeInProgress -Root $tmp) -and $lc81 -and $lc81 -ge $p81.At) "thrown=$t81; LastChange=$lc81"
+    Reset-Files
+
     # ---------------------------------------------------------------- review findings (M1, N1, N2, N3)
     # M1: undo of the ExtensionSettings policy only at our own entry
     $foreign = 'zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz'

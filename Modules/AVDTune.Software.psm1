@@ -815,6 +815,8 @@ function Invoke-AVDTuneSoftwareRun {
     if ($list.Count -eq 0) { return [pscustomobject]@{ WhatIf = $false; Results = @(); Run = $null; Reboot = $false } }
     [void](Clear-AVDTuneSoftwareWork -Root $Root)
     $started = & $Machine.Now
+    $changeOwner = Start-AVDTuneChange -Root $Root   # marker while the master is written (snapshot gate, #27/#81), cleared in finally (Stop stamps LastChange, also after an abort)
+    try {
     [void](Set-AVDTuneState -Root $Root -Values @{ LastChange = $started.ToString('o') })
     $results = New-Object System.Collections.ArrayList
     foreach ($item in $list) {
@@ -842,6 +844,8 @@ function Invoke-AVDTuneSoftwareRun {
         }
     }
     [pscustomobject]@{ WhatIf = $false; Results = @($results); Run = $run; Reboot = $run.Reboot }
+    }
+    finally { Stop-AVDTuneChange -Root $Root -Owner $changeOwner }
 }
 
 function Get-AVDTuneSoftwareHistory {

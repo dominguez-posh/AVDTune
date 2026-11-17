@@ -662,6 +662,31 @@ try {
     [void](Undo-AVDTuneOfficeFix -Machine $m -Name shared -Root $tmp -User 'admin1' -SnapshotId 'snap-check')
     Test-Check '61 undo fix: the marker is cleared also when the step failed' ($null -eq (Get-AVDTuneProp (Get-AVDTuneState $tmp) 'ChangeInProgress')) $null
     Reset-OfficeFiles
+    # 4 (#81): install, remove and undo of Office hold the change marker while setup.exe runs, clear it afterwards, and stamp LastChange also after an abort
+    $probe = @{ Seen = @(); RunAt = $null }
+    $m = New-Master -NoOffice; $o = New-AVDTuneFakeOffice -Machine $m; Reset-OfficeFiles
+    $origRun = $o.Run
+    $o.Run = { param($File, [string[]]$Arguments, [int]$TimeoutSeconds = 600) if ((Split-Path $File -Leaf) -eq 'setup.exe') { $probe.Seen += (Test-AVDTuneChangeInProgress -Root $tmp); $probe.RunAt = [datetime]::UtcNow }; & $origRun $File $Arguments $TimeoutSeconds }.GetNewClosure()
+    $ri81 = Invoke-AVDTuneOfficeRecorded -Machine $m -O $o -Root $tmp -Mode Install -Config $d -User 'admin1' -SnapshotId 'snap-check'
+    Test-Check '81 install: the change marker is set while setup.exe runs and gone afterwards' ($ri81.Setup.Status -eq 'Changed' -and $probe.Seen.Count -eq 1 -and $probe.Seen[0] -and -not (Test-AVDTuneChangeInProgress -Root $tmp) -and $null -eq (Get-AVDTuneProp (Get-AVDTuneState $tmp) 'ChangeInProgress')) ($probe.Seen -join ',')
+    $probe.Seen = @()
+    $ru81 = Invoke-AVDTuneOfficeUndo -Machine $m -O $o -Root $tmp -User 'admin1' -SnapshotId 'snap-check'
+    Test-Check '81 undo (remove): the change marker is set while setup.exe runs and gone afterwards' ($ru81.Setup.Status -eq 'Changed' -and $probe.Seen.Count -eq 1 -and $probe.Seen[0] -and -not (Test-AVDTuneChangeInProgress -Root $tmp)) ($probe.Seen -join ',')
+    # an abort after setup.exe ran (the clock of the machine throws when the run record is written): the error comes through, the marker is gone, LastChange is the end
+    $m = New-Master; $o = New-AVDTuneFakeOffice -Machine $m; Reset-OfficeFiles; $probe.Seen = @(); $probe.RunAt = $null
+    $origRun = $o.Run
+    $o.Run = { param($File, [string[]]$Arguments, [int]$TimeoutSeconds = 600) if ((Split-Path $File -Leaf) -eq 'setup.exe') { $probe.Seen += (Test-AVDTuneChangeInProgress -Root $tmp); $probe.RunAt = [datetime]::UtcNow }; & $origRun $File $Arguments $TimeoutSeconds }.GetNewClosure()
+    $origNow = $m.Now
+    $m.Now = { if ($probe.RunAt) { throw 'fake: the clock failed' }; & $origNow }.GetNewClosure()
+    $abort81 = Get-ThrownText { Invoke-AVDTuneOfficeRecorded -Machine $m -O $o -Root $tmp -Mode Remove -User 'admin1' -SnapshotId 'snap-check' }
+    $lc81 = ConvertTo-AVDTuneUtc (Get-AVDTuneState $tmp).LastChange
+    Test-Check '81 remove aborted: the error comes through, the marker was set during the run and is gone, LastChange is after setup.exe ran' ($abort81 -like '*clock failed*' -and $probe.Seen.Count -eq 1 -and $probe.Seen[0] -and -not (Test-AVDTuneChangeInProgress -Root $tmp) -and $lc81 -and $probe.RunAt -and $lc81 -ge $probe.RunAt) "thrown=$abort81; LastChange=$lc81; run=$($probe.RunAt.ToString('o'))"
+    # the analysis exit (nothing to remove) takes no marker and leaves LastChange alone
+    $m = New-Master -NoOffice; $o = New-AVDTuneFakeOffice -Machine $m; Reset-OfficeFiles
+    [void](Set-AVDTuneState -Root $tmp -Values @{ LastChange = $mark })
+    [void](Invoke-AVDTuneOfficeRecorded -Machine $m -O $o -Root $tmp -Mode Remove -User 'admin1' -SnapshotId 'snap-check')
+    Test-Check '81 remove with nothing installed: no marker left, LastChange untouched' (-not (Test-AVDTuneChangeInProgress -Root $tmp) -and (Get-AVDTuneState $tmp).LastChange -eq $mark) (Get-AVDTuneState $tmp).LastChange
+    Reset-OfficeFiles
 
     # 5: a record this call wrote goes again when the run threw; a Failed step keeps it; an older record stays
     $m = New-Master; & $m.RegSet $ctr 'SharedComputerLicensing' '0' 'String'
