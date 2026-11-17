@@ -331,7 +331,7 @@ function Get-AVDTuneTaskInfoFromXml {
 
 function Get-AVDTuneDcFromNtDomain {
     # Win32_NTDomain rows (the answer of the DC locator as WMI gives it) -> @{ Name; Address; Site } for a domain, or $null. WMI gives the names with two leading
-    # backslashes (\\dc.example.test, \\10.0.0.4): they are cut here, the rest is data (length limited) that Get-AVDTuneJoinState validates.
+    # backslashes (\\dc.example.test, \\192.0.2.10): they are cut here, the rest is data (length limited) that Get-AVDTuneJoinState validates.
     param($Rows, [string]$Domain)
     $first = $Domain.Split('.')[0]
     $row = @(@($Rows) | Where-Object { $_ -and ($_.DomainControllerName -or $_.DomainControllerAddress) } | Where-Object { [string]$_.DnsForestName -ieq $Domain -or [string]$_.DomainName -ieq $first }) | Select-Object -First 1
