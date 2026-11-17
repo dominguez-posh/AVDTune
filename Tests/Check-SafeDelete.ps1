@@ -123,7 +123,7 @@ try {
         if ($Stage -ne 'opened' -or $script:swapped -or (Split-Path $Path -Leaf) -ne 'sub') { return }
         try { [IO.Directory]::Move($Path, "$Path.moved"); New-Junction $Path $c.Out; $script:swapped = $true } catch { $e = $_.Exception; if ($e.InnerException) { $e = $e.InnerException }; $script:swapError = ("{0:X8} {1}" -f $e.HResult, $e.Message) }
     }
-    try { $r = Remove-AVDTuneTreeSafe -Path $c.Tree } catch { $script:caseErr = $_.Exception.Message } finally { [AVDTune.Native.SafeTree]::Hook = $null }
+    try { $r = Remove-AVDTuneTreeSafe -Path $c.Tree } catch { $script:caseErr += " | " + $_.Exception.Message } finally { [AVDTune.Native.SafeTree]::Hook = $null }
     Test-Check 'handles, swap between opening and deleting: the held folder cannot be renamed (sharing violation), the tree is gone, the target outside is untouched' (-not $script:swapped -and $script:swapError -like "80070020*" -and $r.Gone -and (Test-Path -LiteralPath $c.Victim) -and -not (Test-Path -LiteralPath $c.Tree)) "swapped=$($script:swapped) gone=$($r.Gone) $($script:swapError)"
     Test-Check 'handles: the hook saw listing and opening in order (the root listed before its entries were opened)' ($script:stages.IndexOf('listed t') -ge 0 -and $script:stages.IndexOf('opened sub') -gt $script:stages.IndexOf('listed t')) ($script:stages -join ', ')
 
@@ -136,7 +136,7 @@ try {
         $sub = Join-Path $Path 'sub'
         try { Move-Retry $sub "$sub.moved" $true } catch { $script:caseErr = "diag: " + (Get-MoveProbe $Path); throw }; New-Junction $sub $c.Out; $script:swapped = $true
     }
-    try { $r = Remove-AVDTuneTreeSafe -Path $c.Tree } catch { $script:caseErr = $_.Exception.Message } finally { [AVDTune.Native.SafeTree]::Hook = $null }
+    try { $r = Remove-AVDTuneTreeSafe -Path $c.Tree } catch { $script:caseErr += " | " + $_.Exception.Message } finally { [AVDTune.Native.SafeTree]::Hook = $null }
     Test-Check 'handles, swap between listing and opening: the junction is opened itself and removed as a link, the moved folder goes too, the target is untouched' ($script:swapped -and $r.Gone -and (Test-Path -LiteralPath $c.Victim) -and -not (Test-Path -LiteralPath $c.Tree)) "swapped=$($script:swapped) gone=$($r.Gone) $($script:caseErr) [$($script:fsInfo)]"
 
     # a file swapped after it was opened: the opened file is deleted (wherever it is now), the junction put in its place is removed as a link
@@ -147,7 +147,7 @@ try {
         if ($Stage -ne 'opened' -or $script:swapped -or (Split-Path $Path -Leaf) -ne 'f.txt') { return }
         Move-Retry $Path "$Path.moved" $false; New-Junction $Path $c.Out; $script:swapped = $true
     }
-    try { $r = Remove-AVDTuneTreeSafe -Path $c.Tree } catch { $script:caseErr = $_.Exception.Message } finally { [AVDTune.Native.SafeTree]::Hook = $null }
+    try { $r = Remove-AVDTuneTreeSafe -Path $c.Tree } catch { $script:caseErr += " | " + $_.Exception.Message } finally { [AVDTune.Native.SafeTree]::Hook = $null }
     Test-Check 'handles, a file swapped for a junction after opening: the target outside is untouched, the tree is gone' ($script:swapped -and $r.Gone -and (Test-Path -LiteralPath $c.Victim) -and -not (Test-Path -LiteralPath $c.Tree)) "swapped=$($script:swapped) gone=$($r.Gone) $($script:caseErr) [$($script:fsInfo)]"
 
     # the wrappers the callers use take the same path
@@ -159,7 +159,7 @@ try {
         $sub = Join-Path $Path 'sub'
         Move-Retry $sub "$sub.moved" $true; New-Junction $sub $c.Out; $script:swapped = $true
     }
-    try { Remove-AVDTuneFolderNoFollow $c.Tree } catch { $script:caseErr = $_.Exception.Message } finally { [AVDTune.Native.SafeTree]::Hook = $null }
+    try { Remove-AVDTuneFolderNoFollow $c.Tree } catch { $script:caseErr += " | " + $_.Exception.Message } finally { [AVDTune.Native.SafeTree]::Hook = $null }
     Test-Check 'Remove-AVDTuneFolderNoFollow (all callers: Office, VDI, FSLogix, release, sign-in profiles, software work, benchmark) goes through the handles' ($script:swapped -and (Test-Path -LiteralPath $c.Victim) -and -not (Test-Path -LiteralPath $c.Tree)) $script:caseErr
 
     # ---------------------------------------------------------------- in use
