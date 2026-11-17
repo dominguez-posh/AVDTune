@@ -416,6 +416,7 @@ try {
     $swSource = [IO.File]::ReadAllText((Join-Path $repo 'Modules\AVDTune.Software.psm1'))
     $runBody = $swSource.Substring($swSource.IndexOf('function Invoke-AVDTuneSoftwareRun'))
     Test-Check 'the work folders are cleaned inside a run after the write gate, and not by the page when it only scans' ($runBody.IndexOf('Test-AVDTuneWriteAllowed') -ge 0 -and $runBody.IndexOf('Test-AVDTuneWriteAllowed') -lt $runBody.IndexOf('Clear-AVDTuneSoftwareWork') -and ([IO.File]::ReadAllText((Join-Path $repo 'AVDTune-Software.ps1'))) -notmatch 'Clear-AVDTuneSoftwareWork') $null
+    Test-Check 'the cleanup of the work folders runs under the change marker (#81 F1: after Start-AVDTuneChange, inside its try)' ($runBody.IndexOf('Start-AVDTuneChange') -ge 0 -and $runBody.IndexOf('Start-AVDTuneChange') -lt $runBody.IndexOf('try {') -and $runBody.IndexOf('try {') -lt $runBody.IndexOf('Clear-AVDTuneSoftwareWork')) $null
     # the MSI is hashed after unpacking, held, and compared through the held handle before msiexec
     $xh = New-Env
     $heldInfo = @{}

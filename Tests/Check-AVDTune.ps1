@@ -513,97 +513,199 @@ try {
     $wrongLockHits = @(Get-ChildItem -LiteralPath $repo -Recurse -File -Include '*.ps1', '*.psm1', '*.md', '*.json', '*.xaml' | Where-Object { $_.FullName -notmatch '\\\.git\\' } | Where-Object { ([IO.File]::ReadAllText($_.FullName)).IndexOf($wrongLock, [StringComparison]::OrdinalIgnoreCase) -ge 0 } | ForEach-Object { $_.FullName.Substring($repo.Length + 1) })
     Test-Check 'lock (#78): no file names the transitional mutex wrongly (PackTune uses Global\IntuneChocoDeployment)' ($wrongLockHits.Count -eq 0) ($wrongLockHits -join ', ')
     # ---------------------------------------------------------------- every write of the master runs under the change marker (#81)
-    # A function that sets LastChange through Set-AVDTuneState or runs a step (Invoke-AVDTuneStep, not -WhatIf, not -Mode Test) must hold the marker itself:
-    # Start-AVDTuneChange before the first such write and Stop-AVDTuneChange in a finally block. A helper without its own marker is allowed only when every
-    # call of it is inside such a function (after its Start) or inside a step block ({...}.GetNewClosure(), runs only through Invoke-AVDTuneStep); it must have a call.
-    # Stop-AVDTuneChange (the marker itself) and Resolve-AVDTuneStaleChange (the end of a crashed change) are the two exceptions.
+    # A write is: Set-AVDTuneState with LastChange (also through $v.LastChange / a hashtable in $v), Invoke-AVDTuneStep (not -WhatIf, not -Mode Test), an installer
+    # or setup run (Invoke-AVDTuneOfficeSetup, Invoke-AVDTuneVdiPackage, Invoke-AVDTuneVdiWinget, Invoke-AVDTuneLibraryItem, Invoke-AVDTuneCatalogItem, Start-Process) and
+    # an adapter call & $x.<Member> for RegSet, RegRemove, ServiceSetStartup, TaskSetEnabled, ServiceStop, ServiceStart, Run, WuaInstall, DefenderUpdate, ClearFolder.
+    # The function that makes it must hold the marker for it: a Start-AVDTuneChange before it whose if-conditions the write shares (a Start under "-not $WhatIf"
+    # covers a step with -WhatIf:$WhatIf), and the write inside the try block whose finally calls Stop-AVDTuneChange. A function that writes without holding the
+    # marker is a helper: every call of it counts as a write of its caller (transitively). A helper is allowed only when no call of it is left unmarked; a helper
+    # without any call it can see is a finding. Writes and calls inside a step block ({...}.GetNewClosure(), runs only through Invoke-AVDTuneStep) do not count.
+    # Exemptions (named with the reason below): 'Function' for a function that does not change the master, 'Function|Command' when only the condition rule is
+    # waived (the Start is there, the try/finally encloses the write). Stop-AVDTuneChange and Resolve-AVDTuneStaleChange are the marker itself.
+    # Not recognised (F4, #81): code in here-strings (the background workers of the pages, e.g. $script:VdiWorkerText), blocks handed to Start-Job or a runspace
+    # (they count as part of the function that defines them) and calls through a variable (& $cmd, & $fn): the module functions they call hold the marker themselves.
     function Get-ChangeMarkerFinding {
-        param([object[]]$Files)   # @{ Name; Ast }
+        param([object[]]$Files, [hashtable]$Exempt = @{})   # Files: @{ Name; Ast }
         $L = 'System.Management.Automation.Language'
-        $exempt = @('Stop-AVDTuneChange', 'Resolve-AVDTuneStaleChange')
-        $writesOf = {
-            param($Scope)
-            $out = @()
-            foreach ($c in $Scope.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] }, $true)) {
-                $cn = [string]$c.GetCommandName(); $t = $c.Extent.Text
-                if ($cn -eq 'Invoke-AVDTuneStep' -and $t -notmatch '-WhatIf(?![:\w])' -and $t -notmatch "-Mode\s+'?Test\b") { $out += $c; continue }
-                if ($cn -ne 'Set-AVDTuneState') { continue }
-                if ($t -match '\bLastChange\b') { $out += $c; continue }
-                # -Values $v: a hashtable with the key LastChange assigned to $v, or $v.LastChange = / $v['LastChange'] = in the same function
-                $el = @($c.CommandElements); $var = $null
-                for ($i = 1; $i -lt $el.Count; $i++) { if ($el[$i] -is "$L.CommandParameterAst" -and 'Values' -like ($el[$i].ParameterName + '*') -and $i + 1 -lt $el.Count -and $el[$i + 1] -is "$L.VariableExpressionAst") { $var = $el[$i + 1].VariablePath.UserPath } }
-                if (-not $var) { continue }
-                $fnScope = $c.Parent; while ($fnScope -and $fnScope -isnot [System.Management.Automation.Language.FunctionDefinitionAst]) { $fnScope = $fnScope.Parent }; if (-not $fnScope) { $fnScope = $Scope }
-                $hit = @($fnScope.FindAll({ param($n) $n -is [System.Management.Automation.Language.AssignmentStatementAst] }, $true) | Where-Object {
-                        $lt = $_.Left.Extent.Text
-                        ($lt -match ('^\$' + [regex]::Escape($var) + '(\.LastChange|\[''LastChange''\])$')) -or ($lt -eq ('$' + $var) -and $_.Right.Extent.Text -match '\bLastChange\s*=')
-                    })
-                if ($hit.Count -gt 0) { $out += $c }
+        $writeNames = @('Invoke-AVDTuneOfficeSetup', 'Invoke-AVDTuneVdiPackage', 'Invoke-AVDTuneVdiWinget', 'Invoke-AVDTuneLibraryItem', 'Invoke-AVDTuneCatalogItem', 'Start-Process')
+        $writeMembers = @('RegSet', 'RegRemove', 'ServiceSetStartup', 'TaskSetEnabled', 'ServiceStop', 'ServiceStart', 'Run', 'WuaInstall', 'DefenderUpdate', 'ClearFolder')
+        $marker = @('Stop-AVDTuneChange', 'Resolve-AVDTuneStaleChange')
+        $nameOf = {
+            param($c)
+            $n = [string]$c.GetCommandName(); if ($n) { return $n }
+            $first = @($c.CommandElements)[0]
+            if ($first -is [System.Management.Automation.Language.MemberExpressionAst]) { return '.' + $first.Member.Extent.Text }
+            ''
+        }
+        $fnOf = { param($n) $p = $n.Parent; while ($p -and $p -isnot [System.Management.Automation.Language.FunctionDefinitionAst]) { $p = $p.Parent }; $p }
+        $inStep = {
+            # inside a step block below its function: {...}.GetNewClosure(), or a block assigned to $v that the function hands to New-AVDTuneStep as -Apply/-Undo $v
+            param($n)
+            $p = $n.Parent
+            while ($p -and $p -isnot [System.Management.Automation.Language.FunctionDefinitionAst]) {
+                if ($p -is [System.Management.Automation.Language.ScriptBlockExpressionAst]) {
+                    if ($p.Parent -is [System.Management.Automation.Language.InvokeMemberExpressionAst] -and [string]$p.Parent.Member.Extent.Text -eq 'GetNewClosure') { return $true }
+                    $as = $p.Parent; while ($as -and $as -isnot [System.Management.Automation.Language.AssignmentStatementAst] -and $as -isnot [System.Management.Automation.Language.StatementBlockAst] -and $as -isnot [System.Management.Automation.Language.NamedBlockAst]) { $as = $as.Parent }
+                    if ($as -is [System.Management.Automation.Language.AssignmentStatementAst] -and $as.Left -is [System.Management.Automation.Language.VariableExpressionAst]) {
+                        $v = [regex]::Escape($as.Left.VariablePath.UserPath)
+                        $fn = & $fnOf $as
+                        if ($fn -and @($fn.FindAll({ param($x) $x -is [System.Management.Automation.Language.CommandAst] -and $x.GetCommandName() -eq 'New-AVDTuneStep' }, $true) | Where-Object { $_.Extent.Text -match ('-(Apply|Undo)\s+\$' + $v + '\b') }).Count -gt 0) { return $true }
+                    }
+                }
+                $p = $p.Parent
+            }
+            $false
+        }
+        $isWrite = {
+            param($c, $Helpers)
+            $cn = & $nameOf $c; $t = $c.Extent.Text
+            if (-not $cn) { return $false }
+            if ($cn -in $writeNames -or $Helpers.ContainsKey($cn)) { return $true }
+            if ($cn.StartsWith('.')) { return ($cn.Substring(1) -in $writeMembers) }
+            if ($cn -eq 'Invoke-AVDTuneStep') { return ($t -notmatch '-WhatIf(?![:\w])' -and $t -notmatch "-Mode\s+'?Test\b") }
+            if ($cn -ne 'Set-AVDTuneState') { return $false }
+            if ($t -match '\bLastChange\b') { return $true }
+            # -Values $v: a hashtable with the key LastChange assigned to $v, or $v.LastChange = / $v['LastChange'] = in the same function
+            $el = @($c.CommandElements); $var = $null
+            for ($i = 1; $i -lt $el.Count; $i++) { if ($el[$i] -is "$L.CommandParameterAst" -and 'Values' -like ($el[$i].ParameterName + '*') -and $i + 1 -lt $el.Count -and $el[$i + 1] -is "$L.VariableExpressionAst") { $var = $el[$i + 1].VariablePath.UserPath } }
+            if (-not $var) { return $false }
+            $scope = & $fnOf $c; if (-not $scope) { $scope = $c; while ($scope.Parent) { $scope = $scope.Parent } }
+            @($scope.FindAll({ param($n) $n -is [System.Management.Automation.Language.AssignmentStatementAst] }, $true) | Where-Object {
+                    $lt = $_.Left.Extent.Text
+                    ($lt -match ('^\$' + [regex]::Escape($var) + '(\.LastChange|\[''LastChange''\])$')) -or ($lt -eq ('$' + $var) -and $_.Right.Extent.Text -match '\bLastChange\s*=')
+                }).Count -gt 0
+        }
+        $condsOf = {
+            # the if-conditions a node depends on inside its function (text without blanks; the else part of an if is its own token); "$true" does not count
+            param($n, $Fn)
+            $out = @(); $child = $n; $p = $n.Parent
+            while ($p -and $p -ne $Fn) {
+                if ($p -is [System.Management.Automation.Language.IfStatementAst]) {
+                    $hit = $null
+                    foreach ($cl in $p.Clauses) { if ($child -eq $cl.Item2) { $hit = ($cl.Item1.Extent.Text -replace '\s+', '') } }
+                    if ($null -eq $hit -and $child -eq $p.ElseClause) { $hit = "else@$($p.Extent.StartOffset)" }
+                    if ($hit -and $hit -ne '$true') { $out += $hit }
+                }
+                # an earlier "if ($WhatIf) { ... return }" in the same block: what follows runs only without -WhatIf
+                if ($p -is [System.Management.Automation.Language.StatementBlockAst] -or $p -is [System.Management.Automation.Language.NamedBlockAst]) {
+                    foreach ($st in @($p.Statements)) {
+                        if ($st.Extent.StartOffset -ge $child.Extent.StartOffset) { break }
+                        if ($st -is [System.Management.Automation.Language.IfStatementAst] -and @($st.Clauses).Count -eq 1 -and -not $st.ElseClause -and ($st.Clauses[0].Item1.Extent.Text -replace '\s+', '') -eq '$WhatIf' -and
+                            @($st.Clauses[0].Item2.Statements)[-1] -is [System.Management.Automation.Language.ReturnStatementAst]) { $out += '-not$WhatIf' }
+                    }
+                }
+                $child = $p; $p = $p.Parent
             }
             $out
         }
         $holds = {
-            # Start-AVDTuneChange before $Offset and a finally with Stop-AVDTuneChange in the function
-            param($Fn, [int]$Offset)
-            $starts = @($Fn.Body.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] -and $n.GetCommandName() -eq 'Start-AVDTuneChange' }, $true) | Where-Object { $_.Extent.StartOffset -lt $Offset })
-            $stops = @($Fn.Body.FindAll({ param($n) $n -is [System.Management.Automation.Language.TryStatementAst] -and $n.Finally -and @($n.Finally.FindAll({ param($x) $x -is [System.Management.Automation.Language.CommandAst] -and $x.GetCommandName() -eq 'Stop-AVDTuneChange' }, $true)).Count -gt 0 }, $true))
-            ($starts.Count -gt 0 -and $stops.Count -gt 0)
-        }
-        $out = @(); $helpers = @{}; $functions = @{}
-        foreach ($f in $Files) {
-            foreach ($fn in $f.Ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $true)) { $functions[$fn.Name] = $fn }
-            foreach ($w in @(& $writesOf $f.Ast)) {
-                $fn = $w.Parent; while ($fn -and $fn -isnot [System.Management.Automation.Language.FunctionDefinitionAst]) { $fn = $fn.Parent }
-                if (-not $fn) { $out += [pscustomobject]@{ Rule = 'outside'; Where = "$($f.Name):$($w.Extent.StartLineNumber)"; Text = $w.GetCommandName() }; continue }
-                if ($fn.Name -in $exempt) { continue }
-                if (& $holds $fn $w.Extent.StartOffset) { continue }
-                $helpers[$fn.Name] = "$($f.Name):$($w.Extent.StartLineNumber)"
+            param($Fn, $W, [bool]$Waive)
+            $o = $W.Extent.StartOffset
+            $try = @($Fn.Body.FindAll({ param($n) $n -is [System.Management.Automation.Language.TryStatementAst] -and $n.Finally -and @($n.Finally.FindAll({ param($x) $x -is [System.Management.Automation.Language.CommandAst] -and $x.GetCommandName() -eq 'Stop-AVDTuneChange' }, $true)).Count -gt 0 }, $true) |
+                    Where-Object { $o -ge $_.Body.Extent.StartOffset -and $W.Extent.EndOffset -le $_.Body.Extent.EndOffset })
+            if ($try.Count -eq 0) { return $false }
+            $starts = @($Fn.Body.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] -and $n.GetCommandName() -eq 'Start-AVDTuneChange' }, $true) | Where-Object { $_.Extent.StartOffset -lt $o })
+            if ($starts.Count -eq 0) { return $false }
+            if ($Waive) { return $true }
+            $wc = @(& $condsOf $W $Fn)
+            $whatIfStep = ($W.Extent.Text -match '-WhatIf:\$WhatIf\b')
+            foreach ($s in $starts) {
+                $missing = @(@(& $condsOf $s $Fn) | Where-Object { $_ -notin $wc -and -not ($whatIfStep -and $_ -eq '-not$WhatIf') })
+                if ($missing.Count -eq 0) { return $true }
             }
+            $false
         }
-        foreach ($h in @($helpers.Keys)) {
-            $calls = @(foreach ($f in $Files) { $f.Ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] -and $n.GetCommandName() -eq $h }, $true) })
-            if ($calls.Count -eq 0) { $out += [pscustomobject]@{ Rule = 'unmarked'; Where = $helpers[$h]; Text = $h }; continue }
-            foreach ($c in $calls) {
-                $p = $c.Parent; $ok = $false
-                while ($p) {
-                    # a step block ({...}.GetNewClosure() as every step uses): it runs through Invoke-AVDTuneStep, which is checked itself; any other block (a background job) is not
-                    if ($p -is [System.Management.Automation.Language.ScriptBlockExpressionAst]) { $ok = ($p.Parent -is [System.Management.Automation.Language.InvokeMemberExpressionAst] -and [string]$p.Parent.Member.Extent.Text -eq 'GetNewClosure'); break }
-                    if ($p -is [System.Management.Automation.Language.FunctionDefinitionAst]) { $ok = (& $holds $p $c.Extent.StartOffset); break }
-                    $p = $p.Parent
+        $out = @(); $helpers = @{}
+        do {
+            $grew = $false
+            foreach ($f in $Files) {
+                foreach ($c in $f.Ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] }, $true)) {
+                    if (-not (& $isWrite $c $helpers)) { continue }
+                    if (& $inStep $c) { continue }
+                    $fn = & $fnOf $c; $cn = & $nameOf $c
+                    if (-not $fn) {
+                        $key = "outside|$($f.Name):$($c.Extent.StartLineNumber)"
+                        if (-not $helpers.ContainsKey($key)) { $helpers[$key] = $true; $out += [pscustomobject]@{ Rule = 'outside'; Where = "$($f.Name):$($c.Extent.StartLineNumber)"; Text = $cn } }
+                        continue
+                    }
+                    if ($fn.Name -in $marker -or $Exempt.ContainsKey($fn.Name) -or $fn.Name -eq $cn) { continue }
+                    if (& $holds $fn $c ($Exempt.ContainsKey("$($fn.Name)|$cn"))) { continue }
+                    if (-not $helpers.ContainsKey($fn.Name)) { $helpers[$fn.Name] = "$($f.Name):$($c.Extent.StartLineNumber) $cn"; $grew = $true }
                 }
-                if (-not $ok) { $out += [pscustomobject]@{ Rule = 'unmarked'; Where = $helpers[$h]; Text = "$h (called without the marker at line $($c.Extent.StartLineNumber))" } }
             }
+        } while ($grew)
+        foreach ($h in @($helpers.Keys | Where-Object { $_ -notlike 'outside|*' })) {
+            $calls = @(foreach ($f in $Files) { $f.Ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] -and $n.GetCommandName() -eq $h }, $true) })
+            if ($calls.Count -eq 0) { $out += [pscustomobject]@{ Rule = 'unmarked'; Where = $helpers[$h]; Text = $h } }
         }
         $out
+    }
+    # Exemptions: each with its reason; an entry that names no function any more is a finding too (it would hide a new function of the same name)
+    $markerExempt = @{
+        'Get-AVDTuneHealth'                          = 'reads only: tool runs for the health page (no change of the master)'
+        'Get-AVDTuneJoinState'                       = 'reads only: dsregcmd /status'
+        'Get-AVDTuneFSLogixInfo'                     = 'reads only: version of frx.exe'
+        'Invoke-AVDTuneReadiness'                    = 'analysis: reads (dsregcmd /status and the other checks of the readiness page)'
+        'Get-AVDTuneUpdateList'                      = 'reads: winget upgrade / choco outdated list what is open'
+        'Search-AVDTuneCatalog'                      = 'reads: winget search / choco search'
+        'Get-AVDTuneManagedSoftware'                 = 'reads: winget list / upgrade, choco list / outdated'
+        'Invoke-AVDTuneFSLogixVhdxTest'            = 'FSLogix test on the profile share as a test user, nothing on the master (LastChange stays, see Invoke-AVDTuneFSLogixTest)'
+        'Start-AVDTuneBenchmarkQuiet'                = 'benchmark quiet mode: services paused for the measurement and restored by Stop-AVDTuneBenchmarkQuiet; a measurement is no change (Get-AVDTuneLastChange)'
+        'Stop-AVDTuneBenchmarkQuiet'                 = 'benchmark quiet mode: restores what Start-AVDTuneBenchmarkQuiet paused'
+        'Invoke-AVDTuneOptimization|Invoke-AVDTuneStep' = 'the marker starts before the first step whose test says it would change something; a compliant step writes nothing (no marker, no LastChange for a run without change)'
+        'Invoke-AVDTuneOfficeRecorded|Invoke-AVDTuneOfficeSetup' = 'analysis exit (Remove with nothing installed, invalid configuration): the setup returns before it starts anything'
+        'Invoke-AVDTuneOfficeRecorded|Set-AVDTuneState' = 'the end LastChange: also only when not an analysis exit (the condition names it in an -or)'
+        'Invoke-AVDTuneVdiRecorded|Invoke-AVDTuneVdiPackage' = 'analysis exit (Remove with nothing installed, MMR with a browser running): the package run returns before it starts anything'
+        'Invoke-AVDTuneVdiRecorded|Set-AVDTuneState' = 'the end LastChange: also only when not an analysis exit (the condition names it)'
     }
     $markerFiles = @(foreach ($f in @(Get-ChildItem -LiteralPath (Join-Path $repo 'Modules') -Filter '*.psm1' -File) + @(Get-ChildItem -LiteralPath $repo -Filter '*.ps1' -File)) {
             $tk = $null; $pe = $null
             [pscustomobject]@{ Name = $f.Name; Ast = [System.Management.Automation.Language.Parser]::ParseFile($f.FullName, [ref]$tk, [ref]$pe) }
         })
-    $markerFindings = @(Get-ChangeMarkerFinding -Files $markerFiles)
+    $markerFindings = @(Get-ChangeMarkerFinding -Files $markerFiles -Exempt $markerExempt)
+    $markerDefined = @(foreach ($f in $markerFiles) { $f.Ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $true) | ForEach-Object { $_.Name } })
+    $staleExempt = @($markerExempt.Keys | Where-Object { ($_ -split '\|')[0] -notin $markerDefined })
     $markerWriters = @(foreach ($f in $markerFiles) { $f.Ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] -and $n.GetCommandName() -eq 'Start-AVDTuneChange' }, $true) }).Count
-    Test-Check 'change marker (#81): every function that sets LastChange or runs a step holds the marker (Start before, Stop in finally), helpers only under it' ($markerFindings.Count -eq 0 -and $markerWriters -gt 15) "Start calls: $markerWriters; $(@($markerFindings | ForEach-Object { "$($_.Rule) $($_.Where) $($_.Text)" }) -join ' | ')"
+    Test-Check 'change marker (#81): every function that writes the master (LastChange, steps, installers, registry/services/tasks/programs through the adapter) holds the marker for the write (Start before under the same conditions, Stop in the finally of the try around it), helpers only under it' ($markerFindings.Count -eq 0 -and $staleExempt.Count -eq 0 -and $markerWriters -gt 15) "Start calls: $markerWriters; stale exemptions: $($staleExempt -join ', '); $(@($markerFindings | ForEach-Object { "$($_.Rule) $($_.Where) $($_.Text)" }) -join ' | ')"
     $markerSample = {
-        param([string]$Source)
+        param([string]$Source, [hashtable]$Exempt = @{})
         $tk = $null; $pe = $null
-        @(Get-ChangeMarkerFinding -Files @([pscustomobject]@{ Name = 'sample'; Ast = [System.Management.Automation.Language.Parser]::ParseInput($Source, [ref]$tk, [ref]$pe) }) | ForEach-Object { $_.Rule })
+        @(Get-ChangeMarkerFinding -Files @([pscustomobject]@{ Name = 'sample'; Ast = [System.Management.Automation.Language.Parser]::ParseInput($Source, [ref]$tk, [ref]$pe) }) -Exempt $Exempt | ForEach-Object { $_.Rule })
     }
+    $held = { param($body) "function F { `$o = Start-AVDTuneChange -Root `$r; try { $body } finally { Stop-AVDTuneChange -Root `$r -Owner `$o } }" }
     $markerCases = @(
         @{ N = 'LastChange without marker'; S = 'function F { Set-AVDTuneState -Root $r -Values @{ LastChange = 1 } }'; E = 'unmarked' }
         @{ N = 'LastChange through a variable'; S = 'function F { $v = @{ A = 1 }; $v.LastChange = 2; Set-AVDTuneState -Root $r -Values $v }'; E = 'unmarked' }
         @{ N = 'step without marker'; S = 'function F { Invoke-AVDTuneStep -Step $s -Machine $m -Mode Apply }'; E = 'unmarked' }
         @{ N = 'step with -WhatIf:$WhatIf'; S = 'function F { Invoke-AVDTuneStep -Step $s -Machine $m -Mode Undo -WhatIf:$WhatIf }'; E = 'unmarked' }
+        @{ N = 'Office setup without marker (F2)'; S = 'function F { Invoke-AVDTuneOfficeSetup -Machine $m -O $o -Config $c }'; E = 'unmarked' }
+        @{ N = 'VDI package without marker (F2)'; S = 'function F { Invoke-AVDTuneVdiPackage -Machine $m -V $v -Key teams }'; E = 'unmarked' }
+        @{ N = 'library item without marker (F2)'; S = 'function F { Invoke-AVDTuneLibraryItem -Machine $m -U $u -Item $i }'; E = 'unmarked' }
+        @{ N = 'catalog item without marker (F2)'; S = 'function F { Invoke-AVDTuneCatalogItem -Machine $m -U $u -Item $i }'; E = 'unmarked' }
+        @{ N = 'registry write through the adapter (F2)'; S = 'function F { & $Machine.RegSet $k $n 1 DWord }'; E = 'unmarked' }
+        @{ N = 'registry remove through the adapter (F2)'; S = 'function F { & $m.RegRemove $k $n }'; E = 'unmarked' }
+        @{ N = 'program run through the adapter (F2)'; S = 'function F { & $O.Run $file @(''/configure'') }'; E = 'unmarked' }
+        @{ N = 'Start-Process (F2)'; S = 'function F { Start-Process -FilePath $setup -Wait }'; E = 'unmarked' }
+        @{ N = 'helper chain: the writer is called by a function without marker'; S = "function H { & `$m.RegSet `$k `$n 1 DWord }`nfunction G { H }`nfunction K { G }"; E = 'unmarked' }
         @{ N = 'Stop not in finally'; S = 'function F { $o = Start-AVDTuneChange -Root $r; Set-AVDTuneState -Root $r -Values @{ LastChange = 1 }; Stop-AVDTuneChange -Root $r -Owner $o }'; E = 'unmarked' }
+        @{ N = 'Stop in the finally of another try, not around the write (F3)'; S = 'function F { $o = Start-AVDTuneChange; try { } finally { Stop-AVDTuneChange -Owner $o }; & $m.RegSet $k $n 1 DWord }'; E = 'unmarked' }
+        @{ N = 'conditional Start, unconditional write (F3)'; S = 'function F { $o = $false; if ($x) { $o = Start-AVDTuneChange }; try { & $m.RegSet $k $n 1 DWord } finally { Stop-AVDTuneChange -Owner $o } }'; E = 'unmarked' }
         @{ N = 'LastChange before the Start'; S = 'function F { Set-AVDTuneState -Root $r -Values @{ LastChange = 1 }; $o = Start-AVDTuneChange -Root $r; try { } finally { Stop-AVDTuneChange -Root $r -Owner $o } }'; E = 'unmarked' }
         @{ N = 'helper called without marker'; S = "function H { Invoke-AVDTuneStep -Step `$s -Machine `$m -Mode Apply }`nfunction G { H }"; E = 'unmarked' }
         @{ N = 'helper called from a plain block (background job)'; S = "function H { Invoke-AVDTuneStep -Step `$s -Machine `$m -Mode Apply }`nfunction G { `$job = { H } }"; E = 'unmarked' }
-        @{ N = 'write outside any function';S = 'Set-AVDTuneState -Values @{ LastChange = 1 }'; E = 'outside' }
-        @{ N = 'clean: marker held'; S = 'function F { $o = Start-AVDTuneChange -Root $r; try { Set-AVDTuneState -Root $r -Values @{ LastChange = 1 }; Invoke-AVDTuneStep -Step $s -Machine $m -Mode Apply } finally { Stop-AVDTuneChange -Root $r -Owner $o } }'; E = '' }
-        @{ N = 'clean: helper under the marker or in a step block'; S = "function H { Invoke-AVDTuneStep -Step `$s -Machine `$m -Mode Apply }`nfunction G { `$o = Start-AVDTuneChange; try { H } finally { Stop-AVDTuneChange -Owner `$o } }`nfunction K { `$b = { H }.GetNewClosure() }"; E = '' }
-        @{ N = 'clean: dry run, test, other state values'; S = 'function F { Invoke-AVDTuneStep -Step $s -Machine $m -Mode Apply -WhatIf; Invoke-AVDTuneStep -Step $s -Machine $m -Mode Test; Set-AVDTuneState -Values @{ Readiness = 1 } }'; E = '' }
+        @{ N = 'write outside any function'; S = 'Set-AVDTuneState -Values @{ LastChange = 1 }'; E = 'outside' }
+        @{ N = 'clean: marker held'; S = (& $held 'Set-AVDTuneState -Root $r -Values @{ LastChange = 1 }; Invoke-AVDTuneStep -Step $s -Machine $m -Mode Apply; & $m.RegSet $k $n 1 DWord; Invoke-AVDTuneVdiPackage -Key teams'); E = '' }
+        @{ N = 'clean: Start under -not $WhatIf, step with -WhatIf:$WhatIf, LastChange under the same condition'; S = 'function F { $o = $false; if (-not $WhatIf) { $o = Start-AVDTuneChange }; try { Invoke-AVDTuneStep -Step $s -Machine $m -Mode Apply -WhatIf:$WhatIf; if (-not $WhatIf) { Set-AVDTuneState -Values @{ LastChange = 1 } } } finally { Stop-AVDTuneChange -Owner $o } }'; E = '' }
+        @{ N = 'clean: helper under the marker or in a step block'; S = "function H { & `$m.RegSet `$k `$n 1 DWord }`nfunction G { `$o = Start-AVDTuneChange; try { H } finally { Stop-AVDTuneChange -Owner `$o } }`nfunction K { `$b = { H }.GetNewClosure() }"; E = '' }
+        @{ N = 'clean: LastChange after "if ($WhatIf) { return }" under a Start for -not $WhatIf'; S = 'function F { $o = $false; if (-not $WhatIf) { $o = Start-AVDTuneChange }; try { if ($WhatIf) { return 1 }; $v = @{ A = 1 }; $v.LastChange = 2; Set-AVDTuneState -Values $v } finally { Stop-AVDTuneChange -Owner $o } }'; E = '' }
+        @{ N = 'clean: a block handed to New-AVDTuneStep -Apply'; S = 'function F { $apply = { param($m) & $m.Run sc.exe @(1) }; New-AVDTuneStep -Id x -Apply $apply }'; E = '' }
+        @{ N = 'a block not handed to a step is no step'; S = 'function F { $apply = { param($m) & $m.Run sc.exe @(1) }; & $apply $m }'; E = 'unmarked' }
+        @{ N = 'clean: registry write inside a step block';S = 'function F { $apply = { param($m) & $m.RegSet $k $n 1 DWord }.GetNewClosure() }'; E = '' }
+        @{ N = 'clean: dry run, test, other state values, reads through the adapter'; S = 'function F { Invoke-AVDTuneStep -Step $s -Machine $m -Mode Apply -WhatIf; Invoke-AVDTuneStep -Step $s -Machine $m -Mode Test; Set-AVDTuneState -Values @{ Readiness = 1 }; & $m.RegGet $k $n }'; E = '' }
+        @{ N = 'clean: an exempt function, and a waived condition'; S = "function R { & `$m.Run 'x.exe' }`nfunction F { `$o = `$false; if (`$x) { `$o = Start-AVDTuneChange }; try { & `$m.RegSet `$k `$n 1 DWord } finally { Stop-AVDTuneChange -Owner `$o } }"; X = @{ 'R' = 'reads'; 'F|.RegSet' = 'waived' }; E = '' }
     )
-    $markerWrong = @($markerCases | Where-Object { ((& $markerSample $_.S) -join ',') -ne $_.E } | ForEach-Object { "$($_.N): got '$((& $markerSample $_.S) -join ',')'" })
-    Test-Check 'change marker rules (#81): LastChange (also through a variable), steps, Stop outside finally, write before Start, unmarked helper, write outside a function are found; clean examples stay green' ($markerWrong.Count -eq 0) ($markerWrong -join ' | ')
+    $markerWrong = @($markerCases | Where-Object { $x = $(if ($_.X) { $_.X } else { @{} }); ((& $markerSample $_.S $x) -join ',') -ne $_.E } | ForEach-Object { $x = $(if ($_.X) { $_.X } else { @{} }); "$($_.N): got '$((& $markerSample $_.S $x) -join ',')'" })
+    Test-Check 'change marker rules (#81): LastChange (also through a variable), steps, installers, adapter writes, Start-Process, helper chains, Stop outside the finally around the write, a conditional Start, write before Start, write outside a function are found; clean examples stay green' ($markerWrong.Count -eq 0) ($markerWrong -join ' | ')
 
     # ---------------------------------------------------------------- the real machine, read only
     $real = New-AVDTuneMachine

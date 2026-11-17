@@ -813,10 +813,10 @@ function Invoke-AVDTuneSoftwareRun {
     if ($WhatIf) { return [pscustomobject]@{ WhatIf = $true; Results = @($list | ForEach-Object { New-AVDTuneSoftwareResult -Machine $Machine -Item $_ -Status 'WhatIf' -Message 'Would run.' }); Run = $null; Reboot = $false } }
     if (-not (Test-AVDTuneWriteAllowed)) { throw 'The snapshot gate is not confirmed: AVDTune is read only until a snapshot of today is confirmed on the Overview.' }
     if ($list.Count -eq 0) { return [pscustomobject]@{ WhatIf = $false; Results = @(); Run = $null; Reboot = $false } }
-    [void](Clear-AVDTuneSoftwareWork -Root $Root)
     $started = & $Machine.Now
     $changeOwner = Start-AVDTuneChange -Root $Root   # marker while the master is written (snapshot gate, #27/#81), cleared in finally (Stop stamps LastChange, also after an abort)
     try {
+    [void](Clear-AVDTuneSoftwareWork -Root $Root)   # the cleanup of left work folders is a write too: under the marker (#81)
     [void](Set-AVDTuneState -Root $Root -Values @{ LastChange = $started.ToString('o') })
     $results = New-Object System.Collections.ArrayList
     foreach ($item in $list) {
