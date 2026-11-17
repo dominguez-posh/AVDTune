@@ -128,10 +128,13 @@ foreach ($file in $use.Keys) {
 }
 # the FSLogix page (#10): every operation is a task; Retry only for what reads (function test without write tests, storage check), never for a change of the master or the share
 $fsl = [IO.File]::ReadAllText((Join-Path $repo 'AVDTune-FSLogix.ps1'))
-Test-Check 'FSLogix: install, settings, redirections.xml, Defender, ACL, function test and storage check are tasks (counter-test)' ((@('fslogix-settings', 'fslogix-redirections', 'fslogix-defender', 'fslogix-acl') | Where-Object { $fsl -notlike "*Invoke-FslChange -Kind '$_'*" }).Count -eq 0 -and $fsl -like '*function New-FslTask*' -and $fsl -like '*Complete-AVDTuneUiTask $job.Task*' -and $fsl -like '*Update-AVDTuneUiTask $job.Task*') $null
-$fslChange = $fsl.Substring($fsl.IndexOf('function Invoke-FslChange'), $fsl.IndexOf('function Show-FslRun') - $fsl.IndexOf('function Invoke-FslChange'))
-Test-Check 'FSLogix: the changes of the master and the share offer no Retry (counter-test)' ($fslChange -notmatch '-Retry|Retry =') $null
 $fslNew = $fsl.Substring($fsl.IndexOf('function New-FslTask'), $fsl.IndexOf('function Start-FslJob') - $fsl.IndexOf('function New-FslTask'))
+Test-Check 'FSLogix: install, settings, lists, groups, redirections.xml, Defender, ACL, function test, storage check and the read of the page are tasks (counter-test)' ((@('fslogix-settings', 'fslogix-lists', 'fslogix-groups', 'fslogix-redirections', 'fslogix-defender', 'fslogix-acl') | Where-Object { $fslNew -notlike "*'$_'*" }).Count -eq 0 -and $fsl -like '*function New-FslTask*' -and $fsl -like '*Complete-AVDTuneUiTask $job.Task*' -and $fsl -like '*Update-AVDTuneUiTask $job.Task*' -and $fsl -like "*Start-AVDTuneUiTask -Kind 'fslogix-read'*" -and $fsl -notlike '*function Invoke-FslChange*') $null
+# #72: the window thread changes nothing and reads nothing slow: every module call that changes the master or the share and the slow reads (fltmc, local groups,
+# the domain SID, redirections.xml, Defender) are only in the worker texts that the runspaces run; the dry run of the settings (-WhatIf, registry only) stays
+$fslUi = [regex]::Replace($fsl, "(?s)@'.*?'@", '')
+$onUi = @([regex]::Matches($fslUi, '(?m)^.*$') | ForEach-Object { $_.Value } | Where-Object { $_ -notmatch '^\s*#' -and $_ -notmatch '-WhatIf' } | ForEach-Object { [regex]::Matches($_, '\b((?:Set|Undo)-AVDTuneFSLogix\w+|(?:Save|Undo)-AVDTuneRedirections|Set-AVDTuneStorageRootAcl|Get-AVDTuneFSLogix(?:Info|Groups|ListPlan|DefenderState|SettingsState)|Get-AVDTuneRedirectionsTarget)\b|\.ReadText\b') | ForEach-Object { $_.Value } })
+Test-Check 'FSLogix (#72): no change of the master or the share and no slow read runs on the window thread (only in the worker texts of the runspaces)' ($onUi.Count -eq 0 -and $fsl -match "\`$script:FslReadText = @'" -and $fsl -match "\`$script:FslWorkerText = @'") ($onUi -join ', ')
 Test-Check 'FSLogix: Retry only for the function test without write tests and for the storage check, not for the install (counter-test)' ($fslNew.Contains('$Kind -eq ''Test'' -and -not $Write') -and $fslNew.Contains('$Kind -eq ''Storage''') -and $fslNew -notmatch '''Install''.*Retry' -and ([regex]::Matches($fslNew, 'Command = ')).Count -eq 2) $null
 $bar = [IO.File]::ReadAllText((Join-Path $repo 'AVDTune-TaskBar.ps1'))
 Test-Check 'the bar colors are theme resources (no color literal in the bar code)' ($bar -notmatch '#[0-9A-Fa-f]{6}' -and $bar -notmatch 'ConvertTo-Brush') $null
@@ -153,7 +156,7 @@ foreach ($w in $writerStarts) {
 }
 Test-Check 'writers (#66): every start of an operation that changes the master calls the central Assert-NoOtherWriter' ($missingGuard.Count -eq 0) ($missingGuard -join ', ')
 # #66 (round 4c): every background job variable of a page is either a writer (in the list of Assert-NoOtherWriter) or named here as read only; a new page that forgets the list is a finding
-$readOnlyJobs = @('OptJob', 'MaskReadJob', 'JoinJob', 'OverviewJob', 'SwLastRun', 'UpdLastRun')
+$readOnlyJobs = @('OptJob', 'FslReadJob', 'MaskReadJob', 'JoinJob', 'OverviewJob', 'SwLastRun', 'UpdLastRun')
 $jobVars = @(Get-ChildItem -LiteralPath $repo -Filter '*.ps1' | Where-Object { $_.Name -like 'AVDTune-*.ps1' -or $_.Name -eq 'Start-AVDTune.ps1' } | ForEach-Object { [regex]::Matches([IO.File]::ReadAllText($_.FullName), '(?m)^\$script:(\w+(?:Job|Run)) = \$null') | ForEach-Object { $_.Groups[1].Value } } | Select-Object -Unique)
 $unlisted = @($jobVars | Where-Object { $_ -notin $script:WriterJobVariables -and $_ -notin $readOnlyJobs })
 Test-Check 'writers (#66): every job variable of a page is in WriterJobVariables or named as read only (Language, VDI included)' ($unlisted.Count -eq 0 -and 'LangJob' -in $script:WriterJobVariables -and 'VdiJob' -in $script:WriterJobVariables -and 'Latest' -in $script:WriterReadOnlyKinds.VdiJob) ($unlisted -join ', ')
