@@ -157,6 +157,7 @@ function Start-MaskReadJob {
         }).AddArgument($script:AppRoot).AddArgument($dir)
     $script:MaskReadJob = @{ PS = $ps; Handle = $ps.BeginInvoke(); Dir = $dir; Task = (New-MaskReadTask) }
     $ui.TxtMaskCounter.Text = 'Reading the rule sets and the Public Desktop ...'
+    foreach ($e in @($script:MaskRowUi.Values)) { Update-MaskRowState $e }
 }
 function Complete-MaskReadJob {
     $job = $script:MaskReadJob
@@ -185,8 +186,9 @@ function Get-MaskGroupChoices($Dir) {
 function Update-MaskRowState($Entry) {
     $row = $Entry.Data; $mode = [string]$Entry.Mode.SelectedItem
     $Entry.Group.IsEnabled = ($row.Editable -and $mode -eq 'Only members of a group')
-    $Entry.Preview.IsEnabled = [bool]$row.Editable
-    $Entry.Save.IsEnabled = ([bool]$row.Editable -and [bool](Test-AVDTuneWriteAllowed))
+    $busy = [bool]$script:MaskReadJob   # while the state is read the rows are those of the old read: nothing is changed from them
+    $Entry.Preview.IsEnabled = ([bool]$row.Editable -and -not $busy)
+    $Entry.Save.IsEnabled = ([bool]$row.Editable -and -not $busy -and [bool](Test-AVDTuneWriteAllowed))
 }
 
 function New-MaskListRow($Row, $Choices, $Entra) {
@@ -351,12 +353,13 @@ function Show-MaskRun($Run, [string]$What) {
 function Invoke-MaskRow([string]$Name, [bool]$WhatIf) {
     # One row = one change = one undo record. Preview: nothing is written (the connection to the DC is only made for a group). Save: write gate, confirmation with old and new,
     # then (after the confirmation) the connection, a second question when an existing assignment changes its meaning, and the task on the task bar.
+    if ($script:MaskReadJob) { throw "The list is being read. Wait until it is done." }
     $r = $script:MaskRowUi[$Name]
     if (-not $r) { throw "'$Name' is not in the list." }
     $mode = [string]$r.Mode.SelectedItem
     $sid = ''
     if ($mode -eq 'Only members of a group') { $i = $r.Group.SelectedIndex; if ($i -ge 0) { $sid = [string]$r.Group.Tag[$i] } }
-    $ch = Get-AVDTuneShortcutChange -Row $r.Data -Mode $mode -GroupSid $sid -Directory (Get-MaskDirectory)
+    $ch = Get-AVDTuneShortcutChange -Row $r.Data -M (Get-MaskAdapter) -Mode $mode -GroupSid $sid -Directory (Get-MaskDirectory)
     $head = "$Name`: now '$($ch.Old)', new '$($ch.New)' (rule set $($ch.RuleSet))"
     if ($ch.Action -eq 'None') { $ui.TxtMaskState.Text = "$Name`: no change."; return }
     $m = Get-MaskAdapter; $lc = $null; $run = $null
@@ -367,7 +370,7 @@ function Invoke-MaskRow([string]$Name, [bool]$WhatIf) {
                 if ($p.Directory) { $lc = Get-MaskLdap; $p.Ldap = $lc.Ldap; $p.Conn = $lc.Conn }
                 $run = Save-AVDTuneRuleSet -Machine $script:Machine -M $m -Root $script:StateRoot @p -WhatIf
             }
-            else { $run = Remove-AVDTuneRuleSet -Machine $script:Machine -M $m -Root $script:StateRoot -Name $ch.RuleSet -WhatIf }
+            else { $run = Remove-AVDTuneRuleSet -Machine $script:Machine -M $m -Root $script:StateRoot -Name $ch.RuleSet -ExpectedSha $ch.ExpectedSha -WhatIf }
             $steps = (@($run.Results | ForEach-Object { "$($_.Title): $($_.Status)" }) -join '; ')
             $chg = if ($run.PSObject.Properties['AssignmentChange'] -and $run.AssignmentChange) { " The assignment of the existing rule set changes from '$($run.AssignmentChange.Old)' to '$($run.AssignmentChange.New)'." } else { '' }
             $ui.TxtMaskState.Text = "Preview (nothing written): $head. $steps.$chg"
@@ -387,8 +390,8 @@ function Invoke-MaskRow([string]$Name, [bool]$WhatIf) {
             $run = Invoke-MaskChange -Title "Changing who sees $Name" -Step "Rule set $($p.Name)" -Block { Save-AVDTuneRuleSet -Machine $script:Machine -M $m -Root $script:StateRoot @p -User ([string]$env:USERNAME) -SnapshotId (Get-MaskGateSnapshot) }
         }
         else {
-            $rn = $ch.RuleSet
-            $run = Invoke-MaskChange -Title "Changing who sees $Name" -Step "Remove rule set $rn" -Block { Remove-AVDTuneRuleSet -Machine $script:Machine -M $m -Root $script:StateRoot -Name $rn -User ([string]$env:USERNAME) -SnapshotId (Get-MaskGateSnapshot) }
+            $rn = $ch.RuleSet; $sha = $ch.ExpectedSha
+            $run = Invoke-MaskChange -Title "Changing who sees $Name" -Step "Remove rule set $rn" -Block { Remove-AVDTuneRuleSet -Machine $script:Machine -M $m -Root $script:StateRoot -Name $rn -ExpectedSha $sha -User ([string]$env:USERNAME) -SnapshotId (Get-MaskGateSnapshot) }
         }
     }
     finally { if ($lc) { & $lc.Close }; $ui.PwdMask.Clear() }

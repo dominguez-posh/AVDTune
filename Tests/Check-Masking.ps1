@@ -480,7 +480,7 @@ try {
     $L = New-Env -Seed $deskSeed -LdapSeed $ldapSeed
     $l0 = @(Get-AVDTuneMaskingList -M $L.M -Directory $dirG)
     Test-Check 'list69: one row per entry of the Public Desktop, all Everyone and editable when nothing hides them; every row has its own valid rule set name' ($l0.Count -eq 3 -and @($l0 | Where-Object { $_.Mode -eq 'Everyone' -and $_.Editable }).Count -eq 3 -and (@($l0.RuleSet | Sort-Object -Unique)).Count -eq 3) (($l0 | ForEach-Object { "$($_.Name)=$($_.Mode)/$($_.RuleSet)" }) -join ';')
-    $gChange = Get-AVDTuneShortcutChange -Row $l0[0] -Mode 'Only members of a group' -GroupSid 'S-1-5-21-1-2-3-1201' -Directory $dirG
+    $gChange = Get-AVDTuneShortcutChange -M $L.M -Row $l0[0] -Mode 'Only members of a group' -GroupSid 'S-1-5-21-1-2-3-1201' -Directory $dirG
     Test-Check 'list69 change: a group row builds a HiddenExceptGroups save for exactly this entry, bound by sAMAccountName and SID, with old and new text' ($gChange.Action -eq 'Save' -and $gChange.SaveParams.Visibility -eq 'HiddenExceptGroups' -and $gChange.SaveParams.Name -eq 'Desktop-App One' -and @($gChange.SaveParams.Entries).Count -eq 1 -and $gChange.SaveParams.Entries[0].Name -eq 'App One.lnk' -and $gChange.SaveParams.Groups[0].Sam -eq 'Sales Team' -and $gChange.SaveParams.Groups[0].Sid -eq 'S-1-5-21-1-2-3-1201' -and $gChange.Old -eq 'Everyone' -and $gChange.New -like '*EXAMPLE\Sales Team*') ($gChange | Out-String)
     $p = $gChange.SaveParams; $p.Ldap = $L.Ldap; $p.Conn = 'c'
     $pv = Save-AVDTuneRuleSet -Machine $L.Machine -M $L.M -Root $tmp @p -WhatIf
@@ -490,27 +490,27 @@ try {
     Test-Check 'list69 save: one assignment per row = one rule set with exactly one hiding rule and the group (name, DN) in the .fxa; the other entries have no files' (@($sv.Results | Where-Object Status -eq 'Changed').Count -eq 2 -and $fxr1 -like "*$pd`tApp One.lnk*" -and ([regex]::Matches($fxr1, '0x00000222')).Count -eq 1 -and $fxa1 -like '*EXAMPLE\Sales Team*' -and $L.M.Store.Files.Count -eq 2) (($sv.Results | ForEach-Object { "$($_.Status) $($_.Message)" }) -join ';')
     $l1 = @(Get-AVDTuneMaskingList -M $L.M -Directory $dirG)
     Test-Check 'list69: after the save the row shows the group (Account and SID) and stays editable; the other rows are untouched' ($l1[0].Mode -eq 'Only members of a group' -and $l1[0].Groups[0].Account -eq 'EXAMPLE\Sales Team' -and $l1[0].Groups[0].Sid -eq 'S-1-5-21-1-2-3-1201' -and $l1[0].Editable -and $l1[1].Mode -eq 'Everyone' -and $l1[2].Mode -eq 'Everyone') (($l1 | ForEach-Object { "$($_.Name)=$($_.Mode)" }) -join ';')
-    $same = Get-AVDTuneShortcutChange -Row $l1[0] -Mode 'Only members of a group' -GroupSid 'S-1-5-21-1-2-3-1201' -Directory $dirG
-    $other = Get-AVDTuneShortcutChange -Row $l1[0] -Mode 'Only members of a group' -GroupSid 'S-1-5-21-1-2-3-1202' -Directory $dirG
-    $adm = Get-AVDTuneShortcutChange -Row $l1[0] -Mode 'Nobody except administrators' -Directory $dirG
-    $evr = Get-AVDTuneShortcutChange -Row $l1[0] -Mode 'Everyone' -Directory $dirG
+    $same = Get-AVDTuneShortcutChange -M $L.M -Row $l1[0] -Mode 'Only members of a group' -GroupSid 'S-1-5-21-1-2-3-1201' -Directory $dirG
+    $other = Get-AVDTuneShortcutChange -M $L.M -Row $l1[0] -Mode 'Only members of a group' -GroupSid 'S-1-5-21-1-2-3-1202' -Directory $dirG
+    $adm = Get-AVDTuneShortcutChange -M $L.M -Row $l1[0] -Mode 'Nobody except administrators' -Directory $dirG
+    $evr = Get-AVDTuneShortcutChange -M $L.M -Row $l1[0] -Mode 'Everyone' -Directory $dirG
     Test-Check 'list69 change: same value = no change; another group and administrators only = Save; Everyone = Remove of the own rule set' ($same.Action -eq 'None' -and $other.Action -eq 'Save' -and $adm.Action -eq 'Save' -and $adm.SaveParams.Visibility -eq 'Hidden' -and $evr.Action -eq 'Remove' -and $evr.RuleSet -eq 'Desktop-App One') $null
     $po = $other.SaveParams; $po.Ldap = $L.Ldap; $po.Conn = 'c'
     $prev2 = Save-AVDTuneRuleSet -Machine $L.Machine -M $L.M -Root $tmp @po -WhatIf
     $noExp = Get-ThrownText { Save-AVDTuneRuleSet -Machine $L.Machine -M $L.M -Root $tmp @po -User a -SnapshotId s }
     Test-Check 'list69: changing an existing assignment shows old and new meaning, and the module refuses to write without the confirmed ExpectedChange' ($prev2.AssignmentChange -and $prev2.AssignmentChange.Old -like '*Sales Team*' -and $prev2.AssignmentChange.New -like '*Staff*' -and $noExp) $noExp
     $bad = @(
-        { Get-AVDTuneShortcutChange -Row $l1[0] -Mode 'Only members of a group' -GroupSid '' -Directory $dirG },
-        { Get-AVDTuneShortcutChange -Row $l1[0] -Mode 'Only members of a group' -GroupSid 'S-1-5-21-1-2-3-9999' -Directory $dirG },
-        { Get-AVDTuneShortcutChange -Row $l1[0] -Mode 'Only members of a group' -GroupSid 'x,OU=y' -Directory $dirG },
-        { Get-AVDTuneShortcutChange -Row $l1[0] -Mode 'Only members of a group' -GroupSid 'S-1-5-21-1-2-3-1201' -Directory $null },
-        { Get-AVDTuneShortcutChange -Row $l1[0] -Mode 'Everybody' -Directory $dirG }
+        { Get-AVDTuneShortcutChange -M $L.M -Row $l1[0] -Mode 'Only members of a group' -GroupSid '' -Directory $dirG },
+        { Get-AVDTuneShortcutChange -M $L.M -Row $l1[0] -Mode 'Only members of a group' -GroupSid 'S-1-5-21-1-2-3-9999' -Directory $dirG },
+        { Get-AVDTuneShortcutChange -M $L.M -Row $l1[0] -Mode 'Only members of a group' -GroupSid 'x,OU=y' -Directory $dirG },
+        { Get-AVDTuneShortcutChange -M $L.M -Row $l1[0] -Mode 'Only members of a group' -GroupSid 'S-1-5-21-1-2-3-1201' -Directory $null },
+        { Get-AVDTuneShortcutChange -M $L.M -Row $l1[0] -Mode 'Everybody' -Directory $dirG }
     )
     Test-Check 'list69 change: no group chosen, a SID that the DC discovery does not know, a non-SID text, no directory and a mode that is not in the menu are all refused' (@($bad | Where-Object { Test-Throws $_ }).Count -eq 5) $null
     $fo = Save-AVDTuneRuleSet -Machine $L.Machine -M $L.M -Root $tmp -Name 'Public Desktop' -Entries @(@{ Folder = $pd; Name = 'Old.lnk' }, @{ Folder = $pd; Name = 'App Two.lnk' }) -Visibility Hidden -User a -SnapshotId s
     $l2 = @(Get-AVDTuneMaskingList -M $L.M -Directory $dirG)
     $row2 = $l2 | Where-Object Name -eq 'App Two.lnk'
-    Test-Check 'list69: an entry that another (wizard) rule set hides is shown with its state but cannot be changed here (a second rule set could not lift that hiding); the note says where' (-not $row2.Editable -and $row2.Mode -eq 'Nobody except administrators' -and $row2.Note -like "*'Public Desktop'*Advanced*" -and (Test-Throws { Get-AVDTuneShortcutChange -Row $row2 -Mode 'Everyone' -Directory $dirG })) $row2.Note
+    Test-Check 'list69: an entry that another (wizard) rule set hides is shown with its state but cannot be changed here (a second rule set could not lift that hiding); the note says where' (-not $row2.Editable -and $row2.Mode -eq 'Nobody except administrators' -and $row2.Note -like "*'Public Desktop'*Advanced*" -and (Test-Throws { Get-AVDTuneShortcutChange -M $L.M -Row $row2 -Mode 'Everyone' -Directory $dirG })) $row2.Note
     $rem = Remove-AVDTuneRuleSet -Machine $L.Machine -M $L.M -Root $tmp -Name 'Public Desktop' -User a -SnapshotId s
     $rm = Remove-AVDTuneRuleSet -Machine $L.Machine -M $L.M -Root $tmp -Name $evr.RuleSet -User a -SnapshotId s
     Test-Check 'list69 remove: Everyone deletes the own rule set (both files); the row is Everyone again' (@($rm.Results | Where-Object Status -eq 'Changed').Count -eq 2 -and $null -eq (Get-Written $L 'Desktop-App One' 'fxr') -and (@(Get-AVDTuneMaskingList -M $L.M -Directory $dirG) | Where-Object Name -eq 'App One.lnk').Mode -eq 'Everyone') $null
@@ -533,6 +533,48 @@ try {
     $iExp = $bp.IndexOf('ExpMaskAdvanced.Content = $adv')
     Test-Check 'page69: the wizard (rule set name, OU, new group, domain controller account) and the rule sets sit in a collapsed Advanced expander; the list card is outside of it' ($bp.Contains("Header = 'Advanced'") -and $bp.Contains('IsExpanded = $false') -and $bp.IndexOf('$ui.TxtMaskName =') -gt $bp.IndexOf('$adv = New-Object') -and $bp.IndexOf('$ui.CmbMaskOu =') -lt $iExp -and $bp.IndexOf('$ui.TxtMaskDc =') -lt $iExp -and $bp.IndexOf('$ui.PanelMaskList =') -lt $bp.IndexOf('$adv = New-Object')) $null
     Test-Check 'page69: the group menu names Microsoft Entra ID groups as not supported with the source' ($pg69.Contains('Microsoft Entra ID groups: not supported (source: Microsoft Learn') -and $pg69.Contains('Get-AVDTuneEntraGroupInfo')) $null
+
+    # ---------------------------------------------------------------- review of #69 (Finn): collisions, TOCTOU at remove, ASCII only, domain in the preselection
+    $K = [string][char]0x212A   # KELVIN SIGN: matches [A-Za-z] case-insensitively
+    $col = New-Env -Seed @{ Desktop = @(@{ Name = 'Notes.lnk'; Target = 'x'; IsShortcut = $true }, @{ Name = 'Notes.url'; Target = 'x'; IsShortcut = $true }, @{ Name = 'notes'; Target = 'x'; IsShortcut = $false }, @{ Name = 'Solo.lnk'; Target = 'x'; IsShortcut = $true }) }
+    $lc = @(Get-AVDTuneMaskingList -M $col.M -Directory $dirG)
+    $forged = $lc[0].PSObject.Copy(); $forged.Editable = $true
+    Test-Check 'review69 collision: Notes.lnk, Notes.url and notes give the same rule set name; all three rows are locked with the reason and the single one stays editable' (@($lc | Where-Object { $_.Name -in 'Notes.lnk', 'Notes.url', 'notes' -and -not $_.Editable -and $_.Note -like '*same rule set name*' }).Count -eq 3 -and ($lc | Where-Object Name -eq 'Solo.lnk').Editable) (($lc | ForEach-Object { "$($_.Name)=$($_.Editable)" }) -join ';')
+    Test-Check 'review69 collision: the module refuses the change too (also a row that claims Editable), for Save and for the rest; nothing is written' ((Test-Throws { Get-AVDTuneShortcutChange -M $col.M -Row $lc[0] -Mode 'Nobody except administrators' -Directory $dirG }) -and (Test-Throws { Get-AVDTuneShortcutChange -M $col.M -Row $forged -Mode 'Nobody except administrators' -Directory $dirG }) -and (Test-Throws { Get-AVDTuneShortcutChange -M $col.M -Row $lc[2] -Mode 'Everyone' -Directory $dirG }) -and $col.M.Store.Files.Count -eq 0) $null
+    $cafe = 'Caf' + [char]0xE9 + '.lnk'; $hashName = Get-AVDTuneShortcutRuleSetName $cafe; $look = $hashName.Substring('Desktop-'.Length) + '.lnk'
+    $hn = New-Env -Seed @{ Desktop = @(@{ Name = $cafe; Target = 'x'; IsShortcut = $true }, @{ Name = $look; Target = 'x'; IsShortcut = $true }) }
+    $lh = @(Get-AVDTuneMaskingList -M $hn.M -Directory $dirG)
+    Test-Check 'review69 collision: a file named like the hash name of another entry (Caf-<hash>.lnk next to the accented name) locks both rows' ((Get-AVDTuneShortcutRuleSetName $look) -eq $hashName -and @($lh | Where-Object { -not $_.Editable }).Count -eq 2 -and (Test-Throws { Get-AVDTuneShortcutChange -M $hn.M -Row $lh[1] -Mode 'Nobody except administrators' -Directory $dirG })) $hashName
+    $st = New-Env -Seed @{ Desktop = @(@{ Name = 'Foo.lnk'; Target = 'x'; IsShortcut = $true }, @{ Name = 'Bar.lnk'; Target = 'x'; IsShortcut = $true }) }
+    [void](Save-AVDTuneRuleSet -Machine $st.Machine -M $st.M -Root $tmp -Name 'Desktop-Foo' -Entries @(@{ Folder = $pd; Name = 'Bar.lnk' }) -Visibility Hidden -User a -SnapshotId s)
+    $ls = @(Get-AVDTuneMaskingList -M $st.M -Directory $dirG)
+    $foo = $ls | Where-Object Name -eq 'Foo.lnk'
+    Test-Check 'review69 collision: a rule set named like this entry that covers another one is not touched: row locked, change refused, the set is unchanged' (-not $foo.Editable -and $foo.Note -like "*'Desktop-Foo' exists*" -and (Test-Throws { Get-AVDTuneShortcutChange -M $st.M -Row $foo -Mode 'Nobody except administrators' -Directory $dirG }) -and (Get-Written $st 'Desktop-Foo' 'fxr') -like '*Bar.lnk*') $foo.Note
+    # TOCTOU at remove: the hashes of the read go to the module
+    $tt = New-Env -Seed @{ Desktop = @(@{ Name = 'T.lnk'; Target = 'x'; IsShortcut = $true }) }
+    [void](Save-AVDTuneRuleSet -Machine $tt.Machine -M $tt.M -Root $tmp -Name 'Desktop-T' -Entries @(@{ Folder = $pd; Name = 'T.lnk' }) -Visibility Hidden -User a -SnapshotId s)
+    $lt = @(Get-AVDTuneMaskingList -M $tt.M -Directory $dirG)[0]
+    $chT = Get-AVDTuneShortcutChange -M $tt.M -Row $lt -Mode 'Everyone' -Directory $dirG
+    Test-Check 'review69 remove: the row carries the SHA256 of both files and the change hands them on' ($lt.Sha.Fxr.Length -eq 64 -and $lt.Sha.Fxa.Length -eq 64 -and $chT.Action -eq 'Remove' -and $chT.ExpectedSha.Fxa -eq $lt.Sha.Fxa) $null
+    $tt.M.Store.Files["$rules\Desktop-T.fxa"] = ConvertTo-AVDTuneRuleBytes "1`r`n"
+    $rtext = Get-ThrownText { Remove-AVDTuneRuleSet -Machine $tt.Machine -M $tt.M -Root $tmp -Name 'Desktop-T' -ExpectedSha $chT.ExpectedSha -User a -SnapshotId s }
+    Test-Check 'review69 remove: a file changed after the read (also between confirmation and write) stops the delete; nothing is removed' ($rtext -like '*changed since it was read*' -and $tt.M.Store.Files.Count -eq 2) $rtext
+    Test-Check 'review69 change: a row that is older than the files (hashes differ) is refused with "Refresh the list"' ((Get-ThrownText { Get-AVDTuneShortcutChange -M $tt.M -Row $lt -Mode 'Everyone' -Directory $dirG }) -like '*changed since the list was read*') $null
+    $ok = Remove-AVDTuneRuleSet -Machine $tt.Machine -M $tt.M -Root $tmp -Name 'Desktop-T' -ExpectedSha @{ Fxr = (Get-AVDTuneBytesSha256 $tt.M.Store.Files["$rules\Desktop-T.fxr"]); Fxa = (Get-AVDTuneBytesSha256 $tt.M.Store.Files["$rules\Desktop-T.fxa"]) } -User a -SnapshotId s
+    Test-Check 'review69 remove: with the hashes that match, the rule set is removed' (@($ok.Results | Where-Object Status -eq 'Changed').Count -eq 2 -and $tt.M.Store.Files.Count -eq 0) $null
+    # ASCII only: the Kelvin sign and the long s are not [A-Za-z] here
+    $kn = Get-AVDTuneShortcutRuleSetName ("Notes$K.lnk")
+    Test-Check 'review69 ASCII: Kelvin sign and long s do not pass as letters in the validators (rule set name, group name, prefix)' (-not (Test-AVDTuneMaskingName "Desktop-$K") -and -not (Test-AVDTuneMaskingName "Desktop-$([char]0x17F)x") -and -not (Test-AVDTuneMaskingGroupName "AVD-App-$K") -and -not (Test-AVDTuneMaskingPrefix "AV$K") -and (Test-AVDTuneMaskingName 'Desktop-K') -and (Test-AVDTuneMaskingGroupName 'AVD-App-K')) $null
+    Test-Check 'review69 ASCII: a name with a Kelvin sign gets a hash name that is plain ASCII and valid; the group name builder drops it' ($kn -cmatch '\A[\x20-\x7E]+\z' -and (Test-AVDTuneMaskingName $kn) -and $kn -match '-[0-9a-f]{6}\z' -and ((Get-AVDTuneAppGroupName -Prefix AVD -Name "Pr${K}o") -cmatch '\A[\x20-\x7E]+\z')) $kn
+    # the preselection of the group compares the domain too
+    $dm = New-Env -Seed @{ Desktop = @(@{ Name = 'D.lnk'; Target = 'x'; IsShortcut = $true }) } -LdapSeed $ldapSeed
+    $pd2 = (Get-AVDTuneShortcutChange -M $dm.M -Row (@(Get-AVDTuneMaskingList -M $dm.M -Directory $dirG)[0]) -Mode 'Only members of a group' -GroupSid 'S-1-5-21-1-2-3-1201' -Directory $dirG).SaveParams
+    $pd2.Ldap = $dm.Ldap; $pd2.Conn = 'c'
+    [void](Save-AVDTuneRuleSet -Machine $dm.Machine -M $dm.M -Root $tmp @pd2 -User a -SnapshotId s)
+    $otherDom = [pscustomobject]@{ DefaultNamingContext = $dn; NetBiosName = 'OTHER'; OuTree = @(); Groups = $dirG.Groups }
+    Test-Check 'review69 preselection: the group of the row is matched with the domain; the same sAMAccountName of another domain gets no SID' ((@(Get-AVDTuneMaskingList -M $dm.M -Directory $dirG)[0]).Groups[0].Sid -eq 'S-1-5-21-1-2-3-1201' -and (@(Get-AVDTuneMaskingList -M $dm.M -Directory $otherDom)[0]).Groups[0].Sid -eq '') $null
+    $pg70 = [IO.File]::ReadAllText((Join-Path $repo 'AVDTune-AppMasking.ps1'))
+    Test-Check 'page69 review: the row buttons are locked while the state is read and a click during the read is refused; Remove gets the hashes of the read' ($pg70.Contains('$busy = [bool]$script:MaskReadJob') -and $pg70.Contains('-and -not $busy') -and $pg70.Contains('The list is being read') -and $pg70.Contains('-ExpectedSha $sha') -and $pg70.Contains('-ExpectedSha $ch.ExpectedSha -WhatIf') -and $pg70.Contains('Update-MaskRowState $e }')) $null
 }
 finally {
     Close-AVDTuneWriteGate

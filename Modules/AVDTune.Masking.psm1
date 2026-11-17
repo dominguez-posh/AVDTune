@@ -34,7 +34,7 @@ function Test-AVDTuneMaskingName {
     <# A rule set name: file name in the rules folder. Letters, digits, space, '.', '_', '-', 1 to 64 characters, no device name, no leading or trailing blank or dot. #>
     param([string]$Name)
     if (-not $Name -or $Name.Length -gt 64) { return $false }
-    if ($Name -notmatch '\A[A-Za-z0-9][A-Za-z0-9 ._-]*[A-Za-z0-9_-]\z' -and $Name -notmatch '\A[A-Za-z0-9]\z') { return $false }
+    if ($Name -cnotmatch '\A[A-Za-z0-9][A-Za-z0-9 ._-]*[A-Za-z0-9_-]\z' -and $Name -cnotmatch '\A[A-Za-z0-9]\z') { return $false }
     if ($Name.Split('.')[0].Trim().ToUpperInvariant() -in $script:Reserved) { return $false }
     $true
 }
@@ -42,7 +42,7 @@ function Test-AVDTuneMaskingName {
 function Test-AVDTuneMaskingGroupName {
     # A group name (sAMAccountName, local group name): no characters that are special in a DN, a filter or an account name
     param([string]$Name)
-    [bool]($Name -and $Name.Length -le 64 -and $Name -match '\A[A-Za-z0-9]([A-Za-z0-9 ._-]{0,62}[A-Za-z0-9_-])?\z')
+    [bool]($Name -and $Name.Length -le 64 -and $Name -cmatch '\A[A-Za-z0-9]([A-Za-z0-9 ._-]{0,62}[A-Za-z0-9_-])?\z')
 }
 
 function Test-AVDTuneAdExistingGroupName {
@@ -55,13 +55,13 @@ function Test-AVDTuneAdExistingGroupName {
     [bool]($Name -and $Name.Length -le 256 -and $Name -notmatch '[\x00-\x1F\x7F\\]' -and $Name -ceq $Name.Trim())
 }
 
-function Test-AVDTuneMaskingPrefix([string]$Prefix) { [bool]($Prefix -match '\A[A-Za-z0-9]{1,16}\z') }
+function Test-AVDTuneMaskingPrefix([string]$Prefix) { [bool]($Prefix -cmatch '\A[A-Za-z0-9]{1,16}\z') }
 
 function Get-AVDTuneAppGroupName {
     <# <prefix>-App-<name> (plan 5b); spaces in the rule set name become '-'. Throws when the result is not a valid group name. #>
     param([Parameter(Mandatory)][string]$Prefix, [Parameter(Mandatory)][string]$Name)
     if (-not (Test-AVDTuneMaskingPrefix $Prefix)) { throw "The group prefix '$Prefix' is not valid (letters and digits, 1 to 16)." }
-    $g = "$Prefix-App-" + (($Name.Trim() -replace '\s+', '-') -replace '[^A-Za-z0-9._-]', '')
+    $g = "$Prefix-App-" + (($Name.Trim() -replace '\s+', '-') -creplace '[^A-Za-z0-9._-]', '')
     if (-not (Test-AVDTuneMaskingGroupName $g)) { throw "'$g' is not a valid group name." }
     $g
 }
@@ -417,7 +417,7 @@ function Get-AVDTuneShortcutRuleSetName {
     <# The rule set of one Public Desktop entry: 'Desktop-<name>' (letters, digits, '._-' of the file name without .lnk). When the name had to be changed (other characters, too long) a short hash of the original name is added, so two entries never share a rule set. Validated with Test-AVDTuneMaskingName. #>
     param([Parameter(Mandatory)][string]$FileName)
     $base = [IO.Path]::GetFileNameWithoutExtension($FileName)
-    $clean = (($base -replace '[^A-Za-z0-9 ._-]+', '-') -replace '-{2,}', '-' -replace ' {2,}', ' ').Trim('-', '.', ' ')
+    $clean = (($base -creplace '[^A-Za-z0-9 ._-]+', '-') -replace '-{2,}', '-' -replace ' {2,}', ' ').Trim('-', '.', ' ')
     if (-not $clean) { $clean = 'Item' }
     $lossy = ($clean -cne $base)
     if ($clean.Length -gt 40) { $clean = $clean.Substring(0, 40).Trim('-', '.', ' '); $lossy = $true }
@@ -442,6 +442,9 @@ function Get-AVDTuneMaskingList {
     $list = @(Get-AVDTunePublicDesktopList -M $M -RuleSets $sets)
     $desk = (& $M.PublicDesktopFolder).TrimEnd('\'); $drive = & $M.SystemDrive
     $dirGroups = @(if ($Directory -and (Get-AVDTuneProp $Directory 'Groups')) { @($Directory.Groups) } else { @() })
+    $nb = $(if ($Directory) { [string](Get-AVDTuneProp $Directory "NetBiosName") } else { "" })
+    $names = @{}
+    foreach ($d in $list) { try { $k = (Get-AVDTuneShortcutRuleSetName $d.Name).ToLowerInvariant(); $names[$k] = 1 + [int]$names[$k] } catch { } }
     @(foreach ($d in $list) {
             $set = ''; $problem = ''
             try { $set = Get-AVDTuneShortcutRuleSetName $d.Name } catch { $problem = $_.Exception.Message }
@@ -460,18 +463,23 @@ function Get-AVDTuneMaskingList {
                     if ($named.Count -eq 0) { $mode = $script:ModeAdmins }
                     else {
                         $mode = $script:ModeGroup
-                        $groups = @(foreach ($r in $named) { $g = @($dirGroups | Where-Object { $_.Sid -and ([string]$r.Name).EndsWith("\$(Get-AVDTuneMaskAttrName $_)", [StringComparison]::OrdinalIgnoreCase) })[0]; [pscustomobject]@{ Account = [string]$r.Name; Sid = $(if ($g) { [string]$g.Sid } else { '' }) } })
+                        $groups = @(foreach ($r in $named) { $g = @($dirGroups | Where-Object { $_.Sid -and ([string]$r.Name) -ieq "$nb\$(Get-AVDTuneMaskAttrName $_)" })[0]; [pscustomobject]@{ Account = [string]$r.Name; Sid = $(if ($g) { [string]$g.Sid } else { '' }) } })
                     }
                 }
             }
-            if ($foreign.Count -gt 0) { $editable = $false; $note = "Covered by the rule set '$($foreign[0].Name)'. Change or remove it under Advanced." }
+            $sameName = @($sets | Where-Object { $set -and $_.Name -ieq $set })
+            if ($set -and $names[$set.ToLowerInvariant()] -gt 1) { $editable = $false; $note = "Another entry of the Public Desktop has the same rule set name '$set'. Change them under Advanced." }
+            elseif ($foreign.Count -gt 0) { $editable = $false; $note = "Covered by the rule set '$($foreign[0].Name)'. Change or remove it under Advanced." }
+            elseif ($sameName.Count -gt 0 -and $own.Count -eq 0) { $editable = $false; $note = "A rule set named '$set' exists and does not cover this entry. Change or remove it under Advanced." }
             elseif ($own.Count -gt 0) {
                 $o = $own[0]
                 if (@($o.Rules).Count -ne 1 -or $o.OtherRules -gt 0 -or @($o.Problems).Count -gt 0) { $editable = $false; $note = "The rule set '$($o.Name)' holds more than this entry or has problems. Change it under Advanced." }
             }
+            $sha = @{ Fxr = ''; Fxa = '' }
+            if ($set) { foreach ($e in 'fxr', 'fxa') { $b = & $M.ReadBytes (Join-Path $M.RulesFolder "$set.$e"); if ($null -ne $b) { $sha[$(if ($e -eq 'fxr') { 'Fxr' } else { 'Fxa' })] = Get-AVDTuneBytesSha256 $b } } }
             if ($mode -eq 'Custom') { $editable = $false; if (-not $note) { $note = 'The assignment is not one this page writes (made with the Rule Editor?). Change it under Advanced.' } }
             if ($problem) { $editable = $false; $note = $problem }
-            [pscustomobject]@{ Name = $d.Name; Target = $d.Target; IsShortcut = $d.IsShortcut; RuleSet = $set; Covering = @($covering | ForEach-Object { $_.Name }); Mode = $mode; Groups = $groups; Editable = [bool]$editable; Note = $note; Text = $d.Text }
+            [pscustomobject]@{ Name = $d.Name; Target = $d.Target; IsShortcut = $d.IsShortcut; RuleSet = $set; Covering = @($covering | ForEach-Object { $_.Name }); Mode = $mode; Groups = $groups; Editable = [bool]$editable; Note = $note; Text = $d.Text; Sha = $sha }
         })
 }
 
@@ -489,12 +497,17 @@ function Get-AVDTuneShortcutChange {
         What one row asks for, validated: Action None | Save | Remove, the rule set name, Old and New as text, and SaveParams (for Save-AVDTuneRuleSet: Name, Entries, Visibility, Groups, Directory).
         -Mode is one of the three menu values; for 'Only members of a group' -GroupSid names the group by SID (it must be in the directory: bound by sAMAccountName and SID, #29). Throws with the reason.
     #>
-    param([Parameter(Mandatory)]$Row, [Parameter(Mandatory)][string]$Mode, [string]$GroupSid, $Directory)
+    param([Parameter(Mandatory)]$Row, [Parameter(Mandatory)]$M, [Parameter(Mandatory)][string]$Mode, [string]$GroupSid, $Directory)
     if ($Mode -notin $script:ModeEveryone, $script:ModeGroup, $script:ModeAdmins) { throw "'$Mode' is not a choice of 'Visible for'." }
+    # the row the page showed is only the request; what counts is the state now (a caller cannot lift the lock of a collision, and a change since the read is refused)
+    $shown = $Row
+    $Row = @(Get-AVDTuneMaskingList -M $M -Directory $Directory | Where-Object { $_.Name -ceq [string]$shown.Name })[0]
+    if (-not $Row) { throw "'$($shown.Name)' is not on the Public Desktop any more. Refresh the list." }
+    if ($shown.PSObject.Properties['Sha'] -and $shown.Sha -and ([string]$shown.Sha.Fxr -ne [string]$Row.Sha.Fxr -or [string]$shown.Sha.Fxa -ne [string]$Row.Sha.Fxa)) { throw "The rule set of '$($Row.Name)' changed since the list was read. Refresh the list." }
     if (-not $Row.Editable) { throw "'$($Row.Name)' cannot be changed here. $($Row.Note)" }
     if (-not (Test-AVDTuneMaskingName $Row.RuleSet)) { throw "'$($Row.RuleSet)' is not a valid rule set name." }
     $old = $(if ($Row.Mode -eq $script:ModeGroup) { 'Only members of: ' + (@($Row.Groups | ForEach-Object { $_.Account }) -join ', ') } else { [string]$Row.Mode })
-    $res = [ordered]@{ Name = [string]$Row.Name; RuleSet = [string]$Row.RuleSet; Old = $old; New = ''; Action = 'None'; SaveParams = $null }
+    $res = [ordered]@{ Name = [string]$Row.Name; RuleSet = [string]$Row.RuleSet; Old = $old; New = ''; Action = 'None'; SaveParams = $null; ExpectedSha = $Row.Sha }
     if ($Mode -eq $script:ModeEveryone) {
         $res.New = $script:ModeEveryone
         if ($Row.Mode -ne $script:ModeEveryone) { $res.Action = 'Remove' }
@@ -739,9 +752,17 @@ function Save-AVDTuneRuleSet {
 function Remove-AVDTuneRuleSet {
     <# Deletes both files of a rule set (the old content goes into the undo record when the delete worked). The group, if any, stays: it may be used elsewhere. #>
     [CmdletBinding()]
-    param([Parameter(Mandatory)]$Machine, [Parameter(Mandatory)]$M, [string]$Root = (Get-AVDTuneRoot), [Parameter(Mandatory)][string]$Name, [string]$User, [string]$SnapshotId, [switch]$WhatIf)
+    param([Parameter(Mandatory)]$Machine, [Parameter(Mandatory)]$M, [string]$Root = (Get-AVDTuneRoot), [Parameter(Mandatory)][string]$Name, $ExpectedSha, [string]$User, [string]$SnapshotId, [switch]$WhatIf)
     if (-not (Test-AVDTuneMaskingName $Name)) { throw "'$Name' is not a valid rule set name." }
     $paths = @((Join-Path $M.RulesFolder "$Name.fxr"), (Join-Path $M.RulesFolder "$Name.fxa"))
+    if ($ExpectedSha) {
+        # what the administrator saw (hashes of the files at the read): any difference now stops the delete, nothing is removed
+        foreach ($pair in @(@('fxr', $paths[0]), @('fxa', $paths[1]))) {
+            $b = & $M.ReadBytes $pair[1]; $have = $(if ($null -ne $b) { Get-AVDTuneBytesSha256 $b } else { '' })
+            $want = $(if ($pair[0] -eq 'fxr') { [string]$ExpectedSha.Fxr } else { [string]$ExpectedSha.Fxa })
+            if ($have -ne $want) { throw "The rule set '$Name' changed since it was read ($($pair[0])). Nothing was removed; refresh the list." }
+        }
+    }
     $old = @(foreach ($p in $paths) { $b = & $M.ReadBytes $p; @{ StepId = "appmasking.remove.$([IO.Path]::GetExtension($p).TrimStart('.'))"; Path = $p; Before = $(if ($null -ne $b) { [Convert]::ToBase64String($b) } else { $null }); AfterSha = $null } })
     if (@($old | Where-Object { $_.Before }).Count -eq 0) { throw "The rule set '$Name' does not exist." }
     $steps = @(foreach ($p in $paths) {
