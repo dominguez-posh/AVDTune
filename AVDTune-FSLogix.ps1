@@ -17,6 +17,8 @@ $script:FslJob = $null
 $script:FslReadJob = $null      # the background read of the page (#72, read only, one at a time)
 $script:FslState = $null        # what the last successful read found (see $script:FslReadText)
 $script:FslStale = $false       # the last read failed: the page is older than the master, nothing is changed from it until a read works again
+$script:FslStateAt = $null      # when that read was taken over
+$script:FslMaxAgeMinutes = 10   # a change is not worked out from an older read: it is read again first
 $script:FslInputs = @{}
 $script:FslDefOff = @{}   # Defender exclusions the administrator switched off (lower case value), kept while the list is drawn again
 $script:FslTest = $null
@@ -44,6 +46,10 @@ function Assert-FslFresh {
     # a change is worked out from what the page read (the plan of the lists, the Defender list, the settings): not while that read runs, not from a read that failed
     if ($script:FslReadJob) { throw 'The FSLogix state of the master is still being read. Wait until it is done.' }
     if (-not $script:FslState -or $script:FslStale) { throw 'The last read of the FSLogix state failed, so the page may be out of date. Open the page again (or use Retry on the task bar) first.' }
+    if (-not $script:FslStateAt -or ((Get-Date) - $script:FslStateAt).TotalMinutes -gt $script:FslMaxAgeMinutes) {
+        Start-FslRead
+        throw "The FSLogix state on the page is older than $($script:FslMaxAgeMinutes) minutes. It is being read again: check the page and confirm again when the read is done."
+    }
 }
 function Assert-FslWrite { if (-not (Test-AVDTuneWriteAllowed)) { throw 'Read only: confirm a snapshot of today on the Overview first.' }; Assert-NoOtherWriter; Assert-FslFresh }
 function Get-FslGateSnapshot { $g = Get-AVDTuneWriteGate; if ($g) { [string]$g.SnapshotId } else { '' } }
@@ -145,7 +151,7 @@ function Complete-FslRead {
         finally { $job.PS.Dispose() }
     }
     if (-not $res -and -not $err) { $err = $(if ($streamErr) { $streamErr } else { 'No result.' }) }
-    if (-not $err) { $script:FslState = $res; $script:FslStale = $false; Complete-AVDTuneUiTask $job.Task -Summary 'FSLogix state read' }
+    if (-not $err) { $script:FslState = $res; $script:FslStale = $false; $script:FslStateAt = Get-Date; Complete-AVDTuneUiTask $job.Task -Summary 'FSLogix state read' }
     else { Complete-AVDTuneUiTask $job.Task -Failed -Summary "The FSLogix state could not be read: $err"; if ($script:FslState) { $script:FslStale = $true } }   # the page on screen is older than the master: nothing is changed from it
     Update-FslButtons
     if ($script:CurrentPage -eq 'FSLogix') {
@@ -307,7 +313,7 @@ Add-Click $ui.BtnFslSettingsApply {
     $listText = Format-AVDTuneFSLogixListChanges $listPlan
     $askText = "Write $($vals.Count) FSLogix setting(s) to the registry of this master?$(if ($listText) { " Also: $listText.$(if ($listPlan.Notice) { ' ' + $listPlan.Notice })" })"
     if (-not (Confirm-Action $askText 'FSLogix settings')) { return }
-    Start-FslJob 'Settings' @{ Values = $vals; Lists = [bool]$listText }
+    Start-FslJob 'Settings' @{ Values = $vals; Lists = [bool]$listText; ListHash = (Get-AVDTuneFSLogixListPlanHash $listPlan) }   # the job writes the lists only when they are still as confirmed
 }
 Add-Click $ui.BtnFslSettingsUndo {
     Assert-FslWrite
@@ -353,7 +359,7 @@ function Invoke-FslRecommendedLists {
     $text = Format-AVDTuneFSLogixListChanges $plan
     if (-not $text) { $ui.TxtFslState.Text = "The recommended lists are already set.$(if ($plan.Notice) { ' ' + $plan.Notice })"; Show-Toast $ui.TxtFslState.Text; return }
     if (-not (Confirm-Action "Set the recommended lists? $text.$(if ($plan.Notice) { ' ' + $plan.Notice })" 'FSLogix lists')) { return }
-    Start-FslJob 'Lists' @{}
+    Start-FslJob 'Lists' @{ ListHash = (Get-AVDTuneFSLogixListPlanHash $plan) }   # the job writes only when the lists are still as confirmed
 }
 Add-Click $ui.BtnFslListsApply { Invoke-FslRecommendedLists }
 Add-Click $ui.BtnFslListsUndo {
@@ -442,7 +448,7 @@ Add-Click $ui.BtnFslDefAdd {
     Assert-FslWrite
     $off = @($script:FslDefOff.Keys)
     if (-not (Confirm-Action "Add the checked, missing FSLogix exclusions to Microsoft Defender Antivirus on this master? Some are folders that users can write to (marked [risk] in the list): files there are not scanned. Untick an exclusion to leave it out.$(if ($off.Count -gt 0) { " $($off.Count) are unticked and will not be set." })" 'Defender exclusions')) { return }
-    Start-FslJob 'Defender' @{ Skip = $off }
+    Start-FslJob 'Defender' @{ Skip = $off; DefenderHash = (Get-AVDTuneFSLogixDefenderHash -State $script:FslState.Defender -Skip $off) }   # the job sets only what was confirmed
 }
 Add-Click $ui.BtnFslDefUndo {
     Assert-FslWrite
@@ -509,18 +515,23 @@ switch ($Kind) {
     }
     'Settings' {
         # the settings and, when the confirmation named list changes, the recommended lists in the same job (no other writer between them); the lists only when no setting failed
+        # the lists as confirmed: checked before anything is written (a list that changed since the read stops the whole job) and again by the module when it writes
+        if ($C.Args.Lists) {
+            if (-not $C.Args.ListHash) { throw 'The confirmed state of the lists is missing. Nothing was written.' }
+            if ((Get-AVDTuneFSLogixListPlanHash (Get-AVDTuneFSLogixListPlan -F $C.F -Root $C.Root -Answers $C.Answers)) -ne $C.Args.ListHash) { throw 'The FSLogix lists changed after they were read. Nothing was written: read the page again and confirm the new state.' }
+        }
         $run = Set-AVDTuneFSLogixSettings -Machine $C.Machine -Root $C.Root -Values $C.Args.Values -User $C.User -SnapshotId $C.SnapshotId
         $lists = $null
-        if ($C.Args.Lists -and @($run.Results | Where-Object { $_.Status -eq 'Failed' }).Count -eq 0) { $lists = Set-AVDTuneFSLogixRecommendedLists -Machine $C.Machine -F $C.F -Root $C.Root -Answers $C.Answers -User $C.User -SnapshotId $C.SnapshotId }
+        if ($C.Args.Lists -and @($run.Results | Where-Object { $_.Status -eq 'Failed' }).Count -eq 0) { $lists = Set-AVDTuneFSLogixRecommendedLists -Machine $C.Machine -F $C.F -Root $C.Root -Answers $C.Answers -User $C.User -SnapshotId $C.SnapshotId -ExpectedHash $C.Args.ListHash }
         [pscustomobject]@{ Runs = @(@($run, $lists) | Where-Object { $_ }) }
     }
     'SettingsUndo' { [pscustomobject]@{ Runs = @(Undo-AVDTuneFSLogixSettings -Machine $C.Machine -Root $C.Root -User $C.User -SnapshotId $C.SnapshotId) } }
     'Group' { [pscustomobject]@{ Runs = @(Set-AVDTuneFSLogixGroupMember -Machine $C.Machine -F $C.F -Root $C.Root -List $C.Args.List -Action $C.Args.Action -Sid $C.Args.Sid -User $C.User -SnapshotId $C.SnapshotId) } }
-    'Lists' { [pscustomobject]@{ Runs = @(Set-AVDTuneFSLogixRecommendedLists -Machine $C.Machine -F $C.F -Root $C.Root -Answers $C.Answers -User $C.User -SnapshotId $C.SnapshotId) } }
+    'Lists' { if (-not $C.Args.ListHash) { throw 'The confirmed state of the lists is missing. Nothing was written.' }; [pscustomobject]@{ Runs = @(Set-AVDTuneFSLogixRecommendedLists -Machine $C.Machine -F $C.F -Root $C.Root -Answers $C.Answers -User $C.User -SnapshotId $C.SnapshotId -ExpectedHash $C.Args.ListHash) } }
     'ListsUndo' { [pscustomobject]@{ Runs = @(Undo-AVDTuneFSLogixRecommendedLists -Machine $C.Machine -F $C.F -Root $C.Root -User $C.User -SnapshotId $C.SnapshotId) } }
     'Redirections' { [pscustomobject]@{ Runs = @(Save-AVDTuneRedirections -Machine $C.Machine -F $C.F -Root $C.Root -Xml $C.Args.Xml -Folder $C.Args.Folder -User $C.User -SnapshotId $C.SnapshotId) } }
     'RedirectionsUndo' { [pscustomobject]@{ Runs = @(Undo-AVDTuneRedirections -Machine $C.Machine -F $C.F -Root $C.Root -User $C.User -SnapshotId $C.SnapshotId) } }
-    'Defender' { [pscustomobject]@{ Runs = @(Set-AVDTuneFSLogixDefender -Machine $C.Machine -F $C.F -Root $C.Root -VhdLocations @(Get-AVDTuneFSLogixLocations -Machine $C.Machine) -User $C.User -SnapshotId $C.SnapshotId -Skip @($C.Args.Skip)) } }
+    'Defender' { if (-not $C.Args.DefenderHash) { throw 'The confirmed state of the Defender exclusions is missing. Nothing was set.' }; [pscustomobject]@{ Runs = @(Set-AVDTuneFSLogixDefender -Machine $C.Machine -F $C.F -Root $C.Root -VhdLocations @(Get-AVDTuneFSLogixLocations -Machine $C.Machine) -User $C.User -SnapshotId $C.SnapshotId -Skip @($C.Args.Skip) -ExpectedHash $C.Args.DefenderHash) } }
     'DefenderUndo' { [pscustomobject]@{ Runs = @(Undo-AVDTuneFSLogixDefender -Machine $C.Machine -F $C.F -Root $C.Root -User $C.User -SnapshotId $C.SnapshotId) } }
     'Acl' { Set-AVDTuneStorageRootAcl -Files $C.Files -Account $C.Args.Account -Share $C.Args.Share -Token $C.StorageToken -UsersSid $C.Args.UsersSid -AdminsSid $C.Args.AdminsSid -ConfirmedHash $C.Args.Hash -Root $C.Root -User $C.User -SnapshotId $C.SnapshotId }
     default { throw "Unknown FSLogix job '$Kind'." }
@@ -653,7 +664,10 @@ function Complete-FslJob {
     # a result that is there is always evaluated (a change may have been made); an error of the stream is reported in addition (#66)
     if (-not $result -and -not $err) { $err = $(if ($streamErr) { $streamErr } else { 'No result.' }); $streamErr = '' }
     # No token or password stays referenced after the run (the hashtable of the job, the copy of the worker was local to it)
-    if ($job.Common) { foreach ($k in 'StorageToken', 'ArmToken', 'TestPassword') { if ($job.Common.ContainsKey($k)) { $job.Common[$k] = $null } }; $job.Common = $null }
+    if ($job.Common) {
+        if ($job.Common.ContainsKey('TestPassword') -and $job.Common.TestPassword -is [System.Security.SecureString]) { try { $job.Common.TestPassword.Dispose() } catch { } }   # the copy of the password box is zeroed, not only dropped
+        foreach ($k in 'StorageToken', 'ArmToken', 'TestPassword') { if ($job.Common.ContainsKey($k)) { $job.Common[$k] = $null } }; $job.Common = $null
+    }
     Update-FslButtons; Set-FslCursor
     $what = Get-FslKindText $job.Kind
     if ($job.Kind -eq 'Storage') { $ui.PwdFslPassword.Clear(); $ui.ChkFslKey.IsChecked = $false }   # the password and the key confirmation are for one run, also after an error

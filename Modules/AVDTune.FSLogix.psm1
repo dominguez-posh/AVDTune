@@ -380,6 +380,21 @@ function Set-AVDTuneFSLogixListsUndoClaim {
     if ($touched) { Write-AVDTuneFile $path ([ordered]@{ Entries = @($out) } | ConvertTo-Json -Depth 8) }
 }
 
+function Get-AVDTuneFSLogixHash([string[]]$Parts) {
+    # SHA256 over the sorted parts (lower case): binds a confirmation to the state it was shown from (#72)
+    $text = (@($Parts | Where-Object { $_ } | ForEach-Object { ([string]$_).ToLowerInvariant() } | Sort-Object) -join "`n")
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try { (($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($text)) | ForEach-Object { $_.ToString('x2') }) -join '') } finally { $sha.Dispose() }
+}
+
+function Get-AVDTuneFSLogixListPlanHash {
+    <# The hash of a list plan as the confirmation names it: what would change (list, SID) and the members found in both lists. A plan that differs has another hash. #>
+    param([Parameter(Mandatory)]$Plan)
+    $parts = @(foreach ($e in @($Plan.Entries)) { if ($e.Change) { "change|$($e.List)|$($e.Sid)" } })
+    foreach ($l in 'Include', 'Exclude') { $parts += @(@($Plan.Previous[$l]) | Where-Object { $_ } | ForEach-Object { "member|$l|$_" }) }
+    Get-AVDTuneFSLogixHash @($parts + 'plan')
+}
+
 function Set-AVDTuneFSLogixRecommendedLists {
     <#
         Puts the recommended members into the include and exclude lists (one run, steps per SID, through Invoke-AVDTune: gate, change log, LastChange).
@@ -388,8 +403,10 @@ function Set-AVDTuneFSLogixRecommendedLists {
         Undo takes the newest one. A run in which nothing changed or the first step failed writes no entry for the steps that did not change.
     #>
     [CmdletBinding()]
-    param([Parameter(Mandatory)]$Machine, [Parameter(Mandatory)]$F, [string]$Root = (Get-AVDTuneRoot), $Answers, [string]$User, [string]$SnapshotId, [switch]$WhatIf)
+    param([Parameter(Mandatory)]$Machine, [Parameter(Mandatory)]$F, [string]$Root = (Get-AVDTuneRoot), $Answers, [string]$User, [string]$SnapshotId, [string]$ExpectedHash, [switch]$WhatIf)
     $plan = Get-AVDTuneFSLogixListPlan -F $F -Root $Root -Answers $Answers
+    # -ExpectedHash: the hash of the plan the administrator confirmed (Get-AVDTuneFSLogixListPlanHash); a plan that changed since is not written (#72)
+    if ($ExpectedHash -and (Get-AVDTuneFSLogixListPlanHash $plan) -ne $ExpectedHash) { throw 'The FSLogix lists changed after they were read. Nothing was written: read the page again and confirm the new state.' }
     $steps = New-Object System.Collections.ArrayList
     $byId = @{}
     foreach ($e in $plan.Entries) {
@@ -727,11 +744,20 @@ function Get-AVDTuneFSLogixDefenderState {
     [pscustomobject]@{ Readable = $true; Items = $items; NotDefender = $list.NotDefender; Source = $list.Source }
 }
 
+function Get-AVDTuneFSLogixDefenderHash {
+    <# The hash of what a Defender Add would set from this state: the missing exclusions that are not unticked (kind and value). #>
+    param([Parameter(Mandatory)]$State, [string[]]$Skip = @())
+    $skipSet = @(@($Skip) | Where-Object { $_ } | ForEach-Object { ([string]$_).ToLowerInvariant() })
+    Get-AVDTuneFSLogixHash @(@($State.Items | Where-Object { -not $_.Present -and $skipSet -notcontains ([string]$_.Value).ToLowerInvariant() } | ForEach-Object { "$($_.Kind)|$($_.Value)" }) + "readable|$([bool]$State.Readable)")
+}
+
 function Set-AVDTuneFSLogixDefender {
     <# Adds the missing Defender exclusions (one step, Undo removes exactly the ones that were added). Needs the write gate unless -WhatIf. #>
     [CmdletBinding()]
-    param([Parameter(Mandatory)]$Machine, [Parameter(Mandatory)]$F, [string]$Root = (Get-AVDTuneRoot), [string[]]$VhdLocations = @(), [string]$User, [string]$SnapshotId, [string[]]$Skip = @(), [switch]$WhatIf)
+    param([Parameter(Mandatory)]$Machine, [Parameter(Mandatory)]$F, [string]$Root = (Get-AVDTuneRoot), [string[]]$VhdLocations = @(), [string]$User, [string]$SnapshotId, [string[]]$Skip = @(), [string]$ExpectedHash, [switch]$WhatIf)
     $state = Get-AVDTuneFSLogixDefenderState -F $F -VhdLocations $VhdLocations
+    # -ExpectedHash: the hash of the list the administrator confirmed (Get-AVDTuneFSLogixDefenderHash); a list that changed since is not set (#72)
+    if ($ExpectedHash -and (Get-AVDTuneFSLogixDefenderHash -State $state -Skip $Skip) -ne $ExpectedHash) { throw 'The Defender exclusions changed after they were read. Nothing was set: read the page again and confirm the new state.' }
     if (-not $state.Readable) { throw 'The Defender exclusions cannot be read here (another antivirus, or Defender is managed by a policy that hides them). Nothing was changed.' }
     $skipSet = @(@($Skip) | Where-Object { $_ } | ForEach-Object { ([string]$_).ToLowerInvariant() })   # deselected by the administrator: not set, not in the undo list
     $skipped = @($state.Items | Where-Object { -not $_.Present -and $skipSet -contains $_.Value.ToLowerInvariant() })
@@ -1354,6 +1380,6 @@ Export-ModuleMember -Function Get-AVDTuneFSLogixSettingCatalog, Test-AVDTuneFSLo
     New-AVDTuneFSLogixRegStep, Get-AVDTuneFSLogixGroupMembers, Get-AVDTuneFSLogixUndoPath, Set-AVDTuneFSLogixSettings, Undo-AVDTuneFSLogixSettings, Get-AVDTuneFSLogixLastChange, Test-AVDTuneSid, Test-AVDTuneDomainSid, New-AVDTuneFSLogixGroupStep, Get-AVDTuneFSLogixRecommendedLists, Get-AVDTuneFSLogixListPlan, Format-AVDTuneFSLogixListChanges, Set-AVDTuneFSLogixListsUndoClaim, Set-AVDTuneFSLogixRecommendedLists, Undo-AVDTuneFSLogixRecommendedLists, Get-AVDTuneFSLogixListsUndoPath, Get-AVDTuneFSLogixGroups, Get-AVDTuneFSLogixVersionState,
     Get-AVDTuneFSLogixGroupChoices, Set-AVDTuneFSLogixGroupMember, Get-AVDTuneRedirectionTemplate, Test-AVDTuneRedirectionPath, New-AVDTuneRedirectionsXml,
     Test-AVDTuneRedirectionsXml, Get-AVDTuneRedirectionsTarget, Get-AVDTuneRedirectionsDefaultFolder, Get-AVDTuneRedirectionsFolderState, Assert-AVDTuneRedirectionsPath, Write-AVDTuneUndoFile, Split-AVDTuneLogonName, Save-AVDTuneRedirections, Undo-AVDTuneRedirections, Get-AVDTuneFSLogixDefenderList,
-    Get-AVDTuneFSLogixDefenderState, Set-AVDTuneFSLogixDefender, Undo-AVDTuneFSLogixDefender, Get-AVDTuneFSLogixLatest, Invoke-AVDTuneFSLogixInstall, Invoke-AVDTuneFSLogixInstallRecorded,
+    Get-AVDTuneFSLogixDefenderState, Get-AVDTuneFSLogixDefenderHash, Get-AVDTuneFSLogixListPlanHash, Set-AVDTuneFSLogixDefender, Undo-AVDTuneFSLogixDefender, Get-AVDTuneFSLogixLatest, Invoke-AVDTuneFSLogixInstall, Invoke-AVDTuneFSLogixInstallRecorded,
     ConvertFrom-AVDTuneSddl, New-AVDTuneFSLogixRecommendedSddl, Compare-AVDTuneFSLogixAcl, Get-AVDTuneFSLogixLocations, Format-AVDTuneAce, Invoke-AVDTuneFSLogixTest,
     Invoke-AVDTuneFSLogixVhdxTest, Save-AVDTuneFSLogixTestRun, Get-AVDTuneFSLogixTestRecord, New-AVDTuneFSLogixAdapter
