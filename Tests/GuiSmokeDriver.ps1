@@ -100,7 +100,7 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         Test-Smoke 'test mode: fake machine and a state folder that is not ProgramData' ($script:TestMode -and $script:Machine.Kind -eq 'Fake' -and -not (Test-AVDTuneDefaultRoot $script:StateRoot)) $script:StateRoot
         Test-Smoke 'state folders were made in the test root' ((Test-Path (Join-Path $script:StateRoot 'runs')) -and (Test-Path (Join-Path $script:StateRoot 'state.json'))) $null
         Test-Smoke 'window title and version' ($window.Title -eq "AVDTune $script:ToolVersion" -and $ui.TxtVersion.Text -like "AVDTune *") $window.Title
-        Test-Smoke 'navigation has all 15 pages in plan order' ($ui.NavList.Children.Count -eq 15-and $ui.NavOverview -and $ui.NavProtocol -and $ui.NavSeal -and $ui.NavList.Children[0].Name -eq 'NavOverview') $ui.NavList.Children.Count
+        Test-Smoke 'navigation has all 16 pages in plan order' ($ui.NavList.Children.Count -eq 16 -and $ui.NavOverview -and $ui.NavProtocol -and $ui.NavSeal -and $ui.NavList.Children[0].Name -eq 'NavOverview') $ui.NavList.Children.Count
         Test-Smoke 'Overview is the first page and shown' ($script:CurrentPage -eq 'Overview' -and $ui.PageOverview.Visibility -eq 'Visible' -and $ui.NavOverview.IsChecked) $null
         Test-Smoke 'title bar chip shows image name and no version yet' ($ui.TxtChipName.Text -eq 'GM-TEST01' -and $ui.TxtChipVersion.Text -eq 'no image version') "$($ui.TxtChipName.Text) / $($ui.TxtChipVersion.Text)"
         Test-Smoke 'identity card lists image, source image, Windows build, Office' ($ui.PanelIdentity.Children.Count -ge 8 -and (Find-Text $ui.PanelIdentity 'microsoftwindowsdesktop:office-365:win11-25h2-avd-m365:latest') -and (Find-Text $ui.PanelIdentity 'Windows 11 Enterprise multi-session 25H2, build 26100.4652') -and (Find-Text $ui.PanelIdentity '16.0.19231.20138, Monthly Enterprise Channel, x64')) $ui.PanelIdentity.Children.Count
@@ -132,7 +132,7 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         foreach ($page in $script:PageTable) {
             Show-Page $page.Key
             $window.UpdateLayout()
-            $placeholder = $page.Key -notin 'Overview', 'Protocol', 'Updates', 'UpdateBlock', 'UserExperience', 'Benchmark', 'FSLogix', 'Software', 'Office', 'AppMasking', 'Seal', 'Environment', 'Optimization'
+            $placeholder = $page.Key -notin 'Overview', 'Protocol', 'Updates', 'UpdateBlock', 'UserExperience', 'Benchmark', 'FSLogix', 'Software', 'Office', 'AppMasking', 'Seal', 'Environment', 'Optimization', 'Language'
             $ok =($script:CurrentPage -eq $page.Key -and $ui["Nav$($page.Key)"].IsChecked -and $ui.PagePlaceholder.Visibility -eq (ConvertTo-Vis $placeholder))
             if ($placeholder) { $ok = $ok -and $ui.TxtPhTitle.Text -eq $page.Title -and $ui.TxtPhPhase.Text -eq "Planned for phase $($page.Phase)" -and $ui.TxtPhText.Text.Length -gt 40 }
             Test-Smoke "page $($page.Key) shows" $ok $null
@@ -555,6 +555,42 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         Test-Smoke 'quick run done: result stored, score and six categories shown, provisional note, history row' ($r.Count -eq 1 -and $r[0].mode -eq 'quick' -and $ui.TxtBenchScore.Text -match '^\d+$' -and $ui.PanelBenchCats.Children.Count -eq 6 -and $ui.BoxBenchProvisional.Visibility -eq 'Visible' -and $ui.PanelBenchHistory.Children.Count -eq 1 -and $ui.BtnBenchFull.IsEnabled) "$($r.Count) $($ui.TxtBenchScore.Text) | $($ui.TxtBenchState.Text)"
         Test-Smoke 'the run is in the protocol and the change log, services are back' (@($script:Protocol.Actions | Where-Object { $_.Category -eq 'benchmark' }).Count -ge 1 -and @(Get-AVDTuneChangeLog -Root $script:StateRoot | Where-Object { $_.Category -eq 'Benchmark' }).Count -ge 1) $null
         Save-SmokeShot '35-benchmark'
+        $true } }
+    @{ Name = 'language page'; Do = {
+        if ($script:OverviewJob -or $script:ReadyJob) { return $false }   # the fake machine is not thread safe
+        $click = { param($b) $b.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent))) }
+        if (-not $script:LangSmoke) {
+            $script:LangSmoke = 1
+            Show-Page 'Language'; $window.UpdateLayout()
+            $en = $script:LangChecks['en-US']; $de = $script:LangChecks['de-DE']
+            Test-Smoke 'Language page: own page (no placeholder), nav entry "Language and region", 18 languages to tick' ($ui.PageLanguage.Visibility -eq 'Visible' -and $ui.PagePlaceholder.Visibility -eq 'Collapsed' -and $ui.NavLanguage.IsChecked -and $script:LangChecks.Count -eq 18 -and (Find-Text $ui.NavList 'Language and region')) $script:LangChecks.Count
+            Test-Smoke 'Language page: the installed language is ticked and fixed, the others are free' ($en.IsChecked -and -not $en.IsEnabled -and $de.IsEnabled -and -not $de.IsChecked -and (Find-Text $ui.PanelLangInstalled 'en-US  English (United States)   Basic')) $null
+            $sel = { param($k) $script:LangCombos[$k].SelectedItem.Tag }
+            Test-Smoke 'Language page: defaults are preselected with the values of the image (en-US, US keyboard, United States, system locale en-US)' ((& $sel 'Ui') -eq 'en-US' -and (& $sel 'Culture') -eq 'en-US' -and (& $sel 'InputTip') -eq '0409:00000409' -and (& $sel 'GeoId') -eq 244 -and (& $sel 'SystemLocale') -eq 'en-US') $null
+            Test-Smoke 'Language page: the time zone stays on (keep as it is); the Azure region (West Europe) is only suggested, in the list and next to it' ($null -eq (& $sel 'TimeZone') -and @($script:LangCombos.TimeZone.Items | Where-Object { $_.Tag -eq 'W. Europe Standard Time' -and "$($_.Content)" -like '*suggested*westeurope*' }).Count -eq 1 -and $ui.LangNow.TimeZone.Text -like '*westeurope*suggests W. Europe Standard Time*') $ui.LangNow.TimeZone.Text
+            Test-Smoke 'Language page: the display language list offers the missing languages only with the offer to install them first' (@($script:LangCombos.Ui.Items | Where-Object { $_.Tag -eq 'de-DE' -and "$($_.Content)" -like '*not installed*install*first*' }).Count -eq 1 -and @($script:LangCombos.Ui.Items | Where-Object { $_.Tag -eq 'en-US' -and "$($_.Content)" -notlike '*not installed*' }).Count -eq 1) $null
+            Save-SmokeShot '31-language'
+            & $click $ui.BtnLangTest
+            Test-Smoke 'Language page: Test changes nothing and says so' ($ui.TxtLangState.Text -like 'Tested*Nothing was changed*' -and @($script:LangFake.Log | Where-Object { $_ -like 'SetUserIntl*' -or $_ -like 'AddLanguage*' }).Count -eq 0) $ui.TxtLangState.Text
+            # choose German for everything, not installed yet: Apply offers to install it first
+            $de.IsChecked = $true
+            $ui.TxtLangSource.Text = 'E:\'
+            foreach ($pair in @(@('Ui', 'de-DE'), @('Culture', 'de-DE'), @('InputTip', '0407:00000407'), @('GeoId', 94), @('SystemLocale', 'de-DE'))) { $cb = $script:LangCombos[$pair[0]]; $cb.SelectedItem = @($cb.Items | Where-Object { "$($_.Tag)" -eq "$($pair[1])" })[0] }
+            $script:ConfirmAsked = ''
+            & $click $ui.BtnLangApply
+            Test-Smoke 'Language page: Apply with a missing display language asks to install it first and names what cannot be undone, the restart, the kind of source and every change old -> new' ($script:ConfirmAsked -like '*Install*read-only media*CANNOT be undone*restart*Display language: en-US -> de-DE*Regional format: en-US -> de-DE*Location (GeoId): 244 -> 94*System locale: en-US -> de-DE*' -and $script:ConfirmAsked -notlike '*Time zone:*' -and $script:LangJob) $script:ConfirmAsked
+            return $false
+        }
+        if ($script:LangJob) { return $false }
+        if ($script:LangSmoke -eq 2) {
+            Test-Smoke 'Language page: Undo puts the values of the image back; the installed language stays' ((Get-AVDTuneLanguageNewUser $script:Machine).Ui -eq 'en-US' -and $script:LangFake.Store.Installed -contains 'de-DE') $null
+            return $true
+        }
+        $window.UpdateLayout()
+        $nu = Get-AVDTuneLanguageNewUser $script:Machine
+        Test-Smoke 'Language page: language installed from the folder, new users get German (display language, format, keyboard, location), time zone and system locale set' ($script:LangFake.Store.Installed -contains 'de-DE' -and $nu.Ui -eq 'de-DE' -and $nu.Culture -eq 'de-DE' -and $nu.InputTip -eq '0407:00000407' -and $nu.GeoId -eq 94 -and (Get-AVDTuneLanguageState -Machine $script:Machine -L $script:LangFake).SystemLocale -eq 'de-DE') ($nu | ConvertTo-Json -Compress)
+        Test-Smoke 'Language page: the page shows the result, de-DE is now installed and fixed, the task finished' ($ui.TxtLangState.Text -like 'Language and region:*change*restart*' -and -not $script:LangChecks['de-DE'].IsEnabled -and @(Get-AVDTuneUiTasks | Where-Object { $_.Kind -eq 'language-all' -and $_.Status -eq 'succeeded' }).Count -eq 1) $ui.TxtLangState.Text
+        if ($script:LangSmoke -eq 1) { $script:LangSmoke = 2; & $click $ui.BtnLangUndo; return $false }
         $true } }
     @{ Name = 'update block page'; Do = {
         if ($script:OverviewJob -or $script:ReadyJob) { return $false }   # the fake machine is not thread safe: never change it while the overview job reads it

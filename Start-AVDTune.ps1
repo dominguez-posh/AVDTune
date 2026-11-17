@@ -27,7 +27,7 @@ Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, Sys
 $script:AppRoot = $PSScriptRoot
 $script:ToolVersion = (Get-Content -LiteralPath (Join-Path $PSScriptRoot 'VERSION') -Raw -Encoding UTF8).Trim()   # the file VERSION is also the version of the release
 Import-Module (Join-Path $PSScriptRoot 'Modules\AVDTune.psm1') -Force
-foreach ($part in 'Trust', 'Session', 'Snapshot', 'Directory', 'Start', 'UpdateBlock', 'Updates', 'Readiness', 'Watermark', 'Benchmark', 'Shortcut', 'FSLogix', 'Storage', 'Software', 'Office', 'Masking', 'Finish', 'Environment', 'Optimization') { Import-Module (Join-Path $PSScriptRoot "Modules\AVDTune.$part.psm1") -Force }
+foreach ($part in 'Trust', 'Session', 'Snapshot', 'Directory', 'Start', 'UpdateBlock', 'Updates', 'Readiness', 'Watermark', 'Benchmark', 'Shortcut', 'FSLogix', 'Storage', 'Software', 'Office', 'Masking', 'Finish', 'Environment', 'Optimization', 'Language') { Import-Module (Join-Path $PSScriptRoot "Modules\AVDTune.$part.psm1") -Force }
 Import-Module (Join-Path $PSScriptRoot 'Modules\AVDTune.Release.psm1') -Force
 . (Join-Path $PSScriptRoot 'AVDTune-Theme.ps1')
 . (Join-Path $PSScriptRoot 'AVDTune-UiText.ps1')   # the texts of the window (UI\Strings.en.json, UI\Strings.de.json)
@@ -167,6 +167,7 @@ function Confirm-Action([string]$Text, [string]$Title = 'AVDTune') {
 $script:PageTable = @(
     @{ Key = 'Overview'; Title = 'Overview'; Glyph = 0xE80F }
     @{ Key = 'Setup'; Title = 'Setup'; Glyph = 0xE7C3; Phase = 6; Text = 'Guided first setup in a fixed order: language and region for all users, Office, VDI components, optimizations, software and user experience. Each block shows what is done and what is left.' }
+    @{ Key = 'Language'; Title = 'Language and region'; Glyph = 0xF2B7; Phase = 6; Text = 'Language packs and Language Features, system locale, display language, regional format, input, location and time zone for new users.' }
     @{ Key = 'Updates'; Title = 'Updates'; Glyph = 0xE895; Phase = 2 }
     @{ Key = 'Software'; Title = 'Software'; Glyph = 0xE71D; Phase = 4; Text = 'Packages of the PackTune library and the winget and Chocolatey catalog: install, update and remove, and detection of what is already on the master.' }
     @{ Key = 'Office'; Title = 'Office'; Glyph = 0xE8A5; Phase = 6; Text = 'Office Deployment Tool configuration (channel, 64 bit, languages, excluded apps, shared computer licensing, updates off), preview of configuration.xml, install, update and remove, build info.' }
@@ -214,7 +215,7 @@ foreach ($page in $script:PageTable) {
 
 function Show-Page([string]$Key) {
     $script:CurrentPage = $Key
-    $isPlaceholder = $Key -notin 'Overview', 'Protocol', 'Updates', 'UpdateBlock', 'UserExperience', 'Benchmark', 'FSLogix', 'Software', 'Office', 'AppMasking', 'Seal', 'Environment', 'Optimization'
+    $isPlaceholder = $Key -notin 'Overview', 'Protocol', 'Updates', 'UpdateBlock', 'UserExperience', 'Benchmark', 'FSLogix', 'Software', 'Office', 'AppMasking', 'Seal', 'Environment', 'Optimization', 'Language'
     $ui.PageOverview.Visibility = ConvertTo-Vis ($Key -eq 'Overview')
     $ui.PageProtocol.Visibility = ConvertTo-Vis ($Key -eq 'Protocol')
     $ui.PageUpdates.Visibility = ConvertTo-Vis ($Key -eq 'Updates')
@@ -227,6 +228,7 @@ function Show-Page([string]$Key) {
     if ($ui.PageAppMasking) { $ui.PageAppMasking.Visibility = ConvertTo-Vis ($Key -eq 'AppMasking') }
     $ui.PageSeal.Visibility = ConvertTo-Vis ($Key -eq 'Seal')
     if ($ui.PageEnvironment) { $ui.PageEnvironment.Visibility = ConvertTo-Vis ($Key -eq 'Environment') }
+    if ($ui.ContainsKey('PageLanguage')) { $ui.PageLanguage.Visibility = ConvertTo-Vis ($Key -eq 'Language') }
     if ($ui.ContainsKey('PageOptimization')) { $ui.PageOptimization.Visibility = ConvertTo-Vis ($Key -eq 'Optimization') }
     $ui.PagePlaceholder.Visibility = ConvertTo-Vis $isPlaceholder
     $ui["Nav$Key"].IsChecked = $true
@@ -250,6 +252,7 @@ function Show-Page([string]$Key) {
     elseif ($Key -eq 'Seal') { Update-SealView }
     elseif ($Key -eq 'Environment') { Update-EnvView }
     elseif ($Key -eq 'Optimization') { Update-OptView }
+    elseif ($Key -eq 'Language') { Update-LangView }
 }
 
 # ---------------------------------------------------------------- Overview
@@ -413,7 +416,7 @@ function Update-ProtocolView {
     }
     $ui.TxtProtocol.Text = Get-ProtocolShownText
 }
-$ui.CmbNoteCategory.ItemsSource = @('Windows', 'Office', 'Software', 'Optimization', 'FSLogix', 'VDI', 'User experience', 'Update block', 'Benchmark', 'Finish', 'Other')
+$ui.CmbNoteCategory.ItemsSource = @('Windows', 'Office', 'Software', 'Optimization', 'FSLogix', 'Language', 'VDI', 'User experience', 'Update block', 'Benchmark', 'Finish', 'Other')
 $ui.CmbNoteCategory.SelectedIndex = 10
 $ui.CmbNoteType.ItemsSource = @('Note', 'Added', 'Changed', 'Updated', 'Removed')
 $ui.CmbNoteType.SelectedIndex = 0
@@ -472,6 +475,7 @@ $script:ReadyFakeArm = $(if ($script:TestMode) { $script:Services.Arm } else { $
 . (Join-Path $PSScriptRoot 'AVDTune-Seal.ps1')
 . (Join-Path $PSScriptRoot 'AVDTune-Environment.ps1')
 . (Join-Path $PSScriptRoot 'AVDTune-Optimization.ps1')
+. (Join-Path $PSScriptRoot 'AVDTune-Language.ps1')   # the Language and region page (issue 56)
 
 # ---------------------------------------------------------------- theme switch
 function Update-ThemeButton { $ui.BtnTheme.Content = [string][char]$(if ($script:Settings.Theme -eq 'Dark') { 0xE706 } else { 0xE708 }) }
