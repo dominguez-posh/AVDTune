@@ -39,6 +39,7 @@ function Move-Retry([string]$From, [string]$To, [bool]$IsDir) {
         catch [IO.IOException] { if ($i -ge 20) { throw }; Start-Sleep -Milliseconds 250 }
     }
 }
+$script:fsInfo = "fs=$(([IO.DriveInfo]::new([IO.Path]::GetPathRoot($base))).DriveFormat) base=$base"
 function New-Junction([string]$Path, [string]$Target) { [void](New-Item -ItemType Junction -Path $Path -Value $Target) }
 
 function Remove-OldPathVariant([string]$Folder, [scriptblock]$AfterCheck) {
@@ -128,7 +129,7 @@ try {
         Move-Retry $sub "$sub.moved" $true; New-Junction $sub $c.Out; $script:swapped = $true
     }
     try { $r = Remove-AVDTuneTreeSafe -Path $c.Tree } catch { $script:caseErr = $_.Exception.Message } finally { [AVDTune.Native.SafeTree]::Hook = $null }
-    Test-Check 'handles, swap between listing and opening: the junction is opened itself and removed as a link, the moved folder goes too, the target is untouched' ($script:swapped -and $r.Gone -and (Test-Path -LiteralPath $c.Victim) -and -not (Test-Path -LiteralPath $c.Tree)) "swapped=$($script:swapped) gone=$($r.Gone) $($script:caseErr)"
+    Test-Check 'handles, swap between listing and opening: the junction is opened itself and removed as a link, the moved folder goes too, the target is untouched' ($script:swapped -and $r.Gone -and (Test-Path -LiteralPath $c.Victim) -and -not (Test-Path -LiteralPath $c.Tree)) "swapped=$($script:swapped) gone=$($r.Gone) $($script:caseErr) [$($script:fsInfo)]"
 
     # a file swapped after it was opened: the opened file is deleted (wherever it is now), the junction put in its place is removed as a link
     $c = New-Case
@@ -139,7 +140,7 @@ try {
         Move-Retry $Path "$Path.moved" $false; New-Junction $Path $c.Out; $script:swapped = $true
     }
     try { $r = Remove-AVDTuneTreeSafe -Path $c.Tree } catch { $script:caseErr = $_.Exception.Message } finally { [AVDTune.Native.SafeTree]::Hook = $null }
-    Test-Check 'handles, a file swapped for a junction after opening: the target outside is untouched, the tree is gone' ($script:swapped -and $r.Gone -and (Test-Path -LiteralPath $c.Victim) -and -not (Test-Path -LiteralPath $c.Tree)) "swapped=$($script:swapped) gone=$($r.Gone) $($script:caseErr)"
+    Test-Check 'handles, a file swapped for a junction after opening: the target outside is untouched, the tree is gone' ($script:swapped -and $r.Gone -and (Test-Path -LiteralPath $c.Victim) -and -not (Test-Path -LiteralPath $c.Tree)) "swapped=$($script:swapped) gone=$($r.Gone) $($script:caseErr) [$($script:fsInfo)]"
 
     # the wrappers the callers use take the same path
     $c = New-Case
