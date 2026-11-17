@@ -946,6 +946,46 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         Update-OffView; $window.UpdateLayout()
         Save-SmokeShot '61-office-config-light'
         $true } }
+    @{ Name = 'app masking: list (#69)'; Do = {
+        if ($script:OverviewJob -or $script:ReadyJob -or $script:ReadyQueued -or $script:FslJob) { return $false }
+        $click = { param($b) $b.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent))) }
+        $dnx = 'DC=example,DC=test'; $ou = "OU=Groups,$dnx"
+        $grp = @(@{ Name = 'Sales Team'; Sam = 'Sales Team'; Dn = "CN=Sales Team,$ou"; Sid = 'S-1-5-21-1-2-3-1201'; Security = $true }, @{ Name = 'Staff'; Sam = 'Staff'; Dn = "CN=Staff,$ou"; Sid = 'S-1-5-21-1-2-3-1202'; Security = $true })
+        Write-AVDTuneFile (Join-Path $script:StateRoot 'config\directory.json') ([ordered]@{ ReadAt = (Get-Date).ToString('o'); Directory = [ordered]@{ DefaultNamingContext = $dnx; NetBiosName = 'EXAMPLE'; DnsName = 'example.test'; OuTree = @(); Groups = $grp } } | ConvertTo-Json -Depth 12)
+        foreach ($g in $grp) { [void]$script:MaskFake.Ldap.Store.Groups.Add(@{ Name = $g.Sam; Dn = $g.Dn; Sid = $g.Sid; Description = 'x'; Members = @() }) }
+        $script:SmokeMaskGateOpened = $false
+        if (-not (Test-AVDTuneWriteAllowed)) { Open-AVDTuneWriteGate -SnapshotId 'snap-smoke' -ConfirmedBy 'Alex Example'; $script:SmokeMaskGateOpened = $true }
+        Show-Page 'AppMasking'; $window.UpdateLayout()
+        $rows = $script:MaskRowUi
+        Test-Smoke 'App Masking: one row per shortcut of the Public Desktop, read as a task of the task bar' ($ui.PanelMaskList.Children.Count -eq 2 -and $rows.Count -eq 2 -and (Find-Text $ui.PanelMaskList 'Contoso App.lnk') -and (Find-Text $ui.PanelMaskList 'Notes.lnk') -and @($script:UiTasks | Where-Object { $_.Kind -eq 'appmasking-read' -and $_.Status -eq 'succeeded' }).Count -ge 1) $ui.PanelMaskList.Children.Count
+        Test-Smoke 'every row has the three choices of "Visible for", the AD groups of the DC discovery and the Entra note in the group menu' ((@($rows['Notes.lnk'].Mode.ItemsSource) -join '|') -eq 'Everyone|Only members of a group|Nobody except administrators' -and $rows['Notes.lnk'].Group.Items.Count -eq 3 -and [string]$rows['Notes.lnk'].Group.Items[2].Content -like 'Microsoft Entra ID groups: not supported*' -and -not $rows['Notes.lnk'].Group.Items[2].IsEnabled -and $ui.TxtMaskEntra.Text -like '*cloud-only*learn.microsoft.com*') $null
+        Test-Smoke 'the former wizard sits in a collapsed Advanced section' ($ui.ExpMaskAdvanced.Header -eq 'Advanced' -and -not $ui.ExpMaskAdvanced.IsExpanded -and $ui.ExpMaskAdvanced.Content.Children.Count -eq 2) $null
+        Save-SmokeShot '56-appmasking-list-light'
+        $r = $rows['Contoso App.lnk']
+        $r.Mode.SelectedItem = 'Only members of a group'
+        Test-Smoke 'a group needs the menu: the group menu is enabled only for "Only members of a group"' ($r.Group.IsEnabled -and -not $rows['Notes.lnk'].Group.IsEnabled) $null
+        $r.Group.SelectedIndex = 0
+        & $click $r.Preview
+        Test-Smoke 'Preview shows old and new and writes nothing' ($ui.TxtMaskState.Text -like "Preview (nothing written): Contoso App.lnk: now 'Everyone', new 'Only members of: EXAMPLE\Sales Team'*" -and $script:MaskFake.M.Store.Files.Count -eq 0) $ui.TxtMaskState.Text
+        $script:ConfirmAsked = ''
+        & $click $r.Save
+        Test-Smoke 'Save asked first with old and new, then wrote one rule set for this shortcut only (.fxr and .fxa)' ($script:ConfirmAsked -like "*Now: Everyone*New: Only members of: EXAMPLE\Sales Team*" -and $script:MaskFake.M.Store.Files.Count -eq 2 -and @($script:MaskFake.M.Store.Files.Keys | Where-Object { $_ -like '*Desktop-Contoso App.fxr' -or $_ -like '*Desktop-Contoso App.fxa' }).Count -eq 2) $script:ConfirmAsked
+        $r = $script:MaskRowUi['Contoso App.lnk']
+        Test-Smoke 'the list shows the assignment after the re-read (group menu selected, Notes still Everyone)' ($r.Mode.SelectedItem -eq 'Only members of a group' -and $r.Group.SelectedIndex -eq 0 -and $script:MaskRowUi['Notes.lnk'].Mode.SelectedItem -eq 'Everyone') $null
+        $n = $script:MaskRowUi['Notes.lnk']
+        $n.Mode.SelectedItem = 'Nobody except administrators'
+        & $click $n.Save
+        Test-Smoke 'a second row is its own rule set and its own change (4 files), not added to the first' ($script:MaskFake.M.Store.Files.Count -eq 4 -and @($script:MaskFake.M.Store.Files.Keys | Where-Object { $_ -like '*Desktop-Notes.fxr' }).Count -eq 1 -and $script:MaskRowUi['Notes.lnk'].Mode.SelectedItem -eq 'Nobody except administrators') $script:MaskFake.M.Store.Files.Count
+        $script:SmokeMaskStep = 1
+        $true } }
+    @{ Name = 'app masking: undo (#69)'; Do = {
+        if ($script:OverviewJob -or $script:ReadyJob -or $script:ReadyQueued -or $script:FslJob) { return $false }
+        $click = { param($b) $b.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent))) }
+        & $click $ui.BtnMaskUndo
+        Test-Smoke 'Undo puts the last change (Notes) back; the first row keeps its group' ($script:MaskFake.M.Store.Files.Count -eq 2 -and $script:MaskRowUi['Notes.lnk'].Mode.SelectedItem -eq 'Everyone' -and $script:MaskRowUi['Contoso App.lnk'].Mode.SelectedItem -eq 'Only members of a group') $script:MaskFake.M.Store.Files.Count
+        if ($script:SmokeMaskGateOpened) { Close-AVDTuneWriteGate }
+        Show-Page 'Overview'
+        $true } }
     @{ Name = 'start: sign-out and dark'; Do = {
         Open-Stage 'SignIn'; $window.UpdateLayout()
         $ui.BtnStageAction2.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
