@@ -208,7 +208,9 @@ function Get-AVDTuneDirectoryInfo {
     $configNc = [string](Get-AVDTuneAttr $r 'configurationNamingContext')
     if (-not $defaultNc) { throw 'The RootDSE has no defaultNamingContext.' }
     $serverName = [string](Get-AVDTuneAttr $r 'serverName')
-    $site = if ($serverName -match '(?i),CN=Servers,CN=([^,]+),CN=Sites,') { $Matches[1] } else { '' }
+    # serverName comes from the server: length limit and a regex with a timeout
+    $site = ''
+    if ($serverName.Length -le 1024) { $sm = [regex]::Match($serverName, '(?i),CN=Servers,CN=([^,]+),CN=Sites,', [Text.RegularExpressions.RegexOptions]::None, $script:RegexTimeout); if ($sm.Success) { $site = $sm.Groups[1].Value } }
 
     $netbios = ''
     if ($configNc) {
@@ -259,6 +261,82 @@ function Save-AVDTuneDirectoryInfo {
     # The directory as read (OU tree, groups with SIDs) for later phases: config\directory.json in the protected state folder. No credentials.
     param([string]$Root = (Get-AVDTuneRoot), [Parameter(Mandatory)]$Info)
     Write-AVDTuneFile (Join-Path $Root 'config\directory.json') (([ordered]@{ ReadAt = (Get-Date).ToString('o'); Directory = $Info }) | ConvertTo-Json -Depth 12)
+}
+
+#endregion
+
+#region join state (issue #64: read only)
+
+$script:RegexTimeout = [TimeSpan]::FromSeconds(2)
+$script:MaxDsregChars = 200000
+
+function Test-AVDTuneJoinDomainName([string]$Name) {
+    # A detected domain name is data: a DNS name (letters, digits, hyphen, dots), no IP address, no path or filter characters
+    $Name = ([string]$Name).Trim().TrimEnd('.')
+    ($Name.Length -ge 1) -and (Test-AVDTuneDcServer $Name) -and -not (Test-AVDTuneIpAddress $Name)
+}
+
+function Get-AVDTuneJoinState {
+    <#
+        What the master says about its own join, read only and in this order: Win32_ComputerSystem (PartOfDomain, Domain), dsregcmd /status
+        (AzureAdJoined, DomainJoined; started through the machine adapter, i.e. New-AVDTuneChildStartInfo with the full system path), and for a domain
+        member the DC locator of Windows. Nothing is written, no credentials are used. Every value is validated (domain and DC names, addresses);
+        a value that fails is dropped and named in Problems.
+        Kind: Hybrid (domain and Entra), AdDs (domain only), EntraOnly, NotJoined, Unknown (nothing readable).
+        NeedsDc: a domain member has a domain controller to read. Returns Kind, PartOfDomain, DomainName, EntraJoined, NeedsDc, Reason, Dc (Name, Address, Site or $null), Facts, Problems.
+    #>
+    param([Parameter(Mandatory)]$Machine)
+    $problems = New-Object System.Collections.ArrayList; $facts = New-Object System.Collections.ArrayList
+    $partOf = $null; $domain = ''
+    $cs = $null
+    if ($Machine.PSObject.Properties['ComputerSystem']) { try { $cs = & $Machine.ComputerSystem } catch { } }
+    if ($cs -and (Get-AVDTuneProp $cs 'PartOfDomain') -is [bool]) {
+        $partOf = [bool](Get-AVDTuneProp $cs 'PartOfDomain')
+        if ($partOf) {
+            $d = ([string](Get-AVDTuneProp $cs 'Domain')).Trim().TrimEnd('.').ToLowerInvariant()
+            if (Test-AVDTuneJoinDomainName $d) { $domain = $d; [void]$facts.Add("Win32_ComputerSystem: member of the domain $d") }
+            else { [void]$problems.Add('The domain name of Win32_ComputerSystem is not a valid DNS name; it is not used.') }
+        }
+        else { [void]$facts.Add('Win32_ComputerSystem: not a member of a domain') }
+    }
+    else { [void]$problems.Add('Win32_ComputerSystem gave no usable answer.') }
+    $aad = $null; $dsDomainJoined = $null
+    $dsreg = $null
+    try { $dsreg = & $Machine.Run (Join-Path (Get-AVDTuneSystemFolder System) 'dsregcmd.exe') @('/status') 30 } catch { }
+    if ($dsreg -and [int](Get-AVDTuneProp $dsreg 'ExitCode') -eq 0 -and [string](Get-AVDTuneProp $dsreg 'Output')) {
+        $text = [string]$dsreg.Output; if ($text.Length -gt $script:MaxDsregChars) { $text = $text.Substring(0, $script:MaxDsregChars) }
+        try {
+            $aad = [regex]::IsMatch($text, '(?im)^\s*AzureAdJoined\s*:\s*YES\s*$', [Text.RegularExpressions.RegexOptions]::None, $script:RegexTimeout)
+            $dsDomainJoined = [regex]::IsMatch($text, '(?im)^\s*DomainJoined\s*:\s*YES\s*$', [Text.RegularExpressions.RegexOptions]::None, $script:RegexTimeout)
+            [void]$facts.Add("dsregcmd /status: Microsoft Entra joined $(if ($aad) { 'yes' } else { 'no' }), domain joined $(if ($dsDomainJoined) { 'yes' } else { 'no' })")
+        }
+        catch { $aad = $null; $dsDomainJoined = $null; [void]$problems.Add('The output of dsregcmd /status could not be read in time.') }
+    }
+    else { [void]$problems.Add('dsregcmd /status gave no answer.') }
+    if ($null -eq $partOf -and $dsDomainJoined) { $partOf = $true }   # Win32_ComputerSystem unreadable, dsregcmd says domain joined (the name stays unknown)
+    $kind = if ($partOf -and $aad) { 'Hybrid' } elseif ($partOf) { 'AdDs' } elseif ($aad) { 'EntraOnly' } elseif ($partOf -eq $false -or $aad -eq $false) { 'NotJoined' } else { 'Unknown' }
+    $dc = $null
+    if ($kind -in 'Hybrid', 'AdDs' -and $domain -and $Machine.PSObject.Properties['DcLocate']) {
+        $found = $null; try { $found = & $Machine.DcLocate $domain } catch { }
+        if ($found) {
+            $name = ([string](Get-AVDTuneProp $found 'Name')).Trim().TrimEnd('.'); $addr = ([string](Get-AVDTuneProp $found 'Address')).Trim(); $site = ([string](Get-AVDTuneProp $found 'Site')).Trim()
+            $okName = $name -and (Test-AVDTuneDcServer $name) -and -not (Test-AVDTuneIpAddress $name)
+            $okAddr = $addr -and (Test-AVDTuneIpAddress $addr) -and (Test-AVDTuneDcServer $addr)
+            if (-not $okName -and $name) { [void]$problems.Add('The domain controller name of the DC locator is not valid; it is not used.') }
+            if (-not $okAddr -and $addr) { [void]$problems.Add('The domain controller address of the DC locator is not valid; it is not used.') }
+            if ($site -notmatch '^[A-Za-z0-9._ -]{0,64}$') { $site = '' }
+            if ($okName -or $okAddr) { $dc = [pscustomobject]@{ Name = $(if ($okName) { $name.ToLowerInvariant() } else { '' }); Address = $(if ($okAddr) { $addr } else { '' }); Site = $site }; [void]$facts.Add("DC locator: $(if ($okName) { $name.ToLowerInvariant() } else { $addr })$(if ($site) { ", site $site" })") }
+        }
+        else { [void]$problems.Add("The DC locator found no domain controller for $domain.") }
+    }
+    $reason = switch ($kind) {
+        'Hybrid' { "This master is joined to the domain$(if ($domain) { " $domain" }) and to Microsoft Entra ID." }
+        'AdDs' { "This master is joined to the domain$(if ($domain) { " $domain" })." }
+        'EntraOnly' { 'This master is joined to Microsoft Entra ID only, not to a domain (dsregcmd /status).' }
+        'NotJoined' { 'This master is not joined to a domain or to Microsoft Entra ID (Win32_ComputerSystem, dsregcmd /status).' }
+        default { 'The join state of this master could not be read (Win32_ComputerSystem, dsregcmd /status).' }
+    }
+    [pscustomobject]@{ Kind = $kind; PartOfDomain = [bool]$partOf; DomainName = $domain; EntraJoined = [bool]$aad; NeedsDc = ($kind -in 'Hybrid', 'AdDs'); Reason = $reason; Dc = $dc; Facts = @($facts); Problems = @($problems) }
 }
 
 #endregion
@@ -370,4 +448,4 @@ function New-AVDTuneLdapAdapter {
 #endregion
 
 Export-ModuleMember -Function Test-AVDTuneIpAddress, Get-AVDTuneLdapRiskText, Test-AVDTuneDcServer, Test-AVDTuneDomainUser, New-AVDTuneLdapOptions, Assert-AVDTuneLdapOptions, ConvertTo-AVDTuneLdapFilterValue, Connect-AVDTuneDirectory,
-    Disconnect-AVDTuneDirectory, Get-AVDTuneDirectoryInfo, Save-AVDTuneDirectoryInfo, ConvertTo-AVDTuneSid, Get-AVDTuneOuTree, Get-AVDTuneLevelName, New-AVDTuneLdapAdapter
+    Disconnect-AVDTuneDirectory, Get-AVDTuneDirectoryInfo, Save-AVDTuneDirectoryInfo, ConvertTo-AVDTuneSid, Get-AVDTuneOuTree, Get-AVDTuneLevelName, New-AVDTuneLdapAdapter, Get-AVDTuneJoinState, Test-AVDTuneJoinDomainName

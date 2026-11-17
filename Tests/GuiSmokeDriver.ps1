@@ -241,67 +241,32 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         $refused = try { [void](Invoke-AVDTuneStep -Step (New-AVDTuneStep -Id 'setup.smoke' -Section Setup -Title 'x' -Test { $true } -Apply { }) -Machine $script:Machine -Mode Apply); $null } catch { $_.Exception.Message }
         Test-Smoke 'a change of the machine is refused through the engine while the gate is closed' ($refused -like '*snapshot gate*') $refused
         $true } }
-    @{ Name = 'start: questions'; Do = {
-        # the first run opened the questions by itself
-        Test-Smoke 'first start without environment.json: the questions are open, 6 questions and the fields (snapshot name pattern with its default)' ($script:OpenStage -eq 'Environment' -and $ui.BoxStage.Visibility -eq 'Visible' -and $script:Form.Combos.Count -eq 6 -and $script:Form.Texts.Count -eq 4 -and $script:Form.Texts['SnapshotNamePattern'].Text -eq '{OsDisk}-{DD}.{MM}.{YYYY}-{N}' -and -not (Test-Path (Join-Path $script:StateRoot 'environment.json'))) $script:OpenStage
-        Test-Smoke 'the four stages are listed: questions to do, the rest waiting' ($ui.PanelStages.Children.Count -eq 4 -and (($script:Stages | ForEach-Object Status) -join ',') -eq 'Pending,Locked,Locked,Locked') (($script:Stages | ForEach-Object Status) -join ',')
-        Test-Smoke 'no tenant in the questions (issue #11): no tenant field, no forget box before a tenant exists, the client ID is optional' (-not $script:Form.Texts.ContainsKey('TenantId') -and $null -eq $script:Form.ForgetTenant -and -not (Find-Text $ui.PanelStageBody 'Tenant (domain or ID)') -and (Find-Text $ui.PanelStageBody 'Client ID of the app registration (optional)') -and $script:Form.Texts['ClientId'].Text -eq '' -and $script:Form.Preview.Text -like "*No client ID: at the sign-in AVDTune creates*" -and $script:Form.Preview.Text -like '*tenant is not asked*') (@($script:Form.Texts.Keys) -join ',')
-        Save-SmokeShot '11-start-questions'
-        # an invalid combination is explained and cannot be saved
-        $set = { param($key, $text) $script:Form.Combos[$key].Control.SelectedItem = $text }
-        & $set 'Join' 'Microsoft Entra hybrid join'
-        Test-Smoke 'hybrid join without a domain controller: problem shown, save disabled' ($script:Form.Preview.Text -like '*Problem:*domain controller*' -and -not $ui.BtnStageAction.IsEnabled) $script:Form.Preview.Text
-        Save-SmokeShot '12-start-questions-problem'
-        & $set 'Dc' 'AD DS on premises (VPN or ExpressRoute)'
-        & $set 'Identities' 'Synchronized (Entra Connect / Cloud Sync)'
-        # the client ID stays empty: the sign-in creates AVDTune's own app registration (fake Graph)
-        $script:Form.Texts['VNet'].Text = 'vnet-example'; $script:Form.Texts['Subnet'].Text = 'snet-avd'
-        Test-Smoke 'hybrid with an on-premises DC is valid and the preview names the domain step and Azure Files with AD DS' ($ui.BtnStageAction.IsEnabled -and $script:Form.Preview.Text -like '*Domain step*' -and $script:Form.Preview.Text -like '*Azure Files with AD DS*') $script:Form.Preview.Text
-        Save-SmokeShot '13-start-questions-hybrid'
-        $ui.BtnStageAction.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
-        $env1 = Get-AVDTuneEnvironment $script:StateRoot
-        Test-Smoke 'saving writes environment.json (no secret), closes the form and moves on to the sign-in' ($env1.Answers.Join -eq 'Hybrid' -and $env1.Answers.Dc -eq 'AdDsOnPrem' -and $env1.SignIn.TenantId -eq '' -and $env1.SignIn.ClientId -eq '' -and $ui.BoxStage.Visibility -eq 'Collapsed' -and (($script:Stages | ForEach-Object Status) -join ',') -eq 'Done,Pending,Locked,Locked') (($script:Stages | ForEach-Object Status) -join ',')
-        Test-Smoke 'first run in a development copy: no shortcut question, the hint to install first (issue #15)' ($script:LastToast -like '*desktop shortcut can be created once AVDTune is installed*' -and $script:OpenStage -ne 'Shortcut') $script:LastToast
-        Test-Smoke 'the protocol has the answered questions' (@($script:Protocol.Actions | Where-Object { $_.Subject -like 'First-run questions answered*' }).Count -eq 1) $null
-        # no FSLogix: the two pages disappear from the navigation
-        $none = Get-AVDTuneEnvironmentAnswers (Get-AVDTuneEnvironment $script:StateRoot); $none.Profiles = 'None'
-        [void](Save-AVDTuneEnvironment -Root $script:StateRoot -Answers $none -User 'smoke'); Update-StartView
-        Test-Smoke 'without FSLogix the FSLogix and App Masking pages are hidden' ($ui.NavFSLogix.Visibility -eq 'Collapsed' -and $ui.NavAppMasking.Visibility -eq 'Collapsed' -and $ui.NavUpdates.Visibility -eq 'Visible') $null
-        $none.Profiles = 'AzureFiles'; [void](Save-AVDTuneEnvironment -Root $script:StateRoot -Answers $none -User 'smoke'); Update-StartView
-        Test-Smoke 'with FSLogix they are back; a change after a version exists is a change log entry' ($ui.NavFSLogix.Visibility -eq 'Visible' -and @(Get-AVDTuneChangeLog -Root $script:StateRoot | Where-Object { $_.Component -eq 'Environment' }).Count -eq 2) $null
-        $true } }
-    @{ Name = 'shortcut question'; Do = {
-        # issue #15: the installed copy asks once; the shortcut goes into the desktop folder of the test state, never the real desktop
-        $script:ShortcutTestMode = 'Installed'
-        $desk = Join-Path $script:StateRoot 'desktop-test'
-        Test-Smoke 'installed copy, not answered: the question opens below the stages' ((Show-ShortcutQuestion) -and $script:OpenStage -eq 'Shortcut' -and $ui.BoxStage.Visibility -eq 'Visible' -and $ui.TxtStageTitle.Text -eq 'Desktop shortcut' -and $ui.BtnStageAction2.Visibility -eq 'Visible' -and (Find-Text $ui.PanelStageBody 'as administrator (Windows asks for confirmation)')) $script:OpenStage
-        $window.UpdateLayout(); $ui.BoxStage.BringIntoView(); $window.UpdateLayout()
-        Save-SmokeShot '13b-shortcut-question'
-        $ui.BtnStageAction.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
-        $link = Get-AVDTuneDesktopShortcut -Folder $desk -InstallRoot $script:RelInstallRoot
-        Test-Smoke 'Create: AVDTune.lnk in the test desktop, runs as administrator, points to the launcher; the answer is stored and the card closes' ($link -and $link.Matches -and $link.RunAs -and (Get-AVDTuneShortcutAnswer -Root $script:StateRoot) -eq 'Yes' -and $ui.BoxStage.Visibility -eq 'Collapsed' -and $desk -like "$($script:StateRoot)*") ($link | Out-String)
-        Test-Smoke 'answered: not asked again' (-not (Show-ShortcutQuestion) -and $script:OpenStage -ne 'Shortcut') $null
-        Test-Smoke 'the Integrity and updates card offers Remove' ([string]$ui.BtnRelShortcut.Content -eq 'Remove desktop shortcut' -and $ui.TxtRelShortcut.Text -like 'Desktop shortcut on your desktop*') $ui.TxtRelShortcut.Text
-        $ui.BtnRelShortcut.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
-        Test-Smoke 'Remove deletes it; the card offers Create again' (-not (Test-Path (Join-Path $desk 'AVDTune.lnk')) -and [string]$ui.BtnRelShortcut.Content -eq 'Create desktop shortcut') $null
-        $script:ShortcutTestMode = 'Development'; Update-ShortcutRow
-        Test-Smoke 'not installed: Create is off and the card says to install first' (-not $ui.BtnRelShortcut.IsEnabled -and $ui.TxtRelShortcut.Text -like '*install AVDTune first*') $ui.TxtRelShortcut.Text
-        $script:ShortcutTestMode = ''; Update-ShortcutRow
-        Test-Smoke 'the protocol has the shortcut created and removed' (@($script:Protocol.Actions | Where-Object { $_.Subject -eq 'Desktop shortcut created' }).Count -eq 1 -and @($script:Protocol.Actions | Where-Object { $_.Subject -eq 'Desktop shortcut removed' }).Count -eq 1) $null
-        $true } }
     @{ Name = 'start: sign-in'; Do = {
+        # issue #64: the sign-in is the first stage and needs no answer; the master is a domain member for the join detection that follows it (the fake machine, restored after the domain step)
+        $script:Machine.Store.ComputerSystem = [pscustomobject]@{ PartOfDomain = $true; Domain = 'Example.Test'; DomainRole = 3 }
+        $script:Machine.Store.DcLocate = [pscustomobject]@{ Name = ''; Address = '10.0.0.10'; Site = 'Default-First-Site-Name' }
+        Test-Smoke 'first start without environment.json: the stages are in the new order (sign-in, domain, questions, snapshot), only the sign-in is to do, nothing is asked before it' (-not (Test-Path (Join-Path $script:StateRoot 'environment.json')) -and (($script:Stages | ForEach-Object Id) -join ',') -eq 'SignIn,Domain,Environment,Snapshot' -and (($script:Stages | ForEach-Object Status) -join ',') -eq 'Pending,Locked,Locked,Locked' -and $ui.PanelStages.Children.Count -eq 4) (($script:Stages | ForEach-Object Status) -join ',')
         Open-Stage 'SignIn'; $window.UpdateLayout()
         Test-Smoke 'sign-in form lists the four tokens with their permissions' ($ui.PanelStageBody.Children.Count -ge 5 -and (Find-Text $ui.PanelStageBody 'Sites') -and (Find-Text $ui.PanelStageBody 'Azure Resource Manager (snapshot, VM size, region): user_impersonation')) $null
-        Test-Smoke 'sign-in form without tenant and client ID: tenant from the sign-in, own app registration announced, account field' ((Find-Text $ui.PanelStageBody 'Taken from the sign-in (tid of the token) and saved') -and (Find-Text $ui.PanelStageBody "None yet: AVDTune creates its own app registration 'AVDTune' first") -and $script:Form.Account -and $script:Form.Account.Text -eq '') $null
+        Test-Smoke 'sign-in form without tenant and client ID: tenant from the sign-in, own app registration announced, account field' ((Find-Text $ui.PanelStageBody 'Taken from the sign-in (tid of the token) and saved') -and (Find-Text $ui.PanelStageBody "None yet: AVDTune creates its own app registration 'AVDTune' first") -and $script:Form.Account -and $script:Form.Account.Text -eq '' -and $script:Form.ClientId -and $script:Form.ClientId.Text -eq '' -and (Find-Text $ui.PanelStageBody 'Client ID of an existing app registration (optional)')) $null
         Save-SmokeShot '14-start-signin'
         # a wrong account is refused before any sign-in window
         $script:Form.Account.Text = 'admin'
         $ui.BtnStageAction.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
         Test-Smoke 'an account that is not name@domain is refused in the form, nothing signed in' ($ui.TxtStageMessage.Text -like '*name@domain*' -and @($script:Services.Auth.Log | Where-Object { $_ -like 'SignIn*' }).Count -eq 0) $ui.TxtStageMessage.Text
+        # a client ID typed in the form is checked before any sign-in window: not a GUID, and Microsoft's own setup app
+        $script:Form.Account.Text = ''
+        $script:Form.ClientId.Text = 'abc'
+        $ui.BtnStageAction.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
+        $msgGuid = $ui.TxtStageMessage.Text
+        $script:Form.ClientId.Text = '14d82eec-204b-4c2f-b7e8-296a70dab67e'
+        $ui.BtnStageAction.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
+        Test-Smoke 'a client ID that is no GUID, and the setup app of Microsoft, are refused in the form, nothing signed in' ($msgGuid -like '*must be a GUID*' -and $ui.TxtStageMessage.Text -like '*setup app*' -and @($script:Services.Auth.Log | Where-Object { $_ -like 'SignIn*' }).Count -eq 0) "$msgGuid | $($ui.TxtStageMessage.Text)"
+        $script:Form.ClientId.Text = ''
         $script:Form.Account.Text = 'admin.example@contoso.example'
         $script:ConfirmAsked = ''
         $ui.BtnStageAction.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
-        $envSigned = Get-AVDTuneEnvironment $script:StateRoot
+        $envSigned = Get-AVDTuneEnvironmentFile $script:StateRoot   # no answers yet: the file only has the sign-in target
         $fakeApp = @($script:Services.Auth.Store.Apps)[0]
         Test-Smoke 'setup asked first and named the consent that stays with Microsoft Graph Command Line Tools' ($script:ConfirmAsked -like "*Microsoft Graph Command Line Tools*Application.ReadWrite.All*consent for your account only*takes these two out of your own consent*whole organization*") $script:ConfirmAsked
         Test-Smoke 'setup sign-in (fake) at organizations with the account, registration AVDTune created, then the normal sign-in with it' (@($script:Services.Auth.Log | Where-Object { $_ -like 'SignIn tenant=organizations client=setup hint=admin.example@contoso.example*' }).Count -eq 1 -and $fakeApp -and @($script:Services.Auth.Log | Where-Object { $_ -like "SignIn tenant=11111111-2222-3333-4444-555555555555 client=$($fakeApp.appId) hint=admin.example@contoso.example*" }).Count -eq 1) ($script:Services.Auth.Log -join ' | ')
@@ -310,16 +275,17 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         $fakeSp = @($script:Services.Auth.Store.ServicePrincipals | Where-Object { $_.appId -eq $fakeApp.appId })[0]
         Test-Smoke 'the enterprise app requires an assignment, the admin is assigned and consented for himself only' ($fakeSp.appRoleAssignmentRequired -eq $true -and @($fakeSp.Assigned).Count -eq 1 -and @($script:Services.Auth.Store.Grants | Where-Object { $_.clientId -eq $fakeSp.id -and $_.consentType -eq 'Principal' }).Count -eq 3 -and @($script:Services.Auth.Store.Grants | Where-Object { $_.consentType -eq 'AllPrincipals' }).Count -eq 0) $null
         $info = Get-AVDTuneSessionInfo $script:StartContext.Session
-        Test-Smoke 'sign-in (fake): connected, four audiences, stage Done, domain stage open' ($info.Connected -and $info.Audiences.Count -eq 4 -and (($script:Stages | ForEach-Object Status) -join ',') -eq 'Done,Done,Pending,Locked') (($script:Stages | ForEach-Object Status) -join ',')
+        Test-Smoke 'sign-in (fake): connected, four audiences, stage Done, the domain step is next (the master is a domain member), the questions and the snapshot wait' ($info.Connected -and $info.Audiences.Count -eq 4 -and (($script:Stages | ForEach-Object Status) -join ',') -eq 'Done,Pending,Locked,Locked' -and $script:StartContext.Detection.Kind -eq 'AdDs') (($script:Stages | ForEach-Object Status) -join ',')
         Test-Smoke 'the protocol names the account and holds no token' (@($script:Protocol.Actions | Where-Object { $_.Subject -eq 'Microsoft 365 and Azure sign-in' -and $_.Note -like 'Signed in as admin.example@*' -and $_.Note -notmatch 'eyJ' }).Count -eq 1) $null
-        # the questions now show the saved tenant only as "forget"
-        Open-Stage 'Environment'; $window.UpdateLayout()
-        Test-Smoke 'with a saved tenant the questions offer only to forget it, still no tenant field' ($script:Form.ForgetTenant -and -not $script:Form.ForgetTenant.IsChecked -and [string]$script:Form.ForgetTenant.Content -like '*11111111-2222-3333-4444-555555555555*' -and -not $script:Form.Texts.ContainsKey('TenantId')) $null
-        Save-SmokeShot '14b-start-questions-tenant'
-        Close-Stage
+        # the sign-in came before any answer: tenant and client ID are saved, the file has no answers, and the join state was read right after it
+        Test-Smoke 'the sign-in saved tenant and client ID without any answer; the join state of the master was read (read only) and is in the protocol' ($envSigned.SignIn.TenantId -and $null -eq (Get-AVDTuneEnvironment $script:StateRoot) -and $null -eq (Get-AVDTuneProp $envSigned 'Answers') -and @($script:Protocol.Actions | Where-Object { $_.Subject -eq 'Join state of this master read' -and $_.Note -like '*joined to the domain example.test*Win32_ComputerSystem*' }).Count -eq 1) ($envSigned | ConvertTo-Json -Compress -Depth 3)
+        Save-SmokeShot '14c-start-after-signin'
         $true } }
     @{ Name = 'start: domain'; Do = {
         Open-Stage 'Domain'; $window.UpdateLayout()
+        Test-Smoke 'domain stage after the sign-in: the join state says domain member, the intro names it, the server of the DC locator is suggested with its source' ($script:Form.Server.Text -eq '10.0.0.10' -and $ui.TxtStageTitle.Text -eq '2. Domain controller' -and $ui.TxtStageIntro.Text -like 'This master is joined to the domain example.test.*' -and (Find-Text $ui.PanelStageBody 'Suggested by the DC locator of Windows for the domain example.test (site Default-First-Site-Name). Change it if another controller should be read.')) $script:Form.Server.Text
+        $envLocator = Get-AVDTuneEnvironmentFile $script:StateRoot
+        Test-Smoke 'the DC locator suggestion alone, without a click: no probe, no bind, no search, no pin, no Dc server saved (issue #64, security review)' (@($script:Services.Ldap.Log).Count -eq 0 -and @($script:Services.Ldap.Opened).Count -eq 0 -and -not (Get-AVDTuneProp $envLocator 'Dc') ) ((@($script:Services.Ldap.Log) -join ' | ') + ' ' + ($envLocator | ConvertTo-Json -Compress -Depth 5))
         $script:Form.Server.Text = '10.0.0.10'; $script:Form.User.Text = 'EXAMPLE\svc-avdtune'
         $ui.BtnStageAction.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
         Test-Smoke 'connect without a password is refused with a message' ($ui.TxtStageMessage.Text -like '*password*') $ui.TxtStageMessage.Text
@@ -333,7 +299,7 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         $opened = $script:Services.Ldap.Opened
         Test-Smoke 'pinned, then connected over LDAPS 636 and read: domain, OUs, groups with SIDs, site' ($opened.Count -eq 1 -and $opened[0].Port -eq 636 -and $opened[0].AuthType -eq 'Negotiate' -and $script:Form.Summary.Text -like '*example.test*NetBIOS EXAMPLE*' -and $script:Form.Summary.Text -like '*Default-First-Site-Name*' -and $script:Form.Summary.Text -like '*AVD-Users  S-1-5-21-*-1104*') $script:Form.Summary.Text
         Test-Smoke 'the password is cleared after the read' ($script:Form.PasswordBox.SecurePassword.Length -eq 0) $null
-        Test-Smoke 'domain stage Done with the facts, environment.json has the pin and the account name but no password' ((($script:Stages | ForEach-Object Status) -join ',') -eq 'Done,Done,Done,Pending' -and ((Get-Content (Join-Path $script:StateRoot 'environment.json') -Raw) -notmatch 'Not-A-Real-Password') -and (Get-AVDTuneEnvironment $script:StateRoot).Dc.Pins.'10.0.0.10'.Sha256 -and (Get-AVDTuneEnvironment $script:StateRoot).Dc.User -eq 'EXAMPLE\svc-avdtune') $null
+        Test-Smoke 'domain stage Done with the facts, environment.json has the pin and the account name but no password' ((($script:Stages | ForEach-Object Status) -join ',') -eq 'Done,Done,Pending,Locked' -and ((Get-Content (Join-Path $script:StateRoot 'environment.json') -Raw) -notmatch 'Not-A-Real-Password') -and (Get-AVDTuneEnvironmentFile $script:StateRoot).Dc.Pins.'10.0.0.10'.Sha256 -and (Get-AVDTuneEnvironmentFile $script:StateRoot).Dc.User -eq 'EXAMPLE\svc-avdtune' -and $null -eq (Get-AVDTuneEnvironment $script:StateRoot)) (($script:Stages | ForEach-Object Status) -join ',')
         Save-SmokeShot '16-start-domain-read'
         # the certificate changes: the connection stops
         $script:Services.Ldap.Store.Servers['10.0.0.10'].Cert = @{ Sha256 = ('CD' * 32); Thumbprint = ('CD' * 20); Subject = 'CN=dc1.example.test'; Issuer = 'CN=Other CA'; NotBefore = ''; NotAfter = '' }
@@ -362,6 +328,66 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         $last = $script:Services.Ldap.Opened[$script:Services.Ldap.Opened.Count - 1]
         Test-Smoke 'after the confirmation: 389 with Kerberos, the confirmation is in the protocol' ($script:Services.Ldap.Opened.Count -eq $opened + 1 -and $last.Port -eq 389 -and $last.AuthType -eq 'Kerberos' -and @($script:Protocol.Actions | Where-Object { $_.Subject -like 'Domain controller without LDAPS confirmed*' -and $_.Note -like 'Confirmed by *' }).Count -eq 1) ($last | ConvertTo-Json -Compress)
         Close-Stage
+        # the fake master is not a domain member any more for the rest of the run (the join state was read already; the domain step is done)
+        $script:Machine.Store.ComputerSystem = [pscustomobject]@{ PartOfDomain = $false; Domain = 'WORKGROUP'; DomainRole = 2 }; $script:Machine.Store.DcLocate = $null
+        $true } }
+    @{ Name = 'start: questions'; Do = {
+        # issue #64: the questions come after the sign-in and the domain step; what Azure (GET only) and the domain showed is suggested with its source, nothing counts before the confirmation
+        $script:Services.Arm.Store.StorageAccounts = @(@{ Name = 'stprofilesexample'; Kind = 'FileStorage'; Public = 'Disabled'; PrivateEndpoints = 1 }); $script:Services.Arm.Store.DnsZones = @('privatelink.file.core.windows.net')
+        $armBefore = $script:Services.Arm.Log.Count
+        Open-Stage 'Environment'; $window.UpdateLayout()
+        $armUsed = @($script:Services.Arm.Log | Select-Object -Skip $armBefore)
+        Test-Smoke 'questions open after the domain step: 6 questions and 3 fields (the client ID is entered at the sign-in), nothing is saved yet (no answers in environment.json)' ($script:OpenStage -eq 'Environment' -and $ui.BoxStage.Visibility -eq 'Visible' -and $script:Form.Combos.Count -eq 6 -and $script:Form.Texts.Count -eq 3 -and -not $script:Form.Texts.ContainsKey('ClientId') -and $script:Form.Texts['SnapshotNamePattern'].Text -eq '{OsDisk}-{DD}.{MM}.{YYYY}-{N}' -and $null -eq (Get-AVDTuneEnvironment $script:StateRoot) -and $null -eq (Get-AVDTuneProp (Get-AVDTuneEnvironmentFile $script:StateRoot) 'Answers')) $script:OpenStage
+        Test-Smoke 'suggested from the domain and Azure and marked as such: join, identities, network, profiles, endpoint, DNS zone preselected, each with its source' ($script:Form.Combos['Join'].Control.SelectedItem -eq 'AD DS join only' -and $script:Form.Combos['Identities'].Control.SelectedItem -eq 'Synchronized (Entra Connect / Cloud Sync)' -and $script:Form.Combos['Profiles'].Control.SelectedItem -eq 'FSLogix profile container on Azure Files' -and $script:Form.Combos['Endpoint'].Control.SelectedItem -eq 'Private endpoint (recommended)' -and $script:Form.Combos['DnsZone'].Control.SelectedItem -eq 'In Azure (private DNS zone)' -and $script:Form.Texts['VNet'].Text -eq 'vnet-example' -and $script:Form.Texts['Subnet'].Text -eq 'snet-avd' -and $script:Form.SourceLabels['Join'].Text -like 'Suggested, counts after you confirm: *Win32_ComputerSystem*' -and $script:Form.SourceLabels['VNet'].Text -like '*Azure Resource Manager*' -and $script:Form.SourceLabels['Profiles'].Text -like '*stprofilesexample*') ($script:Form.SourceLabels.Keys | ForEach-Object { "$_=$($script:Form.SourceLabels[$_].Text)" })
+        Test-Smoke 'the ambiguous question is empty and says why; the form cannot be confirmed yet' ($null -eq $script:Form.Combos['Dc'].Control.SelectedItem -and $script:Form.SourceLabels['Dc'].Text -like 'Please answer: *Azure or on premises*' -and $script:Form.Preview.Text -like 'Still to answer: Domain controller*' -and -not $ui.BtnStageAction.IsEnabled) $script:Form.Preview.Text
+        Test-Smoke 'Azure was read with GET requests only, and the protocol names the suggestions' ($armUsed.Count -ge 4 -and @($armUsed | Where-Object { $_ -notlike 'GET *' }).Count -eq 0 -and @($script:Protocol.Actions | Where-Object { $_.Subject -eq 'Suggestions for the first-run questions' -and $_.Note -like '*value(s) suggested*Azure Resource Manager GET*' }).Count -eq 1) ($armUsed -join ' | ')
+        Save-SmokeShot '11-start-questions'
+        # an invalid combination is explained and cannot be saved
+        $set = { param($key, $text) $script:Form.Combos[$key].Control.SelectedItem = $text }
+        & $set 'Dc' 'None'
+        Test-Smoke 'AD DS join without a domain controller: problem shown, save disabled' ($script:Form.Preview.Text -like '*Problem:*domain controller*' -and -not $ui.BtnStageAction.IsEnabled) $script:Form.Preview.Text
+        Save-SmokeShot '12-start-questions-problem'
+        & $set 'Dc' 'AD DS on premises (VPN or ExpressRoute)'
+        & $set 'Join' 'Microsoft Entra hybrid join'   # the suggestion (AD DS only) is changed by the administrator
+        Test-Smoke 'a changed suggestion says so and keeps what was suggested; the typed answer says so' ($script:Form.SourceLabels['Join'].Text -like 'Changed by you (suggested AdDs: *' -and $script:Form.SourceLabels['Dc'].Text -eq 'Typed by you.') ($script:Form.SourceLabels['Join'].Text)
+        Test-Smoke 'hybrid with an on-premises DC is valid and the preview names the domain step and Azure Files with AD DS' ($ui.BtnStageAction.IsEnabled -and $script:Form.Preview.Text -like '*Domain step*' -and $script:Form.Preview.Text -like '*Azure Files with AD DS*' -and $script:Form.Preview.Text -like '*Nothing is saved before you confirm*') $script:Form.Preview.Text
+        Test-Smoke 'still nothing saved while the form is filled' ($null -eq (Get-AVDTuneEnvironment $script:StateRoot)) $null
+        Save-SmokeShot '13-start-questions-hybrid'
+        $ui.BtnStageAction.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
+        $env1 = Get-AVDTuneEnvironment $script:StateRoot
+        Test-Smoke 'confirming writes the answers into environment.json (no secret) with the source of each, keeps the sign-in and the DC pin, closes the form' ($env1.Answers.Join -eq 'Hybrid' -and $env1.Answers.Dc -eq 'AdDsOnPrem' -and $env1.Answers.Profiles -eq 'AzureFiles' -and $env1.Answers.Network.VNet -eq 'vnet-example' -and $env1.SignIn.TenantId -eq '11111111-2222-3333-4444-555555555555' -and $env1.SignIn.ClientId -and $env1.Dc.Pins.'10.0.0.10'.Sha256 -and $env1.Sources.Join -like 'Typed by the administrator (suggested AdDs*' -and $env1.Sources.Profiles -like 'Confirmed: *' -and $env1.Sources.Dc -eq 'Typed by the administrator' -and $ui.BoxStage.Visibility -eq 'Collapsed' -and (($script:Stages | ForEach-Object Status) -join ',') -eq 'Done,Done,Done,Pending') (($script:Stages | ForEach-Object Status) -join ',')
+        Test-Smoke 'first run in a development copy: no shortcut question, the hint to install first (issue #15)' ($script:LastToast -like '*desktop shortcut can be created once AVDTune is installed*' -and $script:OpenStage -ne 'Shortcut') $script:LastToast
+        Test-Smoke 'the protocol has the answered questions and how many suggestions were confirmed' (@($script:Protocol.Actions | Where-Object { $_.Subject -like 'First-run questions answered*' -and $_.Note -like '*suggestion(s) confirmed*' }).Count -eq 1) $null
+        # no FSLogix: the two pages disappear from the navigation
+        $none = Get-AVDTuneEnvironmentAnswers (Get-AVDTuneEnvironment $script:StateRoot); $none.Profiles = 'None'
+        [void](Save-AVDTuneEnvironment -Root $script:StateRoot -Answers $none -User 'smoke'); Update-StartView
+        Test-Smoke 'without FSLogix the FSLogix and App Masking pages are hidden' ($ui.NavFSLogix.Visibility -eq 'Collapsed' -and $ui.NavAppMasking.Visibility -eq 'Collapsed' -and $ui.NavUpdates.Visibility -eq 'Visible') $null
+        $none.Profiles = 'AzureFiles'; [void](Save-AVDTuneEnvironment -Root $script:StateRoot -Answers $none -User 'smoke'); Update-StartView
+        Test-Smoke 'with FSLogix they are back; a change after a version exists is a change log entry' ($ui.NavFSLogix.Visibility -eq 'Visible' -and @(Get-AVDTuneChangeLog -Root $script:StateRoot | Where-Object { $_.Component -eq 'Environment' -and $_.Text -like 'First-run answers changed*' }).Count -eq 2) $null
+        # the saved environment is not asked again: Change shows the saved answers with their source and offers to forget the tenant
+        Open-Stage 'Environment'; $window.UpdateLayout()
+        Test-Smoke 'Change: the saved answers are shown with their source, no new suggestions are read, the saved tenant can only be forgotten, still no tenant field' ($script:Form.Combos['Join'].Control.SelectedItem -eq 'Microsoft Entra hybrid join' -and $script:Form.SourceLabels['Join'].Text -like 'Saved: Typed by the administrator (suggested AdDs*' -and $script:Form.SourceLabels['Profiles'].Text -like 'Saved: Typed by the administrator*' -and $null -eq $script:Form.Suggestions -and $script:Form.ForgetTenant -and -not $script:Form.ForgetTenant.IsChecked -and [string]$script:Form.ForgetTenant.Content -like '*11111111-2222-3333-4444-555555555555*' -and -not $script:Form.Texts.ContainsKey('TenantId')) $script:Form.SourceLabels['Join'].Text
+        Save-SmokeShot '14b-start-questions-tenant'
+        Close-Stage
+        $true } }
+    @{ Name = 'shortcut question'; Do = {
+        # issue #15: the installed copy asks once; the shortcut goes into the desktop folder of the test state, never the real desktop
+        $script:ShortcutTestMode = 'Installed'
+        $desk = Join-Path $script:StateRoot 'desktop-test'
+        Test-Smoke 'installed copy, not answered: the question opens below the stages' ((Show-ShortcutQuestion) -and $script:OpenStage -eq 'Shortcut' -and $ui.BoxStage.Visibility -eq 'Visible' -and $ui.TxtStageTitle.Text -eq 'Desktop shortcut' -and $ui.BtnStageAction2.Visibility -eq 'Visible' -and (Find-Text $ui.PanelStageBody 'as administrator (Windows asks for confirmation)')) $script:OpenStage
+        $window.UpdateLayout(); $ui.BoxStage.BringIntoView(); $window.UpdateLayout()
+        Save-SmokeShot '13b-shortcut-question'
+        $ui.BtnStageAction.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
+        $link = Get-AVDTuneDesktopShortcut -Folder $desk -InstallRoot $script:RelInstallRoot
+        Test-Smoke 'Create: AVDTune.lnk in the test desktop, runs as administrator, points to the launcher; the answer is stored and the card closes' ($link -and $link.Matches -and $link.RunAs -and (Get-AVDTuneShortcutAnswer -Root $script:StateRoot) -eq 'Yes' -and $ui.BoxStage.Visibility -eq 'Collapsed' -and $desk -like "$($script:StateRoot)*") ($link | Out-String)
+        Test-Smoke 'answered: not asked again' (-not (Show-ShortcutQuestion) -and $script:OpenStage -ne 'Shortcut') $null
+        Test-Smoke 'the Integrity and updates card offers Remove' ([string]$ui.BtnRelShortcut.Content -eq 'Remove desktop shortcut' -and $ui.TxtRelShortcut.Text -like 'Desktop shortcut on your desktop*') $ui.TxtRelShortcut.Text
+        $ui.BtnRelShortcut.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
+        Test-Smoke 'Remove deletes it; the card offers Create again' (-not (Test-Path (Join-Path $desk 'AVDTune.lnk')) -and [string]$ui.BtnRelShortcut.Content -eq 'Create desktop shortcut') $null
+        $script:ShortcutTestMode = 'Development'; Update-ShortcutRow
+        Test-Smoke 'not installed: Create is off and the card says to install first' (-not $ui.BtnRelShortcut.IsEnabled -and $ui.TxtRelShortcut.Text -like '*install AVDTune first*') $ui.TxtRelShortcut.Text
+        $script:ShortcutTestMode = ''; Update-ShortcutRow
+        Test-Smoke 'the protocol has the shortcut created and removed' (@($script:Protocol.Actions | Where-Object { $_.Subject -eq 'Desktop shortcut created' }).Count -eq 1 -and @($script:Protocol.Actions | Where-Object { $_.Subject -eq 'Desktop shortcut removed' }).Count -eq 1) $null
         $true } }
     @{ Name = 'start: snapshot'; Do = {
         if (-not $script:SnapStarted) {

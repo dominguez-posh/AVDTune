@@ -1,6 +1,7 @@
 # The start sequence in the window (dot-sourced by Start-AVDTune.ps1 after the Overview and the protocol are set up).
-# Four stages on the Overview, each with a status and a form that opens below the list: first-run questions, Microsoft sign-in,
-# domain controller (only with a DC), snapshot gate. The logic is in Modules\AVDTune.Start/Session/Snapshot/Directory.psm1; this file only
+# Four stages on the Overview, each with a status and a form that opens below the list, in this order (issue #64): Microsoft sign-in (needs no answer),
+# domain controller (the master's join state is read first; a DC step only for a domain member), first-run questions (suggested from the sign-in, Azure and the
+# domain with the source of every value, valid after the confirmation), snapshot gate. The logic is in Modules\AVDTune.Start/Session/Snapshot/Directory.psm1; this file only
 # builds the forms, calls the engine and writes the protocol. External services come from $script:Services (real adapters, or the fakes
 # of Tests\Fakes\FakeServices.ps1 in test mode). Secrets: the password stays in the PasswordBox / a SecureString and is cleared after use.
 
@@ -164,40 +165,70 @@ function Open-Stage([string]$Id) {
     switch ($Id) {
         'Environment' { Build-EnvironmentForm }
         'SignIn' { Build-SignInForm }
-        'Domain' { Build-DomainForm }
+        'Domain' { if (-not $script:StartContext.Detection) { Read-JoinState }; if ($script:JoinJob) { Close-Stage; Show-Toast 'Still reading how this master is joined; the step can be opened when that is done.'; return }; Build-DomainForm }
         'Snapshot' { Build-SnapshotForm }
     }
     $ui.BoxStage.BringIntoView()
 }
 
-# ---------------------------------------------------------------- 1. first-run questions
+# ---------------------------------------------------------------- 3. first-run questions
+# Asked after the sign-in and the domain step (issue #64). What the sign-in, Azure (GET only) and the domain showed is suggested with its source and is only a
+# suggestion: nothing is saved and nothing counts as an answer until the administrator presses the confirm button. A question that is missing or ambiguous stays empty.
 function Build-EnvironmentForm {
     $ui.TxtStageTitle.Text = T 'stage.env.title'
     $ui.TxtStageIntro.Text = T 'stage.env.intro'
     $existing = Get-AVDTuneEnvironment $script:StateRoot
-    $answers = Get-AVDTuneEnvironmentAnswers $existing
-    $f = $script:Form; $f.Combos = @{}; $f.Texts = @{}
+    $file = Get-AVDTuneEnvironmentFile $script:StateRoot
+    $answers = Get-AVDTuneEnvironmentAnswers $(if ($existing) { $existing } else { $file })
+    $f = $script:Form; $f.Combos = @{}; $f.Texts = @{}; $f.SourceLabels = @{}
+    $f.KeepClient = [string]$answers.ClientId; $f.KeepTenant = [string]$answers.TenantId
+    $f.PrevAnswers = $(if ($existing) { $answers } else { $null }); $f.PrevSources = $(if ($existing) { Get-AVDTuneAnswerSources $existing } else { $null })
+    # What the sign-in and Azure showed, once per start of the questions (the Region and the notes are information only)
+    $f.Suggestions = $null
+    if (-not $existing) {
+        if (-not $script:StartContext.Detection) { Read-JoinState }
+        if ($script:JoinJob) { Close-Stage; Show-Toast 'Still reading how this master is joined; the questions can be opened when that is done.'; return }
+        try {
+            $sg = Invoke-Busy 'Reading what Azure says about this VM (read only) ...' { Update-AVDTuneStartSuggestions -Context $script:StartContext -Machine $script:Machine -Arm (Get-StartArm) } -TaskTitle 'Reading the VM from Azure' -Done 'Read'
+            $f.Suggestions = $sg
+        }
+        catch { Add-StartProtocol 'Suggestions for the first-run questions' $_.Exception.Message 'failed' }
+        if ($f.Suggestions) {
+            $count = @($f.Suggestions.Items.Values | Where-Object { $_.State -eq 'Detected' }).Count
+            Add-StartProtocol 'Suggestions for the first-run questions' ("$count value(s) suggested (read only: Win32_ComputerSystem, dsregcmd /status, Azure Resource Manager GET)" + $(if (@($f.Suggestions.Notes).Count -gt 0) { '. ' + (@($f.Suggestions.Notes) -join '; ') }) + $(if (@($f.Suggestions.Rejected).Count -gt 0) { '. Not suggested, not valid: ' + (@($f.Suggestions.Rejected) -join '; ') }))
+        }
+        $facts = $script:StartContext.AzureFacts
+        if ($f.Suggestions -and $f.Suggestions.Region) { [void]$ui.PanelStageBody.Children.Add((New-InfoRow 'Region of this VM' "$($f.Suggestions.Region) (Azure Resource Manager)")) }
+        if ($facts -and -not $facts.Reachable) { $ui.PanelStageBody.Children.Add((New-Text "Azure could not be read ($($facts.Problem)). The questions below have no suggestion from Azure; answer them yourself." 'Hint' '0,0,0,6')) | Out-Null }
+    }
     foreach ($q in (Get-AVDTuneQuestions)) {
         $cmb = New-Object System.Windows.Controls.ComboBox
         $cmb.Width = 430
         $cmb.ItemsSource = @($q.Choices | ForEach-Object { $_.Text })
-        $current = @($q.Choices | Where-Object { $_.Value -eq $answers.($q.Key) })[0]
-        $cmb.SelectedItem = $current.Text
+        $current = $null
+        if ($existing) { $current = @($q.Choices | Where-Object { $_.Value -eq $answers.($q.Key) })[0] }
+        elseif ($f.Suggestions -and $f.Suggestions.Items.Contains($q.Key) -and $f.Suggestions.Items[$q.Key].State -eq 'Detected') { $current = @($q.Choices | Where-Object { $_.Value -ceq $f.Suggestions.Items[$q.Key].Value })[0] }
+        if ($current) { $cmb.SelectedItem = $current.Text }   # no suggestion and no saved answer: nothing selected, the question is open
         $cmb.Name = "Q$($q.Key)"
         $f.Combos[$q.Key] = @{ Control = $cmb; Question = $q }
         $cmb.Add_SelectionChanged({ try { Update-EnvironmentPreview } catch { } })
         [void]$ui.PanelStageBody.Children.Add((New-FormRow $q.Title $cmb))
+        $f.SourceLabels[$q.Key] = New-Text '' 'Hint' '250,0,0,4'
+        [void]$ui.PanelStageBody.Children.Add($f.SourceLabels[$q.Key])
     }
     $auth = New-Object System.Windows.Controls.ComboBox; $auth.Width = 430; $auth.Name = 'QAzureFilesAuth'
     $auth.Add_SelectionChanged({ try { Update-EnvironmentPreview } catch { } })
     $f.AuthCombo = $auth; $f.AuthWanted = [string]$answers.AzureFilesAuth
     [void]$ui.PanelStageBody.Children.Add((New-FormRow (T 'stage.env.azurefiles') $auth))
-    # No tenant field: the tenant comes from the sign-in (issue #11). The client ID is optional: empty means AVDTune creates its own app registration.
-    foreach ($t in @(@('VNet', (T 'stage.env.vnet')), @('Subnet', (T 'stage.env.subnet')), @('ClientId', (T 'stage.env.clientid')), @('SnapshotNamePattern', (T 'stage.env.snapname')))) {
+    # No tenant field: the tenant comes from the sign-in (issue #11). The client ID is entered in the sign-in form (#64).
+    foreach ($t in @(@('VNet', (T 'stage.env.vnet')), @('Subnet', (T 'stage.env.subnet')), @('SnapshotNamePattern', (T 'stage.env.snapname')))) {
         $tb = New-Object System.Windows.Controls.TextBox; $tb.Width = 430; $tb.Text = [string]$answers.($t[0]); $tb.MaxLength = 255; $tb.Name = "T$($t[0])"
+        if (-not $existing -and $t[0] -in 'VNet', 'Subnet') { $tb.Text = $(if ($f.Suggestions -and $f.Suggestions.Items.Contains($t[0]) -and $f.Suggestions.Items[$t[0]].State -eq 'Detected') { [string]$f.Suggestions.Items[$t[0]].Value } else { '' }) }
         $tb.Add_TextChanged({ try { Update-EnvironmentPreview } catch { } })
         $f.Texts[$t[0]] = $tb
         [void]$ui.PanelStageBody.Children.Add((New-FormRow $t[1] $tb))
+        $f.SourceLabels[$t[0]] = New-Text '' 'Hint' '250,0,0,4'
+        [void]$ui.PanelStageBody.Children.Add($f.SourceLabels[$t[0]])
     }
     $f.ForgetTenant = $null
     if ([string]$answers.TenantId) {
@@ -219,13 +250,32 @@ function Get-EnvironmentFormAnswers {
     foreach ($key in $f.Combos.Keys) {
         $q = $f.Combos[$key].Question
         $text = [string]$f.Combos[$key].Control.SelectedItem
-        $a.$key = [string](@($q.Choices | Where-Object { $_.Text -eq $text })[0]).Value
+        $a.$key = [string](@($q.Choices | Where-Object { $_.Text -eq $text })[0]).Value   # nothing selected: '' (the question is missing)
     }
     foreach ($key in $f.Texts.Keys) { $a.$key = [string]$f.Texts[$key].Text }
+    $a.ClientId = [string]$f.KeepClient; $a.TenantId = [string]$f.KeepTenant
     $choices = @(Get-AVDTuneAzureFilesAuthChoices $a)
     $sel = [string]$f.AuthCombo.SelectedItem
     $a.AzureFilesAuth = if ($sel -and $sel -notlike 'Automatic*' -and $sel -in $choices) { $sel } else { 'Auto' }
     $a
+}
+function Update-EnvironmentSourceLabels($Answers) {
+    # The source next to every answer: a suggestion that is kept, a changed one, an open question (with the reason it is ambiguous), a saved answer
+    $f = $script:Form
+    $sources = Resolve-AVDTuneAnswerSources -Answers $Answers -Suggestions $f.Suggestions -PreviousAnswers $f.PrevAnswers -PreviousSources $f.PrevSources
+    foreach ($key in $f.SourceLabels.Keys) {
+        $value = [string](Get-AVDTuneProp $Answers $key)
+        $sg = $null; if ($f.Suggestions -and $f.Suggestions.Items.Contains($key)) { $sg = $f.Suggestions.Items[$key] }
+        $text = if ($f.Combos.ContainsKey($key) -and -not $value) { $(if ($sg -and $sg.Hint) { "Please answer: $($sg.Hint)" } else { 'Please answer.' }) }
+        elseif ($sg -and $sg.State -eq 'Detected' -and $sg.Value -ceq $value) { "Suggested, counts after you confirm: $($sg.Source)" }
+        elseif ($f.PrevAnswers -and $f.PrevSources -and [string](Get-AVDTuneProp $f.PrevAnswers $key) -ceq $value -and $f.PrevSources.Contains($key)) { "Saved: $($f.PrevSources[$key])" }
+        elseif ($f.PrevAnswers -and [string](Get-AVDTuneProp $f.PrevAnswers $key) -ceq $value) { 'Saved answer (from an earlier version, no source recorded)' }
+        elseif ($sg -and $sg.State -eq 'Detected') { "Changed by you (suggested $($sg.Value): $($sg.Source))" }
+        elseif (-not $value) { 'Not set (optional).' }
+        else { 'Typed by you.' }
+        $f.SourceLabels[$key].Text = $text
+    }
+    $sources
 }
 function Update-EnvironmentPreview {
     $f = $script:Form
@@ -243,22 +293,28 @@ function Update-EnvironmentPreview {
         $a = Get-EnvironmentFormAnswers
         $check = Test-AVDTuneEnvironmentAnswers $a
         $plan = Resolve-AVDTuneEnvironmentPlan $a
-        $lines = @($plan.Notes) + @($check.Warnings | ForEach-Object { T 'stage.env.note' $_ }) + @($check.Errors | ForEach-Object { T 'stage.env.problem' $_ })
-        if (-not ([string]$a.ClientId).Trim()) { $lines += T 'stage.env.noclient' }
+        [void](Update-EnvironmentSourceLabels $a)
+        $open = @($f.Combos.Keys | Where-Object { -not [string](Get-AVDTuneProp $a $_) } | ForEach-Object { $f.Combos[$_].Question.Title })
+        $errors = @($check.Errors | Where-Object { $_ -notlike '*is missing or unknown.' })
+        $lines = @(); if ($open.Count -gt 0) { $lines += "Still to answer: $($open -join '; ')." } else { $lines += @($plan.Notes) }
+        $lines += @($check.Warnings | ForEach-Object { (T 'stage.env.note' $_) }) + @($errors | ForEach-Object { (T 'stage.env.problem' $_) })
         $lines += T 'stage.env.notenant'
         $f.Preview.Text = $lines -join "`n"
-        Set-Brush $f.Preview ([System.Windows.Controls.TextBlock]::ForegroundProperty) $(if ($check.Errors.Count -gt 0) { 'Danger' } else { 'MutedText' })
+        Set-Brush $f.Preview ([System.Windows.Controls.TextBlock]::ForegroundProperty) $(if ($errors.Count -gt 0) { 'Danger' } else { 'MutedText' })
         $ui.BtnStageAction.IsEnabled = ($check.Errors.Count -eq 0)
     }
     finally { $f.Updating = $false }
 }
 function Save-EnvironmentForm {
+    $f = $script:Form
     $a = Get-EnvironmentFormAnswers
     $firstRun = -not (Get-AVDTuneEnvironment $script:StateRoot)
-    $forget = [bool]($script:Form.ForgetTenant -and $script:Form.ForgetTenant.IsChecked)
-    $result = Save-AVDTuneEnvironment -Root $script:StateRoot -Answers $a -User ([string]$env:USERNAME) -ForgetTenant:$forget
+    $forget = [bool]($f.ForgetTenant -and $f.ForgetTenant.IsChecked)
+    $sources = Resolve-AVDTuneAnswerSources -Answers $a -Suggestions $f.Suggestions -PreviousAnswers $f.PrevAnswers -PreviousSources $f.PrevSources
+    $result = Save-AVDTuneEnvironment -Root $script:StateRoot -Answers $a -User ([string]$env:USERNAME) -ForgetTenant:$forget -Sources $sources
     if ($forget -and $script:StartContext.Session) { Disconnect-AVDTuneSession $script:StartContext.Session }   # a session of the old tenant does not stay
-    $note = if ($result.Changes.Count -gt 0) { 'changed: ' + ($result.Changes -join '; ') } else { 'saved' }
+    $confirmed = @($sources.Values | Where-Object { $_ -like 'Confirmed: *' }).Count
+    $note = $(if ($result.Changes.Count -gt 0) { 'changed: ' + ($result.Changes -join '; ') } else { 'saved' }) + $(if ($confirmed -gt 0) { "; $confirmed suggestion(s) confirmed" })
     Add-StartProtocol 'First-run questions answered (identity model)' $note
     Show-Toast (T 'stage.env.saved')
     Close-Stage
@@ -268,7 +324,7 @@ function Save-EnvironmentForm {
     if ($firstRun -and -not (Show-ShortcutQuestion) -and (Get-AVDTuneShortcutOffer -Root $script:StateRoot -Mode (Get-ShortcutMode)) -eq 'Install') { Show-Toast (T 'stage.env.saved.shortcut') }
 }
 
-# ---------------------------------------------------------------- 2. sign-in
+# ---------------------------------------------------------------- 1. sign-in
 function Build-SignInForm {
     $ui.TxtStageTitle.Text = T 'stage.signin.title'
     $ui.TxtStageIntro.Text = T 'stage.signin.intro'
@@ -277,15 +333,20 @@ function Build-SignInForm {
         $a = (Get-AVDTuneAudience)[$key]
         [void]$ui.PanelStageBody.Children.Add((New-InfoRow $key ("$($a.Purpose): " + ($a.Scopes -join ', '))))
     }
-    $e = Get-AVDTuneEnvironment $script:StateRoot
-    $tenant = if ($e) { [string]$e.SignIn.TenantId } else { '' }
-    $client = if ($e) { [string]$e.SignIn.ClientId } else { '' }
+    $e = Get-AVDTuneEnvironmentFile $script:StateRoot   # the sign-in needs no answer of the first-run questions: the file may not exist yet
+    $tenant = if ($e) { [string](Get-AVDTuneProp (Get-AVDTuneProp $e 'SignIn') 'TenantId') } else { '' }
+    $client = if ($e) { [string](Get-AVDTuneProp (Get-AVDTuneProp $e 'SignIn') 'ClientId') } else { '' }
     [void]$ui.PanelStageBody.Children.Add((New-InfoRow (T 'stage.signin.tenant') $(if ($tenant) { $tenant } else { T 'stage.signin.tenant.none' })))
     [void]$ui.PanelStageBody.Children.Add((New-InfoRow (T 'stage.signin.app') $(if ($client) { $client } else { T 'stage.signin.app.none' })))
     $f = $script:Form
     $f.Account = New-Object System.Windows.Controls.TextBox; $f.Account.Width = 320; $f.Account.MaxLength = 254; $f.Account.Name = 'TxtSignInAccount'
     $f.Account.Text = if ($session -and $session.Account) { [string]$session.Account } else { '' }
     [void]$ui.PanelStageBody.Children.Add((New-FormRow (T 'stage.signin.account') $f.Account (T 'stage.signin.account.name')))
+    if (-not $client) {
+        # An existing app registration of AVDTune can be entered here (moved from the first-run questions: the sign-in comes first and needs no answer)
+        $f.ClientId = New-Object System.Windows.Controls.TextBox; $f.ClientId.Width = 320; $f.ClientId.MaxLength = 36; $f.ClientId.Name = 'TxtSignInClientId'
+        [void]$ui.PanelStageBody.Children.Add((New-FormRow 'Client ID of an existing app registration (optional)' $f.ClientId 'Client ID of an existing app registration'))
+    }
     $hint = if (-not $client) {
         T 'stage.signin.hint.first'
     }
@@ -311,16 +372,19 @@ function Build-SignInForm {
     $script:StageAction = { Invoke-SignIn }
 }
 function Invoke-SignIn([switch]$Setup) {
-    $e = Get-AVDTuneEnvironment $script:StateRoot
-    if (-not $e) { throw (T 'stage.detail.signin.locked') }
+    $e = Get-AVDTuneEnvironmentFile $script:StateRoot
+    $savedClient = if ($e) { [string](Get-AVDTuneProp (Get-AVDTuneProp $e 'SignIn') 'ClientId') } else { '' }
     $account = if ($script:Form.Account) { ([string]$script:Form.Account.Text).Trim() } else { '' }
     if ($account -and -not (Get-AVDTuneAccountDomain $account)) { Set-StageMessage (T 'stage.signin.badaccount') 'error'; return }
-    $setup = $Setup -or -not [string]$e.SignIn.ClientId
-    if ($setup -and -not (Confirm-Action (T 'stage.signin.confirm' $(if ($e.SignIn.ClientId) { T 'stage.signin.confirm.check' $e.SignIn.ClientId } else { T 'stage.signin.confirm.create' }) (Get-AVDTuneSetupConsentNote)) (T 'stage.signin.confirm.title'))) { return }
+    $typedClient = if ($script:Form.ClientId) { ([string]$script:Form.ClientId.Text).Trim() } else { '' }
+    if ($typedClient -and -not (Test-AVDTuneTenantGuid $typedClient)) { Set-StageMessage 'The client ID must be a GUID (or leave it empty).' 'error'; return }
+    if ($typedClient -ieq '14d82eec-204b-4c2f-b7e8-296a70dab67e') { Set-StageMessage "That is Microsoft's setup app; AVDTune needs the client ID of its own app registration (leave the field empty and AVDTune creates it at the sign-in)." 'error'; return }
+    $setup = $Setup -or (-not $savedClient -and -not $typedClient)
+    if ($setup -and -not (Confirm-Action (T 'stage.signin.confirm' $(if ($savedClient) { T 'stage.signin.confirm.check' $savedClient } else { T 'stage.signin.confirm.create' }) (Get-AVDTuneSetupConsentNote)) (T 'stage.signin.confirm.title'))) { return }
     $session = New-AVDTuneSession -Auth (Get-StartAuth) -TempRoot (Get-StartTempRoot)
     try {
         $result = Invoke-Busy $(if ($setup) { T 'stage.signin.busy.setup' } else { T 'stage.signin.busy' }) {
-            Invoke-AVDTuneStartSignIn -Root $script:StateRoot -Session $session -Account $account -User ([string]$env:USERNAME) -RetryDelaySeconds $(if ($script:TestMode) { 0 } else { 5 }) -Setup:$setup } -TaskTitle (T 'stage.signin.task') -Done (T 'stage.signin.done')
+            Invoke-AVDTuneStartSignIn -Root $script:StateRoot -Session $session -Account $account -User ([string]$env:USERNAME) -RetryDelaySeconds $(if ($script:TestMode) { 0 } else { 5 }) -Setup:$setup -ClientId $typedClient } -TaskTitle (T 'stage.signin.task') -Done (T 'stage.signin.done')
         $info = $result.Info
         foreach ($n in @($result.Notes)) { Add-StartProtocol $(if ($n -like 'Warning:*' -or $n -like 'Note:*') { 'Warning: app registration' } else { 'Sign-in: tenant and app registration' }) $n }
         # The full text was in the confirmation; the protocol keeps the short form (notes are cut at 200 characters)
@@ -339,11 +403,64 @@ function Invoke-SignIn([switch]$Setup) {
     Add-StartProtocol 'Microsoft 365 and Azure sign-in' ("Signed in as $($info.Account): " + (($info.Audiences | ForEach-Object { "$($_.Audience) ($($_.Scopes -join ', '))" }) -join '; '))
     $missing = @($info.Unavailable | ForEach-Object { $_.Reason })
     foreach ($w in @($info.Warnings)) { Add-StartProtocol $(if ($w -in $missing) { 'Warning: sign-in without the Storage token' } else { 'Warning: sign-in token with extra permissions' }) $w }
+    # Step 2 follows the sign-in at once: what this master says about its join (read only; nothing is asked, nothing is changed)
+    Read-JoinState
     Show-Toast (T 'stage.signin.toast' $info.Account)
     Close-Stage
     Update-StartView
     Start-ReadyJob 'Start' ''   # the Azure checks of the readiness analysis can read now
 }
+function Set-JoinStateResult($Detection) {
+    # on the window thread: keep what the master said about its join and write it to the protocol
+    $script:StartContext.Detection = $Detection; $script:StartContext.Suggestions = $null
+    $det = $Detection
+    Add-StartProtocol 'Join state of this master read' ($det.Reason + $(if (@($det.Facts).Count -gt 0) { ' (' + (@($det.Facts) -join '; ') + ')' }) + $(if (@($det.Problems).Count -gt 0) { ' Not read: ' + (@($det.Problems) -join '; ') }))
+}
+function Read-JoinState {
+    # dsregcmd (30 s timeout) and the DC locator can take a while: the real read runs in a background runspace with a task on the task bar, the window stays usable.
+    # Test mode runs inline (the fake machine is a closure of this runspace). Whatever needs the result waits for Complete-JoinJob (it refreshes the view).
+    if ($script:JoinJob) { return }
+    if ($script:TestMode) {
+        try {
+            $det = Invoke-Busy 'Reading how this master is joined (read only) ...' { Get-AVDTuneJoinState -Machine $script:Machine } -TaskTitle 'Reading the join state of this master' -Done 'Read'
+            Set-JoinStateResult $det
+        }
+        catch { Add-StartProtocol 'Join state of this master read' $_.Exception.Message 'failed' }
+        return
+    }
+    $task = Start-AVDTuneUiTask -Kind 'join-state' -Title 'Reading the join state of this master' -Step 'Win32_ComputerSystem, dsregcmd /status, DC locator (read only)' -Retry @{ Command = 'Read-JoinState'; Arguments = @() }
+    $ps = [powershell]::Create()
+    [void]$ps.AddScript({
+            param($AppRoot)
+            $ErrorActionPreference = 'Stop'
+            Import-Module (Join-Path $AppRoot 'Modules\AVDTune.psm1') -Force
+            Import-Module (Join-Path $AppRoot 'Modules\AVDTune.Directory.psm1') -Force
+            Get-AVDTuneJoinState -Machine (New-AVDTuneMachine)
+        }).AddArgument($script:AppRoot)
+    $script:JoinJob = @{ PS = $ps; Handle = $ps.BeginInvoke(); Task = $task }
+    Set-StageMessage 'Reading how this master is joined (read only) ...' 'info'
+}
+function Complete-JoinJob {
+    $job = $script:JoinJob
+    if (-not $job -or -not $job.Handle.IsCompleted) { return }
+    $script:JoinJob = $null
+    $det = $null; $err = ''
+    try {
+        $out = @($job.PS.EndInvoke($job.Handle))
+        if ($job.PS.Streams.Error.Count -gt 0) { $err = $job.PS.Streams.Error[0].Exception.Message }
+        $det = $out | Select-Object -Last 1
+    }
+    catch { $err = $_.Exception.Message }
+    finally { $job.PS.Dispose() }
+    if ($err -or -not $det) {
+        Complete-AVDTuneUiTask $job.Task -Failed -Summary "The join state could not be read: $err"
+        Add-StartProtocol 'Join state of this master read' $err 'failed'
+    }
+    else { Complete-AVDTuneUiTask $job.Task -Summary 'Read'; Set-JoinStateResult $det }
+    Update-StartView
+}
+$script:JoinJob = $null
+$script:Timer.Add_Tick({ try { Complete-JoinJob } catch { Show-Error $_.Exception.Message } })
 function Invoke-SignOut {
     if ($script:StartContext.Session) { Disconnect-AVDTuneSession $script:StartContext.Session }
     $left = @(Get-AVDTuneSignInLeftovers -TempRoot (Get-StartTempRoot))
@@ -353,19 +470,25 @@ function Invoke-SignOut {
     Update-StartView
 }
 
-# ---------------------------------------------------------------- 3. domain controller
+# ---------------------------------------------------------------- 2. domain controller
 function Build-DomainForm {
     $ui.TxtStageTitle.Text = T 'stage.dom.title'
-    $ui.TxtStageIntro.Text = T 'stage.dom.intro'
+    $det = $script:StartContext.Detection
+    $ui.TxtStageIntro.Text = "$(if ($det) { "$($det.Reason) " })$(T 'stage.dom.intro')"
     $f = $script:Form
-    $e = Get-AVDTuneEnvironment $script:StateRoot
+    $e = Get-AVDTuneEnvironmentFile $script:StateRoot
     $dc = Get-AVDTuneProp $e 'Dc'
     $f.Server = New-Object System.Windows.Controls.TextBox; $f.Server.Width = 320; $f.Server.Text = [string](Get-AVDTuneProp $dc 'Server'); $f.Server.Name = 'TxtDcServer'
+    # No server saved yet: the one the DC locator of Windows found (validated, read only) is suggested; it is only used when the administrator connects
+    $suggested = ''
+    if (-not $f.Server.Text -and $det -and $det.Dc) { $suggested = $(if ($det.Dc.Name) { $det.Dc.Name } else { $det.Dc.Address }); $f.Server.Text = $suggested }
     # A pending confirmation (LDAP 389, pin) belongs to the server it was shown for: a changed name drops it
     $f.Server.Add_TextChanged({ try { Clear-DomainPending } catch { } })
     $f.User = New-Object System.Windows.Controls.TextBox; $f.User.Width = 320; $f.User.Text = [string](Get-AVDTuneProp $dc 'User'); $f.User.Name = 'TxtDcUser'
+    $f.SuggestedServer = $suggested
     $f.PasswordBox = New-Object System.Windows.Controls.PasswordBox; $f.PasswordBox.Width = 320; $f.PasswordBox.Name = 'PwdDc'; $f.PasswordBox.MaxLength = 256
     [void]$ui.PanelStageBody.Children.Add((New-FormRow (T 'stage.dom.server') $f.Server))
+    if ($suggested) { $ui.PanelStageBody.Children.Add((New-Text "Suggested by the DC locator of Windows for the domain $($det.DomainName)$(if ($det.Dc.Site) { " (site $($det.Dc.Site))" }). Change it if another controller should be read." 'Hint' '250,0,0,4')) | Out-Null }
     [void]$ui.PanelStageBody.Children.Add((New-FormRow (T 'stage.dom.user') $f.User))
     [void]$ui.PanelStageBody.Children.Add((New-FormRow (T 'stage.dom.password') $f.PasswordBox))
     $ui.PanelStageBody.Children.Add((New-Text (T 'stage.dom.hint') 'Hint' '0,6,0,0')) | Out-Null
@@ -404,7 +527,7 @@ function Invoke-DomainConnect {
     param([string]$ConfirmedServer)
     $f = $script:Form
     if ($f.PasswordBox.SecurePassword.Length -eq 0) { Set-StageMessage (T 'stage.dom.nopassword') 'error'; return }
-    $e = Get-AVDTuneEnvironment $script:StateRoot
+    $e = Get-AVDTuneEnvironmentFile $script:StateRoot
     $server = $f.Server.Text.Trim(); $user = $f.User.Text.Trim()
     $f.Secure = $f.PasswordBox.SecurePassword
     $ldap = Get-StartLdap

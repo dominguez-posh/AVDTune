@@ -5,14 +5,18 @@
     registration, the snapshot name pattern, the chosen gallery image definition (readiness), the domain controller (name, account name, pinned certificate thumbprints, summary of what was read). Never a secret:
     only fields of the table below are written, text is cleaned, and no password, token or key has a field.
 
-    Start sequence (docs\plans\avdtune.md 1a): Environment -> Sign-in -> Domain (only with a DC) -> Snapshot gate. Every stage has a status the
-    Overview shows: Pending, Locked (an earlier stage is open), Done, Skipped, Failed. The context ($Context) holds what lives in memory only.
+    Start sequence (docs\plans\avdtune.md 1a, issue #64): Sign-in -> Domain (what the master says about its join; a DC step only for a domain member) -> first-run
+    questions (prefilled from the sign-in, Azure and the domain, each answer with its source, valid only after the administrator confirmed) -> Snapshot gate.
+    Every stage has a status the Overview shows: Pending, Locked (an earlier stage is open), Done, Skipped, Failed. The context ($Context) holds what lives in memory only.
+    The sign-in needs no answer: tenant and client ID go into environment.json without an 'Answers' part ("not confirmed yet": Get-AVDTuneEnvironment returns $null,
+    Get-AVDTuneEnvironmentFile returns the file). An environment.json of an earlier version has its answers and is confirmed as it is.
 #>
 
 Set-StrictMode -Version 2.0
 Import-Module (Join-Path $PSScriptRoot 'AVDTune.psm1')
 Import-Module (Join-Path $PSScriptRoot 'AVDTune.Snapshot.psm1')
 Import-Module (Join-Path $PSScriptRoot 'AVDTune.Session.psm1')
+Import-Module (Join-Path $PSScriptRoot 'AVDTune.Directory.psm1')
 
 #region questions
 
@@ -126,8 +130,8 @@ function Resolve-AVDTuneEnvironmentPlan {
 
 function Get-AVDTuneEnvironmentPath([string]$Root) { Join-Path $Root 'environment.json' }
 
-function Get-AVDTuneEnvironment {
-    <# The saved environment, or $null before the first run. #>
+function Get-AVDTuneEnvironmentFile {
+    <# The file as it is: the confirmed environment, or a part that only has the sign-in target and/or the domain controller (the sign-in and the domain step come before the questions), or $null. #>
     param([string]$Root = (Get-AVDTuneRoot))
     $envObj = Read-AVDTuneJson (Get-AVDTuneEnvironmentPath $Root)
     if ($null -eq $envObj) { return $null }
@@ -135,8 +139,31 @@ function Get-AVDTuneEnvironment {
     $envObj
 }
 
+function Get-AVDTuneEnvironment {
+    <# The confirmed environment (the first-run questions are answered), or $null before. A file that only has the sign-in target or the domain controller is not an environment yet. #>
+    param([string]$Root = (Get-AVDTuneRoot))
+    $envObj = Get-AVDTuneEnvironmentFile $Root
+    if ($null -eq $envObj -or $null -eq (Get-AVDTuneProp $envObj 'Answers')) { return $null }
+    $envObj
+}
+
+function ConvertTo-AVDTuneEnvironmentFields {
+    # Every field of the file as an ordered table (unknown fields stay), so that a writer changes one part and loses nothing of the others
+    param($Environment)
+    $o = [ordered]@{ Schema = 1 }
+    if ($Environment) { foreach ($p in $Environment.PSObject.Properties) { if ($p.Name -ne 'Schema') { $o[$p.Name] = $p.Value } } }
+    $o
+}
+
+function Write-AVDTuneEnvironmentFields {
+    param([string]$Root, [Parameter(Mandatory)]$Fields, [string]$User, [switch]$KeepUser)
+    $Fields['Schema'] = 1; $Fields['Updated'] = (Get-Date).ToString('o')
+    if (-not ($KeepUser -and $Fields.Contains('UpdatedBy'))) { $Fields['UpdatedBy'] = (Remove-AVDTuneControlCharacters $User 80) }
+    Write-AVDTuneFile (Get-AVDTuneEnvironmentPath $Root) ($Fields | ConvertTo-Json -Depth 10)
+}
+
 function Get-AVDTuneEnvironmentAnswers {
-    # The answers of the saved environment as a flat object (defaults for what is not there)
+    # The answers of the saved environment as a flat object (defaults for what is not there); the sign-in target of a file without answers comes along
     param($Environment)
     $a = Get-AVDTuneEnvironmentDefaults
     if ($Environment) {
@@ -152,36 +179,57 @@ function Get-AVDTuneEnvironmentAnswers {
     $a
 }
 
+function Get-AVDTuneAnswerSources {
+    # The source of every saved answer (environment.json Sources): where the value came from and whether it was confirmed or typed; empty for a file of an earlier version
+    param($Environment)
+    $r = [ordered]@{}
+    $s = Get-AVDTuneProp $Environment 'Sources'
+    if ($s) { foreach ($p in $s.PSObject.Properties) { $r[$p.Name] = [string]$p.Value } }
+    $r
+}
+
 function Save-AVDTuneEnvironment {
     <#
-        Writes the answers. Throws when the combination is invalid. Keeps the domain controller part (pins) as it is. When an answer changed
+        Writes the answers (the administrator confirmed them). Throws when the combination is invalid. Keeps the domain controller part (pins) as it is. When an answer changed
         after an environment existed, the change goes into the change log (needs an image version; without one the diff is only returned).
         The tenant is not asked: an empty TenantId keeps the saved one; -ForgetTenant removes it (the next sign-in sets it again).
+        -Sources: where each answer came from (key -> text, for example 'Confirmed: detected by dsregcmd /status'); stored with the answers.
         Returns @{ Environment; Changes = 'Name: old -> new' ... }.
     #>
     [CmdletBinding()]
-    param([string]$Root = (Get-AVDTuneRoot), [Parameter(Mandatory)]$Answers, [string]$User, [switch]$ForgetTenant)
+    param([string]$Root = (Get-AVDTuneRoot), [Parameter(Mandatory)]$Answers, [string]$User, [switch]$ForgetTenant, [hashtable]$Sources)
     $check = Test-AVDTuneEnvironmentAnswers $Answers
     if ($check.Errors.Count -gt 0) { throw ($check.Errors -join ' ') }
+    $file = Get-AVDTuneEnvironmentFile $Root
     $old = Get-AVDTuneEnvironment $Root
     $oldAnswers = if ($old) { Get-AVDTuneEnvironmentAnswers $old } else { $null }
     $tenant = [string](Get-AVDTuneProp $Answers 'TenantId')
-    if ($ForgetTenant) { $tenant = '' } elseif (-not $tenant.Trim() -and $oldAnswers) { $tenant = [string]$oldAnswers.TenantId }
+    if ($ForgetTenant) { $tenant = '' } elseif (-not $tenant.Trim() -and $file) { $tenant = [string](Get-AVDTuneProp (Get-AVDTuneProp $file 'SignIn') 'TenantId') }
     $clean = { param($v, $n) Remove-AVDTuneControlCharacters ([string]$v) $n }
     $plan = Resolve-AVDTuneEnvironmentPlan $Answers
-    $envObj = [ordered]@{
-        Schema = 1
-        Answers = [ordered]@{
-            Join = [string]$Answers.Join; Dc = [string]$Answers.Dc; Identities = [string]$Answers.Identities; Profiles = [string]$Answers.Profiles
-            AzureFilesAuth = [string]$plan.AzureFilesAuth; Network = [ordered]@{ Endpoint = [string]$Answers.Endpoint; VNet = (& $clean $Answers.VNet 200); Subnet = (& $clean $Answers.Subnet 200); DnsZone = [string]$Answers.DnsZone }
-        }
-        SignIn = [ordered]@{ TenantId = (& $clean $tenant 255).Trim(); ClientId = (& $clean $Answers.ClientId 36).Trim() }
-        Snapshot = [ordered]@{ NamePattern = $(if ([string](Get-AVDTuneProp $Answers 'SnapshotNamePattern')) { (& $clean $Answers.SnapshotNamePattern 80).Trim() } else { Get-AVDTuneDefaultSnapshotNamePattern }) }
-        Dc = $(if ($old -and (Get-AVDTuneProp $old 'Dc')) { Get-AVDTuneProp $old 'Dc' } else { [ordered]@{ Server = ''; User = ''; Pins = [ordered]@{}; Discovery = $null } })
-        Gallery = $(if ($old) { Get-AVDTuneProp $old 'Gallery' } else { $null })
-        Updated = (Get-Date).ToString('o'); UpdatedBy = (& $clean $User 80)
+    $fields = ConvertTo-AVDTuneEnvironmentFields $file
+    $fields['Answers'] = [ordered]@{
+        Join = [string]$Answers.Join; Dc = [string]$Answers.Dc; Identities = [string]$Answers.Identities; Profiles = [string]$Answers.Profiles
+        AzureFilesAuth = [string]$plan.AzureFilesAuth; Network = [ordered]@{ Endpoint = [string]$Answers.Endpoint; VNet = (& $clean $Answers.VNet 200); Subnet = (& $clean $Answers.Subnet 200); DnsZone = [string]$Answers.DnsZone }
     }
-    Write-AVDTuneFile (Get-AVDTuneEnvironmentPath $Root) ($envObj | ConvertTo-Json -Depth 8)
+    # the client ID is never taken from the answers: only Set-AVDTuneEnvironmentSignIn sets it (after the sign-in worked); the saved one stays
+    $fields['SignIn'] = [ordered]@{ TenantId = (& $clean $tenant 255).Trim(); ClientId = ([string](Get-AVDTuneProp (Get-AVDTuneProp $file 'SignIn') 'ClientId')).Trim() }
+    $fields['Snapshot'] = [ordered]@{ NamePattern = $(if ([string](Get-AVDTuneProp $Answers 'SnapshotNamePattern')) { (& $clean $Answers.SnapshotNamePattern 80).Trim() } else { Get-AVDTuneDefaultSnapshotNamePattern }) }
+    if (-not $fields.Contains('Dc') -or -not $fields['Dc']) { $fields['Dc'] = [ordered]@{ Server = ''; User = ''; Pins = [ordered]@{}; Discovery = $null } }
+    if (-not $fields.Contains('Gallery')) { $fields['Gallery'] = $null }
+    if ($PSBoundParameters.ContainsKey('Sources')) {
+        $src = [ordered]@{}
+        foreach ($k in @($Sources.Keys | Sort-Object)) { if ([string]$k -match '^[A-Za-z]{1,40}$') { $src[[string]$k] = (& $clean $Sources[$k] 240) } }
+        $fields['Sources'] = $src
+    }
+    elseif ($oldAnswers) {
+        # no -Sources: an answer that changed was typed by the administrator, the earlier source is not kept for it; the others keep theirs
+        $newAnswers = Get-AVDTuneEnvironmentAnswers ((@{ Answers = $fields['Answers']; SignIn = $fields['SignIn']; Snapshot = $fields['Snapshot'] } | ConvertTo-Json -Depth 6) | ConvertFrom-Json)
+        $src = [ordered]@{}; foreach ($kv in (Get-AVDTuneAnswerSources $file).GetEnumerator()) { $src[$kv.Key] = $kv.Value }
+        foreach ($p in $newAnswers.PSObject.Properties) { if ([string]$p.Value -ne [string]$oldAnswers.($p.Name) -and $p.Name -notin 'TenantId', 'ClientId') { $src[$p.Name] = 'Typed by the administrator' } }
+        $fields['Sources'] = $src
+    }
+    Write-AVDTuneEnvironmentFields -Root $Root -Fields $fields -User $User
     $saved = Get-AVDTuneEnvironment $Root
     $changes = @()
     if ($oldAnswers) {
@@ -212,16 +260,16 @@ function Set-AVDTuneDcPin {
     #>
     [CmdletBinding()]
     param([string]$Root = (Get-AVDTuneRoot), [Parameter(Mandatory)][string]$Server, [Parameter(Mandatory)]$Certificate, [string]$User, [switch]$Replace)
-    $envObj = Get-AVDTuneEnvironment $Root
-    if (-not $envObj) { throw 'Answer the first-run questions first.' }
+    $envObj = Get-AVDTuneEnvironmentFile $Root
     $server = $Server.Trim().ToLowerInvariant()
     $sha = [string]$Certificate.Sha256
     if ($sha -notmatch '^[0-9A-Fa-f]{64}$') { throw 'The certificate has no valid SHA-256 thumbprint.' }
     $existing = Get-AVDTuneDcPins $envObj
     if ($existing.ContainsKey($server) -and $existing[$server] -ine $sha -and -not $Replace) { throw "A different certificate is pinned for $server. Replacing it needs an explicit confirmation." }
     $record = [ordered]@{ Sha256 = $sha.ToUpperInvariant(); Thumbprint = [string]$Certificate.Thumbprint; Subject = (Remove-AVDTuneControlCharacters ([string]$Certificate.Subject) 300); PinnedAt = (Get-Date).ToString('o'); PinnedBy = (Remove-AVDTuneControlCharacters $User 80) }
-    $dc = [ordered]@{ Server = [string](Get-AVDTuneProp $envObj.Dc 'Server'); User = [string](Get-AVDTuneProp $envObj.Dc 'User'); Pins = [ordered]@{}; Discovery = (Get-AVDTuneProp $envObj.Dc 'Discovery') }
-    $oldPins = Get-AVDTuneProp $envObj.Dc 'Pins'
+    $oldDc = Get-AVDTuneProp $envObj 'Dc'
+    $dc = [ordered]@{ Server = [string](Get-AVDTuneProp $oldDc 'Server'); User = [string](Get-AVDTuneProp $oldDc 'User'); Pins = [ordered]@{}; Discovery = (Get-AVDTuneProp $oldDc 'Discovery') }
+    $oldPins = Get-AVDTuneProp $oldDc 'Pins'
     if ($oldPins) { foreach ($p in $oldPins.PSObject.Properties) { $dc.Pins[$p.Name] = $p.Value } }
     $dc.Pins[$server] = $record
     Update-AVDTuneEnvironmentDc -Root $Root -Environment $envObj -Dc $dc
@@ -234,20 +282,21 @@ function Set-AVDTuneDcPin {
 
 function Update-AVDTuneEnvironmentDc {
     param([string]$Root, $Environment, $Dc)
-    $copy = [ordered]@{ Schema = 1; Answers = $Environment.Answers; SignIn = $Environment.SignIn; Snapshot = (Get-AVDTuneProp $Environment 'Snapshot'); Dc = $Dc; Gallery = (Get-AVDTuneProp $Environment 'Gallery'); Updated = (Get-Date).ToString('o'); UpdatedBy = [string](Get-AVDTuneProp $Environment 'UpdatedBy') }
-    Write-AVDTuneFile (Get-AVDTuneEnvironmentPath $Root) ($copy | ConvertTo-Json -Depth 10)
+    # Only the Dc part changes; every other field of the file stays as it is (also a file that has no answers yet)
+    $fields = ConvertTo-AVDTuneEnvironmentFields $Environment
+    $fields['Dc'] = $Dc
+    Write-AVDTuneEnvironmentFields -Root $Root -Fields $fields -KeepUser
 }
 
 function Save-AVDTuneDcDiscovery {
     <# Server, account name (no password) and a summary of what was read (domain, NetBIOS name, levels, site, counts) into environment.json. #>
     param([string]$Root = (Get-AVDTuneRoot), [Parameter(Mandatory)][string]$Server, [Parameter(Mandatory)][string]$User, [Parameter(Mandatory)]$Info)
-    $envObj = Get-AVDTuneEnvironment $Root
-    if (-not $envObj) { throw 'Answer the first-run questions first.' }
+    $envObj = Get-AVDTuneEnvironmentFile $Root
     $summary = [ordered]@{
         DnsName = $Info.DnsName; NetBiosName = $Info.NetBiosName; Site = $Info.Site; DomainLevel = $Info.DomainLevel; ForestLevel = $Info.ForestLevel
         DefaultNamingContext = $Info.DefaultNamingContext; OuCount = $Info.OuCount; GroupCount = @($Info.Groups).Count; ReadAt = (Get-Date).ToString('o')
     }
-    $dc = [ordered]@{ Server = $Server.Trim().ToLowerInvariant(); User = (Remove-AVDTuneControlCharacters $User 256); Pins = $(if (Get-AVDTuneProp $envObj.Dc 'Pins') { $envObj.Dc.Pins } else { [ordered]@{} }); Discovery = $summary }
+    $dc = [ordered]@{ Server = $Server.Trim().ToLowerInvariant(); User = (Remove-AVDTuneControlCharacters $User 256); Pins = $(if (Get-AVDTuneProp (Get-AVDTuneProp $envObj 'Dc') 'Pins') { $envObj.Dc.Pins } else { [ordered]@{} }); Discovery = $summary }
     Update-AVDTuneEnvironmentDc -Root $Root -Environment $envObj -Dc $dc
 }
 
@@ -257,9 +306,8 @@ function Set-AVDTuneEnvironmentSignIn {
         A value that changes goes into the change log (needs an image version) and is returned as text.
     #>
     param([string]$Root = (Get-AVDTuneRoot), [string]$TenantId, [string]$ClientId, [string]$User, [string]$Account)
-    $envObj = Get-AVDTuneEnvironment $Root
-    if (-not $envObj) { throw 'Answer the first-run questions first.' }
-    $oldTenant = [string](Get-AVDTuneProp $envObj.SignIn 'TenantId'); $oldClient = [string](Get-AVDTuneProp $envObj.SignIn 'ClientId')
+    $envObj = Get-AVDTuneEnvironmentFile $Root   # the sign-in comes before the questions: a file without answers (or none yet) is fine
+    $oldTenant = [string](Get-AVDTuneProp (Get-AVDTuneProp $envObj 'SignIn') 'TenantId'); $oldClient = [string](Get-AVDTuneProp (Get-AVDTuneProp $envObj 'SignIn') 'ClientId')
     $tenant = $oldTenant; $client = $oldClient; $changes = @()
     if ($TenantId) {
         if ($TenantId -notmatch '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$') { throw 'The tenant of the sign-in is not a GUID.' }
@@ -272,8 +320,9 @@ function Set-AVDTuneEnvironmentSignIn {
         if ($client -ne $oldClient) { $changes += "Client ID of AVDTune's own app registration saved: $(if ($oldClient) { "$oldClient -> " })$client" }
     }
     if ($changes.Count -eq 0) { return @() }
-    $copy = [ordered]@{ Schema = 1; Answers = $envObj.Answers; SignIn = [ordered]@{ TenantId = $tenant; ClientId = $client }; Snapshot = (Get-AVDTuneProp $envObj 'Snapshot'); Dc = (Get-AVDTuneProp $envObj 'Dc'); Gallery = (Get-AVDTuneProp $envObj 'Gallery'); Updated = (Get-Date).ToString('o'); UpdatedBy = (Remove-AVDTuneControlCharacters $User 80) }
-    Write-AVDTuneFile (Get-AVDTuneEnvironmentPath $Root) ($copy | ConvertTo-Json -Depth 10)
+    $fields = ConvertTo-AVDTuneEnvironmentFields $envObj
+    $fields['SignIn'] = [ordered]@{ TenantId = $tenant; ClientId = $client }
+    Write-AVDTuneEnvironmentFields -Root $Root -Fields $fields -User $User
     $version = [string](Get-AVDTuneState $Root).ImageVersion
     if ($version) { foreach ($c in $changes) { [void](Add-AVDTuneChangeLogEntry -Root $Root -Version $version -Category 'Setup' -Component 'Environment' -ChangeType Changed -Text $c -User $User -Source Note) } }
     @($changes)
@@ -301,8 +350,9 @@ function Set-AVDTuneEnvironmentGallery {
     $old = Get-AVDTuneEnvironmentGallery $envObj
     if ($old -ieq $id) { return '' }
     $gallery = if ($id) { [ordered]@{ ImageDefinitionId = $id; Label = (Remove-AVDTuneControlCharacters $Label 200); ChosenBy = (Remove-AVDTuneControlCharacters $User 80); ChosenAt = (Get-Date).ToString('o') } } else { $null }
-    $copy = [ordered]@{ Schema = 1; Answers = $envObj.Answers; SignIn = (Get-AVDTuneProp $envObj 'SignIn'); Snapshot = (Get-AVDTuneProp $envObj 'Snapshot'); Dc = (Get-AVDTuneProp $envObj 'Dc'); Gallery = $gallery; Updated = (Get-Date).ToString('o'); UpdatedBy = (Remove-AVDTuneControlCharacters $User 80) }
-    Write-AVDTuneFile (Get-AVDTuneEnvironmentPath $Root) ($copy | ConvertTo-Json -Depth 10)
+    $fields = ConvertTo-AVDTuneEnvironmentFields $envObj
+    $fields['Gallery'] = $gallery
+    Write-AVDTuneEnvironmentFields -Root $Root -Fields $fields -User $User
     $short = { param($v) if ($v) { (($v -split '/')[-3]) + '/' + (($v -split '/')[-1]) } else { 'none' } }
     $text = "Image definition for the readiness check: $(& $short $old) -> $(& $short $id)"
     $version = [string](Get-AVDTuneState $Root).ImageVersion
@@ -327,13 +377,21 @@ function Invoke-AVDTuneStartSignIn {
         Returns Info (session summary, no token), Notes (lines for the protocol), Registration, ConsentNote. Throws readable text.
     #>
     [CmdletBinding()]
-    param([string]$Root = (Get-AVDTuneRoot), [Parameter(Mandatory)]$Session, [string]$Account, [string]$User, [int]$RetryDelaySeconds = 5, [switch]$Setup)
-    $envObj = Get-AVDTuneEnvironment $Root
-    if (-not $envObj) { throw 'Answer the first-run questions first.' }
-    $tenant = ([string](Get-AVDTuneProp $envObj.SignIn 'TenantId')).Trim()
-    $client = ([string](Get-AVDTuneProp $envObj.SignIn 'ClientId')).Trim()
+    param([string]$Root = (Get-AVDTuneRoot), [Parameter(Mandatory)]$Session, [string]$Account, [string]$User, [int]$RetryDelaySeconds = 5, [switch]$Setup, [string]$ClientId)
+    # The sign-in is the first step and needs no answer of the first-run questions (issue #64): tenant and client ID come from the file (it may not exist yet or have
+    # no answers), from -ClientId (an existing app registration the administrator typed in the sign-in form) or from the sign-in itself.
+    $envObj = Get-AVDTuneEnvironmentFile $Root
+    $tenant = ([string](Get-AVDTuneProp (Get-AVDTuneProp $envObj 'SignIn') 'TenantId')).Trim()
+    $client = ([string](Get-AVDTuneProp (Get-AVDTuneProp $envObj 'SignIn') 'ClientId')).Trim()
     $Account = ([string]$Account).Trim()
     if ($Account -and -not (Get-AVDTuneAccountDomain $Account)) { throw 'The account must look like name@domain.' }
+    $ClientId = ([string]$ClientId).Trim()
+    if ($Setup -and $ClientId) { throw 'Set up and a typed client ID exclude each other: -Setup creates a new app registration, a typed client ID uses an existing one.' }
+    if ($ClientId) {
+        if (-not (Test-AVDTuneTenantGuid $ClientId)) { throw 'The client ID must be a GUID.' }
+        if ($ClientId -ieq '14d82eec-204b-4c2f-b7e8-296a70dab67e') { throw "That is Microsoft's setup app; AVDTune needs the client ID of its own app registration (leave the field empty and AVDTune creates it at the sign-in)." }
+        $client = $ClientId.ToLowerInvariant()
+    }
     $notes = New-Object System.Collections.ArrayList
     $registration = $null
     if (-not $client -or $Setup) {
@@ -353,7 +411,8 @@ function Invoke-AVDTuneStartSignIn {
         catch { [void]$notes.Add("The tenant of the domain $domain was not found ($($_.Exception.Message)); the sign-in goes through 'organizations' (needs a multi-tenant app registration).") }
     }
     $info = Connect-AVDTuneSession -Session $Session -TenantId $tenant -ClientId $client -LoginHint $Account
-    foreach ($c in @(Set-AVDTuneEnvironmentSignIn -Root $Root -TenantId $info.TenantId -User $User -Account $info.Account)) { [void]$notes.Add($c) }
+    # a client ID typed in the form is saved only now, after it worked
+    foreach ($c in @(Set-AVDTuneEnvironmentSignIn -Root $Root -TenantId $info.TenantId -ClientId $(if ($ClientId) { $client } else { '' }) -User $User -Account $info.Account)) { [void]$notes.Add($c) }
     [pscustomobject]@{ Info = $info; Notes = @($notes); Registration = $registration; ConsentNote = $(if ($registration) { Get-AVDTuneSetupConsentNote } else { '' }) }
 }
 
@@ -362,14 +421,134 @@ function Invoke-AVDTuneStartSignIn {
 #region start sequence
 
 function New-AVDTuneStartContext {
-    # What the start sequence keeps in memory: the session, the directory as read, the gate status, failures per stage
-    [pscustomobject]@{ Session = $null; Directory = $null; DirectorySecurity = ''; Gate = $null; Failures = @{} }
+    # What the start sequence keeps in memory: the session, what the master says about its join (Detection), what Azure says about the VM (AzureFacts),
+    # the suggestions for the first-run questions made from both (never an answer before the administrator confirms), the directory as read, failures per stage
+    [pscustomobject]@{ Session = $null; Detection = $null; AzureFacts = $null; Suggestions = $null; Directory = $null; DirectorySecurity = ''; Gate = $null; Failures = @{} }
+}
+
+function Update-AVDTuneStartDetection {
+    <# Step 2 of the start sequence: read the join state of the master (read only, Get-AVDTuneJoinState) and keep it in the context. #>
+    param([Parameter(Mandatory)]$Context, [Parameter(Mandatory)]$Machine)
+    $Context.Detection = Get-AVDTuneJoinState -Machine $Machine
+    $Context.Suggestions = $null
+    $Context.Detection
+}
+
+function Update-AVDTuneStartSuggestions {
+    <#
+        Step 3 of the start sequence: what Azure says about this VM (only GET, Get-AVDTuneAzureFacts) and, together with the join state, the suggestions for the first-run
+        questions. Without the join state it is read first. Azure not reachable or no token: the facts say so and only the domain based suggestions remain.
+        Nothing is saved: a suggestion becomes an answer when the administrator confirms the questions (Save-AVDTuneEnvironment).
+    #>
+    param([Parameter(Mandatory)]$Context, [Parameter(Mandatory)]$Machine, $Arm)
+    if (-not $Context.Detection) { [void](Update-AVDTuneStartDetection -Context $Context -Machine $Machine) }
+    $vm = Get-AVDTuneVmIdentity $Machine
+    $facts = $null
+    $token = ''
+    if ($Context.Session -and $Context.Session.Connected) { try { $token = Get-AVDTuneAccessToken -Session $Context.Session -Audience Arm } catch { $facts = [pscustomobject]@{ Reachable = $false; Problem = $_.Exception.Message; Region = ''; VNet = ''; Subnet = ''; SubnetId = ''; StorageAccounts = @(); DnsZone = $null; Problems = @() } } }
+    if (-not $facts) {
+        if ($Arm -and $token) { try { $facts = Get-AVDTuneAzureFacts -Arm $Arm -Token $token -Vm $vm } catch { $facts = $null } }
+        if (-not $facts) { $facts = [pscustomobject]@{ Reachable = $false; Problem = $(if (-not $token) { 'Not signed in to Azure.' } else { 'Azure could not be read.' }); Region = ''; VNet = ''; Subnet = ''; SubnetId = ''; StorageAccounts = @(); DnsZone = $null; Problems = @() } }
+    }
+    $Context.AzureFacts = $facts
+    $Context.Suggestions = Get-AVDTuneAnswerSuggestions -Detection $Context.Detection -AzureFacts $facts
+    $Context.Suggestions
+}
+
+function Get-AVDTuneAnswerSuggestions {
+    <#
+        The suggestions for the first-run questions from the join state and the Azure facts. Items: key -> @{ Key; State = 'Detected' | 'Ambiguous'; Value; Source; Hint }.
+        Detected has a value (the form preselects it and shows the source); Ambiguous has none (the question stays open and the hint says why).
+        Every value is data and is checked before it is suggested: a choice must be one of the choices of its question, a network name must pass the same rule as an answer;
+        a value that fails is not suggested and named in Rejected. A key without an item is not known and is simply asked.
+    #>
+    param($Detection, $AzureFacts)
+    $items = [ordered]@{}; $rejected = New-Object System.Collections.ArrayList; $notes = New-Object System.Collections.ArrayList
+    $choices = @{}; foreach ($q in $script:Questions) { $choices[$q.Key] = @($q.Choices | ForEach-Object { $_.Value }) }
+    $detect = {
+        param($key, $value, $source)
+        $ok = if ($choices.ContainsKey($key)) { [string]$value -cin $choices[$key] } else { ([string]$value).Length -le 1024 -and [regex]::IsMatch([string]$value, '^[A-Za-z0-9_./ -]{1,200}$', [Text.RegularExpressions.RegexOptions]::None, [TimeSpan]::FromSeconds(2)) }
+        if (-not $ok) { [void]$rejected.Add("$key (the value found is not valid)"); return }
+        $items[$key] = [pscustomobject]@{ Key = $key; State = 'Detected'; Value = [string]$value; Source = $source; Hint = '' }
+    }
+    $ambiguous = { param($key, $hint) if (-not $items.Contains($key)) { $items[$key] = [pscustomobject]@{ Key = $key; State = 'Ambiguous'; Value = ''; Source = ''; Hint = $hint } } }
+    if ($Detection) {
+        $how = 'Win32_ComputerSystem and dsregcmd /status of this master'
+        switch ($Detection.Kind) {
+            'Hybrid' {
+                & $detect 'Join' 'Hybrid' "$how`: joined to the domain$(if ($Detection.DomainName) { " $($Detection.DomainName)" }) and to Microsoft Entra ID"
+                & $detect 'Identities' 'Synced' 'a host joined to a domain needs synchronized identities'
+                & $ambiguous 'Dc' $(if ($Detection.Dc) { "A domain controller was found ($(if ($Detection.Dc.Name) { $Detection.Dc.Name } else { $Detection.Dc.Address })); whether it runs in Azure or on premises is not visible from here." } else { 'The master is joined to a domain; whether its domain controller runs in Azure or on premises is not visible from here.' })
+            }
+            'AdDs' {
+                & $detect 'Join' 'AdDs' "$how`: joined to the domain$(if ($Detection.DomainName) { " $($Detection.DomainName)" })"
+                & $detect 'Identities' 'Synced' 'a host joined to a domain needs synchronized identities'
+                & $ambiguous 'Dc' $(if ($Detection.Dc) { "A domain controller was found ($(if ($Detection.Dc.Name) { $Detection.Dc.Name } else { $Detection.Dc.Address })); whether it runs in Azure or on premises is not visible from here." } else { 'The master is joined to a domain; whether its domain controller runs in Azure or on premises is not visible from here.' })
+            }
+            'EntraOnly' {
+                & $detect 'Join' 'EntraOnly' "$how`: joined to Microsoft Entra ID only, no domain"
+                & $detect 'Dc' 'None' "$how`: no domain, so no domain controller to read"
+                & $ambiguous 'Identities' 'Cloud only or synchronized from a directory is not visible from here.'
+            }
+            default {
+                & $ambiguous 'Join' 'This master is not joined (as a golden master should be), so it says nothing about how the session hosts will join.'
+                & $ambiguous 'Dc' 'This master is not joined to a domain; say whether the session hosts use a domain controller and where it runs.'
+            }
+        }
+        foreach ($p in @($Detection.Problems)) { [void]$notes.Add("Join state: $p") }
+    }
+    if ($AzureFacts -and $AzureFacts.Reachable) {
+        $azure = 'Azure Resource Manager (read only)'
+        if ($AzureFacts.VNet) { & $detect 'VNet' $AzureFacts.VNet "$azure`: virtual network of this VM's network interface" }
+        if ($AzureFacts.Subnet) { & $detect 'Subnet' $AzureFacts.Subnet "$azure`: subnet of this VM's network interface" }
+        $accounts = @($AzureFacts.StorageAccounts)
+        if ($accounts.Count -eq 1) {
+            $a = $accounts[0]
+            & $detect 'Profiles' 'AzureFiles' "$azure`: the storage account $($a.Name) in the resource group of this VM"
+            if ($a.PrivateEndpoints -gt 0) { & $detect 'Endpoint' 'Private' "$azure`: the storage account $($a.Name) has a private endpoint" }
+            elseif ($a.PublicAccess -eq 'Enabled') { & $detect 'Endpoint' 'Public' "$azure`: the storage account $($a.Name) has no private endpoint and allows public access" }
+            else { & $ambiguous 'Endpoint' "The storage account $($a.Name) has neither a private endpoint nor public access." }
+        }
+        elseif ($accounts.Count -gt 1) {
+            & $ambiguous 'Profiles' ("More than one storage account is in the resource group of this VM ($(@($accounts | Select-Object -First 5 | ForEach-Object { $_.Name }) -join ', ')); say which profile storage is used.")
+        }
+        if ($AzureFacts.DnsZone -eq $true) { & $detect 'DnsZone' 'Azure' "$azure`: the private DNS zone privatelink.file.core.windows.net is in the resource group of this VM" }
+        foreach ($p in @($AzureFacts.Problems)) { [void]$notes.Add("Azure: $p") }
+    }
+    elseif ($AzureFacts) { [void]$notes.Add("Azure: nothing could be read, the questions have no suggestion from Azure ($($AzureFacts.Problem))") }
+    [pscustomobject]@{ Items = $items; Rejected = @($rejected); Notes = @($notes); Region = $(if ($AzureFacts -and $AzureFacts.Reachable) { [string]$AzureFacts.Region } else { '' }) }
+}
+
+function Resolve-AVDTuneAnswerSources {
+    <#
+        Where each answer came from, for environment.json (Sources): a suggestion that the administrator kept is 'Confirmed: <source>', a different value is 'Typed by the
+        administrator (suggested ...)', an answer that did not change keeps its earlier source, everything else is 'Typed by the administrator'.
+        -Suggestions is the result of Get-AVDTuneAnswerSuggestions (or $null), -Previous the answers and sources of the saved environment (a change of the answers later).
+    #>
+    param([Parameter(Mandatory)]$Answers, $Suggestions, $PreviousAnswers, $PreviousSources)
+    $r = [ordered]@{}
+    $keys = @($script:Questions | ForEach-Object { $_.Key }) + @('VNet', 'Subnet', 'SnapshotNamePattern')
+    foreach ($k in $keys) {
+        $value = [string](Get-AVDTuneProp $Answers $k)
+        $sg = $null; if ($Suggestions -and $Suggestions.Items.Contains($k) -and $Suggestions.Items[$k].State -eq 'Detected') { $sg = $Suggestions.Items[$k] }
+        $prev = $null; if ($PreviousAnswers) { $prev = [string](Get-AVDTuneProp $PreviousAnswers $k) }
+        if ($sg -and $sg.Value -ceq $value) { $r[$k] = "Confirmed: $($sg.Source)" }
+        elseif ($sg) { $r[$k] = "Typed by the administrator (suggested $($sg.Value): $($sg.Source))" }
+        elseif ($null -ne $prev -and $prev -ceq $value -and $PreviousSources -and $PreviousSources.Contains($k)) { $r[$k] = [string]$PreviousSources[$k] }
+        elseif ($k -eq 'SnapshotNamePattern' -and $value -ceq (Get-AVDTuneDefaultSnapshotNamePattern)) { $r[$k] = 'Default of AVDTune' }
+        elseif (-not $value -and $k -in 'VNet', 'Subnet') { $r[$k] = 'Not set' }
+        else { $r[$k] = 'Typed by the administrator' }
+    }
+    $r
 }
 
 function Get-AVDTuneStartStages {
     <#
-        The four stages with Status and Detail, in order. A stage is Locked while an earlier one that is not Skipped is not Done.
-        Done means: Environment saved; Sign-in connected; Domain read; Snapshot confirmed (write gate open).
+        The four stages with Status and Detail, in order (issue #64): 1 sign-in, 2 domain (what the master says about its join: a domain member has a domain
+        controller to read, everything else is 'not needed' with the reason), 3 first-run questions (suggestions with their source, valid after the confirmation),
+        4 snapshot gate. A stage is Locked while an earlier one that is not Skipped is not Done.
+        Done means: Sign-in connected; Domain read; Environment confirmed; Snapshot confirmed (write gate open).
+        Domain: once the questions are confirmed their domain controller answer decides (an environment.json of an earlier version too); before that the join state decides.
     #>
     param([Parameter(Mandatory)]$Context, [string]$Root = (Get-AVDTuneRoot))
     $envObj = Get-AVDTuneEnvironment $Root
@@ -377,25 +556,32 @@ function Get-AVDTuneStartStages {
     $stages = New-Object System.Collections.ArrayList
     $add = { param($id, $title, $status, $detail) [void]$stages.Add([pscustomobject]@{ Id = $id; Title = $title; Status = $status; Detail = $detail }) }
     $fail = { param($id) $f = $Context.Failures[$id]; if ($f) { [string]$f } else { $null } }
+    $det = $Context.Detection
+    $usesDc = $null   # $null: not known yet
+    if ($envObj) { $usesDc = [bool]$plan.UsesDc } elseif ($det) { $usesDc = [bool]$det.NeedsDc }
 
-    # 1 environment
-    if ($envObj) { & $add 'Environment' 'First-run questions' 'Done' ("{0}, {1}" -f $(if ($plan.UsesDc) { 'domain controller used' } else { 'no domain controller' }), $(if ($plan.AzureFilesAuth -eq 'None') { 'no Azure Files' } else { "Azure Files: $($plan.AzureFilesAuth)" })) }
-    else { & $add 'Environment' 'First-run questions' $(if (& $fail 'Environment') { 'Failed' } else { 'Pending' }) $(if (& $fail 'Environment') { & $fail 'Environment' } else { 'Describe the planned AVD environment.' }) }
-    $open = -not $envObj
-
-    # 2 sign-in
+    # 1 sign-in (needs no answer)
+    $open = $false
     $signedIn = $Context.Session -and $Context.Session.Connected
     if ($signedIn) { & $add 'SignIn' 'Microsoft 365 and Azure sign-in' 'Done' "$($Context.Session.Account) (Graph, Sites.Selected, Azure Resource Manager)" }
-    elseif ($open) { & $add 'SignIn' 'Microsoft 365 and Azure sign-in' 'Locked' 'Answer the first-run questions first.' }
-    else { & $add 'SignIn' 'Microsoft 365 and Azure sign-in' $(if (& $fail 'SignIn') { 'Failed' } else { 'Pending' }) $(if (& $fail 'SignIn') { & $fail 'SignIn' } else { 'One sign-in for Graph, SharePoint and Azure. Tokens stay in memory.' }) }
+    else { & $add 'SignIn' 'Microsoft 365 and Azure sign-in' $(if (& $fail 'SignIn') { 'Failed' } else { 'Pending' }) $(if (& $fail 'SignIn') { & $fail 'SignIn' } else { 'One sign-in for Graph, SharePoint and Azure. The tenant comes from it. Tokens stay in memory.' }) }
     if (-not $signedIn) { $open = $true }
 
-    # 3 domain
-    if ($envObj -and -not $plan.UsesDc) { & $add 'Domain' 'Domain controller' 'Skipped' 'Not needed: no domain controller in this environment (groups come from Microsoft Entra ID).' }
-    elseif ($Context.Directory) { & $add 'Domain' 'Domain controller' 'Done' "$($Context.Directory.DnsName) ($($Context.Directory.NetBiosName)), $($Context.Directory.OuCount) OUs, $(@($Context.Directory.Groups).Count) groups, site $($Context.Directory.Site); $($Context.DirectorySecurity)" }
-    elseif ($open) { & $add 'Domain' 'Domain controller' 'Locked' 'Finish the earlier steps first.' }
-    else { & $add 'Domain' 'Domain controller' $(if (& $fail 'Domain') { 'Failed' } else { 'Pending' }) $(if (& $fail 'Domain') { & $fail 'Domain' } else { 'IP or name of a domain controller and a domain account. LDAPS first, certificate pinned.' }) }
-    if ($envObj -and $plan.UsesDc -and -not $Context.Directory) { $open = $true }
+    # 2 domain
+    if ($Context.Directory) { & $add 'Domain' 'Domain controller' 'Done' "$($Context.Directory.DnsName) ($($Context.Directory.NetBiosName)), $($Context.Directory.OuCount) OUs, $(@($Context.Directory.Groups).Count) groups, site $($Context.Directory.Site); $($Context.DirectorySecurity)" }
+    elseif ($usesDc -eq $false) {
+        & $add 'Domain' 'Domain controller' 'Skipped' $(if ($envObj) { 'Not needed: no domain controller in this environment (groups come from Microsoft Entra ID).' } else { "Not needed: $($det.Reason) No domain controller to read; if the session hosts use one, say so in the questions and this step opens." })
+    }
+    elseif ($open) { & $add 'Domain' 'Domain controller' 'Locked' 'Sign in first.' }
+    elseif ($null -eq $usesDc) { & $add 'Domain' 'Domain controller' $(if (& $fail 'Domain') { 'Failed' } else { 'Pending' }) $(if (& $fail 'Domain') { & $fail 'Domain' } else { 'Reads what this master says about its join (read only), then a domain controller if it is a domain member.' }) }
+    else { & $add 'Domain' 'Domain controller' $(if (& $fail 'Domain') { 'Failed' } else { 'Pending' }) $(if (& $fail 'Domain') { & $fail 'Domain' } else { "$(if ($det -and -not $envObj) { "$($det.Reason) " })IP or name of a domain controller and a domain account. LDAPS first, certificate pinned.$(if ($det -and $det.Dc) { " The DC locator found $(if ($det.Dc.Name) { $det.Dc.Name } else { $det.Dc.Address })." })" }) }
+    if ($usesDc -ne $false -and -not $Context.Directory) { $open = $true }
+
+    # 3 first-run questions
+    if ($envObj) { & $add 'Environment' 'First-run questions' 'Done' ("{0}, {1}" -f $(if ($plan.UsesDc) { 'domain controller used' } else { 'no domain controller' }), $(if ($plan.AzureFilesAuth -eq 'None') { 'no Azure Files' } else { "Azure Files: $($plan.AzureFilesAuth)" })) }
+    elseif ($open) { & $add 'Environment' 'First-run questions' 'Locked' 'Finish the earlier steps first.' }
+    else { & $add 'Environment' 'First-run questions' $(if (& $fail 'Environment') { 'Failed' } else { 'Pending' }) $(if (& $fail 'Environment') { & $fail 'Environment' } else { 'Only what is missing is asked: what the sign-in, Azure and the domain showed is suggested with its source and counts after you confirm it.' }) }
+    if (-not $envObj) { $open = $true }
 
     # 4 snapshot gate
     if (Test-AVDTuneWriteAllowed) { $g = Get-AVDTuneWriteGate; & $add 'Snapshot' 'Snapshot gate' 'Done' "Confirmed by $($g.ConfirmedBy). The pages can change the master." }
@@ -413,5 +599,5 @@ function Get-AVDTuneNextStage {
 #endregion
 
 Export-ModuleMember -Function Get-AVDTuneQuestions, Get-AVDTuneEnvironmentDefaults, Test-AVDTuneEnvironmentAnswers, Get-AVDTuneAzureFilesAuthChoices, Resolve-AVDTuneEnvironmentPlan,
-    Get-AVDTuneEnvironment, Get-AVDTuneEnvironmentAnswers, Save-AVDTuneEnvironment, Get-AVDTuneDcPins, Set-AVDTuneDcPin, Save-AVDTuneDcDiscovery, Set-AVDTuneEnvironmentSignIn, Get-AVDTuneEnvironmentGallery, Set-AVDTuneEnvironmentGallery, Invoke-AVDTuneStartSignIn,
-    New-AVDTuneStartContext, Get-AVDTuneStartStages, Get-AVDTuneNextStage
+    Get-AVDTuneEnvironment, Get-AVDTuneEnvironmentFile, Get-AVDTuneEnvironmentAnswers, Get-AVDTuneAnswerSources, Save-AVDTuneEnvironment, Get-AVDTuneDcPins, Set-AVDTuneDcPin, Save-AVDTuneDcDiscovery, Set-AVDTuneEnvironmentSignIn, Get-AVDTuneEnvironmentGallery, Set-AVDTuneEnvironmentGallery, Invoke-AVDTuneStartSignIn,
+    New-AVDTuneStartContext, Update-AVDTuneStartDetection, Update-AVDTuneStartSuggestions, Get-AVDTuneAnswerSuggestions, Resolve-AVDTuneAnswerSources, Get-AVDTuneStartStages, Get-AVDTuneNextStage

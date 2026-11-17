@@ -359,6 +359,102 @@ function Confirm-AVDTuneSnapshotGate {
 
 #endregion
 
+#region what Azure says about this VM (issue #64: read only, before the snapshot is confirmed)
+
+$script:FactsRegexTimeout = [TimeSpan]::FromSeconds(2)
+# Azure data is checked with a length limit and a regex with a timeout
+function Test-AVDTuneFactsText([string]$Text, [string]$Pattern) { ($Text.Length -le 1024) -and [regex]::IsMatch($Text, $Pattern, [Text.RegularExpressions.RegexOptions]::IgnoreCase, $script:FactsRegexTimeout) }
+$script:FactsComputeApi = '2024-07-01'
+$script:FactsNetworkApi = '2024-01-01'
+$script:FactsStorageApi = '2023-05-01'
+$script:FactsDnsApi = '2020-06-01'
+$script:FactsNicPattern = '^/subscriptions/[0-9a-fA-F-]{36}/resourceGroups/[A-Za-z0-9._()-]+/providers/Microsoft\.Network/networkInterfaces/[A-Za-z0-9._()-]+$'
+$script:FactsSubnetPattern = '^/subscriptions/[0-9a-fA-F-]{36}/resourceGroups/[A-Za-z0-9._()-]+/providers/Microsoft\.Network/virtualNetworks/([A-Za-z0-9._()-]{1,64})/subnets/([A-Za-z0-9._()-]{1,80})$'
+
+function New-AVDTuneReadOnlyArm {
+    <# The ARM adapter that only answers GET without a body: anything else is refused before it reaches the real adapter (Status 0, never throws). Everything before the snapshot gate reads through this. #>
+    param([Parameter(Mandatory)]$Arm)
+    $inner = $Arm
+    $a = [ordered]@{ Kind = 'ReadOnly'; Inner = $inner }
+    $a.Invoke = {
+        param($Method, $Path, $Token, $Body)
+        if ([string]$Method -cne 'GET' -or $null -ne $Body) { return [pscustomobject]@{ Status = 0; Body = $null; Error = 'Refused: only GET requests are made before the snapshot gate is open.' } }
+        & $inner.Invoke $Method $Path $Token $Body
+    }.GetNewClosure()
+    [pscustomobject]$a
+}
+
+function Get-AVDTuneAzureFacts {
+    <#
+        What Azure knows about this VM and its surroundings, for prefilling the first-run questions: region, virtual network and subnet of the primary network
+        interface, the storage accounts of the resource group (kind, public access, private endpoints, Azure Files identity setting) and whether the resource
+        group has the private DNS zone privatelink.file.core.windows.net. Only GET (through New-AVDTuneReadOnlyArm), every name validated before it is used.
+        Reachable = $false when the VM itself cannot be read (no connection, 401, 403, 404): then nothing is known and the questions are asked without
+        prefill from Azure. A part that cannot be read (for example no right on the storage accounts) is left empty and named in Problems.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)]$Arm, [Parameter(Mandatory)][string]$Token, [Parameter(Mandatory)]$Vm)
+    $ro = New-AVDTuneReadOnlyArm -Arm $Arm
+    $problems = New-Object System.Collections.ArrayList
+    $r = [ordered]@{ Reachable = $false; Problem = ''; Region = ''; VNet = ''; Subnet = ''; SubnetId = ''; StorageAccounts = @(); DnsZone = $null; Problems = @() }
+    if (-not $Vm.Available) { $r.Problem = [string]$Vm.Problem; return [pscustomobject]$r }
+    $rgPath = "/subscriptions/$($Vm.SubscriptionId)/resourceGroups/$($Vm.ResourceGroup)"
+    try {
+        $body = Invoke-AVDTuneArm -Arm $ro -Method GET -Path "$rgPath/providers/Microsoft.Compute/virtualMachines/$($Vm.VmName)?api-version=$script:FactsComputeApi" -Token $Token -Action 'Microsoft.Compute/virtualMachines/read' -Scope "the VM $($Vm.VmName)"
+    }
+    catch { $r.Problem = $_.Exception.Message; return [pscustomobject]$r }
+    $r.Reachable = $true
+    $loc = ([string](Get-AVDTuneProp $body 'location')).Trim().ToLowerInvariant()
+    if ($loc -match '^[a-z0-9]{2,40}$') { $r.Region = $loc } elseif ([string]$Vm.Location -match '^[A-Za-z0-9]{2,40}$') { $r.Region = ([string]$Vm.Location).ToLowerInvariant() }
+    # primary network interface -> subnet
+    try {
+        $refs = @(Get-AVDTuneProp (Get-AVDTuneProp (Get-AVDTuneProp $body 'properties') 'networkProfile') 'networkInterfaces' | Where-Object { $_ })
+        $ref = @($refs | Where-Object { (Get-AVDTuneProp (Get-AVDTuneProp $_ 'properties') 'primary') -eq $true } | Select-Object -First 1)
+        if ($ref.Count -eq 0 -and $refs.Count -gt 0) { $ref = @($refs[0]) }
+        if ($ref.Count -gt 0) {
+            $nicId = [string](Get-AVDTuneProp $ref[0] 'id')
+            if (-not (Test-AVDTuneFactsText $nicId $script:FactsNicPattern)) { throw 'The VM names a network interface with an unexpected ID.' }
+            $nic = Invoke-AVDTuneArm -Arm $ro -Method GET -Path "${nicId}?api-version=$script:FactsNetworkApi" -Token $Token -Action 'Microsoft.Network/networkInterfaces/read' -Scope 'the network interface'
+            $cfgs = @(Get-AVDTuneProp (Get-AVDTuneProp $nic 'properties') 'ipConfigurations' | Where-Object { $_ })
+            $cfg = @($cfgs | Where-Object { (Get-AVDTuneProp (Get-AVDTuneProp $_ 'properties') 'primary') -eq $true } | Select-Object -First 1)
+            if ($cfg.Count -eq 0 -and $cfgs.Count -gt 0) { $cfg = @($cfgs[0]) }
+            if ($cfg.Count -gt 0) {
+                $sid = [string](Get-AVDTuneProp (Get-AVDTuneProp (Get-AVDTuneProp $cfg[0] 'properties') 'subnet') 'id')
+                if (Test-AVDTuneFactsText $sid $script:FactsSubnetPattern) { $sm = [regex]::Match($sid, $script:FactsSubnetPattern, [Text.RegularExpressions.RegexOptions]::IgnoreCase, $script:FactsRegexTimeout); $r.SubnetId = $sid; $r.VNet = $sm.Groups[1].Value; $r.Subnet = $sm.Groups[2].Value }
+                elseif ($sid) { [void]$problems.Add('The subnet ID of the network interface has an unexpected form; it is not used.') }
+            }
+        }
+    }
+    catch { [void]$problems.Add("Network: $($_.Exception.Message)") }
+    # storage accounts of the resource group
+    try {
+        $list = Invoke-AVDTuneArm -Arm $ro -Method GET -Path "$rgPath/providers/Microsoft.Storage/storageAccounts?api-version=$script:FactsStorageApi" -Token $Token -Action 'Microsoft.Storage/storageAccounts/read' -Scope "the resource group $($Vm.ResourceGroup)"
+        $accounts = New-Object System.Collections.ArrayList
+        foreach ($s in @(Get-AVDTuneProp $list 'value' | Where-Object { $_ } | Select-Object -First 50)) {
+            $name = [string](Get-AVDTuneProp $s 'name')
+            if ($name -cnotmatch '^[a-z0-9]{3,24}$') { continue }
+            $p = Get-AVDTuneProp $s 'properties'
+            $kind = [string](Get-AVDTuneProp $s 'kind')
+            if ($kind -notmatch '^[A-Za-z0-9]{1,30}$') { $kind = '' }
+            $pub = [string](Get-AVDTuneProp $p 'publicNetworkAccess'); if ($pub -notin 'Enabled', 'Disabled', 'SecuredByPerimeter') { $pub = '' }
+            $dso = [string](Get-AVDTuneProp (Get-AVDTuneProp $p 'azureFilesIdentityBasedAuthentication') 'directoryServiceOptions'); if ($dso -notin 'AADKERB', 'AD', 'AADDS', 'None') { $dso = '' }
+            [void]$accounts.Add([pscustomobject]@{ Name = $name; Kind = $kind; PublicAccess = $pub; PrivateEndpoints = @(Get-AVDTuneProp $p 'privateEndpointConnections' | Where-Object { $_ }).Count; IdentityAuth = $dso })
+        }
+        $r.StorageAccounts = @($accounts)
+    }
+    catch { [void]$problems.Add("Storage accounts: $($_.Exception.Message)") }
+    # private DNS zone for Azure Files in the resource group
+    try {
+        $zones = Invoke-AVDTuneArm -Arm $ro -Method GET -Path "$rgPath/providers/Microsoft.Network/privateDnsZones?api-version=$script:FactsDnsApi" -Token $Token -Action 'Microsoft.Network/privateDnsZones/read' -Scope "the resource group $($Vm.ResourceGroup)"
+        $r.DnsZone = (@(Get-AVDTuneProp $zones 'value' | Where-Object { $_ -and ([string](Get-AVDTuneProp $_ 'name')) -ieq 'privatelink.file.core.windows.net' }).Count -gt 0)
+    }
+    catch { [void]$problems.Add("Private DNS zones: $($_.Exception.Message)") }
+    $r.Problems = @($problems)
+    [pscustomobject]$r
+}
+
+#endregion
+
 #region real adapter
 
 function New-AVDTuneArmAdapter {
@@ -405,4 +501,4 @@ function New-AVDTuneArmAdapter {
 #endregion
 
 Export-ModuleMember -Function Get-AVDTuneVerifiedSnapshot, Get-AVDTuneSnapshotClockBuffer, Get-AVDTuneGateText, Invoke-AVDTuneArm, ConvertTo-AVDTuneArmPath, Get-AVDTuneVmIdentity, Get-AVDTuneDefaultSnapshotNamePattern, Test-AVDTuneSnapshotNamePattern, Get-AVDTuneSnapshotName, Get-AVDTuneOsDiskSnapshots, Get-AVDTuneIncrementalSnapshotSku, Start-AVDTuneSnapshot,
-    Get-AVDTuneSnapshotState, Wait-AVDTuneSnapshot, Test-AVDTuneConfirmationName, Get-AVDTuneGateStatus, Confirm-AVDTuneSnapshotGate, New-AVDTuneArmAdapter
+    Get-AVDTuneSnapshotState, Wait-AVDTuneSnapshot, Test-AVDTuneConfirmationName, Get-AVDTuneGateStatus, Confirm-AVDTuneSnapshotGate, New-AVDTuneArmAdapter, New-AVDTuneReadOnlyArm, Get-AVDTuneAzureFacts
