@@ -535,14 +535,8 @@ function New-AVDTuneMachine {
     $m.TaskRemove = { param($Path, $Name) Unregister-ScheduledTask -TaskPath $Path -TaskName $Name -Confirm:$false }
     # The default user profile that the optimization list loads (#40): is HKU\AVDTune_DefaultUser loaded, and one unload attempt (reg.exe by full path, exit code)
     $m.HiveLoaded = { $k = [Microsoft.Win32.Registry]::Users.OpenSubKey('AVDTune_DefaultUser'); if ($k) { $k.Close(); $true } else { $false } }
-    $m.HiveUnload = {
-        $psi = New-AVDTuneChildStartInfo -File (Join-Path (Get-AVDTuneSystemFolder System) 'reg.exe') -Arguments @('unload', 'HKU\AVDTune_DefaultUser')
-        $p = [System.Diagnostics.Process]::Start($psi)
-        $out = $p.StandardOutput.ReadToEndAsync(); $err = $p.StandardError.ReadToEndAsync()
-        if (-not $p.WaitForExit(60000)) { try { $p.Kill() } catch { }; return -1 }
-        [void]$out.Result; [void]$err.Result
-        $p.ExitCode
-    }
+    $run = $m.Run   # the one program start of the adapter (child environment, timeout)
+    $m.HiveUnload = { [int](& $run (Join-Path (Get-AVDTuneSystemFolder System) 'reg.exe') @('unload', 'HKU\AVDTune_DefaultUser') 60).ExitCode }.GetNewClosure()
     [pscustomobject]$m
 }
 
