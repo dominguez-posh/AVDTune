@@ -276,12 +276,14 @@ function New-HealthRow($Item) {
     [void]$grid.Children.Add($pill); [void]$grid.Children.Add($title); [void]$grid.Children.Add($detail)
     $grid
 }
+# the master is busy while a change is marked in state.json or a job of this window that changes it runs (a job may not have marked it yet)
+function Test-MasterBusy { [bool]((Test-AVDTuneChangeInProgress -Root $script:StateRoot) -or (Get-AVDTuneRunningWriter)) }
 function Update-Chip {
     $state = Get-AVDTuneState $script:StateRoot
     $ui.TxtChipName.Text = $(if ($script:Overview) { [string]$script:Overview.ComputerName } else { [string](& $script:Machine.ComputerName) })
     $ui.TxtChipVersion.Text = $(if ($state.ImageVersion) { [string]$state.ImageVersion } else { 'no image version' })
     # no new version while AVDTune changes the master: the first change of a version and its snapshot must not overlap (#27)
-    $busy = Test-AVDTuneChangeInProgress -Root $script:StateRoot
+    $busy = Test-MasterBusy
     $ui.BtnNewVersion.IsEnabled = -not $busy
     $ui.BtnNewVersion.ToolTip = $(if ($busy) { 'AVDTune is changing the master right now.' } else { $null })
 }
@@ -336,10 +338,11 @@ function Complete-OverviewRefresh {
 $script:Timer = New-Object System.Windows.Threading.DispatcherTimer
 $script:Timer.Interval = [TimeSpan]::FromMilliseconds(250)
 $script:Timer.Add_Tick({ try { Complete-OverviewRefresh } catch { Show-Error $_.Exception.Message } })
+$script:Timer.Add_Tick({ try { $stopError = Get-AVDTuneChangeStopError; if ($stopError) { Show-Error $stopError } } catch { } })   # Stop-AVDTuneChange never replaces a result with its lock error; it is shown here
 
 Add-Click $ui.BtnRefresh { Start-OverviewRefresh }
 function Start-NewVersion {
-    if (Test-AVDTuneChangeInProgress -Root $script:StateRoot) { Show-Error 'AVDTune is changing the master right now. Start the new image version when it has finished.'; return }
+    if (Test-MasterBusy) { Show-Error 'AVDTune is changing the master right now. Start the new image version when it has finished.'; return }
     $state = Get-AVDTuneState $script:StateRoot
     $next = Get-AVDTuneNextImageVersion -Root $script:StateRoot
     $ask = if ($state.ImageVersion) { "Start image version $($next)? The current version $($state.ImageVersion) stays in the change log." } else { "Start image version $($next)?" }
@@ -516,6 +519,8 @@ if (-not ('AVDTune.ShutdownBlock' -as [type])) {
 $script:ShutdownReason = 'AVDTune runs an operation (update or benchmark). Wait until it is done: what was paused or lifted (update block, Windows Update, indexer) is put back at the end.'
 function Get-WindowHandle { (New-Object System.Windows.Interop.WindowInteropHelper $window).Handle }
 function Set-ShutdownBlock([bool]$On) {
+    # Off only when no job is left: an ending search must not take the block away from a run that still goes (#66)
+    if (-not $On) { foreach ($jobName in $script:WriterJobVariables) { if ($jobName -ne 'ReadyJob' -and (Get-Variable -Scope Script -Name $jobName -ValueOnly -ErrorAction SilentlyContinue)) { return } } }
     try {
         $h = Get-WindowHandle
         if ($h -eq [IntPtr]::Zero) { return }

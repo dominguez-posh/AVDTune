@@ -744,6 +744,11 @@ try {
     $script:Machine = $keepM
     Start-OptRead; Complete-OptRead
     Test-Check 'stale (#66): the next successful read opens everything again' (-not $script:OptStale -and $ui.BtnOptApply.IsEnabled -and $ui.OptPresets['recommended'].Content -match 'in place') $null
+    # ---- re-review N-C: the code of "Defender service not running" is 0x800106BA = -2147416390 (as int or uint), found in HResult of a CimException; another code is not "absent"
+    Import-Module CimCmdlets
+    $mkCim = { param([int]$H) $ex = [Microsoft.Management.Infrastructure.CimException]::new('Operation failed'); [Exception].GetField('_HResult', 'NonPublic,Instance').SetValue($ex, $H); [Management.Automation.ErrorRecord]::new($ex, 'x', [Management.Automation.ErrorCategory]::NotSpecified, $null) }
+    Test-Check 'defender (#66): a CimException with HResult 0x800106BA (service not running) means absent, another code (0x803380BA) does not' ((Test-OptDefenderAbsent (& $mkCim -2147416390)) -and -not (Test-OptDefenderAbsent (& $mkCim -2144108358))) $null
+    Test-Check 'defender (#66): an error code as uint is read as the signed number' ((ConvertTo-OptInt32 2147550906) -eq -2147416390 -and (ConvertTo-OptInt32 5) -eq 5 -and (ConvertTo-OptInt32 'x') -eq 0) $null
     # ---- review M1: one writer at a time
     $script:OptRun = @{ Mode = 'Apply' }
     $seen = ((Get-AVDTuneRunningWriter) -eq 'OptRun') -and (Test-Throws { Assert-NoOtherWriter }) -and (Test-Throws { Start-OptChange 'Apply' })
