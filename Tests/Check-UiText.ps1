@@ -1,13 +1,13 @@
 #requires -Version 5.1
 <#
 .SYNOPSIS
-    Checks AVDTune-Language.ps1 and the language files UI\Strings.en.json / UI\Strings.de.json (issue #70): the files are data and typed (flat object, keys
+    Checks AVDTune-UiText.ps1 and the language files UI\Strings.en.json / UI\Strings.de.json (issue #70): the files are data and typed (flat object, keys
     \A[a-z0-9.]+\z, string values), both have the same keys and the same placeholders, every key that the shell code or the XAML asks for exists, the lookup
     falls back to English and then to the key, and the shell code has no fixed text left for the translated areas (sample). No window is shown.
 #>
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path $PSScriptRoot -Parent
-. (Join-Path $repo 'AVDTune-Language.ps1')
+. (Join-Path $repo 'AVDTune-UiText.ps1')
 $script:failed = 0
 function Test-Check([string]$Name, [bool]$Ok, $Detail) { if ($Ok) { "PASS $Name" } else { $script:failed++; "FAIL $Name" + $(if ($null -ne $Detail) { "  -> $Detail" }) } }
 function Test-Throws([scriptblock]$Block) { try { & $Block; $false } catch { $true } }
@@ -130,7 +130,7 @@ try {
         param($Repo)
         $ErrorActionPreference = 'Stop'
         Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase
-        . (Join-Path $Repo 'AVDTune-Language.ps1')
+        . (Join-Path $Repo 'AVDTune-UiText.ps1')
         [void](Initialize-AVDTuneLanguage -Folder (Join-Path $Repo 'UI'))
         $x = '<StackPanel xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"><TextBlock x:Name="A" Uid="ov.title" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"/><Button Uid="ov.refresh"/><Button Uid="title.close" Content="X"/><TextBlock Uid="plain"/><TextBlock Uid="12"/></StackPanel>'
         $root = [Windows.Markup.XamlReader]::Load([System.Xml.XmlReader]::Create([IO.StringReader]::new($x)))
@@ -159,4 +159,4 @@ try {
 }
 finally { Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue }
 if ($script:failed -gt 0) { throw "$script:failed check(s) failed." }
-'Check-Language: all checks passed.'
+'Check-UiText: all checks passed.'

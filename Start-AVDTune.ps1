@@ -30,7 +30,7 @@ Import-Module (Join-Path $PSScriptRoot 'Modules\AVDTune.psm1') -Force
 foreach ($part in 'Trust', 'Session', 'Snapshot', 'Directory', 'Start', 'UpdateBlock', 'Updates', 'Readiness', 'Watermark', 'Benchmark', 'Shortcut', 'FSLogix', 'Storage', 'Software', 'Office', 'Masking', 'Finish', 'Environment', 'Optimization') { Import-Module (Join-Path $PSScriptRoot "Modules\AVDTune.$part.psm1") -Force }
 Import-Module (Join-Path $PSScriptRoot 'Modules\AVDTune.Release.psm1') -Force
 . (Join-Path $PSScriptRoot 'AVDTune-Theme.ps1')
-. (Join-Path $PSScriptRoot 'AVDTune-Language.ps1')   # the texts of the window (UI\Strings.en.json, UI\Strings.de.json)
+. (Join-Path $PSScriptRoot 'AVDTune-UiText.ps1')   # the texts of the window (UI\Strings.en.json, UI\Strings.de.json)
 $script:LanguageInit = Initialize-AVDTuneLanguage -Folder (Join-Path $PSScriptRoot 'UI')
 foreach ($problem in $script:LanguageInit.Problems) { [Console]::Error.WriteLine("AVDTune: $problem") }
 Set-AVDTuneLanguage $(if ([System.Globalization.CultureInfo]::CurrentUICulture.TwoLetterISOLanguageName -eq 'de') { 'de' } else { 'en' })   # until the settings are read: the language of Windows

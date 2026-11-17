@@ -1,6 +1,6 @@
 # AVDTune language: the texts of the window live in UI\Strings.en.json and UI\Strings.de.json (data, never code).
 # English is the base: a key that the chosen language lacks falls back to English, a key that English lacks shows the key itself (and the check
-# Tests\Check-Language.ps1 reports both). Dot-sourced by Start-AVDTune.ps1; no WPF needed for the lookup, so the check runs it without a window.
+# Tests\Check-UiText.ps1 reports both). Dot-sourced by Start-AVDTune.ps1; no WPF needed for the lookup, so the check runs it without a window.
 #
 # In XAML an element gets its texts through its Uid (Uid="nav.overview"): the Uid is the key of Text/Content, "<uid>.tip" is the ToolTip and
 # "<uid>.name" the AutomationProperties.Name. Register-AVDTuneLocalized collects those elements once after the window is loaded;

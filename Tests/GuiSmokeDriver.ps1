@@ -154,7 +154,7 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         Test-Smoke 'switch back to light' ($script:Settings.Theme -eq 'Light' -and (Get-ThemeColor 'WindowBackground') -eq '#FFF3F3F3' -and $window.Background.Color.ToString() -eq '#FFF3F3F3') $null
         Show-Page 'Updates'; Save-SmokeShot '06-page-updates-light'; Show-Page 'Overview'
         $true } }
-    @{ Name = 'language'; Do = {
+    @{ Name = 'ui language'; Do = {
         Show-Page 'Overview'
         $window.UpdateLayout()
         Test-Smoke 'language: English at the start, the button shows EN, the texts come from the language file' ((Get-AVDTuneLanguage) -eq 'en' -and $ui.BtnLang.Content -eq 'EN' -and $ui.BtnRefresh.Content -eq 'Refresh' -and $ui.TxtOverviewSubtitle.Text -like 'This Golden Master at a glance*') "$(Get-AVDTuneLanguage) / $($ui.BtnLang.Content)"
