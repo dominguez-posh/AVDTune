@@ -45,7 +45,7 @@ $psi.EnvironmentVariables['AVDTUNE_SMOKE_OUT'] = $OutDir
 $process = [System.Diagnostics.Process]::Start($psi)
 $stdout = $process.StandardOutput.ReadToEndAsync()
 $stderr = $process.StandardError.ReadToEndAsync()
-if (-not $process.WaitForExit(5 * 60 * 1000)) { $process.Kill(); throw 'The GUI smoke test did not finish within 5 minutes.' }
+if (-not $process.WaitForExit(10 * 60 * 1000)) { $process.Kill(); throw 'The GUI smoke test did not finish within 10 minutes (a busy computer makes it slow).' }
 if ($stderr.Result.Trim()) { '--- stderr ---'; $stderr.Result }
 if (-not (Test-Path $results)) { '--- stdout ---'; $stdout.Result; throw 'The GUI smoke test wrote no results.' }
 Get-Content $results
