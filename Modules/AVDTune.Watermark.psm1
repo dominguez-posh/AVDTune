@@ -32,12 +32,15 @@ function Get-AVDTuneWatermarkPaths {
     param([Parameter(Mandatory)]$Machine)
     $pf = & $Machine.KnownFolder 'ProgramFiles'
     $pd = & $Machine.KnownFolder 'CommonAppData'
-    $dir = Join-Path (Join-Path $pf 'AVDTune') 'Watermark'
-    $pub = Join-Path $pd 'AVDTune-Public'
+    $sys = & $Machine.KnownFolder 'System'
+    # plain string joins: Join-Path of Windows PowerShell 5.1 needs the drive to exist, the paths of a fake machine (X:\Fake) only exist as text
+    $j = { param($a, $b) [IO.Path]::Combine([string]$a, [string]$b) }
+    $dir = & $j (& $j $pf 'AVDTune') 'Watermark'
+    $pub = & $j $pd 'AVDTune-Public'
     [pscustomobject]@{
-        AppDir = (Join-Path $pf 'AVDTune'); PowerShell = (Join-Path (& $Machine.KnownFolder 'System') 'WindowsPowerShell\v1.0\powershell.exe'); Conhost = (Join-Path (& $Machine.KnownFolder 'System') 'conhost.exe')
-        ProgramDir = $dir; Script = (Join-Path $dir 'Show-AVDTuneWatermark.ps1'); Core = (Join-Path $dir 'AVDTune-WatermarkCore.ps1')
-        PublicDir = $pub; PublicJson = (Join-Path $pub 'watermark.json'); LegacyVbs = (Join-Path $pd $script:LegacyVbs)
+        AppDir = (& $j $pf 'AVDTune'); PowerShell = (& $j $sys 'WindowsPowerShell\v1.0\powershell.exe'); Conhost = (& $j $sys 'conhost.exe')
+        ProgramDir = $dir; Script = (& $j $dir 'Show-AVDTuneWatermark.ps1'); Core = (& $j $dir 'AVDTune-WatermarkCore.ps1')
+        PublicDir = $pub; PublicJson = (& $j $pub 'watermark.json'); LegacyVbs = (& $j $pd $script:LegacyVbs)
     }
 }
 

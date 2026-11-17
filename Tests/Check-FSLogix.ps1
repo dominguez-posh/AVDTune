@@ -427,6 +427,18 @@ try {
     $unknown = Compare-AVDTuneFSLogixAcl -Sddl $rs
     Test-Check 'without the group SIDs (Entra only, no domain): yellow, check by hand, never green' (-not $unknown.Compliant -and @($unknown.Findings | Where-Object Status -eq 'yellow').Count -eq 2 -and @($unknown.Findings | Where-Object Status -eq 'red').Count -eq 0) $null
     Test-Check 'a bad SID in the builder, an unparsable SDDL' ((Test-Throws { New-AVDTuneFSLogixRecommendedSddl -UsersSid 'Users' -AdminsSid $sddlAdmins }) -and (Test-Throws { Compare-AVDTuneFSLogixAcl -Sddl 'not sddl' })) $null
+    # a master outside a domain (Entra only, before the join) cannot resolve DU, DA, ... : the recommendation has none, a found SDDL with them is still read
+    Test-Check 'the recommended SDDL has no domain-relative alias (readable on a master outside a domain)' ($rs -notmatch '(?<=[OG]:)(DA|DU|DG|DC|DD|CA|SA|EA|PA|RO|CN|AP|KA|EK|RS)(?=[OGDS]:)' -and $rs -notmatch ';(DA|DU|DG|DC|DD|CA|SA|EA|PA|RO|CN|AP|KA|EK|RS)\)') $rs
+    $noDom = ConvertTo-AVDTuneSddlWithoutDomainAliases -Sddl 'O:DAG:DUD:PAI(A;OICI;FA;;;DA)(A;;0x1301bf;;;du)(A;OICI;FA;;;SY)(A;OICIIO;0x1301bf;;;CO)' -DomainSid 'S-1-5-21-1-2-3'
+    Test-Check 'domain aliases in owner, group and trustees become SIDs of the given domain; other aliases and the rights (FA) stay' ($noDom -ceq 'O:S-1-5-21-1-2-3-512G:S-1-5-21-1-2-3-513D:PAI(A;OICI;FA;;;S-1-5-21-1-2-3-512)(A;;0x1301bf;;;S-1-5-21-1-2-3-513)(A;OICI;FA;;;SY)(A;OICIIO;0x1301bf;;;CO)') $noDom
+    $noDom2 = ConvertTo-AVDTuneSddlWithoutDomainAliases -Sddl 'O:BAG:DUD:PAI(A;OICI;FA;;;DU)' -DomainSid 'not a sid'
+    Test-Check 'without a valid domain SID the placeholder domain S-1-5-21-0-0-0 is used (matches no real group)' ($noDom2 -ceq 'O:BAG:S-1-5-21-0-0-0-513D:PAI(A;OICI;FA;;;S-1-5-21-0-0-0-513)') $noDom2
+    Test-Check 'an SDDL over 64 KB is refused before any regex runs' (Test-Throws { ConvertTo-AVDTuneSddlWithoutDomainAliases -Sddl ('O:DU' + ('(A;;FA;;;DU)' * 6000)) }) $null
+    Test-Check 'the domain part of the first domain SID (Entra SIDs and builtin groups have none)' ((Get-AVDTuneDomainSidOf @('S-1-12-1-1-2-3-4', 'S-1-5-32-544', $sddlAdmins)) -eq 'S-1-5-21-1-2-3' -and (Get-AVDTuneDomainSidOf @('S-1-5-32-545')) -eq '') $null
+    $viaPlain = ConvertFrom-AVDTuneSddl $noDom
+    Test-Check 'the replaced SDDL is read without a domain (owner and trustees as full SIDs)' ($viaPlain.Owner -eq 'S-1-5-21-1-2-3-512' -and @($viaPlain.Aces | Where-Object Sid -eq 'S-1-5-21-1-2-3-513').Count -eq 1) $viaPlain.Owner
+    $foundDu = Compare-AVDTuneFSLogixAcl -Sddl "O:BAG:DUD:PAI(A;OICIIO;0x1301bf;;;CO)(A;OICI;FA;;;$sddlAdmins)(A;;0x1301bf;;;$sddlUsers)(A;OICI;FA;;;SY)" -UsersSids @($sddlUsers) -AdminsSids @($sddlAdmins)
+    Test-Check 'a found SDDL with group DU is compared on any machine (in a domain or not): compliant' ($foundDu.Compliant) (($foundDu.Findings | ForEach-Object Text) -join ';')
 
     # ---------------------------------------------------------------- function test
     $goodF = { New-AVDTuneFakeFSLogix -Seed @{ Acl = @{ $share = $rs }; Probe = @{}; Defender = @{ Paths = @(); Processes = @() } } }

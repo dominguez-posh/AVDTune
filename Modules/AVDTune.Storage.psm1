@@ -480,7 +480,7 @@ function Invoke-AVDTuneStorageCheck {
                 foreach ($fo in (Get-AVDTuneStorageProfileFolders -Files $Files -Account $share.Account -Share $share.Share -Token $StorageToken)) {
                     $fr = Get-AVDTuneStorageShareAcl -Files $Files -Account $share.Account -Share $share.Share -Path $fo -Token $StorageToken
                     if (-not $fr.Ok) { continue }
-                    $acl = ConvertFrom-AVDTuneSddl $fr.Sddl
+                    $acl = ConvertFrom-AVDTuneSddl $fr.Sddl -DomainSid (Get-AVDTuneDomainSidOf (@($AdminsSids) + @($UsersSids)))
                     $bad = @($acl.Aces | Where-Object { $_.Type -eq 'AccessAllowed' -and ($_.Sid -in (@('S-1-1-0', 'S-1-5-11', 'S-1-5-32-545') + @($UsersSids))) })
                     if ($bad.Count -gt 0) { [void]$broadFolders.Add($fo) }
                 }

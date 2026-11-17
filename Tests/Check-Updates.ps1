@@ -411,7 +411,12 @@ try {
     finally { [Environment]::SetEnvironmentVariable('ProgramData', $keepPd, 'Process'); & $psmAVDTune { $script:ChildEnvHooks.Machine = $null } }
     Test-Check 'child env (#47): ChocolateyInstall as REG_EXPAND_SZ with %ProgramData% and ProgramData=evil in the process is not expanded: the default under the real ProgramData' ($chocoRoot -eq (Join-Path ([Environment]::GetFolderPath('CommonApplicationData')) 'chocolatey')) $chocoRoot
     $rawHklm = & $psmAVDTune { Get-AVDTuneMachineEnvironmentValue -Name 'Path' }
-    Test-Check 'child env (#47): the real HKLM read returns the raw text (Path keeps its %SystemRoot% parts, none expanded)' ($rawHklm -and $rawHklm -like '*%SystemRoot%*') $rawHklm
+    # compared with the value as stored (DoNotExpandEnvironmentNames): a GitHub runner stores Path already expanded (no %SystemRoot%), a normal Windows as REG_EXPAND_SZ with %SystemRoot%
+    $envKey = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey('SYSTEM\CurrentControlSet\Control\Session Manager\Environment')
+    try { $storedPath = [string]$envKey.GetValue('Path', $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames); $storedKind = [string]$envKey.GetValueKind('Path'); $expandedPath = [string]$envKey.GetValue('Path') } finally { $envKey.Close() }
+    Test-Check "child env (#47): the real HKLM read returns the raw text of Path exactly as stored ($storedKind)" ($rawHklm -and $rawHklm -ceq $storedPath) $rawHklm
+    if ($storedKind -eq 'ExpandString' -and $storedPath -match '%[^%;]+%') { Test-Check 'child env (#47): Path stored with %variables% keeps them in the read (none expanded)' ($rawHklm -match '%[^%;]+%' -and $rawHklm -cne $expandedPath) $rawHklm }
+    else { "SKIP child env (#47): Path keeps its %variables% - Path of this machine is stored without %variables% ($storedKind), only the raw comparison above applies" }
     # clean-up: set-aside folders beyond the newest two are removed (a link inside as a link only), stale entries of the tool folder too
     $cl = Join-Path $tmp 'cleanup'; [void](New-Item -ItemType Directory -Path (Join-Path $cl 'temp') -Force)
     $out3 = Join-Path $tmp 'outside3'; [void](New-Item -ItemType Directory -Path $out3 -Force); Set-Content -LiteralPath (Join-Path $out3 'keep.txt') -Value 'keep'
