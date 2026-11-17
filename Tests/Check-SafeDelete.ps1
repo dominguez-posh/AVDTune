@@ -32,6 +32,13 @@ function New-Case {
     Set-Content -LiteralPath (Join-Path $c 'out\victim.txt') -Value 'precious'
     [pscustomobject]@{ Dir = $c; Tree = (Join-Path $c 't'); Out = (Join-Path $c 'out'); Victim = (Join-Path $c 'out\victim.txt') }
 }
+function Move-Retry([string]$From, [string]$To, [bool]$IsDir) {
+    # Another process (a virus scanner, the search indexer) can hold a fresh file for a moment: try again before giving up (CI runners)
+    for ($i = 0; ; $i++) {
+        try { if ($IsDir) { [IO.Directory]::Move($From, $To) } else { [IO.File]::Move($From, $To) }; return }
+        catch [IO.IOException] { if ($i -ge 20) { throw }; Start-Sleep -Milliseconds 250 }
+    }
+}
 function New-Junction([string]$Path, [string]$Target) { [void](New-Item -ItemType Junction -Path $Path -Value $Target) }
 
 function Remove-OldPathVariant([string]$Folder, [scriptblock]$AfterCheck) {
@@ -89,7 +96,7 @@ try {
 
     # ---------------------------------------------------------------- red test: the old path variant follows a swap
     $c = New-Case
-    $script:swapped = $false
+    $script:swapped = $false; $script:caseErr = $null
     $swapSub = {
         param($Folder)
         if ($script:swapped -or (Split-Path $Folder -Leaf) -ne 'sub') { return }
@@ -107,44 +114,44 @@ try {
         if ($Stage -ne 'opened' -or $script:swapped -or (Split-Path $Path -Leaf) -ne 'sub') { return }
         try { [IO.Directory]::Move($Path, "$Path.moved"); New-Junction $Path $c.Out; $script:swapped = $true } catch { $e = $_.Exception; if ($e.InnerException) { $e = $e.InnerException }; $script:swapError = ("{0:X8} {1}" -f $e.HResult, $e.Message) }
     }
-    try { $r = Remove-AVDTuneTreeSafe -Path $c.Tree } finally { [AVDTune.Native.SafeTree]::Hook = $null }
+    try { $r = Remove-AVDTuneTreeSafe -Path $c.Tree } catch { $script:caseErr = $_.Exception.Message } finally { [AVDTune.Native.SafeTree]::Hook = $null }
     Test-Check 'handles, swap between opening and deleting: the held folder cannot be renamed (sharing violation), the tree is gone, the target outside is untouched' (-not $script:swapped -and $script:swapError -like "80070020*" -and $r.Gone -and (Test-Path -LiteralPath $c.Victim) -and -not (Test-Path -LiteralPath $c.Tree)) "swapped=$($script:swapped) gone=$($r.Gone) $($script:swapError)"
     Test-Check 'handles: the hook saw listing and opening in order (the root listed before its entries were opened)' ($script:stages.IndexOf('listed t') -ge 0 -and $script:stages.IndexOf('opened sub') -gt $script:stages.IndexOf('listed t')) ($script:stages -join ', ')
 
     # an attacker who is faster: the folder is swapped after the listing and before it is opened
     $c = New-Case
-    $script:swapped = $false
+    $script:swapped = $false; $script:caseErr = $null
     [AVDTune.Native.SafeTree]::Hook = [Action[string, string]] {
         param($Stage, $Path)
         if ($Stage -ne 'listed' -or $script:swapped -or (Split-Path $Path -Leaf) -ne 't') { return }
         $sub = Join-Path $Path 'sub'
-        [IO.Directory]::Move($sub, "$sub.moved"); New-Junction $sub $c.Out; $script:swapped = $true
+        Move-Retry $sub "$sub.moved" $true; New-Junction $sub $c.Out; $script:swapped = $true
     }
-    try { $r = Remove-AVDTuneTreeSafe -Path $c.Tree } finally { [AVDTune.Native.SafeTree]::Hook = $null }
-    Test-Check 'handles, swap between listing and opening: the junction is opened itself and removed as a link, the moved folder goes too, the target is untouched' ($script:swapped -and $r.Gone -and (Test-Path -LiteralPath $c.Victim) -and -not (Test-Path -LiteralPath $c.Tree)) "swapped=$($script:swapped) gone=$($r.Gone)"
+    try { $r = Remove-AVDTuneTreeSafe -Path $c.Tree } catch { $script:caseErr = $_.Exception.Message } finally { [AVDTune.Native.SafeTree]::Hook = $null }
+    Test-Check 'handles, swap between listing and opening: the junction is opened itself and removed as a link, the moved folder goes too, the target is untouched' ($script:swapped -and $r.Gone -and (Test-Path -LiteralPath $c.Victim) -and -not (Test-Path -LiteralPath $c.Tree)) "swapped=$($script:swapped) gone=$($r.Gone) $($script:caseErr)"
 
     # a file swapped after it was opened: the opened file is deleted (wherever it is now), the junction put in its place is removed as a link
     $c = New-Case
-    $script:swapped = $false
+    $script:swapped = $false; $script:caseErr = $null
     [AVDTune.Native.SafeTree]::Hook = [Action[string, string]] {
         param($Stage, $Path)
         if ($Stage -ne 'opened' -or $script:swapped -or (Split-Path $Path -Leaf) -ne 'f.txt') { return }
-        [IO.File]::Move($Path, "$Path.moved"); New-Junction $Path $c.Out; $script:swapped = $true
+        Move-Retry $Path "$Path.moved" $false; New-Junction $Path $c.Out; $script:swapped = $true
     }
-    try { $r = Remove-AVDTuneTreeSafe -Path $c.Tree } finally { [AVDTune.Native.SafeTree]::Hook = $null }
-    Test-Check 'handles, a file swapped for a junction after opening: the target outside is untouched, the tree is gone' ($script:swapped -and $r.Gone -and (Test-Path -LiteralPath $c.Victim) -and -not (Test-Path -LiteralPath $c.Tree)) "swapped=$($script:swapped) gone=$($r.Gone)"
+    try { $r = Remove-AVDTuneTreeSafe -Path $c.Tree } catch { $script:caseErr = $_.Exception.Message } finally { [AVDTune.Native.SafeTree]::Hook = $null }
+    Test-Check 'handles, a file swapped for a junction after opening: the target outside is untouched, the tree is gone' ($script:swapped -and $r.Gone -and (Test-Path -LiteralPath $c.Victim) -and -not (Test-Path -LiteralPath $c.Tree)) "swapped=$($script:swapped) gone=$($r.Gone) $($script:caseErr)"
 
     # the wrappers the callers use take the same path
     $c = New-Case
-    $script:swapped = $false
+    $script:swapped = $false; $script:caseErr = $null
     [AVDTune.Native.SafeTree]::Hook = [Action[string, string]] {
         param($Stage, $Path)
         if ($Stage -ne 'listed' -or $script:swapped -or (Split-Path $Path -Leaf) -ne 't') { return }
         $sub = Join-Path $Path 'sub'
-        [IO.Directory]::Move($sub, "$sub.moved"); New-Junction $sub $c.Out; $script:swapped = $true
+        Move-Retry $sub "$sub.moved" $true; New-Junction $sub $c.Out; $script:swapped = $true
     }
-    try { Remove-AVDTuneFolderNoFollow $c.Tree } finally { [AVDTune.Native.SafeTree]::Hook = $null }
-    Test-Check 'Remove-AVDTuneFolderNoFollow (all callers: Office, VDI, FSLogix, release, sign-in profiles, software work, benchmark) goes through the handles' ($script:swapped -and (Test-Path -LiteralPath $c.Victim) -and -not (Test-Path -LiteralPath $c.Tree)) $null
+    try { Remove-AVDTuneFolderNoFollow $c.Tree } catch { $script:caseErr = $_.Exception.Message } finally { [AVDTune.Native.SafeTree]::Hook = $null }
+    Test-Check 'Remove-AVDTuneFolderNoFollow (all callers: Office, VDI, FSLogix, release, sign-in profiles, software work, benchmark) goes through the handles' ($script:swapped -and (Test-Path -LiteralPath $c.Victim) -and -not (Test-Path -LiteralPath $c.Tree)) $script:caseErr
 
     # ---------------------------------------------------------------- in use
     $c = New-Case
