@@ -5,7 +5,7 @@
                            drivers and previews off by default, KB exclude list, result code per update with an explanation, retry
       Microsoft 365 Apps   build and channel from ClickToRun\Configuration; update with OfficeC2RClient.exe /update (Updates Enabled stays FALSE in the image)
       Edge, Teams, OneDrive, Defender signatures; FSLogix is only detected here (the update comes with the FSLogix page, phase 3)
-      winget / Chocolatey  every call inside the mutex Global\PackTune (and, in the transition, Global\IntuneChocolateyDeployment)
+      winget / Chocolatey  every call inside the mutex Global\PackTune (and, in the transition, Global\IntuneChocoDeployment as in PackTune)
       Repair               DISM /Online /Cleanup-Image /RestoreHealth and sfc /scannow, offered after a failure, run on a click
 
     Every access to the machine goes through two adapters: the machine adapter of AVDTune.psm1 (registry, services, tasks) and the update adapter
@@ -19,7 +19,8 @@ Import-Module (Join-Path $PSScriptRoot 'AVDTune.psm1')
 Import-Module (Join-Path $PSScriptRoot 'AVDTune.UpdateBlock.psm1')
 
 $script:MicrosoftUpdateServiceId = '7971f918-a847-4430-9279-4a52d1efe18d'
-$script:LockNames = @('Global\PackTune', 'Global\IntuneChocolateyDeployment')
+# The same names and order as PackTune (PackTune-Main.ps1, Enter-DeploymentLock): Global\PackTune first, then the one of PackTune's earlier name.
+$script:LockNames = @('Global\PackTune', 'Global\IntuneChocoDeployment')
 $script:TransientHResults = @('0x8024402C', '0x80072EE7', '0x80072EFD', '0x80072EE2', '0x80244022', '0x80240438', '0x8024001E', '0x800705B4', '0x80248007')
 
 #region settings
@@ -763,6 +764,9 @@ function New-AVDTuneUpdateAdapter {
         machine): the COM code of WuaSearch/WuaInstall is written from the WUA API documentation and has to be tried on a throw-away VM.
     #>
     $state = @{ Session = $null; Cache = @{} }
+    # GetNewClosure moves a block into a new dynamic module: $script: there is that module, not this one (#78). The closures below get these values as locals.
+    $lockNames = @($script:LockNames)
+    $muServiceId = [string]$script:MicrosoftUpdateServiceId
     $u = [ordered]@{ Kind = 'Real'; State = $state }
     $u.Sleep = { param($Seconds) Start-Sleep -Seconds $Seconds }
     $u.Path = {
@@ -885,7 +889,7 @@ function New-AVDTuneUpdateAdapter {
     $u.WuaRegisterMicrosoftUpdate = {
         try {
             $sm = New-Object -ComObject Microsoft.Update.ServiceManager
-            [void]$sm.AddService2($script:MicrosoftUpdateServiceId, 7, '')   # asfAllowPendingRegistration + asfAllowOnlineRegistration + asfRegisterServiceWithAU
+            [void]$sm.AddService2($muServiceId, 7, '')   # asfAllowPendingRegistration + asfAllowOnlineRegistration + asfRegisterServiceWithAU
             @{ Ok = $true; Error = '' }
         }
         catch { @{ Ok = $false; Error = $_.Exception.Message } }
@@ -895,7 +899,7 @@ function New-AVDTuneUpdateAdapter {
         try {
             $session = New-Object -ComObject Microsoft.Update.Session
             $searcher = $session.CreateUpdateSearcher()
-            if ($UseMicrosoftUpdate) { $searcher.ServerSelection = 3; $searcher.ServiceID = $script:MicrosoftUpdateServiceId }   # ssOthers
+            if ($UseMicrosoftUpdate) { $searcher.ServerSelection = 3; $searcher.ServiceID = $muServiceId }   # ssOthers
             $found = $searcher.Search('IsInstalled=0 and IsHidden=0')
             $state.Session = $session; $state.Cache = @{}
             $list = @()
@@ -935,8 +939,10 @@ function New-AVDTuneUpdateAdapter {
     $u.LockEnter = {
         # Mutexes with a security descriptor (SYSTEM and Administrators only). One that belongs to someone else was made by a user to steer installs: fail closed.
         $admin = @('S-1-5-18', 'S-1-5-32-544', 'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464')
+        # No names means no lock at all: fail closed instead of running winget or choco unlocked (#78).
+        if (@($lockNames | Where-Object { $_ }).Count -eq 0) { return @{ Ok = $false; Error = 'no lock names are known, so winget and Chocolatey stay off (internal error, AVDTune.Updates.psm1)' } }
         $opened = @()
-        foreach ($name in $script:LockNames) {
+        foreach ($name in $lockNames) {
             $sec = New-Object System.Security.AccessControl.MutexSecurity
             foreach ($sid in 'S-1-5-18', 'S-1-5-32-544') { $sec.AddAccessRule((New-Object System.Security.AccessControl.MutexAccessRule((New-Object System.Security.Principal.SecurityIdentifier $sid), [System.Security.AccessControl.MutexRights]::FullControl, [System.Security.AccessControl.AccessControlType]::Allow))) }
             $created = $false
