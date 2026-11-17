@@ -6,22 +6,23 @@ using System.Text;
 namespace AVDTune.Bench;
 
 /// <summary>Starts the application programs (Word, Excel, Edge, Explorer, PowerShell) NOT elevated (security review of round 2, finding 3). Programs with extension points that a user can
-/// write (Office add-ins, Normal.dotm, XLSTART, PowerShell profiles, Edge extensions) must never run with the rights of the elevated administrator. The token is made with
-/// SaferComputeTokenFromLevel(SAFER_LEVELID_NORMALUSER) (the Administrators group becomes deny-only, the privileges are removed), then marked as a LUA token with
-/// CreateRestrictedToken(LUA_TOKEN | DISABLE_MAX_PRIVILEGE, Administrators and "local account and member of Administrators" deny-only) and its integrity level is set to Medium. The LUA mark is
-/// what makes TokenElevation 0: on a full token without a linked token (the built-in Administrator, RID 500, which Admin Approval Mode does not filter by default; that is the account an Azure
-/// VM is provisioned with) the Safer token alone still reports TokenIsElevated = 1 although it has no admin rights left (issue #14 N1, measured on the GitHub runner). The process is made
+/// write (Office add-ins, Normal.dotm, XLSTART, PowerShell profiles, Edge extensions) must never run with the rights of the elevated administrator. The token is made in ONE step from the token of
+/// this process with CreateRestrictedToken(LUA_TOKEN | DISABLE_MAX_PRIVILEGE): only SeChangeNotifyPrivilege stays, Administrators, the other built-in admin-like groups and "local account and member
+/// of Administrators" become deny-only, the LUA mark makes TokenElevation 0, and the integrity level is set to Medium. One step matters: CreateProcessAsUser accepts a token without
+/// SeAssignPrimaryTokenPrivilege only when it is a restricted version of the caller's own token (a child); a token made from a Safer token is a grandchild and fails with 1314. The LUA mark matters
+/// on a full token without a linked token (the built-in Administrator RID 500, which Admin Approval Mode does not filter by default; the account an Azure VM is provisioned with): a Safer
+/// NORMALUSER token there still reported TokenIsElevated = 1 although it had no admin rights left (issue #14 N1, measured on the GitHub runner). The process is made
 /// with CreateProcessAsUser, suspended, and only put to work after it is in the job object (kill on close) and its real token was read back (Medium or lower, not elevated). When the token cannot
 /// be made or checked nothing starts (fail closed): the measure is then reported as failed, never run elevated as a fallback.</summary>
 public static class RestrictedLauncher
 {
-    private const uint SaferScopeUser = 2, SaferLevelNormalUser = 0x20000, SaferLevelOpen = 1;
     private const int TokenElevationClass = 20, TokenIntegrityLevelClass = 25;
     private const uint MediumRid = 0x2000;
-    /// <summary>Flags of the second step: LUA_TOKEN (0x4) marks the token as a filtered user token, DISABLE_MAX_PRIVILEGE (0x1) leaves only SeChangeNotifyPrivilege.</summary>
+    /// <summary>Flags: LUA_TOKEN (0x4) marks the token as a filtered user token, DISABLE_MAX_PRIVILEGE (0x1) leaves only SeChangeNotifyPrivilege.</summary>
     public const uint RestrictFlags = 0x4 | 0x1;
-    /// <summary>SIDs made deny-only in the second step (ignored when the token does not have them): Administrators and "local account and member of Administrators group".</summary>
-    public static readonly string[] DenyOnlySids = { "S-1-5-32-544", "S-1-5-114" };
+    /// <summary>SIDs made deny-only (ignored when the token does not have them): Administrators, Power Users, Account, Server, Print and Backup Operators, Replicator, Network Configuration
+    /// Operators, Hyper-V Administrators and "local account and member of Administrators group".</summary>
+    public static readonly string[] DenyOnlySids = { "S-1-5-32-544", "S-1-5-32-547", "S-1-5-32-548", "S-1-5-32-549", "S-1-5-32-550", "S-1-5-32-551", "S-1-5-32-552", "S-1-5-32-556", "S-1-5-32-578", "S-1-5-114" };
     private const uint CreateSuspended = 0x4, CreateUnicodeEnvironment = 0x400, CreateNoWindow = 0x08000000;
 
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
@@ -29,9 +30,6 @@ public static class RestrictedLauncher
     [StructLayout(LayoutKind.Sequential)] private struct ProcessInformation { public IntPtr Process, Thread; public int ProcessId, ThreadId; }
     [StructLayout(LayoutKind.Sequential)] private struct SidAndAttributes { public IntPtr Sid; public uint Attributes; }
 
-    [DllImport("advapi32.dll", SetLastError = true)] private static extern bool SaferCreateLevel(uint scope, uint level, uint flags, out IntPtr levelHandle, IntPtr reserved);
-    [DllImport("advapi32.dll", SetLastError = true)] private static extern bool SaferComputeTokenFromLevel(IntPtr level, IntPtr inToken, out IntPtr outToken, uint flags, IntPtr reserved);
-    [DllImport("advapi32.dll", SetLastError = true)] private static extern bool SaferCloseLevel(IntPtr level);
     [DllImport("advapi32.dll", SetLastError = true)] private static extern bool CreateRestrictedToken(IntPtr existing, uint flags, uint disableCount, SidAndAttributes[] sidsToDisable, uint deleteCount, IntPtr privilegesToDelete, uint restrictCount, IntPtr sidsToRestrict, out IntPtr newToken);
     [DllImport("advapi32.dll", SetLastError = true)] private static extern bool SetTokenInformation(IntPtr token, int infoClass, ref SidAndAttributes info, int length);
     [DllImport("advapi32.dll", SetLastError = true)] private static extern bool GetTokenInformation(IntPtr token, int infoClass, IntPtr buffer, int length, out int returned);
@@ -80,15 +78,15 @@ public static class RestrictedLauncher
     /// <summary>The token of this process, reduced to a standard user at Medium integrity. The caller closes it.</summary>
     public static IntPtr MakeToken()
     {
-        IntPtr level = IntPtr.Zero, safer = IntPtr.Zero, token = IntPtr.Zero, sid = IntPtr.Zero;
+        IntPtr self = IntPtr.Zero, token = IntPtr.Zero, sid = IntPtr.Zero;
         var deny = new SidAndAttributes[DenyOnlySids.Length];
         try
         {
-            if (!SaferCreateLevel(SaferScopeUser, SaferLevelNormalUser, SaferLevelOpen, out level, IntPtr.Zero)) throw new Win32Exception(Marshal.GetLastWin32Error(), "SaferCreateLevel failed");
-            if (!SaferComputeTokenFromLevel(level, IntPtr.Zero, out safer, 0, IntPtr.Zero)) throw new Win32Exception(Marshal.GetLastWin32Error(), "SaferComputeTokenFromLevel failed");
+            // TOKEN_DUPLICATE | TOKEN_QUERY | TOKEN_ASSIGN_PRIMARY | TOKEN_ADJUST_DEFAULT: the new token gets the same access as this handle (it is queried, labelled and assigned)
+            if (!OpenProcessToken(Process.GetCurrentProcess().Handle, 0x2 | 0x8 | 0x1 | 0x80, out self)) throw new Win32Exception(Marshal.GetLastWin32Error(), "the token of this process could not be opened");
             for (int i = 0; i < deny.Length; i++)
                 if (!ConvertStringSidToSidW(DenyOnlySids[i], out deny[i].Sid)) throw new Win32Exception(Marshal.GetLastWin32Error());
-            if (!CreateRestrictedToken(safer, RestrictFlags, (uint)deny.Length, deny, 0, IntPtr.Zero, 0, IntPtr.Zero, out token)) throw new Win32Exception(Marshal.GetLastWin32Error(), "CreateRestrictedToken (LUA token) failed");
+            if (!CreateRestrictedToken(self, RestrictFlags, (uint)deny.Length, deny, 0, IntPtr.Zero, 0, IntPtr.Zero, out token)) throw new Win32Exception(Marshal.GetLastWin32Error(), "CreateRestrictedToken (LUA token) failed");
             if (!ConvertStringSidToSidW("S-1-16-8192", out sid)) throw new Win32Exception(Marshal.GetLastWin32Error());
             var label = new SidAndAttributes { Sid = sid, Attributes = 0x20 };   // SE_GROUP_INTEGRITY
             if (!SetTokenInformation(token, TokenIntegrityLevelClass, ref label, Marshal.SizeOf<SidAndAttributes>())) throw new Win32Exception(Marshal.GetLastWin32Error(), "the integrity level of the token could not be set");
@@ -101,8 +99,7 @@ public static class RestrictedLauncher
         {
             if (sid != IntPtr.Zero) LocalFree(sid);
             foreach (var d in deny) if (d.Sid != IntPtr.Zero) LocalFree(d.Sid);
-            if (safer != IntPtr.Zero) CloseHandle(safer);
-            if (level != IntPtr.Zero) SaferCloseLevel(level);
+            if (self != IntPtr.Zero) CloseHandle(self);
             if (token != IntPtr.Zero) CloseHandle(token);
         }
     }
@@ -178,7 +175,7 @@ public static class RestrictedLauncher
         try { return Query(token).Elevated; } finally { CloseHandle(token); }
     }
 
-    /// <summary>The privileges a standard user token may keep (Safer NORMALUSER leaves SeChangeNotify; the others appear on some builds). Everything else is a finding.</summary>
+    /// <summary>The privileges a standard user token may keep (DISABLE_MAX_PRIVILEGE leaves SeChangeNotify; the others appear on some builds). Everything else is a finding.</summary>
     public static readonly string[] StandardPrivileges = { "SeChangeNotifyPrivilege", "SeIncreaseWorkingSetPrivilege", "SeShutdownPrivilege", "SeUndockPrivilege", "SeTimeZonePrivilege" };
 
     /// <summary>Privileges outside the standard-user set (empty = fine).</summary>
