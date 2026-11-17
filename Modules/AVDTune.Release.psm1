@@ -386,7 +386,7 @@ function Get-AVDTuneIntegrityStatus {
     #>
     param([Parameter(Mandatory)][string]$AppRoot, [Parameter(Mandatory)][string]$InstallRoot, [Parameter(Mandatory)][string]$StateRoot, [Parameter(Mandatory)]$Http, [switch]$AllowDevelopment)
     $info = Get-AVDTuneInstallInfo -AppRoot $AppRoot -InstallRoot $InstallRoot -AllowDevelopment:$AllowDevelopment
-    $r = [ordered]@{ Status = ''; Mode = $info.Mode; Version = $info.Version; Commit = ''; Source = ''; Missing = @(); Changed = @(); Extra = @(); Acl = @(); Warnings = @(); Blocked = $false; Message = '' }
+    $r = [ordered]@{ Status = ''; Mode = $info.Mode; Version = $info.Version; Commit = ''; Source = ''; Missing = @(); Changed = @(); Extra = @(); Acl = @(); Warnings = @(); Blocked = $false; OldLauncher = $false; Message = '' }
     if ($info.Mode -eq 'Development') { $r.Status = 'dev'; $r.Message = 'Development copy (git checkout, test mode): the files are not checked against a release.'; return [pscustomobject]$r }
     if ($info.Mode -eq 'Unprotected') {
         $problems = @(Get-AVDTuneAclProblems -Folder $info.AppRoot -Enforce)
@@ -432,7 +432,7 @@ function Get-AVDTuneIntegrityStatus {
     if (Test-Path -LiteralPath $launcher -PathType Leaf) {
         $lt = [IO.File]::ReadAllText($launcher)
         # (line ends normalized: the old launcher may come from a copy with the other line ends)
-        if (($lt -replace "`r`n", "`n") -ceq ($script:LauncherTextBefore73 -replace "`r`n", "`n")) { [void]$changed.Add('../Start-AVDTune.ps1 (launcher of an older AVDTune without the module path protection, #73: Repair writes the new one)') }
+        if (($lt -replace "`r`n", "`n") -ceq ($script:LauncherTextBefore73 -replace "`r`n", "`n")) { $r.OldLauncher = $true; [void]$changed.Add('../Start-AVDTune.ps1 (launcher of an older AVDTune without the module path protection, #73: Repair writes the new one)') }
         elseif ($lt -cne $script:LauncherText) { [void]$changed.Add('../Start-AVDTune.ps1 (launcher)') }
     }
     elseif (Test-Path -LiteralPath $launcher) { [void]$changed.Add('../Start-AVDTune.ps1 (launcher)') }

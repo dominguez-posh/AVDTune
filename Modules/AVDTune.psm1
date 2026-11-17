@@ -732,15 +732,17 @@ function Get-AVDTuneModulePathProblems {
     <#
         Why a module could come from someone without admin rights (fail closed, Start-AVDTune.ps1 does not start then):
           * each folder of the module path and every folder above it up to the Windows or Program Files folder;
-          * below each folder of the path: the module folders (level 1), their version folders and files (level 2) and the files in the version folders
-            (level 3), files only of the types in $script:ModuleFileTypes. Links are reported, never followed;
+          * everything below each folder of the path (module folders, version folders, sub folders like bin\ and en-US\, recursively): every folder, and the
+            files of the types in $script:ModuleFileTypes. Links are reported, never followed. At most -MaxEntries entries per folder of the path: more is a
+            problem too (not everything could be checked);
           * Windows PowerShell would change the path when a runspace opens (Test-AVDTuneModulePathStable).
         A problem is a link, a foreign owner or write access for others (Get-AVDTuneAclProblems). A missing folder is fine (nothing to load). Empty = fine.
         -ReadAcl (path -> object like Read-AVDTuneAclReport), -List (folder -> its FileSystemInfos) and -TestStable are for the checks.
     #>
     param([scriptblock]$ReadAcl = { param($Path) Read-AVDTuneAclReport -Path $Path },
         [scriptblock]$List = { param($Path) (New-Object IO.DirectoryInfo $Path).GetFileSystemInfos() },
-        [scriptblock]$TestStable = { Test-AVDTuneModulePathStable })
+        [scriptblock]$TestStable = { Test-AVDTuneModulePathStable },
+        [int]$MaxEntries = 5000)
     $out = New-Object System.Collections.ArrayList
     $bases = @((Get-AVDTuneSystemFolder Windows), (Get-AVDTuneSystemFolder ProgramFiles))
     $folders = @((Get-AVDTuneSystemModulePath) -split ';')
@@ -755,26 +757,29 @@ function Get-AVDTuneModulePathProblems {
             if (-not $parent -or $parent -eq $cur) { break }
             $cur = $parent
         }
-        # the content, three levels deep (module, version, files); a link is a problem and is not entered
+        # the whole content, recursively; a link is a problem and is not entered; more than -MaxEntries entries is a problem and ends the walk of this folder
+        $root = $folders[$i].TrimEnd('\')
         $queue = New-Object System.Collections.Queue
-        $queue.Enqueue(@($folders[$i].TrimEnd('\'), 0))
+        $queue.Enqueue($root)
+        $seen = 0
         while ($queue.Count -gt 0) {
-            $entry = $queue.Dequeue(); $dir = $entry[0]; $depth = $entry[1]
-            $items = @(); try { $items = @(& $List $dir) } catch { if ($depth -gt 0 -or [IO.Directory]::Exists($dir)) { [void]$out.Add("${dir}: content cannot be listed: $($_.Exception.Message)") }; continue }
+            $dir = $queue.Dequeue()
+            $items = @(); try { $items = @(& $List $dir) } catch { if ($dir -ne $root -or [IO.Directory]::Exists($dir)) { [void]$out.Add("${dir}: content cannot be listed: $($_.Exception.Message)") }; continue }
+            $seen += $items.Count
+            if ($seen -gt $MaxEntries) { [void]$out.Add("${root}: more than $MaxEntries entries in the module folder, not every module file was checked"); break }
             foreach ($item in $items) {
                 $isLink = (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)
                 $isDir = (($item.Attributes -band [IO.FileAttributes]::Directory) -ne 0)
                 if ($isLink) { [void]$out.Add("$($item.FullName): is a link"); continue }
-                if ($isDir) {
-                    if ($depth -ge 2) { continue }
-                    & $check $item.FullName
-                    $queue.Enqueue(@($item.FullName, ($depth + 1)))
-                }
+                if ($isDir) { & $check $item.FullName; $queue.Enqueue($item.FullName) }
                 elseif ([IO.Path]::GetExtension($item.Name).ToLowerInvariant() -in $script:ModuleFileTypes) { & $check $item.FullName }
             }
         }
     }
-    if (-not (& $TestStable)) { [void]$out.Add("PSModulePath: Windows PowerShell would change the module path when a runspace opens (machine value: $([Environment]::GetEnvironmentVariable('PSModulePath', [EnvironmentVariableTarget]::Machine)))") }
+    if (-not (& $TestStable)) {
+        $machineValue = [Environment]::GetEnvironmentVariable('PSModulePath', [EnvironmentVariableTarget]::Machine); $userValue = [Environment]::GetEnvironmentVariable('PSModulePath', [EnvironmentVariableTarget]::User)
+        [void]$out.Add("PSModulePath: Windows PowerShell would change the module path when a runspace opens (checked value: $(Get-AVDTuneSystemModulePath); machine value: $machineValue; user value: $userValue)")
+    }
     @($out)
 }
 

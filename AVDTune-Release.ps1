@@ -101,6 +101,7 @@ function Update-ReleaseView {
     $mode = if ($script:Rel.Info) { [string]$script:Rel.Info.Mode } else { '' }
     $detail = if ($s) { [string]$s.Message + $(if (@($s.Warnings).Count -gt 0) { "`r`n" + (@($s.Warnings) -join "`r`n") }) } else { T 'rel.comparing' }
     if ($script:Rel.Restart) { $detail = $script:Rel.Restart + "`r`n" + $detail }
+    if ($s -and (Get-AVDTuneProp $s 'OldLauncher')) { $detail = (T 'rel.oldlauncher') + "`r`n" + $detail }   # #73: first, it runs cmdlets before the safe module path until repaired
     $ui.TxtRelDetail.Text = $detail
     $files = @()
     if ($s -and ($s.Status -eq 'bad' -or @($s.Acl).Count -gt 0)) {

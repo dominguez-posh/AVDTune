@@ -193,6 +193,7 @@
   "rel.newer": "Version {0}{1} ist verfügbar, veröffentlicht am {2}. Versionshinweise:\r\n{3}",
   "rel.newest": "AVDTune {0} ist die neueste Version{1}.",
   "rel.notrepaired": "Nicht alles ließ sich reparieren: {0}",
+  "rel.oldlauncher": "Sofort reparieren: alter Launcher ohne Modulpfad-Schutz (#73). Bis zur Reparatur führt der Launcher Join-Path, Get-Content und ConvertFrom-Json aus, bevor der sichere Modulpfad gesetzt ist.",
   "rel.pill.bad": "Dateien geändert",
   "rel.pill.dev": "Entwicklungskopie",
   "rel.pill.failed": "Prüfung fehlgeschlagen",

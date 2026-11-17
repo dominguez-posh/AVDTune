@@ -136,7 +136,11 @@ try {
     $mark = Join-Path $tmp 'mark.txt'; $env:AVDTUNE_TEST_MARK = $mark
     & $powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $inst 'Start-AVDTune.ps1')
     Test-Check 'launcher starts the version in current.json' ((Test-Path $mark) -and [IO.File]::ReadAllText($mark) -eq '0.1.0') $null
+    # an install that still has the launcher of an AVDTune before #73: the update writes the new launcher (Write-AVDTuneLauncher in Install-AVDTuneRelease)
+    $newLauncher73 = [IO.File]::ReadAllText((Join-Path $inst 'Start-AVDTune.ps1'))
+    [IO.File]::WriteAllText((Join-Path $inst 'Start-AVDTune.ps1'), (& (Get-Module AVDTune.Release) { $script:LauncherTextBefore73 }))
     $i2 = Install-AVDTuneRelease -Http $http -Manifest (ConvertFrom-AVDTuneManifestText $manifestSaved['0.2.0'] '0.2.0') -InstallRoot $inst -StateRoot $state -User 'admin1'
+    Test-Check 'launcher (#73): installing an update over an old launcher writes the new one (first line sets the module path)' ([IO.File]::ReadAllText((Join-Path $inst 'Start-AVDTune.ps1')) -ceq $newLauncher73 -and $newLauncher73 -match "(?m)\A# AVDTune launcher[^\n]*\n\[Environment\]::SetEnvironmentVariable\('PSModulePath', ") $null
     $cur = Get-AVDTuneInstallState $inst
     Test-Check 'install 0.2.0 side by side: switched, 0.1.0 kept as previous, both folders there' ($cur.Version -eq '0.2.0' -and $cur.Previous -eq '0.1.0' -and (Test-Path (Join-Path $inst '0.1.0')) -and (Test-Path (Join-Path $inst '0.2.0'))) ($cur | Out-String)
     $i3 = Install-AVDTuneRelease -Http $http -Manifest (ConvertFrom-AVDTuneManifestText $manifestSaved['0.3.0'] '0.3.0') -InstallRoot $inst -StateRoot $state -User 'admin1'
@@ -299,8 +303,15 @@ try {
     [IO.File]::WriteAllText($launcherPath, $(if ($oldLauncher.Contains("`r`n")) { $oldLauncher -replace "`r`n", "`n" } else { $oldLauncher -replace "`n", "`r`n" }))
     $st73 = Get-AVDTuneIntegrityStatus -AppRoot $app -InstallRoot $inst -StateRoot $state -Http $http
     Test-Check 'launcher (#73): the old launcher without the module path line is the old text minus exactly that line, counts as changed (bad) with its own text' ($launcherText.StartsWith('# AVDTune launcher.') -and $launcherText -match "(?m)^\[Environment\]::SetEnvironmentVariable\('PSModulePath', " -and $oldLauncher -notmatch 'PSModulePath' -and ($launcherText -split "`n").Count -eq (($oldLauncher -split "`n").Count + 1) -and $st73.Status -eq 'bad' -and ($st73.Changed -join ',') -like '*launcher of an older AVDTune*#73*') ($st73.Changed -join ',')
+    # the card says "repair now" for exactly this finding (OldLauncher), in both languages, and not for another changed launcher
+    $relPage = [IO.File]::ReadAllText((Join-Path $repo 'AVDTune-Release.ps1'))
+    $enText = (Get-Content -LiteralPath (Join-Path $repo 'UI\Strings.en.json') -Raw -Encoding UTF8 | ConvertFrom-Json).'rel.oldlauncher'
+    $deText = (Get-Content -LiteralPath (Join-Path $repo 'UI\Strings.de.json') -Raw -Encoding UTF8 | ConvertFrom-Json).'rel.oldlauncher'
+    $stOther = $st   # the launcher with an extra line above: changed, but not the old one
+    Test-Check 'launcher (#73): only the old launcher sets OldLauncher, and the card puts "Repair now / Sofort reparieren" (rel.oldlauncher) first' ($st73.OldLauncher -eq $true -and $stOther.OldLauncher -eq $false -and $relPage -match "if \(\`$s -and \(Get-AVDTuneProp \`$s 'OldLauncher'\)\) \{ \`$detail = \(T 'rel\.oldlauncher'\) \+ " -and $enText -like 'Repair now: old launcher without the module path protection (#73)*' -and $deText -like 'Sofort reparieren: alter Launcher ohne Modulpfad-Schutz (#73)*') "$($st73.OldLauncher) $($stOther.OldLauncher) | $enText | $deText"
     [void](Repair-AVDTuneInstall -Http $http -AppRoot $app -InstallRoot $inst -StateRoot $state -User 'admin1')
-    Test-Check 'launcher (#73): repair replaces the old launcher with the new one, then the check is ok' ([IO.File]::ReadAllText($launcherPath) -ceq $launcherText -and (Get-AVDTuneIntegrityStatus -AppRoot $app -InstallRoot $inst -StateRoot $state -Http $http).Status -eq 'ok') $null
+    $stAfter = Get-AVDTuneIntegrityStatus -AppRoot $app -InstallRoot $inst -StateRoot $state -Http $http
+    Test-Check 'launcher (#73): repair replaces the old launcher with the new one, then the check is ok' ([IO.File]::ReadAllText($launcherPath) -ceq $launcherText -and $stAfter.Status -eq 'ok' -and $stAfter.OldLauncher -eq $false) $null
     $aclState = @{ Bad = @() }
     Set-AVDTuneReleaseAclReader ({ param($Path, $IsDirectory)
             $rules = @(); if (@($aclState.Bad | Where-Object { $Path -like "$_*" }).Count -gt 0) { $rules = @([pscustomobject]@{ Sid = 'S-1-5-32-545'; Inherited = $false }) }
