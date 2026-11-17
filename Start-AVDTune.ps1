@@ -22,6 +22,15 @@ param([switch]$HideConsole)
 # New-Object would be autoloaded through the inherited path, from any module there that exports that name. Same value as Get-AVDTuneSystemModulePath.
 [Environment]::SetEnvironmentVariable('PSModulePath', [IO.Path]::Combine([Environment]::GetFolderPath('Windows'), 'System32\WindowsPowerShell\v1.0\Modules') + ';' + [IO.Path]::Combine([Environment]::GetFolderPath('ProgramFiles'), 'WindowsPowerShell\Modules'), 'Process')
 $ErrorActionPreference = 'Stop'
+# Then TEMP/TMP of this process (#54), also before any cmdlet and before the first Add-Type: they come from HKCU\Environment, which a non-elevated process of the same
+# administrator can set, and csc writes and loads the compiled DLL there. Until the state folder is verified: a new folder below the Windows TEMP folder (users may create
+# items there but not delete or change ours), Administrators and SYSTEM only (a check run, not elevated, also its own user); then <state>\temp\host (Set-AVDTuneProcessTemp).
+$script:BootTemp = [IO.Path]::Combine([Environment]::GetFolderPath('Windows'), 'Temp', 'AVDTune-' + [guid]::NewGuid().ToString('N'))
+$bootAcl = [System.Security.AccessControl.DirectorySecurity]::new(); $bootAcl.SetAccessRuleProtection($true, $false)
+$bootSids = @('S-1-5-32-544', 'S-1-5-18'); if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) { $bootSids += [Security.Principal.WindowsIdentity]::GetCurrent().User.Value }
+foreach ($sid in $bootSids) { $bootAcl.AddAccessRule([System.Security.AccessControl.FileSystemAccessRule]::new([Security.Principal.SecurityIdentifier]::new($sid), [System.Security.AccessControl.FileSystemRights]::FullControl, [System.Security.AccessControl.InheritanceFlags]'ContainerInherit, ObjectInherit', [System.Security.AccessControl.PropagationFlags]::None, [System.Security.AccessControl.AccessControlType]::Allow)) }
+[void][IO.Directory]::CreateDirectory($script:BootTemp, $bootAcl)
+foreach ($n in 'TEMP', 'TMP') { [Environment]::SetEnvironmentVariable($n, $script:BootTemp, 'Process') }
 if ($PSVersionTable.PSEdition -ne 'Desktop') {
     throw "This WPF tool requires Windows PowerShell 5.1: powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`""
 }
@@ -90,6 +99,9 @@ if ($script:TestMode) {
 else { $script:Machine = New-AVDTuneMachine }
 # The state folder is checked before it is trusted (owner, explicit rules, links; repaired when possible, Modules\AVDTune.psm1)
 try { [void](Initialize-AVDTuneState -Root $script:StateRoot) } catch { Stop-WithMessage $_.Exception.Message }
+# TEMP/TMP of this process now in the verified state folder (#54): <state>\temp\host, admin-only, fresh per start; the start folder below the Windows TEMP folder goes
+try { [void](Set-AVDTuneProcessTemp -StateRoot $script:StateRoot) } catch { Stop-WithMessage $_.Exception.Message }
+try { [void](Remove-AVDTuneTreeSafe -Path $script:BootTemp) } catch { }   # through handles, a link inside removed as a link
 # Staging folders of a Teams update that a crash left behind (Modules\AVDTune.Updates.psm1); after the check, links are never followed
 try { [void](Clear-AVDTuneStageFolder -Root $script:StateRoot) } catch { }
 $script:WorkRoot = $script:StateRoot

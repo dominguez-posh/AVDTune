@@ -685,13 +685,15 @@ function Select-AVDTuneNewestPackageFolder {
 function Test-AVDTuneAdminOnlyPath {
     <#
         Reads the permissions of $Path and of every folder above it up to (not including) $Base: each must be owned and writable only by
-        SYSTEM, Administrators or TrustedInstaller (Test-AVDTuneAdminOnlyAcl). Without $Base only the file is checked. Unreadable = not admin-only.
+        SYSTEM, Administrators or TrustedInstaller (Test-AVDTuneAdminOnlyAcl). Without $Base only the file is checked. Unreadable = not admin-only; a link (reparse point) on the way = not admin-only (#79).
     #>
     param([Parameter(Mandatory)][string]$Path, [string]$Base)
     $stop = if ($Base) { [IO.Path]::GetFullPath($Base).TrimEnd('\') } else { $null }
     $item = [IO.Path]::GetFullPath($Path)
     while ($item) {
         if ($stop -and $item.TrimEnd('\') -ieq $stop) { break }
+        # a link anywhere on the way (the file or a folder up to $Base) is not admin-only, whatever its own ACL says (#79)
+        try { if (([IO.File]::GetAttributes($item) -band [IO.FileAttributes]::ReparsePoint) -ne 0) { return $false } } catch { return $false }
         try { $acl = Get-Acl -LiteralPath $item -ErrorAction Stop } catch { return $false }
         $rules = @(foreach ($r in $acl.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier])) {
                 @{ Sid = $r.IdentityReference.Value; Allow = ($r.AccessControlType -eq 'Allow'); Rights = [int64]$r.FileSystemRights.value__; InheritOnly = (($r.PropagationFlags -band [System.Security.AccessControl.PropagationFlags]::InheritOnly) -ne 0) }
@@ -728,32 +730,6 @@ function Clear-AVDTuneStageFolder {
     $n = 0
     foreach ($c in $temp.GetDirectories()) { if ($c.Name -match '^[0-9a-f]{32}$' -and (Remove-AVDTuneStageDir -Dir $c.FullName -Tries 3)) { $n++ } }
     $n
-}
-
-function Initialize-AVDTuneProcessTree {
-    # A job object around a started tool, so a timeout ends the whole tree (installers started by winget or choco), not only the tool
-    if ('AVDTune.ProcessTree' -as [type]) { return }
-    Add-Type -TypeDefinition @"
-using System;
-using System.ComponentModel;
-using System.Runtime.InteropServices;
-namespace AVDTune {
-    public static class ProcessTree {
-        [StructLayout(LayoutKind.Sequential)]
-        struct BasicAccounting { public long TotalUserTime, TotalKernelTime, PeriodUserTime, PeriodKernelTime; public uint PageFaults, TotalProcesses, ActiveProcesses, TerminatedProcesses; }
-        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] static extern IntPtr CreateJobObject(IntPtr attributes, string name);
-        [DllImport("kernel32.dll", SetLastError = true)] static extern bool AssignProcessToJobObject(IntPtr job, IntPtr process);
-        [DllImport("kernel32.dll", SetLastError = true)] static extern bool TerminateJobObject(IntPtr job, uint exitCode);
-        [DllImport("kernel32.dll", SetLastError = true)] static extern bool QueryInformationJobObject(IntPtr job, int infoClass, out BasicAccounting info, int length, IntPtr returned);
-        [DllImport("kernel32.dll", SetLastError = true)] static extern bool CloseHandle(IntPtr handle);
-        public static IntPtr Create() { IntPtr j = CreateJobObject(IntPtr.Zero, null); if (j == IntPtr.Zero) throw new Win32Exception(); return j; }
-        public static void Assign(IntPtr job, IntPtr process) { if (!AssignProcessToJobObject(job, process)) throw new Win32Exception(); }
-        public static int Active(IntPtr job) { BasicAccounting i; if (!QueryInformationJobObject(job, 1, out i, Marshal.SizeOf(typeof(BasicAccounting)), IntPtr.Zero)) throw new Win32Exception(); return (int)i.ActiveProcesses; }
-        public static void Terminate(IntPtr job) { TerminateJobObject(job, 0xFFFFFFFF); }
-        public static void Close(IntPtr job) { CloseHandle(job); }
-    }
-}
-"@
 }
 
 function New-AVDTuneUpdateAdapter {
@@ -827,15 +803,15 @@ function New-AVDTuneUpdateAdapter {
     }
     $u.Stage = {
         <#
-            A copy of the tool in a new folder under <root>\temp; the copy is checked and run. The folder gets no rules of its own: it inherits
-            those of the protected state folder (Administrators and SYSTEM only), so no unelevated process, not even of the same administrator,
-            can swap the copy, and a folder left behind never looks prepared to the state folder check at the next start.
+            A copy of the tool in a new folder under <root>\temp; the copy is checked and run. The folder is created in one step with the protected ACL
+            (Administrators and SYSTEM only, New-AVDTuneWorkFolder, #79) and the copy gets an explicit admin-only ACL (New-AVDTuneAdminFile), so no unelevated
+            process, not even of the same administrator, can swap the copy, and a folder left behind never looks prepared to the state folder check at the next start.
         #>
         param($Path, $Root)
-        $dir = Join-Path (Join-Path $Root 'temp') ([guid]::NewGuid().ToString('N'))
-        [void][IO.Directory]::CreateDirectory($dir)
+        $dir = New-AVDTuneWorkFolder -Root $Root
         $copy = Join-Path $dir (Split-Path $Path -Leaf)
-        [IO.File]::Copy($Path, $copy)
+        $in = [IO.File]::Open($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+        try { $out = New-AVDTuneAdminFile -Path $copy; try { $in.CopyTo($out) } finally { $out.Dispose() } } finally { $in.Dispose() }
         $copy
     }
     $u.Unstage = {
@@ -849,33 +825,10 @@ function New-AVDTuneUpdateAdapter {
             only when every process of the tree has ended, so the caller's lock (Global\PackTune) is held until then. On a timeout the tree is ended.
         #>
         param($File, [string[]]$Arguments, [int]$TimeoutSeconds = 600)
-        # environment, TEMP and (choco) --cache-location from Windows and an admin-only folder, not from this process (issue #47)
-        try { $psi = New-AVDTuneChildStartInfo -File $File -Arguments $Arguments } catch { return [pscustomobject]@{ ExitCode = -1; Output = $_.Exception.Message } }
-        $job = [IntPtr]::Zero
-        try { Initialize-AVDTuneProcessTree; $job = [AVDTune.ProcessTree]::Create() } catch { $job = [IntPtr]::Zero }
-        try {
-            try { $p = [System.Diagnostics.Process]::Start($psi) } catch { return [pscustomobject]@{ ExitCode = -1; Output = $_.Exception.Message } }
-            $inJob = $false
-            if ($job -ne [IntPtr]::Zero) { try { [AVDTune.ProcessTree]::Assign($job, $p.Handle); $inJob = $true } catch { } }
-            $out = $p.StandardOutput.ReadToEndAsync(); $err = $p.StandardError.ReadToEndAsync()
-            $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
-            $exited = $p.WaitForExit($TimeoutSeconds * 1000)
-            if ($exited -and $inJob) { while ([AVDTune.ProcessTree]::Active($job) -gt 0 -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 250 } }
-            $treeDone = $exited -and (-not $inJob -or [AVDTune.ProcessTree]::Active($job) -eq 0)
-            if (-not $treeDone) {
-                if ($inJob) {
-                    [AVDTune.ProcessTree]::Terminate($job)
-                    $until = (Get-Date).AddSeconds(30)
-                    while ([AVDTune.ProcessTree]::Active($job) -gt 0 -and (Get-Date) -lt $until) { Start-Sleep -Milliseconds 100 }
-                }
-                else { try { $p.Kill() } catch { } }
-                return [pscustomobject]@{ ExitCode = -1; Output = 'timeout' }
-            }
-            [void]$out.Wait(5000); [void]$err.Wait(5000)
-            $text = ''; if ($out.IsCompleted) { $text += $out.Result }; if ($err.IsCompleted) { $text += $err.Result }
-            [pscustomobject]@{ ExitCode = $p.ExitCode; Output = $text }
-        }
-        finally { if ($job -ne [IntPtr]::Zero) { [AVDTune.ProcessTree]::Close($job) } }
+        # environment, TEMP and (choco) --cache-location from Windows and an admin-only folder, not from this process (issue #47); the central start with job object (#76),
+        # a Windows program (Dism, sfc) only with its Windows signature (#71). Fail closed: no job, no run.
+        try { Invoke-AVDTuneProgram -File $File -Arguments $Arguments -TimeoutSeconds $TimeoutSeconds -WaitForTree }
+        catch { [pscustomobject]@{ ExitCode = -1; Output = $_.Exception.Message } }
     }
     $u.WuaMicrosoftUpdateRegistered = {
         try {

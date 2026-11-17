@@ -1311,8 +1311,7 @@ function New-AVDTuneFSLogixAdapter {
     }
     $a.NewTempFolder = {
         param($Root)
-        $dir = Join-Path (Join-Path $Root 'temp') ('fslogix-' + [guid]::NewGuid().ToString('N'))
-        [void][IO.Directory]::CreateDirectory($dir); $dir
+        New-AVDTuneWorkFolder -Root $Root -Prefix fslogix   # created with its protected ACL in one step (#79)
     }
     $a.IsProtectedFolder = { param($Dir, $Root) Test-AVDTuneAdminOnlyPath -Path $Dir -Base (Split-Path $Root -Parent) }
     $a.Download = {
@@ -1325,7 +1324,7 @@ function New-AVDTuneFSLogixAdapter {
             $resp = $req.GetResponse()
             try {
                 if ($resp.ContentLength -gt $MaxBytes) { return @{ Ok = $false; Error = 'The file is larger than expected.' } }
-                $in = $resp.GetResponseStream(); $out = [IO.File]::Create($Dest); $total = 0
+                $in = $resp.GetResponseStream(); $out = New-AVDTuneAdminFile -Path $Dest; $total = 0   # CreateNew with an explicit admin-only ACL (#79)
                 try { $buf = New-Object byte[] 81920; while (($n = $in.Read($buf, 0, $buf.Length)) -gt 0) { $total += $n; if ($total -gt $MaxBytes) { throw 'The download is larger than expected.' }; $out.Write($buf, 0, $n) } } finally { $out.Dispose(); $in.Dispose() }
             }
             finally { $resp.Close() }
@@ -1454,7 +1453,8 @@ function New-AVDTuneFSLogixAdapter {
         }
         finally { if ($id) { $id.Dispose() }; [void][AVDTune.Logon]::CloseHandle($token) }
     }
-    $a.KerberosTickets = { try { @((& (Join-Path (Get-AVDTuneSystemFolder System) 'klist.exe') 2>$null) | Where-Object { $_ -match 'cifs/' }) } catch { @() } }
+    # klist through the central start (#53): clean environment, Windows signature checked and the file held (#71), job object with timeout (#76)
+    $a.KerberosTickets = { try { $r = Invoke-AVDTuneProgram -File (Join-Path (Get-AVDTuneSystemFolder System) 'klist.exe') -TimeoutSeconds 30; @(([string]$r.Output -split "\r?\n") | Where-Object { $_ -match 'cifs/' }) } catch { @() } }
     $a.DefenderGet = { try { $p = Get-MpPreference -ErrorAction Stop; @{ Paths = @($p.ExclusionPath | Where-Object { $_ -and $_ -notmatch 'Administrators' }); Processes = @($p.ExclusionProcess | Where-Object { $_ -and $_ -notmatch 'Administrators' }) } } catch { $null } }
     $a.DefenderAdd = { param($Kind, $Value) if ($Kind -eq 'Process') { Add-MpPreference -ExclusionProcess $Value -ErrorAction Stop } else { Add-MpPreference -ExclusionPath $Value -ErrorAction Stop } }
     $a.DefenderRemove = { param($Kind, $Value) if ($Kind -eq 'Process') { Remove-MpPreference -ExclusionProcess $Value -ErrorAction Stop } else { Remove-MpPreference -ExclusionPath $Value -ErrorAction Stop } }

@@ -245,6 +245,9 @@ try {
     $wrongAcl = @($aclCases | Where-Object { (Test-AVDTuneAdminOnlyAcl -Owner $_.O -Rules $_.R) -ne $_.Ok } | ForEach-Object N)
     Test-Check 'admin-only permissions: only SYSTEM, Administrators and TrustedInstaller own and may write' ($wrongAcl.Count -eq 0) ($wrongAcl -join ', ')
 
+    # The block below sets SystemRoot/windir of this process to a user folder; Windows loads its catalog lookup once per process, and loaded with that value it would
+    # report every catalog-signed Windows program as NotSigned for the rest of this check (Windows programs are checked before their start, #71). Loaded here first.
+    [void](Get-AuthenticodeSignature -LiteralPath (Join-Path ([Environment]::SystemDirectory) 'sc.exe'))
     # the real adapter, read only: environment variables and PATH of this process are set to a folder the user owns; nothing may come from there
     $evil = Join-Path $tmp 'evil'
     [void](New-Item -ItemType Directory -Path (Join-Path $evil 'bin') -Force)
@@ -266,10 +269,16 @@ try {
     $real = New-AVDTuneUpdateAdapter
     $staged = & $real.Stage (Join-Path $repo 'README.md') $tmp
     $sacl = Get-Acl -LiteralPath (Split-Path $staged -Parent)
-    $own = @($sacl.GetAccessRules($true, $false, [System.Security.Principal.SecurityIdentifier]))
+    $own = @($sacl.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier]) | ForEach-Object { $_.IdentityReference.Value } | Sort-Object -Unique)
+    $facl = Get-Acl -LiteralPath $staged
+    $fown = @($facl.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier]) | ForEach-Object { $_.IdentityReference.Value } | Sort-Object -Unique)
     $stagedThere = Test-Path -LiteralPath $staged
+    $sameText = $stagedThere -and ([IO.File]::ReadAllText($staged) -ceq [IO.File]::ReadAllText((Join-Path $repo 'README.md')))
     & $real.Unstage $staged
-    Test-Check 'real adapter: the staged copy lies under <root>\temp in a folder without rules of its own (it inherits the protected state folder: no user entry) and is removed afterwards' ($stagedThere -and $staged -like "$tmp\temp\*\README.md" -and $own.Count -eq 0 -and -not $sacl.AreAccessRulesProtected -and -not (Test-Path -LiteralPath (Split-Path $staged -Parent))) "$staged | own rules: $(@($own | ForEach-Object { $_.IdentityReference.Value }) -join ',')"
+    # #79: folder and copy have their own protected ACL (Administrators, SYSTEM; this unelevated check also its own user), nothing inherited, no Users entry
+    $me = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+    $allowed = @('S-1-5-32-544', 'S-1-5-18', $me)
+    Test-Check 'real adapter (#79): the staged copy lies under <root>\temp in a folder created with its own protected ACL, the copy has an explicit protected admin-only ACL, and both are removed afterwards' ($sameText -and $staged -like "$tmp\temp\*\README.md" -and $sacl.AreAccessRulesProtected -and $facl.AreAccessRulesProtected -and @($own | Where-Object { $_ -notin $allowed }).Count -eq 0 -and @($fown | Where-Object { $_ -notin $allowed }).Count -eq 0 -and $own -contains 'S-1-5-32-544' -and $fown -contains 'S-1-5-32-544' -and -not (Test-Path -LiteralPath (Split-Path $staged -Parent))) "$staged | folder: $($own -join ',') | file: $($fown -join ',')"
     # a copy still in use (the tool has just ended) is removed by the retry
     $busy = & $real.Stage (Join-Path $repo 'README.md') $tmp
     $flag = Join-Path $tmp 'busy.flag'
@@ -389,16 +398,176 @@ try {
     Test-Check 'child start (#47): no shell, no window, redirected output, choco gets --cache-location, the environment is exactly Get-AVDTuneChildEnvironment' (-not $psi.UseShellExecute -and $psi.CreateNoWindow -and $psi.Arguments -eq "outdated -r --cache-location=$chocoTemp" -and $psi.EnvironmentVariables.Count -eq (Get-AVDTuneChildEnvironment -Tool choco -TempDir $chocoTemp).Count) $psi.Arguments
     $offEnv = Get-AVDTuneChildEnvironment -Tool office -TempDir $chocoTemp; $baseEnv = Get-AVDTuneChildEnvironment -Tool base -TempDir $chocoTemp
     Test-Check 'child environment (#47/#35): profile office (Office Deployment Tool setup.exe) is exactly base, and Office.Run asks for it' (($offEnv.Keys -join ',') -eq ($baseEnv.Keys -join ',') -and -not $offEnv.Contains('ChocolateyInstall') -and -not $offEnv.Contains('USERPROFILE') -and (Get-Content -LiteralPath (Join-Path $repo 'Modules\AVDTune.Office.psm1') -Raw) -match '-CleanEnvironment -Tool office ') $null
-    # the source guard: every way to start a program is either in the two builders or a listed exception (#53 handles the exceptions)
-    $startPattern = 'New-Object\s+(System\.)?Diagnostics\.ProcessStartInfo|\[(System\.)?Diagnostics\.ProcessStartInfo\]::new|\[(System\.)?Diagnostics\.Process\]::Start|Start-Process|&\s+(\$icacls\b|\(Join-Path[^\r\n]*\.exe''\)|[''"][^\r\n''"]*\.exe[''"])'
-    $startHits = @{}
-    foreach ($f in @(Get-ChildItem -LiteralPath (Join-Path $repo 'Modules') -Filter '*.psm1')) {
-        $n = ([regex]::Matches(((Get-Content -LiteralPath $f.FullName | Where-Object { $_ -notmatch '^\s*(#|<#)' }) -join "`n"), $startPattern)).Count
-        if ($n) { $startHits[$f.Name] = $n }
+    # the source guard (#53, AST): every way to start a program in the product (Modules, the scripts of the app, Watermark, Shared) is in the central start or a listed exception
+    $findStarts = {
+        param([string]$Source, [string]$Label)
+        $tk = $null; $pe = $null
+        $ast = [Management.Automation.Language.Parser]::ParseInput($Source, [ref]$tk, [ref]$pe)
+        $exe = '\.(exe|com|bat|cmd)\b'
+        $native = '^(cmd|powershell|pwsh|klist|icacls|reg|schtasks|dsregcmd|manage-bde|fltmc|dism|sfc|takeown|netsh|bcdedit|wevtutil|msiexec|certutil|robocopy|xcopy|net|whoami|gpupdate|winget|choco|mklink|sc\.exe)$'
+        $fnOf = { param($x) $fn = $x.Parent; while ($fn -and $fn -isnot [Management.Automation.Language.FunctionDefinitionAst]) { $fn = $fn.Parent }; if ($fn) { $fn.Name } else { '<top>' } }
+        $exeVars = @{}   # variables that hold the path of a program (assigned from a string or Join-Path with .exe, not from a call), per function
+        foreach ($a in $ast.FindAll({ param($n) $n -is [Management.Automation.Language.AssignmentStatementAst] }, $true)) {
+            if ($a.Left -is [Management.Automation.Language.VariableExpressionAst] -and $a.Right.Extent.Text -match "$exe['""]" -and $a.Right.Extent.Text -notmatch '^\s*&' -and -not $a.Right.Find({ param($n) $n -is [Management.Automation.Language.ScriptBlockExpressionAst] }, $true)) { $exeVars["$(& $fnOf $a)|$($a.Left.VariablePath.UserPath.ToLowerInvariant())"] = $true }
+        }
+        foreach ($n in $ast.FindAll({ param($n) $n -is [Management.Automation.Language.CommandAst] -or $n -is [Management.Automation.Language.InvokeMemberExpressionAst] -or $n -is [Management.Automation.Language.TypeExpressionAst] }, $true)) {
+            $why = ''
+            if ($n -is [Management.Automation.Language.CommandAst]) {
+                $name = [string]$n.GetCommandName(); $first = $n.CommandElements[0]
+                if ($name -match '^(Start-Process|saps|start)$') { $why = 'Start-Process' }
+                elseif ($name -match "$exe`$" -or $name -match $native) { $why = "native call $name" }
+                elseif ($name -eq 'New-Object' -and $n.Extent.Text -match 'ProcessStartInfo') { $why = 'ProcessStartInfo' }
+                elseif ($n.InvocationOperator -ne 'Unknown' -and $first.Extent.Text -match $exe) { $why = "native call $($first.Extent.Text)" }
+                elseif ($n.InvocationOperator -ne 'Unknown' -and $first -is [Management.Automation.Language.VariableExpressionAst] -and $exeVars.ContainsKey("$(& $fnOf $n)|$($first.VariablePath.UserPath.ToLowerInvariant())")) { $why = "native call $($first.Extent.Text)" }
+            }
+            elseif ($n -is [Management.Automation.Language.InvokeMemberExpressionAst]) { if ($n.Expression.Extent.Text -match 'Diagnostics\.Process\]$' -and $n.Member.Extent.Text -eq 'Start') { $why = 'Process.Start' } }
+            elseif ($n.TypeName.FullName -match 'ProcessStartInfo$') { $why = 'ProcessStartInfo' }
+            if (-not $why) { continue }
+            [pscustomobject]@{ Key = "$Label|$(& $fnOf $n)"; Why = $why; Line = $n.Extent.StartLineNumber }
+        }
     }
-    $startKnown = @{ 'AVDTune.Benchmark.psm1' = 2; 'AVDTune.psm1' = 3; 'AVDTune.Updates.psm1' = 1; 'AVDTune.FSLogix.psm1' = 1 }   # Benchmark: ProcessStartInfo + Start of Invoke-AVDTuneChildProcess; AVDTune.psm1: ProcessStartInfo of New-AVDTuneChildStartInfo, Start of the machine Run, the icacls call of the quarantine; Updates: Start of the adapter Run (its psi comes from the builder); FSLogix: klist (icacls and klist are the exceptions of #53)
-    $startDiff = @(@($startHits.Keys) + @($startKnown.Keys) | Sort-Object -Unique | Where-Object { $startHits[$_] -ne $startKnown[$_] } | ForEach-Object { "$_ $($startHits[$_]) <> $($startKnown[$_])" })
-    Test-Check 'child start (#47): the only starts of programs are the two builders (New-AVDTuneChildStartInfo, Invoke-AVDTuneChildProcess) and the listed exceptions (icacls, klist); Updates.Run uses the builder' ($startDiff.Count -eq 0 -and (Get-Content -LiteralPath (Join-Path $repo 'Modules\AVDTune.Updates.psm1') -Raw) -match 'New-AVDTuneChildStartInfo -File \$File') ($startDiff -join '; ')
+    # the guard itself finds every form (it would miss them without the AST rules)
+    $guardSamples = @(
+        @{ S = "function F { & 'C:\x\klist.exe' }"; E = 'native call' }
+        @{ S = "function F { & (Join-Path `$s 'klist.exe') 2>`$null }"; E = 'native call' }
+        @{ S = "function F { `$icacls = Join-Path `$s 'icacls.exe'; & `$icacls `$r '/setowner' }"; E = 'native call' }
+        @{ S = 'function F { klist.exe purge }'; E = 'native call' }
+        @{ S = 'function F { icacls $p /reset }'; E = 'native call' }
+        @{ S = 'function F { Start-Process notepad }'; E = 'Start-Process' }
+        @{ S = 'function F { [Diagnostics.Process]::Start($x) }'; E = 'Process.Start' }
+        @{ S = 'function F { $p = New-Object System.Diagnostics.ProcessStartInfo }'; E = 'ProcessStartInfo' }
+        @{ S = 'function F { $p = [System.Diagnostics.ProcessStartInfo]::new() }'; E = 'ProcessStartInfo' }
+        @{ S = 'function F { & $m.Run $file @(1); & $block; sc $p "x" }'; E = '' }
+    )
+    $guardMiss = @(foreach ($g in $guardSamples) { $h = @(& $findStarts $g.S 'x'); if (($g.E -and -not ($h | Where-Object { $_.Why -like "$($g.E)*" })) -or (-not $g.E -and $h.Count)) { $g.S } })
+    Test-Check 'child start guard (#53): the AST guard finds & ''x.exe'', & (Join-Path ... .exe), & $var of an .exe, bare klist.exe/icacls, Start-Process, Process.Start and ProcessStartInfo; adapter calls and scriptblocks are no hit' ($guardMiss.Count -eq 0) ($guardMiss -join ' || ')
+    # allowed: the central start itself; exceptions with their reason
+    $startAllowed = @{
+        'AVDTune.psm1|New-AVDTuneChildStartInfo' = 'builds the one ProcessStartInfo'
+        'AVDTune.psm1|Invoke-AVDTuneChildProcess' = 'the one Process.Start (job object, timeout)'
+        'AVDTune.psm1|Move-AVDTuneStateToQuarantine' = 'icacls /setowner on the state folder that is being set aside: the central start needs the verified <state>\temp, which does not exist at that moment; full path from SystemDirectory, root only (no /T)'
+    }
+    $productFiles = @(Get-ChildItem -LiteralPath (Join-Path $repo 'Modules') -Filter '*.psm1') + @(Get-ChildItem -LiteralPath $repo -Filter '*.ps1') + @(Get-ChildItem -LiteralPath (Join-Path $repo 'Watermark') -Filter '*.ps1') + @(Get-ChildItem -LiteralPath (Join-Path $repo 'Shared') -Recurse -File | Where-Object { $_.Extension -in '.ps1', '.psm1' })
+    $startHits = @(foreach ($f in $productFiles) { & $findStarts ([IO.File]::ReadAllText($f.FullName)) $f.Name })
+    $startBad = @($startHits | Where-Object { -not $startAllowed.ContainsKey($_.Key) } | ForEach-Object { "$($_.Key):$($_.Line) $($_.Why)" })
+    $startUnused = @($startAllowed.Keys | Where-Object { $k = $_; -not ($startHits | Where-Object { $_.Key -eq $k }) })
+    Test-Check "child start (#53): no program start in the product outside the central start (New-AVDTuneChildStartInfo, Invoke-AVDTuneChildProcess) and the listed exception (icacls of the quarantine); $($productFiles.Count) files" ($productFiles.Count -gt 30 -and $startBad.Count -eq 0 -and $startUnused.Count -eq 0) "outside: $($startBad -join '; ') | unused exception: $($startUnused -join ', ')"
+    # #76: one copy of the job object start; Benchmark, Updates (Language runs DISM through it), Office and the machine adapter use it
+    $modSrc = @{}; foreach ($f in @(Get-ChildItem -LiteralPath (Join-Path $repo 'Modules') -Filter '*.psm1')) { $modSrc[$f.Name] = [IO.File]::ReadAllText($f.FullName) }
+    $jobCopies = @($modSrc.Keys | Where-Object { $modSrc[$_] -match 'CreateJobObject' })
+    Test-Check 'central start (#76): the job object exists once (AVDTune.psm1); Updates.Run, the machine Run, the measure program, diskspd and Office setup start through Invoke-AVDTuneChildProcess' (($jobCopies -join ',') -eq 'AVDTune.psm1' -and $modSrc['AVDTune.Updates.psm1'] -match 'Invoke-AVDTuneProgram -File \$File -Arguments \$Arguments -TimeoutSeconds \$TimeoutSeconds -WaitForTree' -and $modSrc['AVDTune.psm1'] -match '\$m\.Run = \{[^}]*Invoke-AVDTuneProgram -File \$File' -and ([regex]::Matches($modSrc['AVDTune.Benchmark.psm1'], 'Invoke-AVDTuneChildProcess -FileName')).Count -eq 2 -and $modSrc['AVDTune.Office.psm1'] -match 'Invoke-AVDTuneChildProcess -FileName \$File' -and $modSrc['AVDTune.FSLogix.psm1'] -match "Invoke-AVDTuneProgram -File \(Join-Path \(Get-AVDTuneSystemFolder System\) 'klist\.exe'\)") ($jobCopies -join ',')
+    # #76: the central start itself (programs this check starts: powershell.exe and ping.exe on 127.0.0.1, PIDs tracked, only they are stopped)
+    $cPids = @()
+    try {
+        $cPid = Join-Path $tmp 'central.pid'
+        $cStart = "`$si = New-Object Diagnostics.ProcessStartInfo((Join-Path ([Environment]::GetFolderPath('System')) 'PING.EXE'), '-n {0} 127.0.0.1'); `$si.UseShellExecute = `$false; `$si.CreateNoWindow = `$true; `$c = [Diagnostics.Process]::Start(`$si); Set-Content -LiteralPath '$cPid' -Value `$c.Id; Start-Sleep -Seconds {1}"
+        $cArgs = { param($a, $b) "-NoProfile -NonInteractive -EncodedCommand " + [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes(($cStart -f $a, $b))) }
+        $sw = [Diagnostics.Stopwatch]::StartNew()
+        $cr = Invoke-AVDTuneChildProcess -FileName $ps -Arguments (& $cArgs 60 0) -TimeoutMs 60000
+        $sw.Stop()
+        $ck = if (Test-Path -LiteralPath $cPid) { [int](Get-Content -LiteralPath $cPid) } else { 0 }; if ($ck) { $cPids += $ck }
+        for ($w = 0; $w -lt 100 -and $ck -and (Get-Process -Id $ck -ErrorAction SilentlyContinue | Where-Object { $_.ProcessName -eq 'PING' }); $w++) { Start-Sleep -Milliseconds 100 }
+        $cAlive = [bool](Get-Process -Id $ck -ErrorAction SilentlyContinue | Where-Object { $_.ProcessName -eq 'PING' })
+        Test-Check 'central start (#76): without -WaitForTree it returns when the program ends, and a child it left behind is ended with the job (nothing outlives the call)' ($ck -gt 0 -and -not $cr.TimedOut -and $cr.ExitCode -eq 0 -and -not $cAlive -and $sw.Elapsed.TotalSeconds -lt 45) "kid=$ck alive=$cAlive took $($sw.Elapsed.TotalSeconds) s"
+        Remove-Item -LiteralPath $cPid -ErrorAction SilentlyContinue
+        $sw = [Diagnostics.Stopwatch]::StartNew()
+        $cr2 = Invoke-AVDTuneChildProcess -FileName $ps -Arguments (& $cArgs 60 0) -TimeoutMs 4000 -WaitForTree
+        $sw.Stop()
+        $ck2 = if (Test-Path -LiteralPath $cPid) { [int](Get-Content -LiteralPath $cPid) } else { 0 }; if ($ck2) { $cPids += $ck2 }
+        $cAlive2 = [bool](Get-Process -Id $ck2 -ErrorAction SilentlyContinue | Where-Object { $_.ProcessName -eq 'PING' })
+        Test-Check 'central start (#76): with -WaitForTree the timeout covers the child the program left behind: TimedOut, exit -1, the tree is ended' ($ck2 -gt 0 -and $cr2.TimedOut -and $cr2.ExitCode -eq -1 -and -not $cAlive2 -and $sw.Elapsed.TotalSeconds -lt 50) "kid=$ck2 alive=$cAlive2 took $($sw.Elapsed.TotalSeconds) s"
+        $shellPsi = New-Object Diagnostics.ProcessStartInfo $ps; $shellPsi.UseShellExecute = $true
+        Test-Check 'central start (#76): a start with shell or window is refused before anything starts' ((Get-ThrownText { Invoke-AVDTuneChildProcess -StartInfo $shellPsi }) -like '*without shell and window*' -and (Get-ThrownText { Invoke-AVDTuneChildProcess -FileName 'ping.exe' }) -like '*full path*') $null
+    }
+    finally { foreach ($k in $cPids) { Get-Process -Id $k -ErrorAction SilentlyContinue | Where-Object { $_.ProcessName -eq 'PING' } | Stop-Process -Force -ErrorAction SilentlyContinue } }
+    # #71: Windows programs only with the Windows signature, held while they run
+    $sys = [Environment]::SystemDirectory
+    $sig = { param($s, $i, $o) [pscustomobject]@{ Status = 'Valid'; Subject = $s; Issuer = $i; OriginalFilename = $o } }
+    $winS = 'CN=Microsoft Windows, O=Microsoft Corporation, L=Redmond, S=Washington, C=US'; $winI = 'CN=Microsoft Windows Production PCA 2011, O=Microsoft Corporation, L=Redmond, S=Washington, C=US'
+    Test-Check 'Windows signature (#71): Microsoft Windows from the production PCA with the right original name passes; another signer, issuer, name or an invalid status does not' ((Test-AVDTuneWindowsSignature -Name 'sc.exe' -Signature (& $sig $winS $winI 'sc.exe.mui')).Ok -and -not (Test-AVDTuneWindowsSignature -Name 'sc.exe' -Signature (& $sig 'CN=Microsoft Corporation, O=Microsoft Corporation' $winI 'sc.exe')).Ok -and -not (Test-AVDTuneWindowsSignature -Name 'sc.exe' -Signature (& $sig 'CN=Microsoft Windows, O=Contoso' $winI 'sc.exe')).Ok -and -not (Test-AVDTuneWindowsSignature -Name 'sc.exe' -Signature (& $sig $winS 'CN=Microsoft Code Signing PCA 2011, O=Microsoft Corporation' 'sc.exe')).Ok -and -not (Test-AVDTuneWindowsSignature -Name 'sc.exe' -Signature (& $sig $winS $winI 'cmd.exe')).Ok -and -not (Test-AVDTuneWindowsSignature -Name 'sc.exe' -Signature ([pscustomobject]@{ Status = 'NotSigned'; Subject = $winS; Issuer = $winI; OriginalFilename = 'sc.exe' })).Ok) $null
+    $realOk = foreach ($n in 'sc.exe', 'dsregcmd.exe', 'klist.exe', 'reg.exe', 'fltmc.exe') { $h = $null; try { $h = Open-AVDTuneSystemProgram -Path (Join-Path $sys $n); "$n ok" } catch { "$n $($_.Exception.Message)" } finally { if ($h) { $h.Dispose() } } }
+    Test-Check 'Windows signature (#71): the real catalog-signed programs of System32 pass the check' (@($realOk | Where-Object { $_ -notlike '* ok' }).Count -eq 0) ($realOk -join '; ')
+    $fakeWin = Join-Path $tmp 'fakewin'; $fakeSys = Join-Path $fakeWin 'System32'; [void](New-Item -ItemType Directory -Path $fakeSys -Force)
+    $marker = Join-Path $tmp 'unsigned-ran.txt'
+    $unsigned = Join-Path $fakeSys 'sc.exe'; Copy-Item -LiteralPath $dumpExe -Destination $unsigned -Force
+    $catCopy = Join-Path $fakeSys 'fltmc.exe'; Copy-Item -LiteralPath (Join-Path $sys 'fltmc.exe') -Destination $catCopy -Force
+    & $psmAVDTune { $script:ChildEnvHooks.Windows = $args[0] } $fakeWin
+    try {
+        $m71 = New-AVDTuneMachine
+        $u71 = Get-ThrownText { & $m71.Run $unsigned @('ran') 30 }
+        $p71 = Get-ThrownText { Invoke-AVDTuneProgram -File $unsigned -Arguments @('ran') -TimeoutSeconds 30 }
+        $c71 = Invoke-AVDTuneProgram -File $catCopy -Arguments @('filters') -TimeoutSeconds 30
+        # held while it runs: a held file cannot be replaced
+        $held = Open-AVDTuneSystemProgram -Path $catCopy
+        $swapRefused = $false; try { [IO.File]::WriteAllBytes($catCopy, [byte[]](1)) } catch { $swapRefused = $true } finally { $held.Dispose() }
+    }
+    finally { & $psmAVDTune { $script:ChildEnvHooks.Windows = '' } }
+    Test-Check 'Windows signature (#71): an unsigned program in the Windows folder is not started by the machine Run (fail closed, clear message)' ($u71 -like '*sc.exe has no valid signature*not started*' -and $p71 -like '*not started*') "$u71 | $p71"
+    Test-Check 'Windows signature (#71): a copy of a catalog-signed Windows program is found in the catalog and runs; the file is held without write sharing until the run ends' ($null -ne $c71 -and $c71.Output -ne 'timeout' -and $swapRefused) "$($c71.ExitCode) $swapRefused"
+    Test-Check 'Windows signature (#71): a Windows program outside the Windows folder is not one (Test-AVDTuneSystemProgramPath), System32 is' (-not (Test-AVDTuneSystemProgramPath -Path $unsigned) -and (Test-AVDTuneSystemProgramPath -Path (Join-Path $sys 'sc.exe'))) $null
+    # #79: work folders and downloaded files with their own protected ACL, links on the way refused
+    $wf = New-AVDTuneWorkFolder -Root $tmp -Prefix office
+    $wacl = Get-Acl -LiteralPath $wf
+    $wRules = @($wacl.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier]) | ForEach-Object { $_.IdentityReference.Value } | Sort-Object -Unique)
+    $af = Join-Path $wf 'dl.bin'; $as = New-AVDTuneAdminFile -Path $af; try { $as.WriteByte(1) } finally { $as.Dispose() }
+    $facl79 = Get-Acl -LiteralPath $af
+    $fRules79 = @($facl79.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier]) | ForEach-Object { $_.IdentityReference.Value } | Sort-Object -Unique)
+    $again = Get-ThrownText { $x = New-AVDTuneAdminFile -Path $af; $x.Dispose() }
+    Test-Check 'work folder (#79): created in one step with a protected ACL (no inherited rule), a downloaded file is CreateNew with an explicit protected admin-only ACL (no Users)' ($wf -like "$tmp\temp\office-*" -and $wacl.AreAccessRulesProtected -and @($wacl.GetAccessRules($false, $true, [System.Security.Principal.SecurityIdentifier])).Count -eq 0 -and @($wRules | Where-Object { $_ -notin $allowed }).Count -eq 0 -and $facl79.AreAccessRulesProtected -and @($facl79.GetAccessRules($false, $true, [System.Security.Principal.SecurityIdentifier])).Count -eq 0 -and @($fRules79 | Where-Object { $_ -notin $allowed }).Count -eq 0 -and $again) "$($wRules -join ',') | $($fRules79 -join ',') | $again"
+    $src79 = ($modSrc['AVDTune.Office.psm1'] + $modSrc['AVDTune.FSLogix.psm1'] + $modSrc['AVDTune.Vdi.psm1'])
+    Test-Check 'work folder (#79): Office, FSLogix and VDI create their download folder with New-AVDTuneWorkFolder and the file with New-AVDTuneAdminFile (no CreateDirectory, no File.Create)' (([regex]::Matches($src79, 'NewTempFolder = \{[^}]*New-AVDTuneWorkFolder')).Count -eq 3 -and ([regex]::Matches($src79, 'New-AVDTuneAdminFile -Path \$Dest')).Count -eq 2 -and $src79 -notmatch 'NewTempFolder = \{[^}]*CreateDirectory' -and $src79 -notmatch '\[IO\.File\]::Create\(\$Dest\)') $null
+    $lroot = Join-Path $tmp 'lroot'; [void](New-Item -ItemType Directory -Path $lroot -Force); $ltarget = Join-Path $tmp 'ltarget'; [void](New-Item -ItemType Directory -Path $ltarget -Force)
+    [void](& $cmd /c mklink /J (Join-Path $lroot 'temp') $ltarget)
+    $lmsg = Get-ThrownText { New-AVDTuneWorkFolder -Root $lroot -Prefix vdi }
+    Test-Check 'work folder (#79): <state>\temp as a link stops it, nothing is created in the target' ($lmsg -like '*is a link*' -and @(Get-ChildItem -LiteralPath $ltarget -Force).Count -eq 0) $lmsg
+    [IO.Directory]::Delete((Join-Path $lroot 'temp'))
+    # Test-AVDTuneAdminOnlyPath: a link on the way is not admin-only, whatever its ACL. An unelevated check cannot make an admin-only link, so it uses the one of Windows:
+    # C:\Users\All Users is a link (SYSTEM, admin-only ACL) to ProgramData; ProgramData itself passes, the link must not
+    $allUsers = Join-Path (Split-Path ([Environment]::GetFolderPath('UserProfile')) -Parent) 'All Users'
+    $auAttr = $null; try { $auAttr = [IO.File]::GetAttributes($allUsers) } catch { }
+    if ($null -ne $auAttr -and ($auAttr -band [IO.FileAttributes]::ReparsePoint)) {
+        # the verdict on the ACL of the link itself, read as Test-AVDTuneAdminOnlyPath reads it: admin-only; the path verdict must still be no
+        $lacl = Get-Acl -LiteralPath $allUsers
+        $lrules = @(foreach ($r in $lacl.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier])) { @{ Sid = $r.IdentityReference.Value; Allow = ($r.AccessControlType -eq 'Allow'); Rights = [int64]$r.FileSystemRights.value__; InheritOnly = (($r.PropagationFlags -band [System.Security.AccessControl.PropagationFlags]::InheritOnly) -ne 0) } })
+        $aclOk = Test-AVDTuneAdminOnlyAcl -Owner $lacl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value -Rules $lrules
+        Test-Check 'admin-only path (#79): a link is not admin-only although its own ACL is (All Users, a link of Windows)' ($aclOk -and -not (Test-AVDTuneAdminOnlyPath -Path $allUsers)) $aclOk
+    }
+    else { "SKIP admin-only path (#79): link - $allUsers is no link on this machine" }
+    # #54: TEMP/TMP of the AVDTune process itself. A child Windows PowerShell starts with TEMP/TMP = a folder this user prepared, in which nothing can be created
+    # (as if HKCU\Environment pointed there); it runs the start lines of Start-AVDTune.ps1, imports AVDTune.psm1 (Add-Type at import), verifies a state folder,
+    # moves TEMP to <state>\temp\host and compiles with Add-Type. Without the start lines the import already fails in the prepared folder.
+    $startSrc = [IO.File]::ReadAllText((Join-Path $repo 'Start-AVDTune.ps1'))
+    $boot = [regex]::Match($startSrc, '(?ms)^\$script:BootTemp = .*?^foreach \(\$n in ''TEMP'', ''TMP''\)[^\r\n]*').Value
+    $iBoot = $startSrc.IndexOf('$script:BootTemp = '); $iImport = $startSrc.IndexOf('Import-Module ([IO.Path]::Combine($PSScriptRoot'); $iState = $startSrc.IndexOf('[void](Initialize-AVDTuneState -Root $script:StateRoot)'); $iSet = $startSrc.IndexOf('Set-AVDTuneProcessTemp -StateRoot $script:StateRoot')
+    $firstAddType = [regex]::Match($startSrc, 'Add-Type -(TypeDefinition|MemberDefinition|Namespace)').Index
+    Test-Check 'process TEMP (#54): Start-AVDTune.ps1 sets TEMP/TMP before the first module import and moves them to <state>\temp\host right after the state folder check, before its own Add-Type' ($boot -and $iBoot -gt 0 -and $iBoot -lt $iImport -and $iState -gt 0 -and $iSet -gt $iState -and $iSet -lt $firstAddType) "$iBoot $iImport $iState $iSet $firstAddType"
+    $evil54 = Join-Path $tmp 'evil54'; [void](New-Item -ItemType Directory -Path $evil54 -Force)
+    $root54 = Join-Path $tmp 'state54'
+    $me54 = [Security.Principal.WindowsIdentity]::GetCurrent().User
+    $deny = New-Object System.Security.AccessControl.FileSystemAccessRule($me54, 'CreateFiles, CreateDirectories', 'ContainerInherit, ObjectInherit', 'None', 'Deny')
+    $eacl = Get-Acl -LiteralPath $evil54; $eacl.AddAccessRule($deny); Set-Acl -LiteralPath $evil54 -AclObject $eacl
+    try {
+        $script54 = Join-Path $tmp 't54.ps1'
+        $body54 = @(
+            '$ErrorActionPreference = ''Stop''', $boot, '$before = [IO.Path]::GetTempPath()',
+            "Import-Module '$(Join-Path $repo 'Modules\AVDTune.psm1')'",
+            "[void](Initialize-AVDTuneState -Root '$root54')", "`$hostTemp = Set-AVDTuneProcessTemp -StateRoot '$root54'",
+            'Add-Type -TypeDefinition ''public static class AVDTuneT54 { public static int V() { return 54; } }''',
+            'try { [void](Remove-AVDTuneTreeSafe -Path $script:BootTemp) } catch { }',
+            '"BEFORE:$before"; "HOST:$hostTemp"; "NOW:$([IO.Path]::GetTempPath())"; "ADDTYPE:$([AVDTuneT54]::V())"') -join "`r`n"
+        [IO.File]::WriteAllText($script54, $body54, (New-Object Text.UTF8Encoding $true))
+        $psi54 = New-Object Diagnostics.ProcessStartInfo -ArgumentList $ps, "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$script54`""
+        $psi54.UseShellExecute = $false; $psi54.CreateNoWindow = $true; $psi54.RedirectStandardOutput = $true; $psi54.RedirectStandardError = $true
+        $psi54.EnvironmentVariables['TEMP'] = $evil54; $psi54.EnvironmentVariables['TMP'] = $evil54
+        $p54 = [Diagnostics.Process]::Start($psi54); $o54 = $p54.StandardOutput.ReadToEndAsync(); $e54 = $p54.StandardError.ReadToEndAsync()
+        if (-not $p54.WaitForExit(120000)) { $p54.Kill() }
+        $out54 = $o54.Result + $e54.Result
+        $hostDir = Join-Path $root54 'temp\host'
+        Test-Check 'process TEMP (#54): with TEMP/TMP of the process in a prepared folder, the import (Add-Type) and a later Add-Type work and never use it: TEMP is first a new folder below the Windows TEMP, then <state>\temp\host' ($out54 -match 'ADDTYPE:54' -and $out54 -match ('BEFORE:' + [regex]::Escape((Join-Path ([Environment]::GetFolderPath('Windows')) 'Temp\AVDTune-'))) -and $out54 -match ('NOW:' + [regex]::Escape($hostDir)) -and $out54 -notmatch [regex]::Escape($evil54)) $out54
+        $hacl = Get-Acl -LiteralPath $hostDir
+        Test-Check 'process TEMP (#54): <state>\temp\host is protected (Administrators, SYSTEM; this unelevated check also its own user)' ($hacl.AreAccessRulesProtected -and @($hacl.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier]) | Where-Object { $_.IdentityReference.Value -notin $allowed }).Count -eq 0) $null
+    }
+    finally { $eacl = Get-Acl -LiteralPath $evil54; [void]$eacl.RemoveAccessRule($deny); Set-Acl -LiteralPath $evil54 -AclObject $eacl }
     # a program without a full path is refused (no search through PATH)
     Test-Check 'child start (#47): a file name without a path throws, nothing is started' ((Get-ThrownText { New-AVDTuneChildStartInfo -File 'dsregcmd.exe' -Arguments @('/status') -StateRoot $tmp }) -like '*full path*') $null
     # HKLM value as REG_EXPAND_SZ: read raw, never expanded with this process's environment; a value with % falls back to the default
