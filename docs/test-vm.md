@@ -19,7 +19,7 @@ Everything in AVDTune is checked against fakes first. This guide is for the real
 ## 3. Get AVDTune onto the VM
 
 1. On the VM, download the repository as ZIP from GitHub (`main`), right click > Properties > Unblock, unpack to `C:\Program Files\AVDTune` (admin-only folder).
-2. Start Windows PowerShell 5.1 **as administrator**: `powershell -ExecutionPolicy Bypass -File "C:\Program Files\AVDTune\Start-AVDTune.ps1"`.
+2. Start Windows PowerShell 5.1 **as administrator**: `powershell -NoProfile -ExecutionPolicy Bypass -File "C:\Program Files\AVDTune\Start-AVDTune.ps1"` (without `-NoProfile` the admin's profile runs first, #73).
 3. Do not set `AVDTUNE_FAKE` or `AVDTUNE_ROOT`.
 
 ## 4. What to test and what to expect

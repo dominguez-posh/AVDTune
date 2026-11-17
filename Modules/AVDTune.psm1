@@ -694,7 +694,9 @@ function Get-AVDTuneSystemFolder {
 # Why both folders and in this order: on every runspace open Windows PowerShell 5.1 recomputes the path (ModuleIntrinsics.SetModulePath). It always adds
 # Program Files\WindowsPowerShell\Modules when it is missing, and when the value then equals the machine value (Program Files first) it adds the personal
 # Documents folder again. System32 first, then Program Files is a value that it keeps as it is; System32 alone would become the user path after two opens.
-# (The Microsoft.PowerShell.* core cmdlets such as Join-Path or Add-Type are built in and not loaded through this path.)
+# Also Microsoft.PowerShell.Utility and .Management (Join-Path, New-Object, Add-Type, Get-Content, ConvertFrom-Json, ...) are modules below $PSHOME\Modules that
+# are autoloaded through this path, and any module earlier in the path that exports a command of the same name wins. So the launcher and Start-AVDTune.ps1
+# set the path with .NET alone as their first statement, before any cmdlet runs (the same expression as Get-AVDTuneSystemModulePath; Tests\Check-AVDTune.ps1).
 
 function Get-AVDTuneSystemModulePath {
     # The module path of AVDTune: Windows PowerShell's own modules (System32), then Program Files (admin-only, checked by Get-AVDTuneModulePathProblems).
@@ -710,41 +712,89 @@ function Set-AVDTuneSafeModulePath {
     $value
 }
 
+function Test-AVDTuneModulePathStable {
+    <#
+        $true when Windows PowerShell keeps $Value as it is when a runspace opens: the same computation it runs then (ModuleIntrinsics.GetModulePath with the
+        machine and the user value of PSModulePath). It would change it, for example, when the machine value equals our value (then it puts the Documents
+        folder in front). -Machine / -User are for the checks; by default the values of the registry as Windows PowerShell reads them.
+    #>
+    param([string]$Value = (Get-AVDTuneSystemModulePath),
+        [AllowNull()][string]$Machine = [Environment]::GetEnvironmentVariable('PSModulePath', [EnvironmentVariableTarget]::Machine),
+        [AllowNull()][string]$User = [Environment]::GetEnvironmentVariable('PSModulePath', [EnvironmentVariableTarget]::User))
+    if ($Machine -eq '') { $Machine = $null }; if ($User -eq '') { $User = $null }
+    $next = [System.Management.Automation.ModuleIntrinsics]::GetModulePath($Value, $Machine, $User)
+    [string]::Equals([string]$next, $Value, [StringComparison]::OrdinalIgnoreCase)
+}
+
+$script:ModuleFileTypes = @('.psd1', '.psm1', '.ps1', '.ps1xml', '.cdxml', '.dll')   # what Windows PowerShell loads from a module folder
+
 function Get-AVDTuneModulePathProblems {
     <#
-        Why a folder of the module path could have been prepared by someone without admin rights: each folder and every folder above it up to the Windows or
-        Program Files folder (link, foreign owner, write for others; Get-AVDTuneAclProblems). A missing folder is fine (nothing to load). Empty = fine.
-        -ReadAcl (path -> object like Read-AVDTuneAclReport) is for the checks.
+        Why a module could come from someone without admin rights (fail closed, Start-AVDTune.ps1 does not start then):
+          * each folder of the module path and every folder above it up to the Windows or Program Files folder;
+          * below each folder of the path: the module folders (level 1), their version folders and files (level 2) and the files in the version folders
+            (level 3), files only of the types in $script:ModuleFileTypes. Links are reported, never followed;
+          * Windows PowerShell would change the path when a runspace opens (Test-AVDTuneModulePathStable).
+        A problem is a link, a foreign owner or write access for others (Get-AVDTuneAclProblems). A missing folder is fine (nothing to load). Empty = fine.
+        -ReadAcl (path -> object like Read-AVDTuneAclReport), -List (folder -> its FileSystemInfos) and -TestStable are for the checks.
     #>
-    param([scriptblock]$ReadAcl = { param($Path) Read-AVDTuneAclReport -Path $Path })
+    param([scriptblock]$ReadAcl = { param($Path) Read-AVDTuneAclReport -Path $Path },
+        [scriptblock]$List = { param($Path) (New-Object IO.DirectoryInfo $Path).GetFileSystemInfos() },
+        [scriptblock]$TestStable = { Test-AVDTuneModulePathStable })
     $out = New-Object System.Collections.ArrayList
     $bases = @((Get-AVDTuneSystemFolder Windows), (Get-AVDTuneSystemFolder ProgramFiles))
     $folders = @((Get-AVDTuneSystemModulePath) -split ';')
+    $check = { param($Path) foreach ($p in @(Get-AVDTuneAclProblems -Report (& $ReadAcl $Path))) { [void]$out.Add("${Path}: $p") } }
     for ($i = 0; $i -lt $folders.Count; $i++) {
         $stop = $bases[$i].TrimEnd('\')
         $cur = $folders[$i].TrimEnd('\')
         while ($cur) {
-            foreach ($p in @(Get-AVDTuneAclProblems -Report (& $ReadAcl $cur))) { [void]$out.Add("${cur}: $p") }
+            & $check $cur
             if ($cur -ieq $stop) { break }
             $parent = [IO.Path]::GetDirectoryName($cur)
             if (-not $parent -or $parent -eq $cur) { break }
             $cur = $parent
         }
+        # the content, three levels deep (module, version, files); a link is a problem and is not entered
+        $queue = New-Object System.Collections.Queue
+        $queue.Enqueue(@($folders[$i].TrimEnd('\'), 0))
+        while ($queue.Count -gt 0) {
+            $entry = $queue.Dequeue(); $dir = $entry[0]; $depth = $entry[1]
+            $items = @(); try { $items = @(& $List $dir) } catch { if ($depth -gt 0 -or [IO.Directory]::Exists($dir)) { [void]$out.Add("${dir}: content cannot be listed: $($_.Exception.Message)") }; continue }
+            foreach ($item in $items) {
+                $isLink = (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)
+                $isDir = (($item.Attributes -band [IO.FileAttributes]::Directory) -ne 0)
+                if ($isLink) { [void]$out.Add("$($item.FullName): is a link"); continue }
+                if ($isDir) {
+                    if ($depth -ge 2) { continue }
+                    & $check $item.FullName
+                    $queue.Enqueue(@($item.FullName, ($depth + 1)))
+                }
+                elseif ([IO.Path]::GetExtension($item.Name).ToLowerInvariant() -in $script:ModuleFileTypes) { & $check $item.FullName }
+            }
+        }
     }
+    if (-not (& $TestStable)) { [void]$out.Add("PSModulePath: Windows PowerShell would change the module path when a runspace opens (machine value: $([Environment]::GetEnvironmentVariable('PSModulePath', [EnvironmentVariableTarget]::Machine)))") }
     @($out)
 }
 
-function New-AVDTunePowerShell {
-    # The one way to create a worker ([powershell]::Create()): the module path of the process is set to the system folders first (#73); the runspace
-    # that opens with BeginInvoke inherits it. Tests\Check-AVDTune.ps1 makes sure no other place calls [powershell]::Create() or [runspacefactory].
+function Assert-AVDTuneModulePathStable {
+    # Fail closed before a worker opens: the path is set again and must stay as it is when the runspace opens (#73)
     [void](Set-AVDTuneSafeModulePath)
+    if (-not (Test-AVDTuneModulePathStable)) { throw 'Windows PowerShell would change the module path when the worker opens (machine or user value of PSModulePath). Nothing is started.' }
+}
+
+function New-AVDTunePowerShell {
+    # The one way to create a worker ([powershell]::Create()): the module path of the process is set to the system folders first and must stay so (#73);
+    # the runspace that opens with BeginInvoke inherits it. Tests\Check-AVDTune.ps1 makes sure no other place calls [powershell]::Create() or [runspacefactory].
+    Assert-AVDTuneModulePathStable
     [powershell]::Create()
 }
 
 function New-AVDTuneRunspacePool {
     # A runspace pool for parallel workers, after the same module path step as New-AVDTunePowerShell. Not opened yet.
     param([Parameter(Mandatory)][int]$Min, [Parameter(Mandatory)][int]$Max)
-    [void](Set-AVDTuneSafeModulePath)
+    Assert-AVDTuneModulePathStable
     [runspacefactory]::CreateRunspacePool($Min, $Max)
 }
 
@@ -1881,7 +1931,7 @@ function Get-AVDTuneOverview {
 
 #endregion
 
-Export-ModuleMember -Function Get-AVDTuneDcFromNtDomain, Get-AVDTuneSystemFolder, Get-AVDTuneSystemModulePath, Set-AVDTuneSafeModulePath, Get-AVDTuneModulePathProblems, New-AVDTunePowerShell, New-AVDTuneRunspacePool, Get-AVDTuneChocolateyRoot, Get-AVDTuneChildTool, Initialize-AVDTuneToolTemp, Get-AVDTuneChildEnvironment, Get-AVDTuneProfilePath, Get-AVDTuneHklmValue, New-AVDTuneChildStartInfo, Get-AVDTuneProp, Get-AVDTuneWebResponse, Test-AVDTuneElevated, Get-AVDTuneRoot, Test-AVDTuneDefaultRoot, Test-AVDTuneTestMode, Resolve-AVDTuneTestScript, Get-AVDTuneLongPath, Get-AVDTuneTestModeRefusal, Confirm-AVDTuneAction, ConvertTo-AVDTuneArgument, New-AVDTuneMachine, Invoke-AVDTuneMachine,
+Export-ModuleMember -Function Get-AVDTuneDcFromNtDomain, Get-AVDTuneSystemFolder, Get-AVDTuneSystemModulePath, Set-AVDTuneSafeModulePath, Test-AVDTuneModulePathStable, Assert-AVDTuneModulePathStable, Get-AVDTuneModulePathProblems, New-AVDTunePowerShell, New-AVDTuneRunspacePool, Get-AVDTuneChocolateyRoot, Get-AVDTuneChildTool, Initialize-AVDTuneToolTemp, Get-AVDTuneChildEnvironment, Get-AVDTuneProfilePath, Get-AVDTuneHklmValue, New-AVDTuneChildStartInfo, Get-AVDTuneProp, Get-AVDTuneWebResponse, Test-AVDTuneElevated, Get-AVDTuneRoot, Test-AVDTuneDefaultRoot, Test-AVDTuneTestMode, Resolve-AVDTuneTestScript, Get-AVDTuneLongPath, Get-AVDTuneTestModeRefusal, Confirm-AVDTuneAction, ConvertTo-AVDTuneArgument, New-AVDTuneMachine, Invoke-AVDTuneMachine,
     New-AVDTuneStateSecurity, Initialize-AVDTuneState, Read-AVDTuneAclInfo, Get-AVDTuneStateSecurityProblems, Move-AVDTuneStateToQuarantine, New-AVDTuneProtectedFolder, Assert-AVDTuneStateSecurity, Get-AVDTuneStateSecurityReport, Get-AVDTuneState, Set-AVDTuneState, Test-AVDTuneImageVersion, Get-AVDTuneNextImageVersion, Start-AVDTuneImageVersion,
     Add-AVDTuneRun, Get-AVDTuneRun, Get-AVDTuneLastChange, Get-AVDTuneChangeTimes, Get-AVDTuneChangeMarker, Invoke-AVDTuneStateLock, Get-AVDTuneChangeStopError, Test-AVDTuneChangeInProgress, Resolve-AVDTuneStaleChange, Start-AVDTuneChange, Stop-AVDTuneChange, Get-AVDTuneSnapshotClockBufferMinutes, ConvertTo-AVDTuneUtc, Get-AVDTuneSnapshotWindow, Test-AVDTuneSnapshotInWindow,New-AVDTuneStep, Invoke-AVDTuneStep, New-AVDTuneStepFromData, Get-AVDTuneStepCatalog, Invoke-AVDTune,
     Add-AVDTuneChangeLogEntry, Get-AVDTuneChangeLog, Get-AVDTuneChangeLogVersions, ConvertTo-AVDTuneChangeLogDocument, Export-AVDTuneChangeLog,

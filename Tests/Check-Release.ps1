@@ -293,6 +293,14 @@ try {
     Test-Check 'a launcher that is not what AVDTune writes counts as changed (bad)' ($st.Status -eq 'bad' -and ($st.Changed -join ',') -like '*launcher*') ($st | Out-String)
     $rp = Repair-AVDTuneInstall -Http $http -AppRoot $app -InstallRoot $inst -StateRoot $state -User 'admin1'
     Test-Check 'repair writes the launcher again' ([IO.File]::ReadAllText($launcherPath) -ceq $launcherText -and (Get-AVDTuneIntegrityStatus -AppRoot $app -InstallRoot $inst -StateRoot $state -Http $http).Status -eq 'ok') $null
+    # the launcher of an AVDTune before #73 (no module path line): changed with its own text until Repair writes the new one
+    $oldLauncher = & (Get-Module AVDTune.Release) { $script:LauncherTextBefore73 }
+    # written with the other line ends than this checkout (an install from a release ZIP need not match the line ends of this copy)
+    [IO.File]::WriteAllText($launcherPath, $(if ($oldLauncher.Contains("`r`n")) { $oldLauncher -replace "`r`n", "`n" } else { $oldLauncher -replace "`n", "`r`n" }))
+    $st73 = Get-AVDTuneIntegrityStatus -AppRoot $app -InstallRoot $inst -StateRoot $state -Http $http
+    Test-Check 'launcher (#73): the old launcher without the module path line is the old text minus exactly that line, counts as changed (bad) with its own text' ($launcherText.StartsWith('# AVDTune launcher.') -and $launcherText -match "(?m)^\[Environment\]::SetEnvironmentVariable\('PSModulePath', " -and $oldLauncher -notmatch 'PSModulePath' -and ($launcherText -split "`n").Count -eq (($oldLauncher -split "`n").Count + 1) -and $st73.Status -eq 'bad' -and ($st73.Changed -join ',') -like '*launcher of an older AVDTune*#73*') ($st73.Changed -join ',')
+    [void](Repair-AVDTuneInstall -Http $http -AppRoot $app -InstallRoot $inst -StateRoot $state -User 'admin1')
+    Test-Check 'launcher (#73): repair replaces the old launcher with the new one, then the check is ok' ([IO.File]::ReadAllText($launcherPath) -ceq $launcherText -and (Get-AVDTuneIntegrityStatus -AppRoot $app -InstallRoot $inst -StateRoot $state -Http $http).Status -eq 'ok') $null
     $aclState = @{ Bad = @() }
     Set-AVDTuneReleaseAclReader ({ param($Path, $IsDirectory)
             $rules = @(); if (@($aclState.Bad | Where-Object { $Path -like "$_*" }).Count -gt 0) { $rules = @([pscustomobject]@{ Sid = 'S-1-5-32-545'; Inherited = $false }) }
