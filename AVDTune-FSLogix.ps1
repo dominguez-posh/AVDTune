@@ -120,7 +120,7 @@ function Start-FslRead {
         $script:FslReadJob = @{ Inline = $true; Answers = $answers; Task = $task }
     }
     else {
-        $ps = [powershell]::Create()
+        $ps = New-AVDTunePowerShell
         [void]$ps.AddScript({
                 param($AppRoot, $Root, $Answers, $ReadText)
                 $ErrorActionPreference = 'Stop'
