@@ -78,6 +78,7 @@ function New-ReadyTask([string]$Kind, [string]$FixId) {
 function Start-ReadyJob([string]$Kind, [string]$FixId) {
     # Kind: Start | Erstanalyse | Healthcheck | Manual (analysis) or Fix. A request while one runs is queued (the newest one wins).
     # Test mode: the inline run waits while the Overview refresh uses the same fake machine on its own thread (the timer starts it afterwards)
+    if ($Kind -eq 'Fix') { Assert-NoOtherWriter }   # a fix changes the master (#66)
     if ($script:ReadyJob -or ($script:TestMode -and $script:OverviewJob)) { $script:ReadyQueued = @{ Kind = $Kind; FixId = $FixId }; return }
     $tok = Get-ReadyToken
     $gate = Get-AVDTuneWriteGate
@@ -259,7 +260,7 @@ function Update-ReadyView {
     if ($needAck) { $ui.TxtReadyAckHint.Text = T 'ready.ackhint' ($open -join ', ') }
 }
 function Start-ReadyFix([string]$FixId) {
-    if (-not (Test-AVDTuneWriteAllowed)) { throw (T 'ready.err.readonly') }
+    if (-not (Test-AVDTuneWriteAllowed)) { throw (T 'ready.err.readonly') }; Assert-NoOtherWriter
     $row = @($script:Ready.Rows | Where-Object { $_.FixId -eq $FixId } | Select-Object -First 1)
     $ask = if ($FixId -eq 'readiness.updateblock-on') { T 'ready.ask.updateblock' } else { T 'ready.ask.fix' $row[0].Title }
     if (-not (Confirm-Action $ask (T 'ready.fix'))) { return }

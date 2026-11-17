@@ -139,5 +139,46 @@ $xaml = [IO.File]::ReadAllText((Join-Path $repo 'UI\AVDTune.xaml'))
 $barXaml = $xaml.Substring($xaml.IndexOf('x:Name="BoxTaskBar"'))
 Test-Check 'the bar XAML uses DynamicResource only (follows the light/dark switch)' ($barXaml -notmatch 'StaticResource' -and $barXaml -notmatch '"#[0-9A-Fa-f]{6}"') $null
 
+# #66: one writer at a time. Every start of an operation that changes the master (job or inline) asks the central check first; a start that lacks it is a finding.
+$writerStarts = @(
+    @('AVDTune-Optimization.ps1', 'Start-OptChange'), @('AVDTune-FSLogix.ps1', 'Start-FslJob'), @('AVDTune-FSLogix.ps1', 'Assert-FslWrite'), @('AVDTune-Office.ps1', 'Start-OffJob'),
+    @('AVDTune-Readiness.ps1', 'Start-ReadyJob'), @('AVDTune-Readiness.ps1', 'Start-ReadyFix'), @('AVDTune-UserExperience.ps1', 'Start-WatermarkChange'), @('AVDTune-AppMasking.ps1', 'Assert-MaskWrite'),
+    @('AVDTune-Updates.ps1', 'Start-UpdateRun'), @('AVDTune-Updates.ps1', 'Start-BlockChange'), @('AVDTune-Software.ps1', 'Start-SwRun'), @('AVDTune-Seal.ps1', 'Start-SealJob'), @('AVDTune-Benchmark.ps1', 'Start-BenchJob'), @('AVDTune-Benchmark.ps1', 'Start-BenchRepair'), @('AVDTune-Language.ps1', 'Start-LangJob'), @('AVDTune-Vdi.ps1', 'Start-VdiJob'))
+$missingGuard = @()
+foreach ($w in $writerStarts) {
+    $ast = [Management.Automation.Language.Parser]::ParseFile((Join-Path $repo $w[0]), [ref]$null, [ref]$null)
+    $fn = $ast.Find({ param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $w[1] }, $true)
+    $body = if ($fn) { $fn.Extent.Text } else { '' }
+    if ($body -notmatch 'Assert-NoOtherWriter' -and $body -notmatch "foreach \(\`$other in 'SealJob'") { $missingGuard += "$($w[0]):$($w[1])" }
+}
+Test-Check 'writers (#66): every start of an operation that changes the master calls the central Assert-NoOtherWriter' ($missingGuard.Count -eq 0) ($missingGuard -join ', ')
+# #66 (round 4c): every background job variable of a page is either a writer (in the list of Assert-NoOtherWriter) or named here as read only; a new page that forgets the list is a finding
+$readOnlyJobs = @('OptJob', 'MaskReadJob', 'JoinJob', 'OverviewJob', 'SwLastRun', 'UpdLastRun')
+$jobVars = @(Get-ChildItem -LiteralPath $repo -Filter '*.ps1' | Where-Object { $_.Name -like 'AVDTune-*.ps1' -or $_.Name -eq 'Start-AVDTune.ps1' } | ForEach-Object { [regex]::Matches([IO.File]::ReadAllText($_.FullName), '(?m)^\$script:(\w+(?:Job|Run)) = \$null') | ForEach-Object { $_.Groups[1].Value } } | Select-Object -Unique)
+$unlisted = @($jobVars | Where-Object { $_ -notin $script:WriterJobVariables -and $_ -notin $readOnlyJobs })
+Test-Check 'writers (#66): every job variable of a page is in WriterJobVariables or named as read only (Language, VDI included)' ($unlisted.Count -eq 0 -and 'LangJob' -in $script:WriterJobVariables -and 'VdiJob' -in $script:WriterJobVariables -and 'Latest' -in $script:WriterReadOnlyKinds.VdiJob) ($unlisted -join ', ')
+
+# #66 (re-review): a new image version must not start while a job of the window changes the master (it may not have set the marker yet); the shutdown block goes only when no job is left
+$startText = Get-Content -Raw (Join-Path $repo 'Start-AVDTune.ps1')
+$startAst = [Management.Automation.Language.Parser]::ParseInput($startText, [ref]$null, [ref]$null)
+$getFn = { param($n) $startAst.Find({ param($x) $x -is [Management.Automation.Language.FunctionDefinitionAst] -and $x.Name -eq $n }, $true) }
+Test-Check 'new version (#66): the busy state of the button and Start-NewVersion ask Test-MasterBusy (marker or a running writer)' ((& $getFn 'Update-Chip').Extent.Text -match 'Test-MasterBusy' -and (& $getFn 'Start-NewVersion').Extent.Text -match 'Test-MasterBusy') $null
+$script:StateRoot = 'x'
+function Test-AVDTuneChangeInProgress { param($Root) $false }
+Invoke-Expression (& $getFn 'Test-MasterBusy').Extent.Text
+$free = -not (Test-MasterBusy)
+$script:OptRun = @{ Mode = 'Apply' }; $busyRun = Test-MasterBusy; $script:OptRun = $null
+Test-Check 'new version (#66): a running writer without any marker makes the master busy, nothing running does not' ($free -and $busyRun) "free=$free busy=$busyRun"
+$script:DestroyCount = 0; $script:CreateCount = 0
+function Get-WindowHandle { [IntPtr]1 }
+Invoke-Expression ((& $getFn 'Set-ShutdownBlock').Extent.Text.Replace('[void][AVDTune.ShutdownBlock]::ShutdownBlockReasonDestroy($h)', '$script:DestroyCount++').Replace('[void][AVDTune.ShutdownBlock]::ShutdownBlockReasonCreate($h, $script:ShutdownReason)', '$script:CreateCount++'))
+$script:UpdJob = @{ Kind = 'Scan' }; $script:OptRun = @{ Mode = 'Apply' }
+Set-ShutdownBlock $false; $keptWhileRun = ($script:DestroyCount -eq 0)
+$script:OptRun = $null
+Set-ShutdownBlock $false; $keptWhileScan = ($script:DestroyCount -eq 0)
+$script:UpdJob = $null
+Set-ShutdownBlock $false
+Test-Check 'shutdown block (#66): switching it off does nothing while any job still runs (an ending search must not release the block of a run) and releases it when none is left' ($keptWhileRun -and $keptWhileScan -and $script:DestroyCount -eq 1) "kept=$keptWhileRun/$keptWhileScan destroy=$($script:DestroyCount)"
+
 if ($script:failed -gt 0) { throw "$script:failed check(s) failed." }
 'Check-Tasks: all checks passed.'

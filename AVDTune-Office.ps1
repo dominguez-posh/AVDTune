@@ -105,6 +105,7 @@ switch ($Kind) {
 '@
 function Start-OffJob([string]$Kind, $Config) {
     if ($script:OffJob) { throw 'Another Office operation is still running.' }
+    Assert-NoOtherWriter
     $gate = Get-AVDTuneWriteGate
     $common = @{ Root = $script:StateRoot; User = (Get-FslUser); SnapshotId = (Get-FslGateSnapshot); Config = $Config }
     $title = switch ($Kind) { 'Install' { 'Installing or reconfiguring Microsoft 365 Apps' } 'Remove' { 'Removing Microsoft 365 Apps' } default { 'Undoing the Office change' } }

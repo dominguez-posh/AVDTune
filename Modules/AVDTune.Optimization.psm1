@@ -755,7 +755,8 @@ function New-AVDTuneOptimizationStep {
         }
         'DefenderPref' {
             $param = $Entry.Parameter; $want = $Entry.Value
-            $present = { param($m) try { $null -ne (& $m.MpGet $param) } catch { $false } }.GetNewClosure()
+            # only "Defender is not there" counts as not present; any other error (a policy, a damaged WMI) is thrown and the row says "cannot be read" (#66)
+            $present = { param($m) try { $null -ne (& $m.MpGet $param) } catch { if (Test-OptDefenderAbsent $_) { $false } else { throw } } }.GetNewClosure()
             $test = { param($m) $v = & $m.MpGet $param; @{ Compliant = ($null -ne $v -and (ConvertTo-OptCompare $v) -eq (ConvertTo-OptCompare $want)); State = $(if ($null -eq $v) { 'not available' } else { [string](ConvertTo-OptCompare $v) }) } }.GetNewClosure()
             $apply = {
                 param($m)
@@ -785,6 +786,26 @@ function New-AVDTuneOptimizationStep {
 #endregion
 
 #region status and run
+
+function ConvertTo-OptInt32($Value) {
+    # An error code as a signed 32 bit number, whether it comes as int or uint
+    try { $l = [int64]$Value; if ($l -gt [int]::MaxValue) { $l -= 4294967296 }; [int]$l } catch { 0 }
+}
+function Test-OptDefenderAbsent($ErrorRecord) {
+    # The errors that mean "this host has no Microsoft Defender to ask": the cmdlet does not exist, the Defender WMI namespace does not exist, or its service is not running
+    # (0x800106BA = -2147416390). A CimException carries the code in HResult or in ErrorData (error_Code); the text is the last resort.
+    $e = $ErrorRecord.Exception
+    if ($e -is [System.Management.Automation.CommandNotFoundException] -or [string]$ErrorRecord.FullyQualifiedErrorId -like 'CommandNotFoundException*') { return $true }
+    $cim = $e; while ($cim -and $cim.GetType().Name -ne 'CimException') { $cim = $cim.InnerException }
+    if ($cim) {
+        if ([string]$cim.NativeErrorCode -eq 'InvalidNamespace') { return $true }
+        $codes = @($cim.HResult)
+        try { if ($cim.ErrorData) { $codes += $cim.ErrorData.error_Code } } catch { }
+        foreach ($c in $codes) { if ($null -ne $c -and (ConvertTo-OptInt32 $c) -eq -2147416390) { return $true } }
+        if ([string]$cim.Message -match '(?i)0x800106ba') { return $true }
+    }
+    $false
+}
 
 function Get-AVDTuneOptimizationStatus {
     <#
@@ -925,5 +946,5 @@ function Invoke-AVDTuneOptimization {
 #endregion
 
 Export-ModuleMember -Function Get-AVDTuneOptimizationDataPath, Read-AVDTuneOptimizationData, Get-AVDTuneOptimizationPresetIds, Get-AVDTuneOptimizationCategoryLabel, Get-AVDTuneOptimizationCategoryOrder,
-    Add-AVDTuneOptimizationMachineMembers, New-AVDTuneOptimizationStep, Get-AVDTuneOptimizationStatus, Invoke-AVDTuneOptimization,
+    Add-AVDTuneOptimizationMachineMembers, New-AVDTuneOptimizationStep, Get-AVDTuneOptimizationStatus, Test-OptDefenderAbsent, ConvertTo-OptInt32, Invoke-AVDTuneOptimization,
     Get-AVDTuneOptimizationBackup, Save-AVDTuneOptimizationBackup, Remove-AVDTuneOptimizationBackup, ConvertTo-OptScalar, ConvertTo-OptCompare, Test-OptInt, Test-OptText, Test-OptPattern, Get-OptRegistryProblem, Get-OptServiceProblem, Get-OptTaskProblem, Get-OptAppxProblem, Get-OptDefenderProblem, Get-OptEntryProblem, Get-OptCreatedKeys, Assert-OptRegistryAccess, Get-OptRegistryKeyProblem, Get-OptRegistryValueProblem, Get-OptRestoreProblem, Test-OptDefenderUnset, ConvertTo-OptDWordRead, ConvertTo-OptDWordWrite, Test-OptRegPathSyntax, Test-OptRegNameSyntax

@@ -95,6 +95,7 @@ switch ($Kind) {
 '@
 function Start-VdiJob([string]$Kind, [string]$Key) {
     if ($script:VdiJob) { throw 'Another VDI operation is still running.' }
+    if ($Kind -ne 'Latest') { Assert-NoOtherWriter }   # the look-up of the newest versions only reads (#66)
     $gate = if ($Kind -eq 'Latest') { $null } else { Get-AVDTuneWriteGate }
     $common = @{ Root = $script:StateRoot; User = (Get-FslUser); SnapshotId = (Get-FslGateSnapshot); Key = $Key }
     $name = if ($Key) { (Get-AVDTuneVdiComponent $Key).Title } else { 'VDI components' }

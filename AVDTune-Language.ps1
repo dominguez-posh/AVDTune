@@ -187,6 +187,7 @@ switch ($Kind) {
 '@
 function Start-LangJob([string]$Kind, $Config) {
     if ($script:LangJob) { throw 'Another language operation is still running.' }
+    Assert-NoOtherWriter
     $gate = Get-AVDTuneWriteGate
     $common = @{ Root = $script:StateRoot; User = (Get-FslUser); SnapshotId = (Get-FslGateSnapshot); Config = $Config }
     $title = switch ($Kind) { 'Languages' { 'Installing languages' } 'Undo' { 'Undoing the language defaults' } 'All' { 'Installing languages and setting the defaults for new users' } default { 'Setting the defaults for new users' } }

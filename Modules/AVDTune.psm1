@@ -383,7 +383,9 @@ function New-AVDTuneMachine {
     }
     $m.ServiceGet = {
         param($Name)
-        $s = Get-Service -Name $Name -ErrorAction SilentlyContinue
+        # only "there is no such service" means absent; any other error (access, service control manager) is thrown, so the row says "cannot be read" instead of "not on this host" (#66)
+        $s = $null
+        try { $s = Get-Service -Name $Name -ErrorAction Stop } catch { if ([string]$_.FullyQualifiedErrorId -notlike 'NoServiceFoundForGivenName*') { throw } }
         if (-not $s) { return $null }
         [pscustomobject]@{ Name = $s.Name; Status = [string]$s.Status; StartType = [string]$s.StartType }
     }
@@ -392,14 +394,15 @@ function New-AVDTuneMachine {
     $m.ServiceStart = { param($Name) Start-Service -Name $Name }
     $m.TaskGet = {
         param($Path, $Name)
-        $t = Get-ScheduledTask -TaskPath $Path -TaskName $Name -ErrorAction SilentlyContinue
+        $t = $null
+        try { $t = Get-ScheduledTask -TaskPath $Path -TaskName $Name -ErrorAction Stop } catch { if ([string]$_.FullyQualifiedErrorId -notlike 'CmdletizationQuery_NotFound*') { throw } }   # only "not found" means absent (#66)
         if (-not $t) { return $null }
         [pscustomobject]@{ Path = $t.TaskPath; Name = $t.TaskName; Enabled = ($t.State -ne 'Disabled') }
     }
     $m.TaskList = {
         # Names of the tasks directly in a folder (for tasks whose name carries a GUID, like the Edge update tasks)
         param($Path)
-        @(Get-ScheduledTask -TaskPath $Path -ErrorAction SilentlyContinue | ForEach-Object { $_.TaskName })
+        try { @(Get-ScheduledTask -TaskPath $Path -ErrorAction Stop | ForEach-Object { $_.TaskName }) } catch { if ([string]$_.FullyQualifiedErrorId -notlike 'CmdletizationQuery_NotFound*') { throw }; @() }
     }
     $m.TaskSetEnabled = {
         param($Path, $Name, $Enabled)
@@ -1014,7 +1017,37 @@ function Get-AVDTuneState([string]$Root = (Get-AVDTuneRoot)) {
     $state
 }
 
+$script:StateLockSeconds = 30   # how long a writer waits for the state lock (a check sets it low)
+function Invoke-AVDTuneStateLock {
+    # One lock for the whole process (all runspaces of the window and its background jobs): state.json is read, changed and written, and the marker of a change in progress
+    # is counted, under it. A named mutex is re-entrant for the same thread, so the helpers below may call each other.
+    param([Parameter(Mandatory)][scriptblock]$Block)
+    $mutex = New-Object System.Threading.Mutex($false, 'Local\AVDTuneStateFile')
+    $got = $false
+    try {
+        try { $got = $mutex.WaitOne([TimeSpan]::FromSeconds($script:StateLockSeconds)) } catch [System.Threading.AbandonedMutexException] { $got = $true }
+        if (-not $got) { throw "The state file is in use by another operation of AVDTune for more than $($script:StateLockSeconds) seconds. Try again." }
+        & $Block
+    }
+    finally { if ($got) { try { $mutex.ReleaseMutex() } catch { } }; $mutex.Dispose() }
+}
+
+function Get-AVDTuneHolderKey([string]$Root) { try { [IO.Path]::GetFullPath($Root).TrimEnd([char]92).ToLowerInvariant() } catch { $Root } }
+
+function Get-AVDTuneChangeHolders {
+    # Who holds the marker of a change in progress in THIS process: managed thread ids per state folder, in a table all runspaces of the process share (a module copy per runspace
+    # would count on its own). Call only under Invoke-AVDTuneStateLock.
+    $t = [AppDomain]::CurrentDomain.GetData('AVDTune.ChangeHolders')
+    if (-not $t) { $t = [hashtable]::Synchronized(@{}); [AppDomain]::CurrentDomain.SetData('AVDTune.ChangeHolders', $t) }
+    $t
+}
+
 function Set-AVDTuneState {
+    param([string]$Root = (Get-AVDTuneRoot), [Parameter(Mandatory)][hashtable]$Values)
+    Invoke-AVDTuneStateLock { Set-AVDTuneStateUnlocked -Root $Root -Values $Values }
+}
+
+function Set-AVDTuneStateUnlocked {
     # Changes single values of state.json: Set-AVDTuneState -Values @{ UpdateBlock = 'On' }
     param([string]$Root = (Get-AVDTuneRoot), [Parameter(Mandatory)][hashtable]$Values)
     $state = Get-AVDTuneState $Root
@@ -1065,24 +1098,27 @@ function Get-AVDTuneNextImageVersion {
 function Start-AVDTuneImageVersion {
     # "Start new version": raises the version, clears the finished mark, keeps the list of versions with their start time
     param([string]$Root = (Get-AVDTuneRoot), [datetime]$Date = (Get-Date), [string]$User)
-    Resolve-AVDTuneStaleChange -Root $Root
-    $running = Get-AVDTuneChangeMarker -Root $Root
-    if ($running -and $running.Live) { throw "AVDTune is changing the master right now (started $($running.Started.ToLocalTime().ToString('yyyy-MM-dd HH:mm'))). Start the new image version when it has finished: a snapshot and the first change of the version must not overlap." }
-    $version = Get-AVDTuneNextImageVersion -Root $Root -Date $Date
-    $state = Get-AVDTuneState $Root
-    $list = @(@($state.Versions) | Where-Object { $_ }) + [pscustomobject]@{ Version = $version; Started = $Date.ToString('o'); User = $User }
-    # Snapshot gate (#27): the last change of the version that ends here is the baseline of the new one; the first change of the new version is not there yet
-    $baseline = Get-AVDTuneLastChange -Root $Root
-    [void](Set-AVDTuneState -Root $Root -Values @{ ImageVersion = $version; Versions = $list; Sealed = $false; VersionBaseline = $(if ($baseline) { $baseline.ToUniversalTime().ToString('o') } else { $null }); FirstChange = $null; FirstChangeSnapshotId = $null })
-    # An open gate stays open only when its snapshot is already valid for the new version (made after the last change of the old one); else new snapshot needed
-    if (Test-AVDTuneWriteAllowed) {
-        # the time comes from state.json (written by the confirmation), and only for the snapshot the open gate was opened with
-        $confirmed = Get-AVDTuneProp (Get-AVDTuneState $Root) 'SnapshotGate'
-        $created = ConvertTo-AVDTuneUtc (Get-AVDTuneProp $confirmed 'SnapshotCreated')
-        $same = ([string](Get-AVDTuneProp $confirmed 'SnapshotId') -ieq [string](Get-AVDTuneWriteGate).SnapshotId)
-        if (-not $same -or ($baseline -and (-not $created -or $created -le $baseline.ToUniversalTime().AddMinutes($script:SnapshotClockBufferMinutes)))) { Close-AVDTuneWriteGate }
+    # the check of the marker and the write of the new version are one step under the state lock: no writer can start in between (#66)
+    Invoke-AVDTuneStateLock {
+        Resolve-AVDTuneStaleChange -Root $Root
+        $running = Get-AVDTuneChangeMarker -Root $Root
+        if ($running -and $running.Live) { throw "AVDTune is changing the master right now (started $($running.Started.ToLocalTime().ToString('yyyy-MM-dd HH:mm'))). Start the new image version when it has finished: a snapshot and the first change of the version must not overlap." }
+        $version = Get-AVDTuneNextImageVersion -Root $Root -Date $Date
+        $state = Get-AVDTuneState $Root
+        $list = @(@($state.Versions) | Where-Object { $_ }) + [pscustomobject]@{ Version = $version; Started = $Date.ToString('o'); User = $User }
+        # Snapshot gate (#27): the last change of the version that ends here is the baseline of the new one; the first change of the new version is not there yet
+        $baseline = Get-AVDTuneLastChange -Root $Root
+        [void](Set-AVDTuneState -Root $Root -Values @{ ImageVersion = $version; Versions = $list; Sealed = $false; VersionBaseline = $(if ($baseline) { $baseline.ToUniversalTime().ToString('o') } else { $null }); FirstChange = $null; FirstChangeSnapshotId = $null })
+        # An open gate stays open only when its snapshot is already valid for the new version (made after the last change of the old one); else new snapshot needed
+        if (Test-AVDTuneWriteAllowed) {
+            # the time comes from state.json (written by the confirmation), and only for the snapshot the open gate was opened with
+            $confirmed = Get-AVDTuneProp (Get-AVDTuneState $Root) 'SnapshotGate'
+            $created = ConvertTo-AVDTuneUtc (Get-AVDTuneProp $confirmed 'SnapshotCreated')
+            $same = ([string](Get-AVDTuneProp $confirmed 'SnapshotId') -ieq [string](Get-AVDTuneWriteGate).SnapshotId)
+            if (-not $same -or ($baseline -and (-not $created -or $created -le $baseline.ToUniversalTime().AddMinutes($script:SnapshotClockBufferMinutes)))) { Close-AVDTuneWriteGate }
+        }
+        $version
     }
-    $version
 }
 
 function Add-AVDTuneRun {
@@ -1157,26 +1193,60 @@ function Resolve-AVDTuneStaleChange {
 function Start-AVDTuneChange {
     <#
         Marks the start of an operation that changes the master (snapshot gate, #27/#34): the start becomes the first change of the version and
-        a new image version or a snapshot cannot count while it runs. Returns $true when this call owns the marker (pass it to Stop-AVDTuneChange
-        in finally); $false when another operation of this process holds it already.
+        a new image version or a snapshot cannot count while it runs. Returns $true when this call is a holder of the marker (pass it to Stop-AVDTuneChange
+        in finally); $false for a nested call of the same thread (the outer call holds it). Operations on other threads of this process (the window thread and its
+        background runspaces) are counted: the marker stays until the LAST holder has stopped.
     #>
     param([string]$Root = (Get-AVDTuneRoot), [datetime]$At = (Get-Date))
-    Resolve-AVDTuneStaleChange -Root $Root
-    $m = Get-AVDTuneChangeMarker -Root $Root
-    if ($m -and $m.Live) {
-        if ($m.Pid -eq $PID) { return $false }   # a nested operation of this process: the outer one owns the marker
-        throw "Another AVDTune process (ID $($m.Pid), since $($m.Started.ToLocalTime().ToString('yyyy-MM-dd HH:mm'))) is changing the master. Wait until it has finished."
+    Invoke-AVDTuneStateLock {
+        Resolve-AVDTuneStaleChange -Root $Root
+        $holders = Get-AVDTuneChangeHolders
+        $key = Get-AVDTuneHolderKey $Root
+        $m = Get-AVDTuneChangeMarker -Root $Root
+        $thread = [Threading.Thread]::CurrentThread.ManagedThreadId
+        if ($m -and $m.Live) {
+            if ($m.Pid -ne $PID) { throw "Another AVDTune process (ID $($m.Pid), since $($m.Started.ToLocalTime().ToString('yyyy-MM-dd HH:mm'))) is changing the master. Wait until it has finished." }
+            $list = @(@($holders[$key]) | Where-Object { $null -ne $_ })
+            if ($list -contains $thread) { return $false }          # nested call of the same thread: the outer one holds the marker
+            $holders[$key] = $list + $thread                         # another thread of this process, or a marker of this process without a known holder: a holder too, the marker stays until it has stopped
+            return $true
+        }
+        $me = [Diagnostics.Process]::GetCurrentProcess()
+        [void](Set-AVDTuneState -Root $Root -Values @{ ChangeInProgress = [ordered]@{ Started = $At.ToUniversalTime().ToString('o'); Pid = $PID; ProcessStart = $me.StartTime.ToUniversalTime().ToString('o'); ProcessName = $me.ProcessName } })
+        $holders[$key] = @($thread)
+        $true
     }
-    $me = [Diagnostics.Process]::GetCurrentProcess()
-    [void](Set-AVDTuneState -Root $Root -Values @{ ChangeInProgress = [ordered]@{ Started = $At.ToUniversalTime().ToString('o'); Pid = $PID; ProcessStart = $me.StartTime.ToUniversalTime().ToString('o'); ProcessName = $me.ProcessName } })
-    $true
 }
 
 function Stop-AVDTuneChange {
     param([string]$Root = (Get-AVDTuneRoot), [bool]$Owner = $true)
     if (-not $Owner) { return }
-    # the end is stamped here (also after an abort: a change may have been half done), in the same write that clears the marker; FirstChange comes from the marker still in place
-    try { [void](Set-AVDTuneState -Root $Root -Values @{ LastChange = [datetime]::UtcNow.ToString('o'); ChangeInProgress = $null }) } catch { }
+    # Stop runs in finally blocks: a lock that cannot be had must not replace the result of the operation. The error is kept for the window (Get-AVDTuneChangeStopError), the marker stays.
+    try {
+        Invoke-AVDTuneStateLock {
+            $holders = Get-AVDTuneChangeHolders
+            $key = Get-AVDTuneHolderKey $Root
+            $thread = [Threading.Thread]::CurrentThread.ManagedThreadId
+            $rest = @(@($holders[$key]) | Where-Object { $null -ne $_ -and $_ -ne $thread })
+            if (@($holders[$key]) -contains $thread -and $rest.Count -gt 0) {
+                # another holder still works: only the end of this one is stamped, the marker stays
+                $holders[$key] = $rest
+                try { [void](Set-AVDTuneState -Root $Root -Values @{ LastChange = [datetime]::UtcNow.ToString('o') }) } catch { }
+                return
+            }
+            # the end is stamped here (also after an abort: a change may have been half done), in the same write that clears the marker; FirstChange comes from the marker still in place
+            try { [void](Set-AVDTuneState -Root $Root -Values @{ LastChange = [datetime]::UtcNow.ToString('o'); ChangeInProgress = $null }) } catch { }
+            $holders.Remove($key)
+        }
+    }
+    catch { [AppDomain]::CurrentDomain.SetData('AVDTune.ChangeStopError', "The end of a change could not be recorded: $($_.Exception.Message)") }
+}
+
+function Get-AVDTuneChangeStopError {
+    # The last error of Stop-AVDTuneChange (read once, then cleared), $null when there is none
+    $e = [AppDomain]::CurrentDomain.GetData('AVDTune.ChangeStopError')
+    if ($e) { [AppDomain]::CurrentDomain.SetData('AVDTune.ChangeStopError', $null) }
+    $e
 }
 
 function Get-AVDTuneLastChange {
@@ -1749,7 +1819,7 @@ function Get-AVDTuneOverview {
 
 Export-ModuleMember -Function Get-AVDTuneDcFromNtDomain, Get-AVDTuneSystemFolder, Get-AVDTuneChocolateyRoot, Get-AVDTuneChildTool, Initialize-AVDTuneToolTemp, Get-AVDTuneChildEnvironment, Get-AVDTuneProfilePath, Get-AVDTuneHklmValue, New-AVDTuneChildStartInfo, Get-AVDTuneProp, Get-AVDTuneWebResponse, Test-AVDTuneElevated, Get-AVDTuneRoot, Test-AVDTuneDefaultRoot, Test-AVDTuneTestMode, Resolve-AVDTuneTestScript, Get-AVDTuneLongPath, Get-AVDTuneTestModeRefusal, Confirm-AVDTuneAction, ConvertTo-AVDTuneArgument, New-AVDTuneMachine, Invoke-AVDTuneMachine,
     New-AVDTuneStateSecurity, Initialize-AVDTuneState, Read-AVDTuneAclInfo, Get-AVDTuneStateSecurityProblems, Move-AVDTuneStateToQuarantine, New-AVDTuneProtectedFolder, Assert-AVDTuneStateSecurity, Get-AVDTuneStateSecurityReport, Get-AVDTuneState, Set-AVDTuneState, Test-AVDTuneImageVersion, Get-AVDTuneNextImageVersion, Start-AVDTuneImageVersion,
-    Add-AVDTuneRun, Get-AVDTuneRun, Get-AVDTuneLastChange, Get-AVDTuneChangeTimes, Get-AVDTuneChangeMarker, Test-AVDTuneChangeInProgress, Resolve-AVDTuneStaleChange, Start-AVDTuneChange, Stop-AVDTuneChange, Get-AVDTuneSnapshotClockBufferMinutes, ConvertTo-AVDTuneUtc, Get-AVDTuneSnapshotWindow, Test-AVDTuneSnapshotInWindow,New-AVDTuneStep, Invoke-AVDTuneStep, New-AVDTuneStepFromData, Get-AVDTuneStepCatalog, Invoke-AVDTune,
+    Add-AVDTuneRun, Get-AVDTuneRun, Get-AVDTuneLastChange, Get-AVDTuneChangeTimes, Get-AVDTuneChangeMarker, Invoke-AVDTuneStateLock, Get-AVDTuneChangeStopError, Test-AVDTuneChangeInProgress, Resolve-AVDTuneStaleChange, Start-AVDTuneChange, Stop-AVDTuneChange, Get-AVDTuneSnapshotClockBufferMinutes, ConvertTo-AVDTuneUtc, Get-AVDTuneSnapshotWindow, Test-AVDTuneSnapshotInWindow,New-AVDTuneStep, Invoke-AVDTuneStep, New-AVDTuneStepFromData, Get-AVDTuneStepCatalog, Invoke-AVDTune,
     Add-AVDTuneChangeLogEntry, Get-AVDTuneChangeLog, Get-AVDTuneChangeLogVersions, ConvertTo-AVDTuneChangeLogDocument, Export-AVDTuneChangeLog,
     Get-AVDTuneWindowsInfo, Get-AVDTuneOfficeInfo, Get-AVDTuneSourceImage, Get-AVDTuneHealth, Get-AVDTuneOverview, Write-AVDTuneFile, Read-AVDTuneJson,
     Open-AVDTuneWriteGate, Close-AVDTuneWriteGate, Set-AVDTuneWriteBlock, Clear-AVDTuneWriteBlock, Get-AVDTuneWriteBlock, Get-AVDTuneWriteGate, Test-AVDTuneWriteAllowed, Remove-AVDTuneControlCharacters, ConvertTo-AVDTuneTestResult,

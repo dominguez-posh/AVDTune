@@ -28,7 +28,7 @@ function Test-FslApplies { $a = Get-FslAnswers; [bool]($a -and [string](Get-AVDT
 function Get-FslUser { [string]$env:USERNAME }
 function Format-FslValue($v) { if ($null -eq $v) { '' } else { (@($v) | ForEach-Object { [string]$_ }) -join '; ' } }
 function Test-FslBusy { [bool]$script:FslJob }
-function Assert-FslWrite { if (-not (Test-AVDTuneWriteAllowed)) { throw 'Read only: confirm a snapshot of today on the Overview first.' } }
+function Assert-FslWrite { if (-not (Test-AVDTuneWriteAllowed)) { throw 'Read only: confirm a snapshot of today on the Overview first.' }; Assert-NoOtherWriter }
 function Get-FslGateSnapshot { $g = Get-AVDTuneWriteGate; if ($g) { [string]$g.SnapshotId } else { '' } }
 
 function Set-FslPill($Border, $Text, [string]$Status) {
@@ -457,6 +457,7 @@ function Get-FslStorageToken {
 }
 function Start-FslJob([string]$Kind, [hashtable]$Arg = @{}) {
     if ($script:FslJob) { throw 'Another FSLogix operation is still running.' }
+    Assert-NoOtherWriter
     $sids = Get-FslSids
     $gate = Get-AVDTuneWriteGate
     $common = @{ Root = $script:StateRoot; User = (Get-FslUser); SnapshotId = $(if ($gate) { [string]$gate.SnapshotId } else { '' }); UsersSids = $sids.Users; AdminsSids = $sids.Admins; Write = [bool]$Arg.Write }

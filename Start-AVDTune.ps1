@@ -294,12 +294,14 @@ function New-HealthRow($Item) {
     [void]$grid.Children.Add($pill); [void]$grid.Children.Add($title); [void]$grid.Children.Add($detail)
     $grid
 }
+# the master is busy while a change is marked in state.json or a job of this window that changes it runs (a job may not have marked it yet)
+function Test-MasterBusy { [bool]((Test-AVDTuneChangeInProgress -Root $script:StateRoot) -or (Get-AVDTuneRunningWriter)) }
 function Update-Chip {
     $state = Get-AVDTuneState $script:StateRoot
     $ui.TxtChipName.Text = $(if ($script:Overview) { [string]$script:Overview.ComputerName } else { [string](& $script:Machine.ComputerName) })
     $ui.TxtChipVersion.Text = $(if ($state.ImageVersion) { [string]$state.ImageVersion } else { T 'ov.chip.noversion' })
     # no new version while AVDTune changes the master: the first change of a version and its snapshot must not overlap (#27)
-    $busy = Test-AVDTuneChangeInProgress -Root $script:StateRoot
+    $busy = Test-MasterBusy
     $ui.BtnNewVersion.IsEnabled = -not $busy
     $ui.BtnNewVersion.ToolTip = $(if ($busy) { T 'ov.busy.tip' } else { $null })
 }
@@ -353,11 +355,15 @@ function Complete-OverviewRefresh {
 }
 $script:Timer = New-Object System.Windows.Threading.DispatcherTimer
 $script:Timer.Interval = [TimeSpan]::FromMilliseconds(250)
-$script:Timer.Add_Tick({ try { Complete-OverviewRefresh } catch { Show-Error $_.Exception.Message } })
+# one handler: the refresh, then the error of a stop that could not get the state lock (Stop-AVDTuneChange never replaces a result with it; read once, so it is shown once)
+$script:Timer.Add_Tick({
+    try { Complete-OverviewRefresh } catch { Show-Error $_.Exception.Message }
+    try { $stopError = Get-AVDTuneChangeStopError; if ($stopError) { Show-Error $stopError } } catch { }
+})
 
 Add-Click $ui.BtnRefresh { Start-OverviewRefresh }
 function Start-NewVersion {
-    if (Test-AVDTuneChangeInProgress -Root $script:StateRoot) { Show-Error (T 'ov.newversion.busy'); return }
+    if (Test-MasterBusy) { Show-Error (T 'ov.newversion.busy'); return }
     $state = Get-AVDTuneState $script:StateRoot
     $next = Get-AVDTuneNextImageVersion -Root $script:StateRoot
     $ask = if ($state.ImageVersion) { T 'ov.newversion.ask.next' $next $state.ImageVersion } else { T 'ov.newversion.ask.first' $next }
@@ -556,6 +562,8 @@ if (-not ('AVDTune.ShutdownBlock' -as [type])) {
 function Get-ShutdownReasonText { T 'shell.shutdownreason' }
 function Get-WindowHandle { (New-Object System.Windows.Interop.WindowInteropHelper $window).Handle }
 function Set-ShutdownBlock([bool]$On) {
+    # Off only when no job is left: an ending search must not take the block away from a run that still goes (#66)
+    if (-not $On) { foreach ($jobName in $script:WriterJobVariables) { if ($jobName -ne 'ReadyJob' -and (Get-Variable -Scope Script -Name $jobName -ValueOnly -ErrorAction SilentlyContinue)) { return } } }
     try {
         $h = Get-WindowHandle
         if ($h -eq [IntPtr]::Zero) { return }
@@ -579,12 +587,15 @@ $script:SessionEndingHandler = [System.Windows.SessionEndingCancelEventHandler]{
 
 $window.Add_Closed({
     try { [System.Windows.Application]::Current.remove_SessionEnding($script:SessionEndingHandler) } catch { }   # a handler left on the application keeps the process from ending
+    try { if ($script:OptSessionEnding) { [System.Windows.Application]::Current.remove_SessionEnding($script:OptSessionEnding) } } catch { }
+    try { if ($script:SwSessionEnding) { [System.Windows.Application]::Current.remove_SessionEnding($script:SwSessionEnding) } } catch { }   # the handlers of the pages too: a handler left on the application keeps the process from ending
     $script:Timer.Stop()
     try { $script:SnapTimer.Stop() } catch { }
     try { if ($script:StartContext.Session) { Disconnect-AVDTuneSession $script:StartContext.Session } } catch { }   # tokens leave the memory with the window
     if ($script:OverviewJob) { try { [void]$script:OverviewJob.PS.BeginStop($null, $null) } catch { } }
     if ($script:ReadyJob) { try { [void]$script:ReadyJob.PS.BeginStop($null, $null) } catch { } }
     try { Close-FslLatestLookup } catch { }   # the FSLogix page's background lookup of the newest release
+    if ($script:OptJob -and $script:OptJob.PS) { try { [void]$script:OptJob.PS.BeginStop($null, $null) } catch { } }   # a read does not hold the window back
     try { if ($script:MutexOwned) { $script:Mutex.ReleaseMutex() } } catch { }
     [System.Windows.Application]::Current.Shutdown()
 })

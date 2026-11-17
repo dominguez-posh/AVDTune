@@ -106,6 +106,7 @@ function Get-SwTaskTitle([string]$Kind, $Argument) {
 function Start-SwJob([string]$Kind, $Argument) {
     if ($script:SwJob) { throw 'Another software operation is still running.' }
     if ($script:UpdJob) { throw 'An update operation is running. Wait until it is done.' }
+    if ($script:OptRun) { throw 'An optimization run is going. Wait until it is done.' }
     if ($script:BenchJob) { throw 'A benchmark is running. Wait until it is done.' }
     $settings = Get-SwSettings
     $siteUrl = [string]$settings.StoreSiteUrl
@@ -304,7 +305,7 @@ function Update-SoftwareView {
 
 # ---------------------------------------------------------------- actions
 function Start-SwRun([object[]]$Items, [string]$Question) {
-    if (-not (Test-AVDTuneWriteAllowed)) { throw 'Read only: confirm a snapshot of today on the Overview first.' }
+    if (-not (Test-AVDTuneWriteAllowed)) { throw 'Read only: confirm a snapshot of today on the Overview first.' }; Assert-NoOtherWriter
     $list = @($Items | Where-Object { $_ })
     if ($list.Count -eq 0) { throw 'Nothing to do.' }
     if (-not $Question) { $Question = "Run $($list.Count) software change(s) on this master?" }

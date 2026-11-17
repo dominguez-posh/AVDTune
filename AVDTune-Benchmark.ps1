@@ -17,6 +17,8 @@ function Set-BenchBusy([bool]$Busy) {
 function Start-BenchJob([string]$Mode, [string]$Kind) {
     if ($script:BenchJob) { throw 'A benchmark is already running.' }
     if ($script:UpdJob) { throw 'An update operation is running. Wait until it is done.' }
+    if ($script:OptRun) { throw 'An optimization run is going. Wait until it is done.' }
+    Assert-NoOtherWriter
     $sync = [hashtable]::Synchronized(@{ Text = ''; Percent = 0 })
     $ps = [powershell]::Create()
     [void]$ps.AddScript({
@@ -166,7 +168,8 @@ function Start-BenchRun([string]$Mode) {
 }
 Add-Click $ui.BtnBenchFull { Start-BenchRun 'Full' }
 Add-Click $ui.BtnBenchQuick { Start-BenchRun 'Quick' }
-Add-Click $ui.BtnBenchRepair {
+function Start-BenchRepair {
+    Assert-NoOtherWriter   # the repair changes the master (Windows Update, indexer): never next to another writer (#66)
     $r = Invoke-UiTaskInline -Kind 'benchmark-repair' -Title 'Restoring Windows Update and the indexer' -Step 'Putting back what the benchmark paused' -Block {
         $m = $script:Machine
         $b = $(if ($script:TestMode) { . $script:BenchFakeScript; New-AVDTuneFakeBench -Reference (Get-AVDTuneBenchmarkReference) -Config (Get-AVDTuneBenchmarkConfig) } else { New-AVDTuneBenchAdapter })
@@ -175,3 +178,4 @@ Add-Click $ui.BtnBenchRepair {
     Show-Toast $r.Message
     Update-BenchmarkView
 }
+Add-Click $ui.BtnBenchRepair { Start-BenchRepair }

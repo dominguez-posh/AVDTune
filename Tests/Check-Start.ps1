@@ -609,6 +609,73 @@ try {
     [void](Add-AVDTuneChangeLogEntry -Root $rx -Version '2026.11.001' -Category 'Setup' -Component 'x' -ChangeType Changed -Text 'a change without state.json' -User 'admin1' -Source Step -At $T0)
     Test-Check 'a change that only the change log knows keeps the strict rule (lower bound = that change, no first change)' ((Get-AVDTuneSnapshotWindow -Root $rx).Lower -eq $T0 -and -not (Get-AVDTuneSnapshotWindow -Root $rx).FirstChange) $null
 
+    # #66 (review M1): two overlapping writers in this process (the window thread and a background runspace) share the marker: it stays until the LAST one has stopped
+    $ro = Join-Path $tmp 'issue66-overlap'; [void](Initialize-AVDTuneState -Root $ro); [void](Start-AVDTuneImageVersion -Root $ro -Date ([datetime]'2026-11-01') -User 'admin1')
+    $o1 = Start-AVDTuneChange -Root $ro
+    $rsO = [powershell]::Create()
+    [void]$rsO.AddScript({
+            param($Repo, $Root, $Sync)
+            Import-Module (Join-Path $Repo 'Modules\AVDTune.psm1') -Force
+            $o2 = Start-AVDTuneChange -Root $Root; $Sync.Started = $o2; $Sync.Ready = $true
+            while (-not $Sync.Stop) { Start-Sleep -Milliseconds 50 }
+            Stop-AVDTuneChange -Root $Root -Owner $o2; $Sync.Done = $true
+        }).AddArgument($repo).AddArgument($ro).AddArgument(($syncO = [hashtable]::Synchronized(@{ Ready = $false; Stop = $false; Done = $false; Started = $null })))
+    $hO = $rsO.BeginInvoke()
+    $waitO = [Diagnostics.Stopwatch]::StartNew(); while (-not $syncO.Ready -and $waitO.Elapsed.TotalSeconds -lt 60) { Start-Sleep -Milliseconds 50 }
+    Test-Check 'overlap (#66): a writer on another thread of this process becomes a second holder, not a nested call' ($o1 -and $syncO.Started -eq $true) "o1=$o1 o2=$($syncO.Started)"
+    Stop-AVDTuneChange -Root $ro -Owner $o1
+    Test-Check 'overlap (#66): after the first writer stopped the marker stays while the second still works (the snapshot gate holds)' (Test-AVDTuneChangeInProgress -Root $ro) $null
+    $syncO.Stop = $true; $waitO.Restart(); while (-not $syncO.Done -and $waitO.Elapsed.TotalSeconds -lt 60) { Start-Sleep -Milliseconds 50 }
+    try { [void]$rsO.EndInvoke($hO) } finally { $rsO.Dispose() }
+    Test-Check 'overlap (#66): the marker is gone after the last writer stopped and LastChange is set' (-not (Test-AVDTuneChangeInProgress -Root $ro) -and (Get-AVDTuneState $ro).LastChange) $null
+    # the state file is written under one lock for the whole process: while it is held elsewhere, Set-AVDTuneState of another thread waits (counter-test: without the lock it returns at once)
+    $mtx = New-Object System.Threading.Mutex($false, 'Local\AVDTuneStateFile'); $rsL = $null; $held = $false
+    try {
+        $held = $mtx.WaitOne(10000)
+        $syncL = [hashtable]::Synchronized(@{ Done = $false })
+        $rsL = [powershell]::Create()
+        [void]$rsL.AddScript({ param($Repo, $Root, $S) Import-Module (Join-Path $Repo 'Modules\AVDTune.psm1') -Force; [void](Set-AVDTuneState -Root $Root -Values @{ UpdateBlock = 'Off' }); $S.Done = $true }).AddArgument($repo).AddArgument($ro).AddArgument($syncL)
+        $hL = $rsL.BeginInvoke(); Start-Sleep -Milliseconds 1500
+        $waited = -not $syncL.Done
+        if ($held) { $mtx.ReleaseMutex(); $held = $false }
+        $wl = [Diagnostics.Stopwatch]::StartNew(); while (-not $syncL.Done -and $wl.Elapsed.TotalSeconds -lt 30) { Start-Sleep -Milliseconds 50 }
+        Test-Check 'lock (#66): Set-AVDTuneState of another thread waits while the state lock is held and writes after it is released' ($waited -and $syncL.Done) "waited=$waited done=$($syncL.Done)"
+        [void]$rsL.EndInvoke($hL)
+    }
+    finally { if ($held) { $mtx.ReleaseMutex() }; if ($rsL) { $rsL.Dispose() }; $mtx.Dispose() }
+
+    # #66 (re-review N-D): the holders are kept per normalised folder; a live marker of this process without a known holder makes the caller a holder
+    $rn = Join-Path $tmp 'issue66-key'; [void](Initialize-AVDTuneState -Root $rn); [void](Start-AVDTuneImageVersion -Root $rn -Date ([datetime]'2026-11-01') -User 'admin1')
+    $k1 = Start-AVDTuneChange -Root ($rn + '\'); Stop-AVDTuneChange -Root $rn -Owner $k1
+    Test-Check 'holders (#66): start with a trailing backslash and stop without it are the same folder (marker gone, holder removed)' ($k1 -and -not (Test-AVDTuneChangeInProgress -Root $rn) -and (Start-AVDTuneChange -Root $rn) -and -not (Test-AVDTuneChangeInProgress -Root $rn) -eq $false) $null
+    Stop-AVDTuneChange -Root $rn
+    $me = [Diagnostics.Process]::GetCurrentProcess()
+    [void](Set-AVDTuneState -Root $rn -Values @{ ChangeInProgress = [ordered]@{ Started = (Get-Date).ToUniversalTime().ToString('o'); Pid = $PID; ProcessStart = $me.StartTime.ToUniversalTime().ToString('o'); ProcessName = $me.ProcessName } })
+    $kUnknown = Start-AVDTuneChange -Root $rn
+    Test-Check 'holders (#66): a live marker of this process without a known holder makes the caller a holder (true), and its stop clears the marker' ($kUnknown -eq $true -and (Test-AVDTuneChangeInProgress -Root $rn)) $null
+    Stop-AVDTuneChange -Root $rn -Owner $kUnknown
+    Test-Check 'holders (#66): ... and after that stop the marker is gone' (-not (Test-AVDTuneChangeInProgress -Root $rn)) $null
+    # N-B (engine): the check of the marker and the write of the new version are one step under the state lock: while another thread holds the lock the new version waits
+    # N-F: a stop that cannot get the lock does not throw (it would replace the result of the operation), keeps the marker and leaves the error for the window
+    $mtx2 = New-Object System.Threading.Mutex($false, 'Local\AVDTuneStateFile'); $rsV = $null; $heldV = $false
+    try {
+        $kStop = Start-AVDTuneChange -Root $rn
+        $syncV = [hashtable]::Synchronized(@{ Held = $false; Release = $false; Done = $false })
+        $rsV = [powershell]::Create()
+        [void]$rsV.AddScript({ param($S) $m = New-Object System.Threading.Mutex($false, 'Local\AVDTuneStateFile'); [void]$m.WaitOne(); $S.Held = $true; while (-not $S.Release) { Start-Sleep -Milliseconds 50 }; $m.ReleaseMutex() }).AddArgument($syncV)
+        $hV = $rsV.BeginInvoke(); $wv = [Diagnostics.Stopwatch]::StartNew(); while (-not $syncV.Held -and $wv.Elapsed.TotalSeconds -lt 30) { Start-Sleep -Milliseconds 50 }
+        & (Get-Module AVDTune) { $script:StateLockSeconds = 1 }
+        $thrown = $null; try { Stop-AVDTuneChange -Root $rn -Owner $kStop } catch { $thrown = $_.Exception.Message }
+        $stopErr = Get-AVDTuneChangeStopError
+        Test-Check 'stop (#66): a lock that cannot be had does not throw, the marker stays and the error is kept once for the window' (-not $thrown -and $stopErr -like '*could not be recorded*' -and (Test-AVDTuneChangeInProgress -Root $rn) -and -not (Get-AVDTuneChangeStopError)) "thrown=$thrown err=$stopErr"
+        $vErr = Get-ThrownText { Start-AVDTuneImageVersion -Root $rn -Date ([datetime]'2026-11-05') -User 'admin1' }
+        Test-Check 'version (#66): a new image version waits for the state lock too (here it gives up with the lock message)' ($vErr -like '*state file is in use*' -and $vErr -like '*more than 1 seconds*') $vErr
+        & (Get-Module AVDTune) { $script:StateLockSeconds = 30 }
+        $syncV.Release = $true; [void]$rsV.EndInvoke($hV)
+        Stop-AVDTuneChange -Root $rn -Owner $kStop
+        Test-Check 'stop (#66): the same stop works when the lock is free again' (-not (Test-AVDTuneChangeInProgress -Root $rn)) $null
+    }
+    finally { & (Get-Module AVDTune) { $script:StateLockSeconds = 30 }; if ($rsV) { $rsV.Dispose() }; $mtx2.Dispose() }
     # ---------------------------------------------------------------- findings of the security review of #27
     # 1: a change in progress (marker): first change = its start, no new version, no snapshot as the current state meanwhile
     $rp = Join-Path $tmp 'issue27-progress'; [void](Initialize-AVDTuneState -Root $rp); [void](Start-AVDTuneImageVersion -Root $rp -Date ([datetime]'2026-11-01') -User 'admin1')
