@@ -64,6 +64,7 @@ function Get-TestScript([string]$Name) {
 }
 function Stop-WithMessage([string]$Text) {
     # In test mode never a dialog: it would appear on the developer's desktop and block an unattended run
+    try { [IO.Directory]::Delete($script:BootTemp) } catch { }   # the start folder below the Windows TEMP (#54), when still there and empty (not recursive)
     if ($script:TestMode) { [Console]::Error.WriteLine("AVDTune: $Text"); exit 1 }
     [void][System.Windows.MessageBox]::Show($Text, 'AVDTune', 'OK', 'Error')
     exit 1

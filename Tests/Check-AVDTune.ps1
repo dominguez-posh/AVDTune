@@ -906,9 +906,11 @@ try { $ps = [powershell]::Create(); $ps.Runspace = $rs; [void]$ps.AddScript($pro
     $stmts = @($startAst.EndBlock.Statements)
     $upTo = -1; for ($i = 0; $i -lt $stmts.Count; $i++) { if ($stmts[$i].Extent.Text -like '$script:ModulePathProblems = *') { $upTo = $i; break } }
     $headLines = @($stmts[0..$upTo] | ForEach-Object { $_.Extent.Text.Replace('$PSScriptRoot', "'" + $repo.Replace("'", "''") + "'") })
-    $tail = "`r`n" + '[IO.File]::WriteAllText($env:AVDTUNE_TEST_STARTED, ((Get-Module | ForEach-Object { $_.Name + ''@'' + $_.ModuleBase }) -join ''|''))' + "`r`n"
-    [IO.File]::WriteAllText((Join-Path $modTmp 'head-new.ps1'), ($headLines -join "`r`n") + $tail)
-    [IO.File]::WriteAllText((Join-Path $modTmp 'head-old.ps1'), (@($headLines | Select-Object -Skip 1) -join "`r`n") + $tail)
+    # the head also makes the start TEMP folder below the Windows TEMP (#54); the full start removes it after the state check, this cut-off head removes it itself (in finally: the red run stops early)
+    $wrap = { param($Body) "try {`r`n" + $Body + "`r`n} finally { if (`$script:BootTemp) { try { [IO.Directory]::Delete(`$script:BootTemp) } catch { } } }`r`n" }
+    $tail = "`r`n" + '[IO.File]::WriteAllText($env:AVDTUNE_TEST_STARTED, ((Get-Module | ForEach-Object { $_.Name + ''@'' + $_.ModuleBase }) -join ''|''))'
+    [IO.File]::WriteAllText((Join-Path $modTmp 'head-new.ps1'), (& $wrap (($headLines -join "`r`n") + $tail)))
+    [IO.File]::WriteAllText((Join-Path $modTmp 'head-old.ps1'), (& $wrap ((@($headLines | Select-Object -Skip 1) -join "`r`n") + $tail)))
     $hGreen = & $runScript (Join-Path $modTmp 'head-new.ps1') (Join-Path $modTmp 'head-new.marker') (Join-Path $modTmp 'head-new.started')
     $hRed = & $runScript (Join-Path $modTmp 'head-old.ps1') (Join-Path $modTmp 'head-old.marker') (Join-Path $modTmp 'head-old.started')
     Test-Check 'module path (#73, F1/F2) red: the head of Start-AVDTune.ps1 without its first statement loads a fake while AVDTune.psm1 loads' ($upTo -ge 3 -and $hRed.Marker -ne '') "upTo $upTo marker: $($hRed.Marker) | $($hRed.Err)"
