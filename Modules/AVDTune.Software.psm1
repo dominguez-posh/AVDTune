@@ -11,7 +11,7 @@
                        here (msiexec with fixed switches); the recipe is never run.
 
     Every program (winget, choco, msiexec) is started with its full path from a fixed system place, inside the lock Global\PackTune (and, in the
-    transition, Global\IntuneChocolateyDeployment), from a file that is held open without write/delete sharing while its Authenticode signature is
+    transition, Global\IntuneChocoDeployment, the name PackTune and its device scripts use), from a file that is held open without write/delete sharing while its Authenticode signature is
     checked and while it runs. A run needs the open write gate, sets LastChange (also when it fails), writes a run record (Plan 'Software') and a
     change log entry per package. The adapters are the update adapter $U of AVDTune.Updates.psm1 (tools, lock, process tree) and the machine adapter;
     the library has a context object with a replaceable GET (Tests\Check-Software.ps1 uses a fake SharePoint and a fake Intune).

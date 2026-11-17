@@ -5,7 +5,7 @@
                            drivers and previews off by default, KB exclude list, result code per update with an explanation, retry
       Microsoft 365 Apps   build and channel from ClickToRun\Configuration; update with OfficeC2RClient.exe /update (Updates Enabled stays FALSE in the image)
       Edge, Teams, OneDrive, Defender signatures; FSLogix is only detected here (the update comes with the FSLogix page, phase 3)
-      winget / Chocolatey  every call inside the mutex Global\PackTune (and, in the transition, Global\IntuneChocolateyDeployment)
+      winget / Chocolatey  every call inside the mutex Global\PackTune (and, in the transition, Global\IntuneChocoDeployment as in PackTune)
       Repair               DISM /Online /Cleanup-Image /RestoreHealth and sfc /scannow, offered after a failure, run on a click
 
     Every access to the machine goes through two adapters: the machine adapter of AVDTune.psm1 (registry, services, tasks) and the update adapter
@@ -19,7 +19,8 @@ Import-Module (Join-Path $PSScriptRoot 'AVDTune.psm1')
 Import-Module (Join-Path $PSScriptRoot 'AVDTune.UpdateBlock.psm1')
 
 $script:MicrosoftUpdateServiceId = '7971f918-a847-4430-9279-4a52d1efe18d'
-$script:LockNames = @('Global\PackTune', 'Global\IntuneChocolateyDeployment')
+# The same names and order as PackTune (PackTune-Main.ps1, Enter-DeploymentLock): Global\PackTune first, then the one of PackTune's earlier name.
+$script:LockNames = @('Global\PackTune', 'Global\IntuneChocoDeployment')
 $script:TransientHResults = @('0x8024402C', '0x80072EE7', '0x80072EFD', '0x80072EE2', '0x80244022', '0x80240438', '0x8024001E', '0x800705B4', '0x80248007')
 
 #region settings

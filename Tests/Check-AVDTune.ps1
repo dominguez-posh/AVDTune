@@ -417,21 +417,101 @@ try {
         Where-Object { [regex]::IsMatch([IO.File]::ReadAllText($_.FullName), "`r(?!`n)") } | ForEach-Object { $_.FullName.Substring($repo.Length + 1) })
     Test-Check 'no script contains a lone CR (it splits a statement for PowerShell but not in the editor)' ($loneCr.Count -eq 0) ($loneCr -join ', ')
 
-    # ---------------------------------------------------------------- no $script: inside a GetNewClosure block (#78)
-    # GetNewClosure binds the block to a new dynamic module: $script:X there is that module's (empty) variable, not the one of the file.
-    # The winget/choco lock read $script:LockNames that way and took no mutex at all. Values go into a local variable before GetNewClosure.
-    $closureScript = @(); $closureCount = 0
+    # ---------------------------------------------------------------- what a GetNewClosure block cannot see (#78)
+    # GetNewClosure binds the block to a new dynamic module: $script:X there is that module's (empty) variable, not the one of the file, and the functions
+    # a module does not export are not found at all. The winget/choco lock read $script:LockNames that way and took no mutex. Rules per closure block
+    # (direct {...}.GetNewClosure() and $b = {...}; $b.GetNewClosure()): no $script: variable, no $using:, no *-Variable -Scope Script, no call of a
+    # function the module defines but does not export. Values go into a local variable before GetNewClosure; private functions are exported or inlined.
+    function Get-ClosureFinding {
+        param([System.Management.Automation.Language.Ast]$Ast, [bool]$IsModule)
+        $A = 'System.Management.Automation.Language'
+        $private = @()
+        if ($IsModule) {
+            $defined = @($Ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $true) | ForEach-Object { $_.Name } | Select-Object -Unique)
+            $exports = @($Ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] -and $n.GetCommandName() -eq 'Export-ModuleMember' }, $true))
+            if ($exports.Count -eq 0) { $exported = $defined }
+            else {
+                $exported = @()
+                foreach ($e in $exports) {
+                    $el = @($e.CommandElements)
+                    for ($i = 1; $i -lt $el.Count; $i++) {
+                        if ($el[$i] -is "$A.CommandParameterAst" -and 'Function' -like ($el[$i].ParameterName + '*')) {
+                            $arg = $el[$i].Argument; if (-not $arg -and $i + 1 -lt $el.Count) { $arg = $el[$i + 1] }
+                            if ($arg) { $exported += @($arg.FindAll({ param($n) $n -is [System.Management.Automation.Language.StringConstantExpressionAst] }, $true) | ForEach-Object { $_.Value }) }
+                        }
+                    }
+                }
+            }
+            $private = @($defined | Where-Object { $d = $_; -not @($exported | Where-Object { $d -like $_ }).Count })
+        }
+        $out = @(); $count = 0
+        foreach ($call in $Ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.InvokeMemberExpressionAst] -and [string]$n.Member.Extent.Text -eq 'GetNewClosure' }, $true)) {
+            $count++
+            $blocks = @()
+            if ($call.Expression -is "$A.ScriptBlockExpressionAst") { $blocks = @($call.Expression) }
+            elseif ($call.Expression -is "$A.VariableExpressionAst" -and -not $call.Expression.VariablePath.IsScript) {
+                # $b = {...}; $b.GetNewClosure(): every block assigned to $b in the same function (or file)
+                $name = $call.Expression.VariablePath.UserPath
+                $scope = $call.Parent; while ($scope -and $scope -isnot [System.Management.Automation.Language.FunctionDefinitionAst]) { $scope = $scope.Parent }; if (-not $scope) { $scope = $Ast }
+                foreach ($as in $scope.FindAll({ param($n) $n -is [System.Management.Automation.Language.AssignmentStatementAst] -and $n.Left -is [System.Management.Automation.Language.VariableExpressionAst] -and $n.Left.VariablePath.UserPath -eq $name }, $true)) {
+                    $r = $as.Right; if ($r -is "$A.PipelineAst" -and @($r.PipelineElements).Count -eq 1) { $r = $r.PipelineElements[0] }
+                    if ($r -is "$A.CommandExpressionAst" -and $r.Expression -is "$A.ScriptBlockExpressionAst") { $blocks += $r.Expression }
+                }
+            }
+            if ($blocks.Count -eq 0) { $out += [pscustomobject]@{ Rule = 'unresolved'; Line = $call.Extent.StartLineNumber; Text = $call.Expression.Extent.Text }; continue }
+            foreach ($b in $blocks) {
+                $inner = @($b.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $true) | ForEach-Object { $_.Name })
+                foreach ($n in $b.FindAll({ param($x) $x -is [System.Management.Automation.Language.VariableExpressionAst] -and $x.VariablePath.IsScript }, $true)) { $out += [pscustomobject]@{ Rule = 'script'; Line = $n.Extent.StartLineNumber; Text = $n.Extent.Text } }
+                foreach ($n in $b.FindAll({ param($x) $x -is [System.Management.Automation.Language.UsingExpressionAst] }, $true)) { $out += [pscustomobject]@{ Rule = 'using'; Line = $n.Extent.StartLineNumber; Text = $n.Extent.Text } }
+                foreach ($c in $b.FindAll({ param($x) $x -is [System.Management.Automation.Language.CommandAst] }, $true)) {
+                    $cn = [string]$c.GetCommandName()
+                    if ($cn -in 'Get-Variable', 'Set-Variable', 'New-Variable', 'Remove-Variable', 'Clear-Variable', 'gv', 'sv', 'nv', 'rv', 'clv') {
+                        $el = @($c.CommandElements)
+                        for ($i = 1; $i -lt $el.Count; $i++) {
+                            if ($el[$i] -is "$A.CommandParameterAst" -and $el[$i].ParameterName.Length -ge 2 -and 'Scope' -like ($el[$i].ParameterName + '*')) {
+                                $arg = $el[$i].Argument; if (-not $arg -and $i + 1 -lt $el.Count) { $arg = $el[$i + 1] }
+                                if ($arg -and $arg.Extent.Text.Trim('''', '"') -eq 'Script') { $out += [pscustomobject]@{ Rule = 'scope'; Line = $c.Extent.StartLineNumber; Text = $c.Extent.Text } }
+                            }
+                        }
+                    }
+                    elseif ($cn -and $cn -in $private -and $cn -notin $inner) { $out += [pscustomobject]@{ Rule = 'private'; Line = $c.Extent.StartLineNumber; Text = $cn } }
+                }
+            }
+        }
+        [pscustomobject]@{ Count = $count; Findings = $out }
+    }
+    $closureFindings = @(); $closureCount = 0
     foreach ($f in @(Get-ChildItem -LiteralPath $repo -Recurse -File -Include '*.ps1', '*.psm1' | Where-Object { $_.FullName -notmatch '\\\.git\\' })) {
         $tokens = $null; $parseErrors = $null
         $ast = [System.Management.Automation.Language.Parser]::ParseFile($f.FullName, [ref]$tokens, [ref]$parseErrors)
-        foreach ($call in $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.InvokeMemberExpressionAst] -and [string]$n.Member.Extent.Text -eq 'GetNewClosure' }, $true)) {
-            $closureCount++
-            foreach ($v in $call.Expression.FindAll({ param($n) $n -is [System.Management.Automation.Language.VariableExpressionAst] -and $n.VariablePath.IsScript }, $true)) {
-                $closureScript += '{0}:{1} {2}' -f $f.FullName.Substring($repo.Length + 1), $v.Extent.StartLineNumber, $v.Extent.Text
-            }
-        }
+        $res = Get-ClosureFinding -Ast $ast -IsModule ($f.Extension -eq '.psm1')
+        $closureCount += $res.Count
+        foreach ($x in $res.Findings) { $closureFindings += '{0}:{1} {2} {3}' -f $f.FullName.Substring($repo.Length + 1), $x.Line, $x.Rule, $x.Text }
     }
-    Test-Check 'no GetNewClosure block reads or writes a $script: variable (it would be the empty one of the closure''s own module, #78)' ($closureScript.Count -eq 0 -and $closureCount -gt 50) "closures found: $closureCount; $($closureScript -join ', ')"
+    Test-Check 'no GetNewClosure block reads $script:/$using: variables, uses -Scope Script or calls a function its module does not export (#78)' ($closureFindings.Count -eq 0 -and $closureCount -gt 50) "closures found: $closureCount; $($closureFindings -join ' | ')"
+    # each rule turns red on a small example (and a clean example stays green)
+    $sample = {
+        param([string]$Source, [bool]$IsModule)
+        $tk = $null; $pe = $null
+        @((Get-ClosureFinding -Ast ([System.Management.Automation.Language.Parser]::ParseInput($Source, [ref]$tk, [ref]$pe)) -IsModule $IsModule).Findings | ForEach-Object { $_.Rule })
+    }
+    $ruleCases = @(
+        @{ N = 'script'; S = 'function F { { $script:LockNames }.GetNewClosure() }'; M = $false; E = 'script' }
+        @{ N = 'using'; S = 'function F { { $using:x }.GetNewClosure() }'; M = $false; E = 'using' }
+        @{ N = 'Get-Variable -Scope Script'; S = 'function F { { Get-Variable LockNames -Scope Script -ValueOnly }.GetNewClosure() }'; M = $false; E = 'scope' }
+        @{ N = 'Set-Variable -Scope:Script'; S = 'function F { { Set-Variable -Name x -Value 1 -Scope:Script }.GetNewClosure() }'; M = $false; E = 'scope' }
+        @{ N = 'closure over a variable'; S = 'function F { $b = { $script:x }; $b.GetNewClosure() }'; M = $false; E = 'script' }
+        @{ N = 'private function with digits'; S = "function Get-AVDTuneBytesSha256 { 1 }`nfunction Get-Pub { { Get-AVDTuneBytesSha256 }.GetNewClosure() }`nExport-ModuleMember -Function Get-Pub"; M = $true; E = 'private' }
+        @{ N = 'private function in a closure over a variable'; S = "function Get-Priv2 { 1 }`nfunction Get-Pub { `$b = { Get-Priv2 }; `$b.GetNewClosure() }`nExport-ModuleMember -Function Get-Pub, Get-Other"; M = $true; E = 'private' }
+        @{ N = 'clean: exported function, local value, -Scope Local'; S = "function Get-Pub2 { 1 }`nfunction Get-Pub { `$n = `$script:x; { Get-Pub2; `$n; Get-Variable n -Scope Local }.GetNewClosure() }`nExport-ModuleMember -Function Get-Pub, Get-Pub2"; M = $true; E = '' }
+        @{ N = 'clean: no Export-ModuleMember exports everything'; S = "function Get-A1 { 1 }`nfunction Get-B { { Get-A1 }.GetNewClosure() }"; M = $true; E = '' }
+    )
+    $wrongRule = @($ruleCases | Where-Object { ((& $sample $_.S $_.M) -join ',') -ne $_.E } | ForEach-Object { "$($_.N): got '$((& $sample $_.S $_.M) -join ',')'" })
+    Test-Check 'closure rules (#78): each rule finds its example ($script:, $using:, -Scope Script, closure over a variable, private function also with digits), clean examples stay green' ($wrongRule.Count -eq 0) ($wrongRule -join ' | ')
+    # the transitional lock name is PackTune's (Global\IntuneChocoDeployment); the old wrong spelling must not come back anywhere
+    $wrongLock = 'Global\IntuneChoco' + 'latey' + 'Deployment'
+    $wrongLockHits = @(Get-ChildItem -LiteralPath $repo -Recurse -File -Include '*.ps1', '*.psm1', '*.md', '*.json', '*.xaml' | Where-Object { $_.FullName -notmatch '\\\.git\\' } | Where-Object { ([IO.File]::ReadAllText($_.FullName)).IndexOf($wrongLock, [StringComparison]::OrdinalIgnoreCase) -ge 0 } | ForEach-Object { $_.FullName.Substring($repo.Length + 1) })
+    Test-Check 'lock (#78): no file names the transitional mutex wrongly (PackTune uses Global\IntuneChocoDeployment)' ($wrongLockHits.Count -eq 0) ($wrongLockHits -join ', ')
 
     # ---------------------------------------------------------------- the real machine, read only
     $real = New-AVDTuneMachine
