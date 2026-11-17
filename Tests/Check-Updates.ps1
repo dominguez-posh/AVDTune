@@ -297,18 +297,19 @@ try {
     $childPids = @()
     try {
         $t0 = Get-Date
-        $rt = & $real.Run $ps @('-NoProfile', '-NonInteractive', '-EncodedCommand', (& $enc ($startChild -f 60, 60))) 20
-        $kid = [int](Get-Content -LiteralPath $pidFile); $childPids += $kid
+        $rt = & $real.Run $ps @('-NoProfile', '-NonInteractive', '-EncodedCommand', (& $enc ($startChild -f 60, 60))) 40
+        # a slow machine (CI) may need long to start the child powershell; without a PID file the check fails with a reason instead of stopping the script
+        $kid = if (Test-Path -LiteralPath $pidFile) { [int](Get-Content -LiteralPath $pidFile) } else { 0 }; if ($kid) { $childPids += $kid }
         Start-Sleep -Milliseconds 500
         $alive = [bool](Get-Process -Id $kid -ErrorAction SilentlyContinue | Where-Object { $_.ProcessName -eq 'PING' })
-        Test-Check 'real Run: a timeout ends the whole tree (the child of the tool too), so the lock is not freed while an installer still runs' ($rt.Output -eq 'timeout' -and -not $alive -and ((Get-Date) - $t0).TotalSeconds -lt 70) "alive=$alive"
+        Test-Check 'real Run: a timeout ends the whole tree (the child of the tool too), so the lock is not freed while an installer still runs' ($kid -gt 0 -and $rt.Output -eq 'timeout' -and -not $alive -and ((Get-Date) - $t0).TotalSeconds -lt 70) "kid=$kid alive=$alive output=$($rt.Output)"
         Remove-Item -LiteralPath $pidFile -ErrorAction SilentlyContinue
         $t1 = Get-Date
         $rn = & $real.Run $ps @('-NoProfile', '-NonInteractive', '-EncodedCommand', (& $enc ($startChild -f 4, 0))) 60
         $took = ((Get-Date) - $t1).TotalSeconds
-        $kid2 = [int](Get-Content -LiteralPath $pidFile); $childPids += $kid2
+        $kid2 = if (Test-Path -LiteralPath $pidFile) { [int](Get-Content -LiteralPath $pidFile) } else { 0 }; if ($kid2) { $childPids += $kid2 }
         $alive2 = [bool](Get-Process -Id $kid2 -ErrorAction SilentlyContinue | Where-Object { $_.ProcessName -eq 'PING' })
-        Test-Check 'real Run: returns only when the child the tool left behind has ended (the lock is held until then)' ($rn.ExitCode -eq 0 -and -not $alive2 -and $took -ge 2.5) "took $took s, alive=$alive2"
+        Test-Check 'real Run: returns only when the child the tool left behind has ended (the lock is held until then)' ($kid2 -gt 0 -and $rn.ExitCode -eq 0 -and -not $alive2 -and $took -ge 2.5) "kid=$kid2 took $took s, alive=$alive2"
     }
     finally { foreach ($k in $childPids) { Get-Process -Id $k -ErrorAction SilentlyContinue | Where-Object { $_.ProcessName -eq 'PING' } | Stop-Process -Force -ErrorAction SilentlyContinue } }
 

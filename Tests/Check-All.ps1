@@ -14,10 +14,14 @@ $checks = @('Check-Shared.ps1', 'Check-AVDTune.ps1', 'Check-UpdateBlock.ps1', 'C
 if ($Smoke) { $checks += 'Invoke-GuiSmoke.ps1' }
 $failed = @()
 foreach ($check in $checks) {
+    # stderr of the child must not stop this script (Windows PowerShell 5.1 turns native stderr into error records under 'Stop'); the exit code and FAIL lines decide.
+    $ErrorActionPreference = 'Continue'
     $output = & $powershell -NoProfile -NonInteractive -STA -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot $check) 2>&1 | Out-String
+    $code = $LASTEXITCODE
+    $ErrorActionPreference = 'Stop'
     $pass = ([regex]::Matches($output, '(?m)^PASS ')).Count
     $fail = ([regex]::Matches($output, '(?m)^FAIL ')).Count
-    $ok = ($LASTEXITCODE -eq 0 -and $fail -eq 0)
+    $ok = ($code -eq 0 -and $fail -eq 0)
     '{0,-22} {1,3} passed, {2} failed  {3}' -f $check, $pass, $fail, $(if ($ok) { 'OK' } else { 'FAILED' })
     if (-not $ok) { $failed += $check; $output }
 }

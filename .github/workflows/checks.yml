@@ -1,0 +1,37 @@
+# Checks of AVDTune on a clean Windows runner (same step as the release build, without building or publishing anything).
+# Runs on a manual start and on pushes to main and ci/** branches. Read-only token, no secrets, actions pinned to a commit.
+name: checks
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - 'ci/**'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: checks-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    runs-on: windows-2022
+    timeout-minutes: 45
+    steps:
+      - name: Keep line endings as committed
+        shell: powershell
+        run: git config --global core.autocrlf false
+
+      # actions/checkout v4.2.2
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+
+      - name: Checks (Windows PowerShell 5.1, without the GUI smoke test)
+        shell: powershell
+        run: |
+          $PSVersionTable.PSVersion
+          .\Tests\Check-All.ps1
