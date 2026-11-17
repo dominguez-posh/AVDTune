@@ -160,7 +160,7 @@ Test-Check 'writers (#66): every start of an operation that changes the master c
 $readOnlyJobs = @('OptJob', 'FslReadJob', 'MaskReadJob', 'JoinJob', 'OverviewJob', 'SwLastRun', 'UpdLastRun')
 $jobVars = @(Get-ChildItem -LiteralPath $repo -Filter '*.ps1' | Where-Object { $_.Name -like 'AVDTune-*.ps1' -or $_.Name -eq 'Start-AVDTune.ps1' } | ForEach-Object { [regex]::Matches([IO.File]::ReadAllText($_.FullName), '(?m)^\$script:(\w+(?:Job|Run)) = \$null') | ForEach-Object { $_.Groups[1].Value } } | Select-Object -Unique)
 $unlisted = @($jobVars | Where-Object { $_ -notin $script:WriterJobVariables -and $_ -notin $readOnlyJobs })
-Test-Check 'writers (#66): every job variable of a page is in WriterJobVariables or named as read only (Language, VDI included)' ($unlisted.Count -eq 0 -and 'LangJob' -in $script:WriterJobVariables -and 'VdiJob' -in $script:WriterJobVariables -and 'Latest' -in $script:WriterReadOnlyKinds.VdiJob -and 'CustJob' -in $script:WriterJobVariables -and @($script:WriterReadOnlyKinds.CustJob) -join ',' -eq 'Status') ($unlisted -join ', ')
+Test-Check 'writers (#66): every job variable of a page is in WriterJobVariables or named as read only (Language, VDI included)' ($unlisted.Count -eq 0 -and 'LangJob' -in $script:WriterJobVariables -and 'VdiJob' -in $script:WriterJobVariables -and 'Latest' -in $script:WriterReadOnlyKinds.VdiJob -and 'CustJob' -in $script:WriterJobVariables -and (@($script:WriterReadOnlyKinds.CustJob) -join ',') -eq 'Status,Reach,Preview') ($unlisted -join ', ')
 
 # #66 (re-review): a new image version must not start while a job of the window changes the master (it may not have set the marker yet); the shutdown block goes only when no job is left
 $startText = Get-Content -Raw (Join-Path $repo 'Start-AVDTune.ps1')

@@ -139,7 +139,7 @@ function Get-AVDTuneUiTaskLabel([string]$Status) { switch ($Status) { 'running' 
 # calls Assert-NoOtherWriter first. A new job adds the name of its script variable to the list; a job that is read only in some of its kinds names them.
 # RelJob is the release job (install, repair, back change AVDTune itself; the checks only read, #49). CustJob: customizations (#85), Status only reads.
 $script:WriterJobVariables = @('OptRun', 'UpdJob', 'BenchJob', 'SealJob', 'SwJob', 'FslJob', 'OffJob', 'LangJob', 'VdiJob', 'ReadyJob', 'RelJob', 'CustJob')
-$script:WriterReadOnlyKinds = @{ UpdJob = @('Scan'); SwJob = @('Scan'); VdiJob = @('Latest'); ReadyJob = @('Start', 'Erstanalyse', 'Healthcheck', 'Manual'); RelJob = @('Start', 'Check'); CustJob = @('Status') }
+$script:WriterReadOnlyKinds = @{ UpdJob = @('Scan'); SwJob = @('Scan'); VdiJob = @('Latest'); ReadyJob = @('Start', 'Erstanalyse', 'Healthcheck', 'Manual'); RelJob = @('Start', 'Check'); CustJob = @('Status', 'Reach', 'Preview') }
 function Get-AVDTuneRunningWriter {
     # The name of the running job that changes the master, '' when there is none
     foreach ($name in $script:WriterJobVariables) {

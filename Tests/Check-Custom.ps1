@@ -18,7 +18,7 @@ $script:failed = 0
 function Test-Check([string]$Name, [bool]$Ok, $Detail) { if ($Ok) { "PASS $Name" } else { $script:failed++; "FAIL $Name" + $(if ($null -ne $Detail) { "  -> $Detail" }) } }
 function Get-ThrownText([scriptblock]$Block) { try { & $Block | Out-Null; $null } catch { $_.Exception.Message } }
 $tmp = Join-Path ([IO.Path]::GetTempPath()) ('avdtune-custom-' + [guid]::NewGuid().ToString('N'))
-$forbidden = @{ Exact = @('C:', 'C:\Program Files', 'C:\Program Files (x86)', 'C:\ProgramData', 'C:\Users'); Below = @('C:\Windows', $tmp) }
+$forbidden = @{ Exact = @('C:', 'C:\Program Files', 'C:\Program Files (x86)', 'C:\ProgramData', 'C:\Users'); Below = @('C:\Windows', $tmp); Programs = @('C:\Program Files', 'C:\Program Files (x86)', 'C:\ProgramData') }
 function Test-Item([hashtable]$Raw, [switch]$FromForm, [object[]]$Library) { ConvertTo-AVDTuneCustomItem -Raw $Raw -FromForm:$FromForm -Library $Library -Forbidden $forbidden }
 
 try {
@@ -115,7 +115,10 @@ try {
     $st = Get-AVDTuneCustomStatus -Machine $m -C $c -Root $tmp
     $byName = @{}; foreach ($r in $st.Items) { $byName[$r.Name] = $r }
     Test-Check 'status: before Apply every item tests as missing (the script says it cannot be tested without its file)' (@($st.Items | Where-Object { $_.Status -eq 'NonCompliant' }).Count -eq 9 -and $byName['Setup'].Status -eq 'Failed' -and $byName['Setup'].Message -like '*not in the cache*') (($st.Items | ForEach-Object { "$($_.Name)=$($_.Status)" }) -join ', ')
-    Test-Check 'reachability: a local target and a UNC target that answer are reachable, an unknown UNC path is not, the library icon is not cached yet' (@($byName['Contoso App'].Reach | Where-Object { $_.What -eq 'Target' -and $_.Ok }).Count -eq 1 -and @($byName['Share tool'].Reach | Where-Object { $_.What -eq 'Target' -and $_.Ok }).Count -eq 1 -and @($byName['Gone'].Reach | Where-Object { $_.What -eq 'Target' -and -not $_.Ok }).Count -eq 1 -and @($byName['Contoso App'].Reach | Where-Object { $_.What -eq 'Icon' -and -not $_.Ok }).Count -eq 1) $null
+    Test-Check 'reachability: a local target is checked, UNC paths are NOT asked automatically (NTLM to foreign hosts, review L2), the library icon is not cached yet' (@($byName['Contoso App'].Reach | Where-Object { $_.What -eq 'Target' -and $_.Ok -eq $true }).Count -eq 1 -and @($byName['Share tool'].Reach | Where-Object { $_.What -eq 'Target' -and $null -eq $_.Ok }).Count -eq 1 -and @($byName['Gone'].Reach | Where-Object { $_.What -eq 'Target' -and $null -eq $_.Ok }).Count -eq 1 -and @($byName['Contoso App'].Reach | Where-Object { $_.What -eq 'Icon' -and $_.Ok -eq $false }).Count -eq 1) $null
+    $stu = Get-AVDTuneCustomStatus -Machine $m -C $c -Root $tmp -NoScripts -CheckUnc
+    $bu = @{}; foreach ($r in $stu.Items) { $bu[$r.Name] = $r }
+    Test-Check 'reachability on request (-CheckUnc): a UNC target that answers is reachable, an unknown one is not' (@($bu['Share tool'].Reach | Where-Object { $_.What -eq 'Target' -and $_.Ok -eq $true }).Count -eq 1 -and @($bu['Gone'].Reach | Where-Object { $_.What -eq 'Target' -and $_.Ok -eq $false }).Count -eq 1) $null
 
     $gateText = Get-ThrownText { Invoke-AVDTuneCustomRun -Machine $m -C $c -Root $tmp -Mode Apply -Context @{ Fake = $true } }
     Test-Check 'Apply without the snapshot gate changes nothing (every step fails at the gate)' (($c.Store.Log.Count -eq 0) -and ($null -eq $gateText -or $gateText -like '*snapshot*')) $c.Store.Log.Count
@@ -170,6 +173,81 @@ try {
     $c3.Store.ScriptMode[$scrItem.Sha256] = 'NoChange'
     $nc = Invoke-AVDTuneStep -Step (New-AVDTuneCustomStep -Item $scrItem -C $c3 -Fetch $f3) -Machine $m -Mode Apply
     Test-Check 'an ini file that is a link is not read or written, a refused registry write and a script that changes nothing are failed steps with the reason' ($lk.Status -eq 'Failed' -and $lk.Message -like '*link*' -and $fw.Status -eq 'Failed' -and $fw.Message -like '*refused*' -and $nc.Status -eq 'Failed' -and $nc.Message -like '*still fails*') "$($lk.Message) / $($fw.Message) / $($nc.Message)"
+
+    # ---------------------------------------------------------------- review #85 (Finn): M1-M4, L2-L5, I1
+    $m1 = @(
+        @('8.3 short name', @{ Kind = 'Folder'; Name = 'x'; Path = 'C:\PROGRA~1\Contoso'; Principal = 'Users'; Rights = 'ReadAndExecute' }),
+        @('8.3 short name in a file copy', @{ Kind = 'FileCopy'; Name = 'x'; File = 'readme.txt'; Sha256 = ('a' * 64); Destination = 'C:\Apps\SUBFOL~2\readme.txt' }),
+        @('Users Modify in Program Files', @{ Kind = 'Folder'; Name = 'x'; Path = 'C:\Program Files\Contoso\Data'; Principal = 'Users'; Rights = 'Modify' }),
+        @('Domain Users FullControl in ProgramData', @{ Kind = 'Folder'; Name = 'x'; Path = 'C:\ProgramData\Contoso'; Principal = 'S-1-5-21-1-2-3-513'; Rights = 'FullControl' }),
+        @('INTERACTIVE Modify in Program Files (x86)', @{ Kind = 'Folder'; Name = 'x'; Path = 'C:\Program Files (x86)\Contoso'; Principal = 'S-1-5-4'; Rights = 'Modify' }),
+        @('ALL APPLICATION PACKAGES Modify in Program Files', @{ Kind = 'Folder'; Name = 'x'; Path = 'C:\Program Files\Contoso'; Principal = 'S-1-15-2-1'; Rights = 'Modify' }),
+        @('Users Modify in the Default user autostart', @{ Kind = 'Folder'; Name = 'x'; Path = 'C:\Users\Default\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup'; Principal = 'Users'; Rights = 'Modify' }),
+        @('Remote Desktop Users is no choice any more', @{ Kind = 'Folder'; Name = 'x'; Path = 'C:\Data\Scans'; Principal = 'Remote Desktop Users'; Rights = 'Modify' }),
+        @('Remote Desktop Users by SID Modify in Program Files', @{ Kind = 'Folder'; Name = 'x'; Path = 'C:\Program Files\Contoso'; Principal = 'S-1-5-32-555'; Rights = 'Modify' }),
+        @('file into the all-users autostart', @{ Kind = 'FileCopy'; Name = 'x'; File = 'readme.txt'; Sha256 = ('a' * 64); Destination = 'C:\ProgramData\Microsoft\Windows\Start Menu\Programs\StartUp\readme.txt' }),
+        @('file into the Default user autostart', @{ Kind = 'FileCopy'; Name = 'x'; File = 'link.url'; Sha256 = ('a' * 64); Destination = 'C:\Users\Default\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup\link.url' }),
+        @('.exe.config in Program Files', @{ Kind = 'FileCopy'; Name = 'x'; File = 'app.config'; Sha256 = ('a' * 64); Destination = 'C:\Program Files\Contoso\app.exe.config' }),
+        @('.dll.config in ProgramData', @{ Kind = 'FileCopy'; Name = 'x'; File = 'lib.config'; Sha256 = ('a' * 64); Destination = 'C:\ProgramData\Contoso\lib.dll.config' }),
+        @('Lsa', @{ Kind = 'Registry'; Name = 'x'; Path = 'HKLM:\SYSTEM\CurrentControlSet\Control\Lsa'; ValueName = 'Security Packages'; ValueType = 'String'; Value = 'x' }),
+        @('SecurityProviders', @{ Kind = 'Registry'; Name = 'x'; Path = 'HKLM:\SYSTEM\ControlSet001\Control\SecurityProviders\WDigest'; ValueName = 'UseLogonCredential'; ValueType = 'DWord'; Value = '1' })
+    )
+    $wrong2 = @(foreach ($b in $m1) { $r = Test-Item $b[1] -FromForm; if ($r.Valid) { $b[0] } })
+    Test-Check "review M1/M2/M3/I1: refused ($($m1.Count) cases: 8.3 names, broad groups with write rights in program and autostart folders, Remote Desktop Users, autostart files, .exe/.dll.config, Lsa, SecurityProviders)" ($wrong2.Count -eq 0) ($wrong2 -join ', ')
+    $okRx = Test-Item @{ Kind = 'Folder'; Name = 'x'; Path = 'C:\Program Files\Contoso'; Principal = 'Users'; Rights = 'ReadAndExecute' } -FromForm
+    $okAdm = Test-Item @{ Kind = 'Folder'; Name = 'x'; Path = 'C:\Program Files\Contoso'; Principal = 'S-1-5-21-1-2-3-1105'; Rights = 'Modify' } -FromForm
+    $okCfg = Test-Item @{ Kind = 'FileCopy'; Name = 'x'; File = 'app.config'; Sha256 = ('a' * 64); Destination = 'C:\Apps\app.exe.config' } -FromForm
+    Test-Check 'review M2/M3: ReadAndExecute for Users in Program Files, Modify for a named group there, and an .exe.config outside the program folders stay allowed' ($okRx.Valid -and $okAdm.Valid -and $okCfg.Valid) ((@($okRx.Errors) + @($okAdm.Errors) + @($okCfg.Errors)) -join ' ')
+    $shortPf = ConvertTo-AVDTuneCustomLong 'C:\PROGRA~1'
+    if ($shortPf -ne 'C:\PROGRA~1') { Test-Check 'review M1: the long form of C:\PROGRA~1 is compared with the forbidden folders (8.3 names on this drive)' (Test-AVDTuneCustomForbidden 'C:\PROGRA~1' (Get-AVDTuneCustomForbiddenFolders -Root $tmp)) $shortPf }
+    else { 'SKIP review M1 long form: this drive has no 8.3 names (the segment rule ~N still refuses them)' }
+    $runRisk = Test-Item @{ Kind = 'Registry'; Name = 'Agent'; Path = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run'; ValueName = 'Agent'; ValueType = 'String'; Value = 'C:\Apps\agent.exe' } -FromForm
+    $polRisk = Test-Item @{ Kind = 'Registry'; Name = 'Pol'; Path = 'HKLM:\SOFTWARE\Policies\Contoso'; ValueName = 'X'; ValueType = 'DWord'; Value = '1' } -FromForm
+    $plain = Test-Item @{ Kind = 'Registry'; Name = 'Plain'; Path = 'HKLM:\SOFTWARE\Contoso'; ValueName = 'X'; ValueType = 'DWord'; Value = '1' } -FromForm
+    Test-Check 'review I1: Run and Policies are allowed with a visible RISK note in the title (confirmation and change log), a plain key has none; AppInit_DLLs and services are named' ($runRisk.Valid -and (Get-AVDTuneCustomTitle $runRisk.Item) -like '*RISK: autostart*' -and (Get-AVDTuneCustomTitle $polRisk.Item) -like '*RISK: policies*' -and (Get-AVDTuneCustomTitle $plain.Item) -notlike '*RISK*' -and (Get-AVDTuneCustomRegRisk 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Windows' 'AppInit_DLLs') -like '*AppInit_DLLs*' -and (Get-AVDTuneCustomRegRisk 'HKLM:\SYSTEM\CurrentControlSet\Services\Foo' 'Start') -like '*services*') (Get-AVDTuneCustomTitle $runRisk.Item)
+    # M1: checked again directly before Apply: a folder that became forbidden since the item was saved
+    $tight = @{ Exact = $forbidden.Exact; Below = @($forbidden.Below) + 'C:\Data'; Programs = $forbidden.Programs }
+    $scans = @($saved.Items | Where-Object { $_.Name -eq 'Scans' })[0]
+    $cG = New-AVDTuneFakeCustom
+    $gd = Invoke-AVDTuneStep -Step (New-AVDTuneCustomStep -Item $scans -C $cG -Forbidden $tight) -Machine $m -Mode Apply
+    Test-Check 'review M1: the item is validated again directly before Apply (now forbidden: refused, nothing written)' ($gd.Status -eq 'Failed' -and $gd.Message -like 'Refused before Apply*' -and $cG.Store.Log.Count -eq 0) $gd.Message
+    # M3/L1: preview of a file and a script before saving
+    $pv = Get-AVDTuneCustomPreview -C $c -Root $tmp -Context @{ Fake = $true } -Name 'setup.ps1' -Sha256 (@($libRows | Where-Object Name -eq 'setup.ps1')[0].Sha256)
+    Test-Check 'review M3/L1: before a library script or file is saved its size, SHA256 and first lines are shown' ($pv.Size -eq ([Text.Encoding]::UTF8.GetBytes($script1)).Length -and $pv.Sha256 -match '\A[0-9a-f]{64}\z' -and $pv.Lines[0] -like 'param(*') ($pv | ConvertTo-Json -Compress)
+    # M4: fonts keep what was there
+    $fontItem = (Test-Item @{ Kind = 'Font'; Name = 'Corp Sans'; File = 'corp.ttf' } -FromForm -Library $libRows).Item
+    $fk = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Fonts|Corp Sans (TrueType)'
+    $cF1 = New-AVDTuneFakeCustom -Seed @{ Library = @{ 'corp.ttf' = 'FONTBYTES' }; Registry = @{ $fk = @{ Value = 'other.ttf'; Kind = 'String' } } }
+    $f1 = Invoke-AVDTuneStep -Step (New-AVDTuneCustomStep -Item $fontItem -C $cF1 -Fetch (New-AVDTuneCustomFetch -C $cF1 -Root $tmp -Context @{ Fake = $true }) -Forbidden $forbidden) -Machine $m -Mode Apply
+    Test-Check 'review M4: a font registration that points to another file is not replaced (Apply refused, no file copied)' ($f1.Status -eq 'Failed' -and $f1.Message -like '*points to other.ttf*' -and -not $cF1.Store.Files.ContainsKey('c:\windows\fonts\corp.ttf')) $f1.Message
+    $cF2 = New-AVDTuneFakeCustom -Seed @{ Library = @{ 'corp.ttf' = 'FONTBYTES' }; Files = @{ 'C:\Windows\Fonts\corp.ttf' = 'FONTBYTES' } }
+    $b2 = Get-AVDTuneCustomBefore -Item $fontItem -C $cF2
+    $fe2 = New-AVDTuneCustomFetch -C $cF2 -Root $tmp -Context @{ Fake = $true }
+    [void](Invoke-AVDTuneStep -Step (New-AVDTuneCustomStep -Item $fontItem -C $cF2 -Fetch $fe2 -Forbidden $forbidden) -Machine $m -Mode Apply)
+    $u2f = Invoke-AVDTuneStep -Step (New-AVDTuneCustomStep -Item $fontItem -C $cF2 -Fetch $fe2 -Before $b2 -Forbidden $forbidden) -Machine $m -Mode Undo
+    Test-Check 'review M4: a font file that was there before stays after Undo, only the registration AVDTune added is removed' ($b2.FileExisted -and $u2f.Status -eq 'Reverted' -and $cF2.Store.Files.ContainsKey('c:\windows\fonts\corp.ttf') -and $null -eq (& $cF2.RegGet 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Fonts' 'Corp Sans (TrueType)')) "$($u2f.Status) $($u2f.Message)"
+    $cF3 = New-AVDTuneFakeCustom -Seed @{ Library = @{ 'corp.ttf' = 'FONTBYTES' }; Registry = @{ $fk = @{ Value = 'CORP.TTF'; Kind = 'String' } } }
+    $b3 = Get-AVDTuneCustomBefore -Item $fontItem -C $cF3
+    $fe3 = New-AVDTuneCustomFetch -C $cF3 -Root $tmp -Context @{ Fake = $true }
+    [void](Invoke-AVDTuneStep -Step (New-AVDTuneCustomStep -Item $fontItem -C $cF3 -Fetch $fe3 -Forbidden $forbidden) -Machine $m -Mode Apply)
+    $u3f = Invoke-AVDTuneStep -Step (New-AVDTuneCustomStep -Item $fontItem -C $cF3 -Fetch $fe3 -Before $b3 -Forbidden $forbidden) -Machine $m -Mode Undo
+    Test-Check 'review M4: a registration that was there before keeps its old value after Undo, the file AVDTune copied is deleted' ($b3.ValueExisted -and $u3f.Status -eq 'Reverted' -and (& $cF3.RegGet 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Fonts' 'Corp Sans (TrueType)').Value -ceq 'CORP.TTF' -and -not $cF3.Store.Files.ContainsKey('c:\windows\fonts\corp.ttf')) "$($u3f.Status) $($u3f.Message)"
+    # L3: the rules of the SID from before come back after Undo
+    $cL3 = New-AVDTuneFakeCustom -Seed @{ Folders = @('C:\Data\Scans'); Rules = @{ 'C:\Data\Scans' = @(@{ Sid = 'S-1-5-32-545'; Rights = 131241; Inherited = $false; Inherit = 3; Propagate = 0 }) } }
+    $bL3 = Get-AVDTuneCustomBefore -Item $scans -C $cL3
+    [void](Invoke-AVDTuneStep -Step (New-AVDTuneCustomStep -Item $scans -C $cL3 -Forbidden $forbidden) -Machine $m -Mode Apply)
+    $uL3 = Invoke-AVDTuneStep -Step (New-AVDTuneCustomStep -Item $scans -C $cL3 -Before $bL3 -Forbidden $forbidden) -Machine $m -Mode Undo
+    $rulesL3 = @((& $cL3.DirInfo 'C:\Data\Scans').Rules)
+    Test-Check 'review L3: Undo removes the added Modify rule and puts back the explicit ReadAndExecute rule the group had before; the existing folder stays' ($uL3.Status -eq 'Reverted' -and $rulesL3.Count -eq 1 -and $rulesL3[0].Rights -eq 131241 -and (& $cL3.DirInfo 'C:\Data\Scans').Exists) ($rulesL3 | ConvertTo-Json -Compress)
+    # L5: the script test is a change of the master
+    Close-AVDTuneWriteGate
+    $noGate = Get-ThrownText { Invoke-AVDTuneCustomScriptTest -Machine $m -C $c -Root $tmp }
+    Open-AVDTuneWriteGate -SnapshotId 'snap-1' -ConfirmedBy 'Alex Example'
+    [void](Set-AVDTuneState -Root $tmp -Values @{ LastChange = '2026-11-17T09:00:00' })
+    $runsBefore = @(Get-ChildItem -LiteralPath (Join-Path $tmp 'runs') -File -ErrorAction SilentlyContinue).Count
+    $sts = Invoke-AVDTuneCustomScriptTest -Machine $m -C $c -Root $tmp
+    $runsAfter = @(Get-ChildItem -LiteralPath (Join-Path $tmp 'runs') -File -ErrorAction SilentlyContinue).Count
+    Test-Check 'review L5: testing the scripts needs the write gate, sets LastChange, writes a run record and leaves no marker' ($noGate -like '*snapshot gate*' -and [string](Get-AVDTuneState $tmp).LastChange -ne '2026-11-17T09:00:00' -and $runsAfter -eq $runsBefore + 1 -and -not (Test-AVDTuneChangeInProgress -Root $tmp) -and @($sts.Items | Where-Object { $_.Kind -eq 'Script' -and $_.Status -ne 'Unknown' }).Count -eq 1) "$noGate / $((Get-AVDTuneState $tmp).LastChange) / $runsBefore -> $runsAfter"
 
     # ---------------------------------------------------------------- scripts
     $sItem = @($saved.Items | Where-Object { $_.Name -eq 'Setup' })[0]
@@ -240,6 +318,9 @@ try {
     $src = [IO.File]::ReadAllText((Join-Path $repo 'Modules\AVDTune.Custom.psm1'))
     $runSrc = $src.Substring($src.IndexOf('$a.RunScript = {'))
     Test-Check 'real script start: Windows PowerShell from System32 with its trust check, held open and hashed through the handle, broken signature stops, job object run with timeout' ($runSrc -match "Get-AVDTuneSystemFolder System\) 'WindowsPowerShell" -and $runSrc -match "Test-AVDTuneToolTrust -Signature" -and $runSrc -match 'FileShare\]::Read\)' -and $runSrc -match 'Get-AVDTuneStreamHash \$hold' -and $runSrc -match 'HashMismatch' -and $runSrc -match '& \$u\.Run \$ps') $null
+    $wt = $src.Substring($src.IndexOf('$a.WriteText = {'), $src.IndexOf('$a.FileSize = {') - $src.IndexOf('$a.WriteText = {'))
+    $dar = $src.Substring($src.IndexOf('$a.DirAddRule = {'), 600)
+    Test-Check 'review L4/M2: the real WriteText writes a temp file with the ACL and owner of the target and moves it with Move-AVDTuneFileReplace; the real DirAddRule checks the broad groups again' ($wt.Contains("GetAccessControl([Security.AccessControl.AccessControlSections]'Access, Owner')") -and $wt.Contains('Move-AVDTuneFileReplace $temp $Path') -and -not $wt.Contains('SetLength(0)') -and $dar.Contains('Get-AVDTuneCustomRuleProblem')) $null
     Test-Check 'real writes: no link in the path (WriteText, CopyFile, DirCreate, DirAddRule), shortcuts through the state folder and the Public Desktop check, deletes through Remove-AVDTuneTreeSafe' (([regex]::Matches($src, 'Assert-AVDTuneCustomNoLink \$')).Count -ge 6 -and $src -match 'Get-AVDTunePublicDesktopFindings -Path \$Path' -and ([regex]::Matches($src, 'Remove-AVDTuneTreeSafe -Path')).Count -ge 2 -and $src -notmatch 'Remove-Item -Recurse') $null
     $page = [IO.File]::ReadAllText((Join-Path $repo 'AVDTune-Custom.ps1'))
     Test-Check 'page: the texts come from the language files (T), the job uses New-AVDTunePowerShell, Apply/Undo check the gate and Assert-NoOtherWriter, the masking goes through Get-AVDTuneShortcutChange and Save-AVDTuneRuleSet' ($page -match "T 'cust\." -and $page -match 'New-AVDTunePowerShell' -and $page -match 'Assert-NoOtherWriter' -and $page -match 'Test-AVDTuneWriteAllowed' -and $page -match 'Get-AVDTuneShortcutChange' -and $page -match 'Save-AVDTuneRuleSet' -and $page -notmatch '\[powershell\]::Create') $null

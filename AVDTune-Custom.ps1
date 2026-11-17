@@ -14,6 +14,7 @@ $script:CustForm = @{}
 $script:CustFake = $null
 $script:CustAfter = $null
 $script:CustQueued = $false
+$script:CustReadKinds = @('Status', 'Reach', 'Preview')   # the kinds of CustJob that do not change the master (also in WriterReadOnlyKinds)
 if ($script:TestMode) {
     . (Get-TestScript 'FakeCustom.ps1')
     $script:CustFake = New-AVDTuneFakeCustom -Seed @{ Library = @{ 'corp-sans.ttf' = 'FONT'; 'crm.ico' = 'ICON'; 'policy.txt' = 'Policy'; 'setup-printer.ps1' = 'param($AVDTuneMode) exit 0' }; Files = @{ 'C:\Apps\crm.exe' = 'exe' } }
@@ -41,13 +42,16 @@ try {
     }
     if ($Gate) { Open-AVDTuneWriteGate -SnapshotId $Gate.SnapshotId -ConfirmedBy $Gate.ConfirmedBy }
     switch ($Kind) {
-        { $_ -in 'Status', 'TestScripts' } {
+        { $_ -in 'Status', 'Reach', 'TestScripts' } {
             $lib = $null; $libError = ''
             if ($ctx) { $Sync.Text = 'library'; try { $lib = Get-AVDTuneAssetManifest -Context $ctx } catch { $libError = $_.Exception.Message } }
             elseif ($Tokens -and $Tokens.Reason) { $libError = [string]$Tokens.Reason }
             $Sync.Text = 'status'
-            [pscustomobject]@{ Status = (Get-AVDTuneCustomStatus -Machine $m -C $c -Root $Root -NoScripts:($Kind -ne 'TestScripts')); Library = $lib; LibraryError = $libError }
+            # the scripts are tested like a change of the master (marker, LastChange, run record, review #85 L5); UNC paths are asked only on request (L2)
+            $st = if ($Kind -eq 'TestScripts') { Invoke-AVDTuneCustomScriptTest -Machine $m -C $c -Root $Root } else { Get-AVDTuneCustomStatus -Machine $m -C $c -Root $Root -NoScripts -CheckUnc:($Kind -eq 'Reach') }
+            [pscustomobject]@{ Status = $st; Library = $lib; LibraryError = $libError }
         }
+        'Preview' { $Sync.Text = 'library'; [pscustomobject]@{ Preview = (Get-AVDTuneCustomPreview -C $c -Root $Root -Context $ctx -Name $Ids[0] -Sha256 $Ids[1]) } }
         { $_ -in 'Apply', 'Undo' } { $Sync.Text = 'run'; Invoke-AVDTuneCustomRun -Machine $m -C $c -Root $Root -Mode $Kind -Ids $Ids -Context $ctx -User $User -SnapshotId $Gate.SnapshotId }
     }
 }
@@ -56,7 +60,8 @@ finally { if ($ctx) { Close-AVDTuneLibraryContext $ctx }; $Tokens = $null }
 
 function Start-CustJob([string]$Kind, [string[]]$Ids = @(), $After) {
     if ($script:CustJob) { throw (T 'cust.err.busy') }
-    if ($Kind -ne 'Status') {
+    $writes = $Kind -notin $script:CustReadKinds
+    if ($writes) {
         if (-not (Test-AVDTuneWriteAllowed)) { throw (T 'shell.readonly') }
         Assert-NoOtherWriter
     }
@@ -71,13 +76,13 @@ function Start-CustJob([string]$Kind, [string[]]$Ids = @(), $After) {
     $script:CustJob = @{ PS = $ps; Handle = $ps.BeginInvoke(); Kind = $Kind; Sync = $sync; Task = $task; Ids = @($Ids) }
     $script:CustAfter = $After
     $tokens = $null
-    if ($Kind -ne 'Status') { Set-ShutdownBlock $true }
+    if ($writes) { Set-ShutdownBlock $true }
     Set-CustBusy $true
 }
 
 function Set-CustBusy([bool]$Busy) {
     if (-not $script:CustUiBuilt) { return }
-    foreach ($b in $ui.BtnCustRefresh, $ui.BtnCustApplyAll, $ui.BtnCustScripts, $ui.BtnCustSave) { $b.IsEnabled = -not $Busy }
+    foreach ($b in $ui.BtnCustRefresh, $ui.BtnCustUnc, $ui.BtnCustApplyAll, $ui.BtnCustScripts, $ui.BtnCustSave) { $b.IsEnabled = -not $Busy }
     foreach ($p in $ui.PanelCustShortcuts, $ui.PanelCustFonts, $ui.PanelCustSteps) { $p.IsEnabled = -not $Busy }
 }
 
@@ -90,7 +95,7 @@ function Complete-CustJob {
         return
     }
     $script:CustJob = $null
-    if ($job.Kind -ne 'Status') { Set-ShutdownBlock $false }
+    if ($job.Kind -notin $script:CustReadKinds) { Set-ShutdownBlock $false }
     $result = $null; $err = ''
     try {
         $out = @($job.PS.EndInvoke($job.Handle))
@@ -101,7 +106,8 @@ function Complete-CustJob {
     finally { $job.PS.Dispose() }
     Set-CustBusy $false
     $failed = [bool]$err; $summary = ''
-    if ($job.Kind -in 'Status', 'TestScripts') {
+    if ($job.Kind -eq 'Preview') { $summary = $(if ($err) { T 'cust.read.failed' $err } else { $result.Preview.Name }) }
+    elseif ($job.Kind -in 'Status', 'Reach', 'TestScripts') {
         if ($err) { $summary = T 'cust.read.failed' $err }
         else {
             $script:CustStatus = $result.Status; $script:CustLibrary = $result.Library; $script:CustLibraryError = [string]$result.LibraryError
@@ -126,8 +132,8 @@ function Complete-CustJob {
     Complete-AVDTuneUiTask $job.Task -Failed:$failed -Summary $summary
     if ($script:CustUiBuilt) { $ui.TxtCustState.Text = $summary }
     $after = $script:CustAfter; $script:CustAfter = $null
-    if ($after -and -not $err -and $result -and $job.Kind -ne 'Status') { try { Invoke-CustAfter $after $result } catch { Show-Error $_.Exception.Message } }
-    if (($job.Kind -ne 'Status' -or $script:CustQueued) -and -not $script:CustJob) { $script:CustQueued = $false; Start-CustJob 'Status' }
+    if ($after -and -not $err -and $result -and $job.Kind -notin 'Status', 'Reach') { try { Invoke-CustAfter $after $result } catch { Show-Error $_.Exception.Message } }
+    if ((($job.Kind -notin 'Status', 'Reach', 'Preview', 'TestScripts') -or $script:CustQueued) -and -not $script:CustJob) { $script:CustQueued = $false; Start-CustJob 'Status' }
     Update-CustView
 }
 $script:Timer.Add_Tick({ try { Complete-CustJob } catch { Show-Error $_.Exception.Message } })
@@ -136,6 +142,12 @@ function Invoke-CustAfter($After, $Result) {
     # What follows a run on the window thread (no closures: they would hide the functions of this script): the visibility of new desktop shortcuts, or taking an undone item out of the list
     switch ($After.Kind) {
         'Visibility' { foreach ($it in @($After.Items)) { $st = @($Result.Run.Results | Where-Object { $_.Id -eq (Get-AVDTuneCustomStepId $it) })[0]; if ($st -and $st.Status -in 'Changed', 'Unchanged') { Set-CustVisibility $it } } }
+        'Save' {
+            # the file or script was fetched against its pinned SHA256: the administrator sees size, hash and the first lines before it goes into the list (review #85, M3/L1)
+            $pv = $Result.Preview
+            $lines = if (@($pv.Lines).Count) { (@($pv.Lines) -join "`n") } else { '-' }
+            if (Confirm-Action (T 'cust.ask.preview' $pv.Name $pv.Size $pv.Sha256 $lines) (T 'nav.customizations')) { Add-CustItem $After.Raw }
+        }
         'Remove' { if (-not (Read-AVDTuneCustomUndo $script:StateRoot).ContainsKey($After.Id)) { Remove-AVDTuneCustomItem -Root $script:StateRoot -Id $After.Id; Show-Toast (T 'cust.removed' $After.Title) } }
     }
 }
@@ -184,8 +196,9 @@ function Build-CustPage {
     $row = New-Object System.Windows.Controls.StackPanel; $row.Orientation = 'Horizontal'; $row.Margin = '0,12,0,0'
     $ui.BtnCustRefresh = New-MaskButton (T 'cust.btn.refresh') (T 'cust.btn.refresh.tip')
     $ui.BtnCustScripts = New-MaskButton (T 'cust.btn.scripts') (T 'cust.btn.scripts.tip')
+    $ui.BtnCustUnc = New-MaskButton (T 'cust.btn.unc') (T 'cust.btn.unc.tip')
     $ui.BtnCustApplyAll = New-MaskButton (T 'cust.btn.applyall') (T 'cust.btn.applyall.tip') $true
-    foreach ($b in $ui.BtnCustRefresh, $ui.BtnCustScripts, $ui.BtnCustApplyAll) { [void]$row.Children.Add($b) }
+    foreach ($b in $ui.BtnCustRefresh, $ui.BtnCustUnc, $ui.BtnCustScripts, $ui.BtnCustApplyAll) { [void]$row.Children.Add($b) }
     [void]$root.Children.Add($row)
     $ui.TxtCustState = New-MaskText '' 'Hint' '0,8,0,0'; [void]$root.Children.Add($ui.TxtCustState)
     $ui.TxtCustLibrary = New-MaskText '' 'Hint' '0,4,0,0'; [void]$root.Children.Add($ui.TxtCustLibrary)
@@ -207,6 +220,7 @@ function Build-CustPage {
     $ui.PageCustomizations = $page; [void]$parent.Children.Add($page)
     $ui.CmbCustKind.Add_SelectionChanged({ try { Update-CustForm } catch { Show-Error $_.Exception.Message } })
     Add-Click $ui.BtnCustRefresh { Start-CustJob 'Status' }
+    Add-Click $ui.BtnCustUnc { if (Confirm-Action (T 'cust.ask.unc') (T 'nav.customizations')) { Start-CustJob 'Reach' } }
     Add-Click $ui.BtnCustScripts { if (Confirm-Action (T 'cust.ask.scripts') (T 'nav.customizations')) { Start-CustJob 'TestScripts' } }
     Add-Click $ui.BtnCustApplyAll { Invoke-CustApply @() }
     Add-Click $ui.BtnCustSave { Save-CustForm }
@@ -265,9 +279,19 @@ function Get-CustFormRaw {
     $raw
 }
 
+function Get-CustFiles { if ($script:CustLibrary -and $script:CustLibrary.State -eq 'Ready') { @($script:CustLibrary.Files) } else { @() } }
+
 function Save-CustForm {
-    $files = if ($script:CustLibrary -and $script:CustLibrary.State -eq 'Ready') { @($script:CustLibrary.Files) } else { @() }
-    $r = Add-AVDTuneCustomItem -Root $script:StateRoot -Raw (Get-CustFormRaw) -Library $files
+    # a file or a script from the library is shown first (size, SHA256, first lines); everything else is added at once
+    $raw = Get-CustFormRaw
+    $check = ConvertTo-AVDTuneCustomItem -Raw $raw -FromForm -Library (Get-CustFiles) -Forbidden (Get-AVDTuneCustomForbiddenFolders -Root $script:StateRoot)
+    if (-not $check.Valid) { $ui.TxtCustErrors.Text = ($check.Errors -join "`r`n"); return }
+    if ($check.Item.Kind -in 'FileCopy', 'Script') { Start-CustJob 'Preview' @($check.Item.File, $check.Item.Sha256) @{ Kind = 'Save'; Raw = $raw }; return }
+    Add-CustItem $raw
+}
+
+function Add-CustItem($Raw) {
+    $r = Add-AVDTuneCustomItem -Root $script:StateRoot -Raw $Raw -Library (Get-CustFiles)
     if (-not $r.Valid) { $ui.TxtCustErrors.Text = ($r.Errors -join "`r`n"); return }
     $ui.TxtCustErrors.Text = ''
     [void](Add-AVDTuneProtocolNote -Protocol $script:Protocol -Group 'customizations' -Subject (T 'cust.saved' (Get-AVDTuneCustomTitle $r.Item)))
@@ -281,7 +305,9 @@ function Invoke-CustApply([string[]]$Ids) {
     $items = @($script:CustStatus.Items | Where-Object { $Ids.Count -eq 0 -or $_.Id -in $Ids })
     if ($items.Count -eq 0) { Show-Toast (T 'cust.none'); return }
     $list = (@($items | Select-Object -First 12 | ForEach-Object { '- ' + $_.Title }) -join "`n") + $(if ($items.Count -gt 12) { "`n..." } else { '' })
-    if (-not (Confirm-Action (T 'cust.ask.apply' $items.Count $list) (T 'nav.customizations'))) { return }
+    $risky = @($items | Where-Object { $_.Title -like '*RISK:*' })
+    $ask = (T 'cust.ask.apply' $items.Count $list) + $(if ($risky.Count) { "`n`n" + (T 'cust.ask.risk' $risky.Count) } else { '' })
+    if (-not (Confirm-Action $ask (T 'nav.customizations'))) { return }
     $vis = @($items | Where-Object { Get-AVDTuneCustomMaskingRequest -Item $_.Item } | ForEach-Object { $_.Item })
     Start-CustJob 'Apply' $Ids $(if ($vis.Count) { @{ Kind = 'Visibility'; Items = $vis } })
 }
@@ -327,7 +353,8 @@ function Update-CustView {
         $detail = @()
         if ($r.State) { $detail += (T 'cust.row.state' $r.State) }
         if ($r.Message) { $detail += $r.Message }
-        foreach ($x in @($r.Reach | Where-Object { -not $_.Ok })) { $detail += (T 'cust.row.unreachable' $x.What $x.Path) }
+        foreach ($x in @($r.Reach | Where-Object { $_.Ok -eq $false })) { $detail += (T 'cust.row.unreachable' $x.What $x.Path) }
+        foreach ($x in @($r.Reach | Where-Object { $null -eq $_.Ok })) { $detail += (T 'cust.row.unchecked' $x.What $x.Path) }
         # the handlers find their row by the id in DataContext (no GetNewClosure: it would hide the functions of this script)
         $apply = New-MaskButton (T 'cust.btn.apply') (T 'cust.btn.apply.tip' $r.Title); $apply.Add_Click({ param($src) try { Invoke-CustApply @([string]$src.DataContext) } catch { Show-Error $_.Exception.Message } })
         $undo = $null; if ($r.Undo) { $undo = New-MaskButton (T 'cust.btn.undo') (T 'cust.btn.undo.tip' $r.Title); $undo.Add_Click({ param($src) try { Invoke-CustUndo (Get-CustRow ([string]$src.DataContext)) $false } catch { Show-Error $_.Exception.Message } }) }

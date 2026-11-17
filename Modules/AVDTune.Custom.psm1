@@ -21,6 +21,7 @@ Set-StrictMode -Version 2.0
 Import-Module (Join-Path $PSScriptRoot 'AVDTune.psm1')
 Import-Module (Join-Path $PSScriptRoot 'AVDTune.Updates.psm1')
 Import-Module (Join-Path $PSScriptRoot 'AVDTune.Software.psm1')
+Import-Module (Join-Path $PSScriptRoot 'AVDTune.FSLogix.psm1')   # Test-AVDTuneBroadSid (one list of broad groups, #83)
 Import-Module (Join-Path $PSScriptRoot 'AVDTune.Masking.psm1')
 
 $script:Kinds = @('Shortcut', 'Font', 'Registry', 'Ini', 'Hosts', 'Folder', 'FileCopy', 'Script')
@@ -37,7 +38,7 @@ $script:Fields = @{
 $script:IntFields = @('IconIndex', 'TimeoutSeconds')
 $script:BoolFields = @('Undo')
 $script:Rights = [ordered]@{ ReadAndExecute = 131241; Modify = 197055; FullControl = 2032127 }
-$script:PrincipalAlias = [ordered]@{ 'Users' = 'S-1-5-32-545'; 'Authenticated Users' = 'S-1-5-11'; 'Administrators' = 'S-1-5-32-544'; 'Remote Desktop Users' = 'S-1-5-32-555' }
+$script:PrincipalAlias = [ordered]@{ 'Users' = 'S-1-5-32-545'; 'Authenticated Users' = 'S-1-5-11'; 'Administrators' = 'S-1-5-32-544' }   # Remote Desktop Users is not offered (review #85, M2)
 $script:ValueTypes = @('String', 'ExpandString', 'DWord', 'QWord')
 $script:Locations = @('Desktop', 'StartMenu', 'Both')
 $script:Marker = 'AVDTune shortcut'
@@ -45,6 +46,8 @@ $script:HostsMarker = '# AVDTune'
 $script:FontKey = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Fonts'
 $script:Reserved = @('CON', 'PRN', 'AUX', 'NUL', 'COM1', 'COM2', 'COM3', 'COM4', 'COM5', 'COM6', 'COM7', 'COM8', 'COM9', 'LPT1', 'LPT2', 'LPT3', 'LPT4', 'LPT5', 'LPT6', 'LPT7', 'LPT8', 'LPT9')
 $script:RegexTimeout = [TimeSpan]::FromMilliseconds(200)
+$script:StartupPattern = '(?i)\\Start Menu\\Programs\\Startup(\\|\z)'   # every autostart folder: all users, Default user, each profile
+$script:AppPackageSids = @('S-1-15-2-1', 'S-1-15-2-2')   # ALL APPLICATION PACKAGES, ALL RESTRICTED APPLICATION PACKAGES
 
 #region validation (pure)
 
@@ -66,6 +69,7 @@ function Test-AVDTuneCustomPathSegments([string[]]$Segments) {
         if (-not $s -or $s -eq '.' -or $s -eq '..' -or $s.Length -gt 120) { return $false }
         if ($s -match '[. ]\z' -or $s -match '\A ') { return $false }
         if ($s.Split('.')[0].ToUpperInvariant() -in $script:Reserved) { return $false }
+        if ($s -match '~\d') { return $false }   # an 8.3 short name (PROGRA~1) would get round the folder rules (review #85, M1)
     }
     $true
 }
@@ -97,7 +101,25 @@ function ConvertTo-AVDTuneCustomRegPath {
     if ($segs.Count -gt 32) { return '' }
     foreach ($s in $segs) { if (-not $s -or $s.Length -gt 255 -or $s.Trim() -ne $s -or (Test-AVDTuneCustomMatch $s '[*?]' 255)) { return '' } }
     if ($segs[0].ToUpperInvariant() -in 'SAM', 'SECURITY', 'BCD00000000', 'HARDWARE') { return '' }
-    'HKLM:\' + ($segs -join '\')
+    $joined = $segs -join '\'
+    if (Test-AVDTuneCustomMatch $joined '(?i)\ASYSTEM\\(CurrentControlSet|ControlSet\d{3})\\Control\\(Lsa|SecurityProviders)(\\|\z)' 400) { return '' }   # authentication packages (review #85, I1)
+    'HKLM:\' + $joined
+}
+
+function Get-AVDTuneCustomRegRisk {
+    # A visible risk note for registry places that start code or change security (review #85, I1): '' when there is none
+    param([string]$Path, [string]$ValueName)
+    $rest = $Path -replace '\AHKLM:\\', ''
+    $rules = @(
+        @('(?i)\ASOFTWARE\\(WOW6432Node\\)?Microsoft\\Windows\\CurrentVersion\\(Run|RunOnce|RunOnceEx|RunServices|RunServicesOnce)(\\|\z)', 'autostart (Run/RunOnce)'),
+        @('(?i)\\Image File Execution Options(\\|\z)', 'Image File Execution Options (debugger of a program)'),
+        @('(?i)\\Windows NT\\CurrentVersion\\Winlogon(\\|\z)', 'Winlogon'),
+        @('(?i)\ASYSTEM\\(CurrentControlSet|ControlSet\d{3})\\Services(\\|\z)', 'services'),
+        @('(?i)(\A|\\)Policies(\\|\z)', 'policies')
+    )
+    $hits = @(foreach ($r in $rules) { if (Test-AVDTuneCustomMatch $rest $r[0] 400) { $r[1] } })
+    if ($ValueName -ieq 'AppInit_DLLs' -or $ValueName -ieq 'LoadAppInit_DLLs') { $hits += 'AppInit_DLLs' }
+    if ($hits.Count) { 'RISK: ' + ($hits -join ', ') } else { '' }
 }
 
 function Test-AVDTuneCustomHostName([string]$Name) { Test-AVDTuneCustomMatch $Name '\A(?=.{1,253}\z)[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*\z' 253 }
@@ -116,22 +138,57 @@ function ConvertTo-AVDTuneCustomSid {
     ''
 }
 
+function ConvertTo-AVDTuneCustomLong([string]$Path) {
+    # The long form (no 8.3 short names) of the existing part of a path; the path as given when Windows cannot say (review #85, M1)
+    if (-not $Path) { return '' }
+    try { (Get-AVDTuneLongPath $Path).TrimEnd([char]92) } catch { $Path.TrimEnd([char]92) }
+}
+
 function Get-AVDTuneCustomForbiddenFolders {
-    # Folders a customization may never write into or change the permissions of, as themselves (a folder below them is fine where the rules say so)
+    <#
+        Folders a customization may never write into or change the permissions of, as themselves (Exact) or anywhere below (Below), and the program folders (Programs)
+        where broad groups get at most ReadAndExecute and no .exe.config/.dll.config may be put. Every entry in its long form.
+    #>
     param([string]$Root = (Get-AVDTuneRoot))
     $win = Get-AVDTuneSystemFolder Windows
     @{
-        Exact = @(([IO.Path]::GetPathRoot($win)), (Get-AVDTuneSystemFolder ProgramFiles), (Get-AVDTuneSystemFolder ProgramFilesX86), (Get-AVDTuneSystemFolder ProgramData), (Join-Path ([IO.Path]::GetPathRoot($win)) 'Users')) | ForEach-Object { $_.TrimEnd([char]92) }
-        Below = @($win, $Root) | ForEach-Object { $_.TrimEnd([char]92) }
+        Exact = @(([IO.Path]::GetPathRoot($win)), (Get-AVDTuneSystemFolder ProgramFiles), (Get-AVDTuneSystemFolder ProgramFilesX86), (Get-AVDTuneSystemFolder ProgramData), (Join-Path ([IO.Path]::GetPathRoot($win)) 'Users')) | ForEach-Object { ConvertTo-AVDTuneCustomLong $_ }
+        Below = @($win, $Root) | ForEach-Object { ConvertTo-AVDTuneCustomLong $_ }
+        Programs = @((Get-AVDTuneSystemFolder ProgramFiles), (Get-AVDTuneSystemFolder ProgramFilesX86), (Get-AVDTuneSystemFolder ProgramData)) | ForEach-Object { ConvertTo-AVDTuneCustomLong $_ }
     }
 }
 
+function Test-AVDTuneCustomUnder([string]$Path, [string]$Folder) { [bool]($Folder -and ($Path -ieq $Folder -or $Path.StartsWith($Folder + '\', [StringComparison]::OrdinalIgnoreCase))) }
+
 function Test-AVDTuneCustomForbidden {
+    # Compared in the given and in the long form: C:\PROGRA~1 is Program Files (review #85, M1)
     param([string]$Path, $Forbidden)
-    $p = $Path.TrimEnd([char]92)
-    foreach ($x in @($Forbidden.Exact)) { if ($x -and $p -ieq $x) { return $true } }
-    foreach ($x in @($Forbidden.Below)) { if ($x -and ($p -ieq $x -or $p.StartsWith($x + '\', [StringComparison]::OrdinalIgnoreCase))) { return $true } }
+    foreach ($p in @($Path.TrimEnd([char]92), (ConvertTo-AVDTuneCustomLong $Path)) | Select-Object -Unique) {
+        foreach ($x in @($Forbidden.Exact)) { if ($x -and $p -ieq $x.TrimEnd([char]92)) { return $true } }
+        foreach ($x in @($Forbidden.Below)) { if (Test-AVDTuneCustomUnder $p $x) { return $true } }
+    }
     $false
+}
+
+function Test-AVDTuneCustomInPrograms([string]$Path, $Forbidden) {
+    foreach ($p in @($Path.TrimEnd([char]92), (ConvertTo-AVDTuneCustomLong $Path)) | Select-Object -Unique) { foreach ($x in @($Forbidden.Programs)) { if (Test-AVDTuneCustomUnder $p $x) { return $true } } }
+    $false
+}
+
+function Test-AVDTuneCustomStartup([string]$Path) {
+    # Any autostart folder (all users, Default user, a profile), also through a short name
+    foreach ($p in @($Path, (ConvertTo-AVDTuneCustomLong $Path)) | Select-Object -Unique) { if (Test-AVDTuneCustomMatch $p $script:StartupPattern 400) { return $true } }
+    $false
+}
+
+function Test-AVDTuneCustomBroadSid([string]$Sid) { (Test-AVDTuneBroadSid $Sid) -or $Sid -in $script:AppPackageSids }
+
+function Get-AVDTuneCustomRuleProblem {
+    # Broad groups (users, Authenticated Users, INTERACTIVE, Domain Users, Remote Desktop Users, app packages ...) get at most ReadAndExecute in the program folders and the autostart folders (review #85, M2)
+    param([string]$Path, [string]$Sid, [string]$Rights, $Forbidden)
+    if ($Rights -eq 'ReadAndExecute' -or -not (Test-AVDTuneCustomBroadSid $Sid)) { return '' }
+    if ((Test-AVDTuneCustomInPrograms $Path $Forbidden) -or (Test-AVDTuneCustomStartup $Path)) { return "Rights: $Sid is a broad group; in Program Files, ProgramData and the autostart folders it gets at most ReadAndExecute." }
+    ''
 }
 
 function ConvertTo-AVDTuneCustomItem {
@@ -229,12 +286,15 @@ function ConvertTo-AVDTuneCustomItem {
             if (-not $sid) { [void]$errors.Add("Who: a SID (S-1-...) or one of $($script:PrincipalAlias.Keys -join ', ').") } else { $i.Principal = $sid }
             if ($sid -in 'S-1-1-0', 'S-1-5-7') { [void]$errors.Add('Who: Everyone and Anonymous are not allowed.') }
             if ($i.Rights -cnotin @($script:Rights.Keys)) { [void]$errors.Add("Rights: $(@($script:Rights.Keys) -join ', ').") }
+            elseif ($sid -and (Test-AVDTuneCustomLocalPath $i.Path)) { $rp = Get-AVDTuneCustomRuleProblem -Path $i.Path -Sid $sid -Rights $i.Rights -Forbidden $Forbidden; if ($rp) { [void]$errors.Add($rp) } }
         }
         'FileCopy' {
             $h = & $lib $i.File @('.txt', '.ini', '.xml', '.json', '.cfg', '.config', '.ico', '.png', '.jpg', '.bmp', '.reg', '.pdf', '.url') 'File'; if ($h) { $i.Sha256 = $h }
             if ($i.Sha256 -notmatch '\A[0-9a-f]{64}\z') { [void]$errors.Add('File: the SHA256 of the library file is missing (read the library first).') }
             if (-not (Test-AVDTuneCustomLocalPath $i.Destination)) { [void]$errors.Add('Destination: the full local path of the new file.') }
             elseif (Test-AVDTuneCustomForbidden (Split-Path $i.Destination -Parent) $Forbidden) { [void]$errors.Add('Destination: not in the Windows folder, the state folder of AVDTune or the root of a system folder.') }
+            elseif (Test-AVDTuneCustomStartup $i.Destination) { [void]$errors.Add('Destination: no autostart folder (Startup).') }
+            elseif ($i.Destination -match '(?i)\.(exe|dll)\.config\z' -and (Test-AVDTuneCustomInPrograms $i.Destination $Forbidden)) { [void]$errors.Add('Destination: no .exe.config or .dll.config in the program folders (it changes how a program loads).') }
         }
         'Script' {
             $h = & $lib $i.File @('.ps1') 'Script'; if ($h) { $i.Sha256 = $h }
@@ -402,7 +462,7 @@ function Get-AVDTuneCustomTitle($Item) {
     switch ($Item.Kind) {
         'Shortcut' { "Shortcut $($Item.Name) ($($Item.Location))" }
         'Font' { "Font $($Item.Name) ($($Item.File))" }
-        'Registry' { "Registry $($Item.Path)\$(if ($Item.ValueName) { $Item.ValueName } else { '(Default)' }) = $($Item.Value)" }
+        'Registry' { $risk = Get-AVDTuneCustomRegRisk $Item.Path $Item.ValueName; "Registry $($Item.Path)\$(if ($Item.ValueName) { $Item.ValueName } else { '(Default)' }) = $($Item.Value)$(if ($risk) { " [$risk]" })" }
         'Ini' { "Ini $($Item.Path) [$($Item.Section)] $($Item.Key)=$($Item.Value)" }
         'Hosts' { "Hosts entry $($Item.Address) $($Item.HostName)" }
         'Folder' { "Folder $($Item.Path) with $($Item.Rights) for $($Item.Principal)" }
@@ -445,13 +505,20 @@ function Test-AVDTuneCustomRegEqual {
     [string]$Raw.Value -ceq [string]$Want
 }
 
+function Get-AVDTuneCustomFontValueName($Item) { "$($Item.Name) ($(if ([IO.Path]::GetExtension($Item.File) -ieq '.otf') { 'OpenType' } else { 'TrueType' }))" }
+
 function Get-AVDTuneCustomBefore {
     # What is there before Apply, for the undo record (read only)
     param([Parameter(Mandatory)]$Item, [Parameter(Mandatory)]$C)
     switch ($Item.Kind) {
         'Registry' { $r = & $C.RegGet $Item.Path $Item.ValueName; if ($r) { @{ Exists = $true; Value = $r.Value; Kind = [string]$r.Kind } } else { @{ Exists = $false } } }
         'Ini' { $f = & $C.ReadText $Item.Path; $v = if ($f) { Get-AVDTuneIniValue -Text $f.Text -Section $Item.Section -Key $Item.Key } else { $null }; @{ FileExisted = [bool]$f; Exists = ($null -ne $v); Value = [string]$v } }
-        'Folder' { $d = & $C.DirInfo $Item.Path; @{ Existed = [bool]$d.Exists } }
+        'Folder' {
+            $d = & $C.DirInfo $Item.Path
+            $own = @(@($d.Rules) | Where-Object { $_ -and $_.Sid -eq $Item.Principal -and -not $_.Inherited } | ForEach-Object { @{ Rights = [int]$_.Rights; Inherit = $(if ($null -ne $_.Inherit) { [int]$_.Inherit } else { 3 }); Propagate = $(if ($null -ne $_.Propagate) { [int]$_.Propagate } else { 0 }) } })
+            @{ Existed = [bool]$d.Exists; Rules = $own }
+        }
+        'Font' { $r = & $C.RegGet $script:FontKey (Get-AVDTuneCustomFontValueName $Item); @{ FileExisted = ($null -ne (& $C.FileHash (Join-Path (& $C.Folder 'Fonts') $Item.File))); ValueExisted = [bool]$r; Value = $(if ($r) { [string]$r.Value } else { '' }) } }
         default { @{} }
     }
 }
@@ -461,8 +528,9 @@ function New-AVDTuneCustomStep {
         The step of one item. -Fetch is a scriptblock (Name, Sha256) that returns the path of the checked library file (New-AVDTuneCustomFetch); -Before is the undo record
         of the item (for Undo). Test/Apply/Undo only talk to the adapter $C and the fetch block.
     #>
-    param([Parameter(Mandatory)]$Item, [Parameter(Mandatory)]$C, [scriptblock]$Fetch, $Before)
+    param([Parameter(Mandatory)]$Item, [Parameter(Mandatory)]$C, [scriptblock]$Fetch, $Before, $Forbidden)
     $i = $Item
+    $fb = if ($Forbidden) { $Forbidden } else { Get-AVDTuneCustomForbiddenFolders }
     $nofetch = { param($n, $h) throw "The library file $n is not available (not signed in or no library): read the library first." }
     $get = if ($Fetch) { $Fetch } else { $nofetch }
     $undo = $null
@@ -504,7 +572,10 @@ function New-AVDTuneCustomStep {
             $apply = { param($m) $d = & $C.DirInfo $i.Path; if ($d.Link) { throw "$($i.Path) is a link: not changed." }; if (-not $d.Exists) { & $C.DirCreate $i.Path }; & $C.DirAddRule $i.Path $i.Principal $mask }.GetNewClosure()
             if ($Before) {
                 $b = $Before
-                $undo = { param($m) & $C.DirRemoveRule $i.Path $i.Principal $mask; if (-not $b.Existed) { & $C.DirRemoveEmpty $i.Path } }.GetNewClosure()
+                # the rules of this SID from before are put back (an added rule merges with an existing one of the same SID, review #85, L3)
+                $undo = { param($m) & $C.DirRemoveRule $i.Path $i.Principal $mask
+                    foreach ($r in @($b.Rules)) { if ($r) { & $C.DirAddRule $i.Path $i.Principal ([int]$r.Rights) ([int]$r.Inherit) ([int]$r.Propagate) } }
+                    if (-not $b.Existed) { & $C.DirRemoveEmpty $i.Path } }.GetNewClosure()
             }
         }
         'FileCopy' {
@@ -513,19 +584,26 @@ function New-AVDTuneCustomStep {
             $undo = { param($m) if ((& $C.FileHash $i.Destination) -eq $i.Sha256) { & $C.FileDelete $i.Destination } }.GetNewClosure()
         }
         'Font' {
-            $type = if ([IO.Path]::GetExtension($i.File) -ieq '.otf') { 'OpenType' } else { 'TrueType' }
-            $valueName = "$($i.Name) ($type)"
+            $valueName = Get-AVDTuneCustomFontValueName $i
             $fontKey = $script:FontKey
             $test = { param($m) $dest = Join-Path (& $C.Folder 'Fonts') $i.File; $h = & $C.FileHash $dest; $r = & $C.RegGet $fontKey $valueName
                 $ok = ($h -eq $i.Sha256 -and $r -and [string]$r.Value -ieq $i.File)
                 @{ Compliant = [bool]$ok; State = $(if ($ok) { 'installed' } elseif ($null -ne $h -and $h -ne $i.Sha256) { 'a different font file of that name' } elseif ($h) { 'file without registration' } else { 'not installed' }) } }.GetNewClosure()
             $apply = { param($m) $dest = Join-Path (& $C.Folder 'Fonts') $i.File; $h = & $C.FileHash $dest
                 if ($null -ne $h -and $h -ne $i.Sha256) { throw "$dest exists with other content: not overwritten." }
+                $cur = & $C.RegGet $fontKey $valueName
+                if ($cur -and [string]$cur.Value -ine $i.File) { throw "The font registration '$valueName' points to $($cur.Value): not replaced." }
                 if ($null -eq $h) { & $C.CopyFile (& $get $i.File $i.Sha256) $dest 'Default' }
                 & $C.RegSet $fontKey $valueName $i.File 'String' }.GetNewClosure()
-            $undo = { param($m) $dest = Join-Path (& $C.Folder 'Fonts') $i.File
-                $r = & $C.RegGet $fontKey $valueName; if ($r -and [string]$r.Value -ieq $i.File) { & $C.RegRemove $fontKey $valueName }
-                if ((& $C.FileHash $dest) -eq $i.Sha256) { & $C.FileDelete $dest } }.GetNewClosure()
+            if ($Before) {
+                # the registration as it was; the file is deleted only when AVDTune put it there (review #85, M4)
+                $b = $Before
+                $undo = { param($m) $dest = Join-Path (& $C.Folder 'Fonts') $i.File
+                    $r = & $C.RegGet $fontKey $valueName
+                    if ($b.ValueExisted) { if (-not $r -or [string]$r.Value -cne [string]$b.Value) { & $C.RegSet $fontKey $valueName ([string]$b.Value) 'String' } }
+                    elseif ($r -and [string]$r.Value -ieq $i.File) { & $C.RegRemove $fontKey $valueName }
+                    if (-not $b.FileExisted -and (& $C.FileHash $dest) -eq $i.Sha256) { & $C.FileDelete $dest } }.GetNewClosure()
+            }
         }
         'Shortcut' {
             $paths = @(Get-AVDTuneCustomShortcutPaths -Item $i -C $C)
@@ -552,6 +630,9 @@ function New-AVDTuneCustomStep {
             if ($i.Undo) { $undo = { param($m) $r = & $run 'Undo'; if ($r.ExitCode -ne 0) { throw "The undo of the script ended with exit code $($r.ExitCode)." } }.GetNewClosure() }
         }
     }
+    # checked again directly before Apply (the forbidden folders in their long form now, review #85, M1)
+    $inner = $apply
+    $apply = { param($m) $chk = ConvertTo-AVDTuneCustomItem -Raw $i -Forbidden $fb; if (-not $chk.Valid) { throw "Refused before Apply: $($chk.Errors -join ' ')" }; & $inner $m }.GetNewClosure()
     New-AVDTuneStep -Id (Get-AVDTuneCustomStepId $i) -Section Customizations -Title (Get-AVDTuneCustomTitle $i) -Why 'Own customization of this master (Customizations page).' -Risk Medium -Test $test -Apply $apply -Undo $undo
 }
 
@@ -594,20 +675,23 @@ function Get-AVDTuneCustomStatus {
         Read only: every saved item with its test result and, for shortcuts, whether target, working folder and icon are reachable. Library files are taken from
         the cache only (no download): a script that is not cached yet says so. Returns Items (Id, Kind, Name, Title, Status, State, Message, Reach, Undo) and Invalid.
     #>
-    param([Parameter(Mandatory)]$Machine, [Parameter(Mandatory)]$C, [string]$Root = (Get-AVDTuneRoot), [switch]$NoScripts)
-    $list = Get-AVDTuneCustomizations -Root $Root
+    param([Parameter(Mandatory)]$Machine, [Parameter(Mandatory)]$C, [string]$Root = (Get-AVDTuneRoot), [switch]$NoScripts, [switch]$CheckUnc)
+    $forbidden = Get-AVDTuneCustomForbiddenFolders -Root $Root
+    $list = Get-AVDTuneCustomizations -Root $Root -Forbidden $forbidden
     $undo = Read-AVDTuneCustomUndo $Root
     $fetch = New-AVDTuneCustomFetch -C $C -Root $Root
     $rows = foreach ($i in $list.Items) {
         $row = [ordered]@{ Id = $i.Id; Kind = $i.Kind; Name = $i.Name; Title = (Get-AVDTuneCustomTitle $i); Status = 'Unknown'; State = ''; Message = ''; Reach = @(); Undo = $undo.ContainsKey($i.Id); Item = $i }
         if ($i.Kind -eq 'Script' -and $NoScripts) { $row.Message = 'Not tested (scripts are tested on request).' }
         else {
-            $r = Invoke-AVDTuneStep -Step (New-AVDTuneCustomStep -Item $i -C $C -Fetch $fetch) -Machine $Machine -Mode Test
+            $r = Invoke-AVDTuneStep -Step (New-AVDTuneCustomStep -Item $i -C $C -Fetch $fetch -Forbidden $forbidden) -Machine $Machine -Mode Test
             $row.Status = $r.Status; $row.State = [string]$r.Before; $row.Message = [string]$r.Message
         }
         if ($i.Kind -eq 'Shortcut') {
-            $reach = @(@{ What = 'Target'; Path = $i.Target; Ok = [bool](& $C.Reachable $i.Target) })
-            if ($i.WorkingDirectory) { $reach += @{ What = 'Working folder'; Path = $i.WorkingDirectory; Ok = [bool](& $C.Reachable $i.WorkingDirectory) } }
+            # a UNC path is only asked on request: asking sends the administrator's NTLM credentials to that host (review #85, L2). Ok = $null: not checked.
+            $ask = { param($p) if ($p.StartsWith('\\') -and -not $CheckUnc) { $null } else { [bool](& $C.Reachable $p) } }
+            $reach = @(@{ What = 'Target'; Path = $i.Target; Ok = (& $ask $i.Target) })
+            if ($i.WorkingDirectory) { $reach += @{ What = 'Working folder'; Path = $i.WorkingDirectory; Ok = (& $ask $i.WorkingDirectory) } }
             if ($i.IconSource -eq 'Library') {
                 $ico = (Get-AVDTuneCustomIconPath -Item $i -C $C) -replace ',\d+\z', ''
                 $ok = ((& $C.FileHash $ico) -eq $i.IconSha256)
@@ -631,7 +715,8 @@ function Invoke-AVDTuneCustomRun {
     [CmdletBinding()]
     param([Parameter(Mandatory)]$Machine, [Parameter(Mandatory)]$C, [string]$Root = (Get-AVDTuneRoot), [ValidateSet('Apply', 'Undo')][string]$Mode = 'Apply', [string[]]$Ids = @(), $Context,
         [string]$User, [string]$SnapshotId, [switch]$WhatIf)
-    $list = Get-AVDTuneCustomizations -Root $Root
+    $forbidden = Get-AVDTuneCustomForbiddenFolders -Root $Root
+    $list = Get-AVDTuneCustomizations -Root $Root -Forbidden $forbidden
     if ($list.Problem) { throw $list.Problem }
     $items = @($list.Items | Where-Object { $Ids.Count -eq 0 -or $_.Id -in $Ids })
     $unknown = @($Ids | Where-Object { $_ -notin @($list.Items | ForEach-Object { $_.Id }) })
@@ -642,13 +727,13 @@ function Invoke-AVDTuneCustomRun {
     foreach ($i in $items) {
         if ($Mode -eq 'Apply') {
             $before[$i.Id] = Get-AVDTuneCustomBefore -Item $i -C $C
-            $s = New-AVDTuneCustomStep -Item $i -C $C -Fetch $fetch
+            $s = New-AVDTuneCustomStep -Item $i -C $C -Fetch $fetch -Forbidden $forbidden
         }
         else {
             if (-not $undo.ContainsKey($i.Id)) { [void]$skipped.Add([pscustomobject]@{ Id = $i.Id; Title = (Get-AVDTuneCustomTitle $i); Message = 'Nothing to undo: AVDTune has not changed this on the master.' }); continue }
             $b = Get-AVDTuneProp $undo[$i.Id] 'Before'
             $bh = @{}; if ($b) { foreach ($p in $b.PSObject.Properties) { $bh[$p.Name] = $p.Value } }
-            $orig = New-AVDTuneCustomStep -Item $i -C $C -Fetch $fetch -Before $bh
+            $orig = New-AVDTuneCustomStep -Item $i -C $C -Fetch $fetch -Before $bh -Forbidden $forbidden
             if (-not $orig.Undo) { [void]$skipped.Add([pscustomobject]@{ Id = $i.Id; Title = $orig.Title; Message = 'This customization has no undo (a script without an undo part).' }); continue }
             $s = New-AVDTuneCustomUndoStep -Step $orig
         }
@@ -666,6 +751,37 @@ function Invoke-AVDTuneCustomRun {
         if ($changed) { Write-AVDTuneCustomUndo $Root $undo }
     }
     [pscustomobject]@{ Run = $run; Skipped = @($skipped) }
+}
+
+function Invoke-AVDTuneCustomScriptTest {
+    <#
+        The test of the library scripts runs code of the customer as administrator: behind the write gate and like a run that changes the master (change marker, LastChange,
+        run record), because nobody can say what a test part does (review #85, L5). Returns the status with the scripts tested.
+    #>
+    param([Parameter(Mandatory)]$Machine, [Parameter(Mandatory)]$C, [string]$Root = (Get-AVDTuneRoot), [switch]$CheckUnc)
+    if (-not (Test-AVDTuneWriteAllowed)) { throw 'The snapshot gate is not confirmed: the library scripts are not tested.' }
+    $started = & $Machine.Now
+    $owner = Start-AVDTuneChange -Root $Root
+    try {
+        $st = Get-AVDTuneCustomStatus -Machine $Machine -C $C -Root $Root -CheckUnc:$CheckUnc
+        $ended = (& $Machine.Now).ToString('o')
+        $state = Get-AVDTuneState $Root
+        $results = @($st.Items | Where-Object { $_.Kind -eq 'Script' } | ForEach-Object { [pscustomobject]@{ Id = (Get-AVDTuneCustomStepId $_.Item); Section = 'Customizations'; Title = $_.Title; Mode = 'Test'; Status = $_.Status; Before = $_.State; After = $null; Message = $_.Message; Reboot = $false; WhatIf = $false; At = $ended } })
+        [void](Add-AVDTuneRun -Root $Root -Run ([pscustomobject][ordered]@{ Id = $null; Plan = 'Customizations script test'; Started = $started.ToString('o'); Ended = $ended; User = ''; SnapshotId = ''; WhatIf = $false; ImageVersion = $state.ImageVersion; Reboot = $false; Results = $results }))
+        [void](Set-AVDTuneState -Root $Root -Values @{ LastChange = $ended; FirstChange = $started.ToString('o') })
+        $st
+    }
+    finally { Stop-AVDTuneChange -Root $Root -Owner $owner }
+}
+
+function Get-AVDTuneCustomPreview {
+    # What the administrator confirms before a library file or script is saved (review #85, M3/L1): name, size, SHA256 and, for text, the first lines. The file comes through the fetch (pinned hash).
+    param([Parameter(Mandatory)]$C, [Parameter(Mandatory)][string]$Root, $Context, [Parameter(Mandatory)][string]$Name, [Parameter(Mandatory)][string]$Sha256, [int]$Lines = 12)
+    $path = & (New-AVDTuneCustomFetch -C $C -Root $Root -Context $Context) $Name $Sha256
+    $text = [IO.Path]::GetExtension($Name).ToLowerInvariant() -in '.ps1', '.txt', '.ini', '.xml', '.json', '.cfg', '.config', '.reg', '.url'
+    $first = @()
+    if ($text) { $f = & $C.ReadText $path; if ($f) { $first = @((Split-AVDTuneCustomLines $f.Text) | Select-Object -First $Lines | ForEach-Object { Remove-AVDTuneControlCharacters $_ 200 }) } }
+    [pscustomobject]@{ Name = $Name; Sha256 = $Sha256; Size = [int64](& $C.FileSize $path); Lines = @($first) }
 }
 
 function Get-AVDTuneCustomMaskingRequest {
@@ -752,16 +868,27 @@ function New-AVDTuneCustomAdapter {
         @{ Text = $text; Encoding = $enc }
     }
     $a.WriteText = {
-        # In place (the file keeps its ACL and owner) or, when it is missing, a new file in an existing folder; no component of the path may be a link
+        # The new content atomically next to the old file, or a new file in an existing folder; no component of the path may be a link
         param($Path, $Text, $Encoding)
         Assert-AVDTuneCustomNoLink $Path
         if (-not (Test-Path -LiteralPath (Split-Path $Path -Parent) -PathType Container)) { throw "The folder of $Path does not exist." }
         $pre = switch ($Encoding) { 'utf-16' { [byte[]](0xFF, 0xFE) } 'utf-8-bom' { [byte[]](0xEF, 0xBB, 0xBF) } default { [byte[]]@() } }
         $body = switch ($Encoding) { 'utf-16' { [Text.Encoding]::Unicode.GetBytes($Text) } 'ansi' { [Text.Encoding]::Default.GetBytes($Text) } default { (New-Object Text.UTF8Encoding $false).GetBytes($Text) } }
-        $mode = if (Test-Path -LiteralPath $Path -PathType Leaf) { [IO.FileMode]::Open } else { [IO.FileMode]::CreateNew }
-        $s = New-Object IO.FileStream($Path, $mode, [IO.FileAccess]::Write, [IO.FileShare]::None)
-        try { $s.SetLength(0); $s.Write($pre, 0, $pre.Length); $s.Write($body, 0, $body.Length); $s.Flush($true) } finally { $s.Dispose() }
+        # atomic (review #85, L4): a temp file next to the target that takes the ACL and owner of the target on purpose (CreateNew with that security), then
+        # Move-AVDTuneFileReplace; a missing file is made new in its existing folder (it inherits)
+        $exists = Test-Path -LiteralPath $Path -PathType Leaf
+        $temp = if ($exists) { "$Path.$([guid]::NewGuid().ToString('N').Substring(0, 8)).tmp" } else { $Path }
+        try {
+            $s = if ($exists) {
+                $sec = (New-Object IO.FileInfo $Path).GetAccessControl([Security.AccessControl.AccessControlSections]'Access, Owner')
+                New-Object IO.FileStream($temp, [IO.FileMode]::CreateNew, [Security.AccessControl.FileSystemRights]'Write, ReadPermissions', [IO.FileShare]::None, 4096, [IO.FileOptions]::None, $sec)
+            } else { New-Object IO.FileStream($temp, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None) }
+            try { $s.Write($pre, 0, $pre.Length); $s.Write($body, 0, $body.Length); $s.Flush($true) } finally { $s.Dispose() }
+            if ($exists) { Move-AVDTuneFileReplace $temp $Path }
+        }
+        finally { if ($exists -and (Test-Path -LiteralPath $temp)) { Remove-Item -LiteralPath $temp -Force -ErrorAction SilentlyContinue } }
     }
+    $a.FileSize = { param($Path) (New-Object IO.FileInfo $Path).Length }
     $a.FileDelete = { param($Path) if ((Test-Path -LiteralPath $Path -PathType Leaf) -and -not (Remove-AVDTuneTreeSafe -Path $Path).Gone) { throw "$Path could not be deleted (in use)." } }
     $a.FileMove = { param($From, $To) [IO.File]::Move($From, $To) }
     $a.CopyFile = {
@@ -786,15 +913,16 @@ function New-AVDTuneCustomAdapter {
         if (-not $d.Exists) { return @{ Exists = $false; Link = $false; Rules = @() } }
         $acl = $d.GetAccessControl([Security.AccessControl.AccessControlSections]::Access)
         @{ Exists = $true; Link = (($d.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)
-            Rules = @($acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]) | Where-Object { $_.AccessControlType -eq 'Allow' } | ForEach-Object { @{ Sid = [string]$_.IdentityReference.Value; Rights = [int]$_.FileSystemRights; Inherited = [bool]$_.IsInherited } }) }
+            Rules = @($acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]) | Where-Object { $_.AccessControlType -eq 'Allow' } | ForEach-Object { @{ Sid = [string]$_.IdentityReference.Value; Rights = [int]$_.FileSystemRights; Inherited = [bool]$_.IsInherited; Inherit = [int]$_.InheritanceFlags; Propagate = [int]$_.PropagationFlags } }) }
     }
     $a.DirCreate = { param($Path) Assert-AVDTuneCustomNoLink $Path; $parent = Split-Path $Path -Parent; if (-not (Test-Path -LiteralPath $parent -PathType Container)) { throw "The folder $parent does not exist." }; [void](New-Object IO.DirectoryInfo $Path).Create() }
     $a.DirAddRule = {
-        param($Path, $Sid, $Rights)
+        param($Path, $Sid, $Rights, $Inherit = 3, $Propagate = 0)
         Assert-AVDTuneCustomNoLink $Path
+        if ([int]$Rights -ne [int]$script:Rights['ReadAndExecute']) { $rp = Get-AVDTuneCustomRuleProblem -Path $Path -Sid $Sid -Rights 'Write' -Forbidden (Get-AVDTuneCustomForbiddenFolders); if ($rp) { throw $rp } }   # the adapter checks again (review #85, M2)
         $d = New-Object IO.DirectoryInfo $Path
         $acl = $d.GetAccessControl([Security.AccessControl.AccessControlSections]::Access)
-        $acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule((New-Object Security.Principal.SecurityIdentifier $Sid), [Security.AccessControl.FileSystemRights]$Rights, 'ContainerInherit, ObjectInherit', 'None', 'Allow')))
+        $acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule((New-Object Security.Principal.SecurityIdentifier $Sid), [Security.AccessControl.FileSystemRights]$Rights, [Security.AccessControl.InheritanceFlags][int]$Inherit, [Security.AccessControl.PropagationFlags][int]$Propagate, 'Allow')))
         $d.SetAccessControl($acl)
     }
     $a.DirRemoveRule = {
@@ -864,4 +992,6 @@ Export-ModuleMember -Function Test-AVDTuneCustomMatch, Test-AVDTuneCustomText, T
     Get-AVDTuneCustomPath, Get-AVDTuneCustomUndoPath, Get-AVDTuneCustomizations, Save-AVDTuneCustomizations, Add-AVDTuneCustomItem, Remove-AVDTuneCustomItem, Read-AVDTuneCustomUndo, Write-AVDTuneCustomUndo,
     Get-AVDTuneCustomStepId, Get-AVDTuneCustomTitle, Get-AVDTuneCustomShortcutPaths, Get-AVDTuneCustomIconPath, ConvertTo-AVDTuneCustomRegValue, Test-AVDTuneCustomRegEqual, Get-AVDTuneCustomBefore,
     New-AVDTuneCustomStep, New-AVDTuneCustomUndoStep, New-AVDTuneCustomFetch, Get-AVDTuneCustomStatus, Invoke-AVDTuneCustomRun, Get-AVDTuneCustomMaskingRequest,
-    Get-AVDTuneCustomKinds, Get-AVDTuneCustomFields, Get-AVDTuneCustomChoices, Assert-AVDTuneCustomNoLink, New-AVDTuneCustomAdapter
+    Get-AVDTuneCustomKinds, Get-AVDTuneCustomFields, Get-AVDTuneCustomChoices, Assert-AVDTuneCustomNoLink, New-AVDTuneCustomAdapter,
+    Get-AVDTuneCustomRegRisk, ConvertTo-AVDTuneCustomLong, Test-AVDTuneCustomUnder, Test-AVDTuneCustomInPrograms, Test-AVDTuneCustomStartup, Test-AVDTuneCustomBroadSid, Get-AVDTuneCustomRuleProblem,
+    Get-AVDTuneCustomFontValueName, Invoke-AVDTuneCustomScriptTest, Get-AVDTuneCustomPreview
