@@ -323,20 +323,25 @@
                                     <Border Style="{DynamicResource CardBox}" Margin="0,16,0,0" Background="{DynamicResource Card}" Padding="20,16">
                                         <StackPanel>
                                             <TextBlock Text="Configuration" Style="{DynamicResource CardTitle}"/>
-                                            <TextBlock Style="{DynamicResource Hint}" Margin="0,4,0,0" TextWrapping="Wrap" Text="Shared computer activation (SharedComputerLicensing = 1) and Updates Enabled = FALSE are fixed: Windows multi-session needs both. Preset: the sample of the Microsoft AVD article."/>
+                                            <TextBlock Style="{DynamicResource Hint}" Margin="0,4,0,0" TextWrapping="Wrap" Text="Shared computer activation (SharedComputerLicensing = 1) and Updates Enabled = FALSE are fixed: Windows multi-session needs both. Preset: the sample of the Microsoft AVD article with the best-practice apps."/>
                                             <Grid Margin="0,10,0,0">
                                                 <Grid.ColumnDefinitions><ColumnDefinition Width="160"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
-                                                <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+                                                <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
                                                 <TextBlock Text="Channel" VerticalAlignment="Center" Margin="0,4"/>
                                                 <ComboBox x:Name="CmbOffChannel" Grid.Column="1" Margin="0,4" AutomationProperties.Name="Update channel"/>
                                                 <TextBlock Grid.Row="1" Text="32 or 64 bit" VerticalAlignment="Center" Margin="0,4"/>
                                                 <ComboBox x:Name="CmbOffEdition" Grid.Row="1" Grid.Column="1" Margin="0,4" AutomationProperties.Name="32 or 64 bit"/>
-                                                <TextBlock Grid.Row="2" Text="Product" VerticalAlignment="Center" Margin="0,4"/>
-                                                <ComboBox x:Name="CmbOffProduct" Grid.Row="2" Grid.Column="1" Margin="0,4" AutomationProperties.Name="Product"/>
-                                                <TextBlock Grid.Row="3" Text="Languages" VerticalAlignment="Center" Margin="0,4"/>
-                                                <TextBox x:Name="TxtOffLanguages" Grid.Row="3" Grid.Column="1" Padding="6,4" Margin="0,4" ToolTip="Language IDs like de-DE, separated by comma; MatchOS = the language of Windows" AutomationProperties.Name="Languages"/>
-                                                <TextBlock Grid.Row="4" Text="Excluded apps" VerticalAlignment="Top" Margin="0,8"/>
-                                                <WrapPanel x:Name="PanelOffExclude" Grid.Row="4" Grid.Column="1" Margin="0,4"/>
+                                                <TextBlock Grid.Row="2" Text="Licence" VerticalAlignment="Center" Margin="0,4"/>
+                                                <ComboBox x:Name="CmbOffLicense" Grid.Row="2" Grid.Column="1" Margin="0,4" DisplayMemberPath="Name" SelectedValuePath="Key" AutomationProperties.Name="Licence of the users (decides the Microsoft 365 Apps product)"/>
+                                                <TextBlock x:Name="TxtOffLicenseHint" Grid.Row="3" Grid.Column="1" Style="{DynamicResource Hint}" TextWrapping="Wrap" Margin="0,0,0,6"/>
+                                                <TextBlock Grid.Row="4" Text="Outlook" VerticalAlignment="Center" Margin="0,4"/>
+                                                <ComboBox x:Name="CmbOffOutlook" Grid.Row="4" Grid.Column="1" Margin="0,4" DisplayMemberPath="Name" SelectedValuePath="Key" AutomationProperties.Name="Outlook (classic), Outlook (new) or both"/>
+                                                <TextBlock x:Name="TxtOffOutlookHint" Grid.Row="5" Grid.Column="1" Style="{DynamicResource Hint}" TextWrapping="Wrap" Margin="0,0,0,6"/>
+                                                <TextBlock Grid.Row="6" Text="Languages" VerticalAlignment="Top" Margin="0,8"/>
+                                                <WrapPanel x:Name="PanelOffLanguages" Grid.Row="6" Grid.Column="1" Margin="0,4"/>
+                                                <TextBlock Grid.Row="7" Text="Install" VerticalAlignment="Top" Margin="0,8"/>
+                                                <WrapPanel x:Name="PanelOffInstall" Grid.Row="7" Grid.Column="1" Margin="0,4"/>
+                                                <TextBlock x:Name="TxtOffAppsHint" Grid.Row="8" Grid.Column="1" Style="{DynamicResource Hint}" TextWrapping="Wrap" Margin="0,0,0,4"/>
                                             </Grid>
                                             <CheckBox x:Name="ChkOffMsi" Content="Remove older Office versions installed with Windows Installer (RemoveMSI)" Margin="0,8,0,0"/>
                                             <TextBlock Text="configuration.xml (preview, this is what the ODT gets)" Style="{DynamicResource Hint}" Margin="0,12,0,4"/>
@@ -356,7 +361,8 @@
                                             <TextBlock Style="{DynamicResource Hint}" Margin="0,4,0,0" TextWrapping="Wrap" Text="Hides the Office update notifications and the update button for all users (two machine policies of the AVD article). Press Test to see the state; Apply asks first."/>
                                             <StackPanel Orientation="Horizontal" Margin="0,12,0,0">
                                                 <Button x:Name="BtnOffPolicies" Content="Set update policies" Margin="0,0,8,0" AutomationProperties.Name="Hide Office update notifications for users"/>
-                                                <Button x:Name="BtnOffPoliciesUndo" Content="Undo policies" AutomationProperties.Name="Put the Office policy values back"/>
+                                                <Button x:Name="BtnOffPoliciesUndo" Content="Undo policies" Margin="0,0,8,0" AutomationProperties.Name="Put the Office policy values back"/>
+                                                <Button x:Name="BtnOffFixUndo" Content="Undo one-click fixes" AutomationProperties.Name="Put back the values that the Fix buttons of the state list changed"/>
                                             </StackPanel>
                                         </StackPanel>
                                     </Border>

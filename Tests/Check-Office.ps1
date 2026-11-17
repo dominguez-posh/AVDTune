@@ -10,6 +10,7 @@
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path $PSScriptRoot -Parent
 Import-Module (Join-Path $repo 'Modules\AVDTune.psm1') -Force
+Import-Module (Join-Path $repo 'Modules\AVDTune.UpdateBlock.psm1') -Force
 Import-Module (Join-Path $repo 'Modules\AVDTune.Updates.psm1') -Force
 Import-Module (Join-Path $repo 'Modules\AVDTune.Office.psm1') -Force
 . (Join-Path $PSScriptRoot 'Fakes\FakeMachine.ps1')
@@ -27,7 +28,8 @@ function New-Master([switch]$NoOffice) {
     $m
 }
 function Get-Row($Rows, [string]$Id) { @($Rows | Where-Object Id -eq $Id)[0] }
-function Reset-OfficeFiles { foreach ($f in 'office-undo.json', 'office-applied.json', 'office-policies-undo.json') { Remove-Item -LiteralPath (Join-Path $tmp "config\$f") -Force -ErrorAction SilentlyContinue } }
+function Reset-OfficeFiles { foreach ($f in 'office-undo.json', 'office-applied.json', 'office-policies-undo.json', 'office-fix-shared-undo.json', 'office-fix-updates-undo.json') { Remove-Item -LiteralPath (Join-Path $tmp "config\$f") -Force -ErrorAction SilentlyContinue } }
+function Write-FixRec($Path, [string]$Json) { Write-AVDTuneFile $Path ($Json.Replace('@@NOW@@', [datetime]::UtcNow.ToString('o'))) }   # At just before now: not in the future, later than every earlier run of the check
 function Get-RunLog($O, [string]$Pattern) { @($O.Log | Where-Object { $_ -like $Pattern }) }
 
 $tmp = Join-Path ([IO.Path]::GetTempPath()) ('avdtune-office-' + [guid]::NewGuid().ToString('N'))
@@ -40,8 +42,8 @@ try {
 
     # ---------------------------------------------------------------- defaults and validation
     $d = Get-AVDTuneOfficeDefaults
-    Test-Check 'defaults are the sample of the AVD article and valid' ((@(Test-AVDTuneOfficeConfig $d).Count -eq 0) -and $d.Channel -eq 'MonthlyEnterprise' -and $d.Edition -eq '64' -and $d.Product -eq 'O365ProPlusRetail' -and $d.RemoveMSI -and 'MatchOS' -in $d.Languages -and 'Teams' -in $d.ExcludeApps) $null
-    function With([hashtable]$Over) { $c = [ordered]@{ Channel = 'MonthlyEnterprise'; Edition = '64'; Product = 'O365ProPlusRetail'; Languages = @('de-DE'); ExcludeApps = @(); RemoveMSI = $true }; foreach ($k in $Over.Keys) { $c[$k] = $Over[$k] }; [pscustomobject]$c }
+    Test-Check 'defaults are the sample of the AVD article and valid' ((@(Test-AVDTuneOfficeConfig $d).Count -eq 0) -and $d.Channel -eq 'MonthlyEnterprise' -and $d.Edition -eq '64' -and $d.Product -eq 'O365ProPlusRetail' -and $d.RemoveMSI -and 'MatchOS' -in $d.Languages -and 'Teams' -in $d.ExcludeApps -and 'Access' -in $d.ExcludeApps -and 'Word' -notin $d.ExcludeApps) $null
+    function With([hashtable]$Over) { $c = [ordered]@{ Channel = 'MonthlyEnterprise'; Edition = '64'; Product = 'O365ProPlusRetail'; Languages = @('de-DE'); Outlook = 'both'; ExcludeApps = @(); RemoveMSI = $true }; foreach ($k in $Over.Keys) { $c[$k] = $Over[$k] }; [pscustomobject]$c }
     Test-Check 'validation refuses: unknown channel, edition 128, product Visio, no language, language injection, 21 languages, duplicate language, unknown app' (
         (@(Test-AVDTuneOfficeConfig (With @{ Channel = 'Insider' })).Count -ge 1) -and (@(Test-AVDTuneOfficeConfig (With @{ Edition = '128' })).Count -ge 1) -and (@(Test-AVDTuneOfficeConfig (With @{ Product = 'VisioProRetail' })).Count -ge 1) -and
         (@(Test-AVDTuneOfficeConfig (With @{ Languages = @() })).Count -ge 1) -and (@(Test-AVDTuneOfficeConfig (With @{ Languages = @('de-DE"/><Evil') })).Count -ge 1) -and (@(Test-AVDTuneOfficeConfig (With @{ Languages = @(1..21 | ForEach-Object { "xx-A$_" }) })).Count -ge 1) -and
@@ -54,9 +56,9 @@ try {
 
     # ---------------------------------------------------------------- saved configuration
     Test-Check 'no saved file: the defaults' ((Get-AVDTuneOfficeConfig -Root $tmp).Channel -eq 'MonthlyEnterprise') $null
-    $saved = Set-AVDTuneOfficeConfig -Root $tmp -Config (With @{ Channel = 'SemiAnnual'; Languages = @('de-DE', 'en-US'); ExcludeApps = @('Teams', 'Access', 'Teams') })
+    $saved = Set-AVDTuneOfficeConfig -Root $tmp -Config (With @{ Channel = 'SemiAnnual'; Languages = @('de-DE', 'en-US'); ExcludeApps = @('Teams', 'Access', 'Teams'); Outlook = 'both' })
     $back = Get-AVDTuneOfficeConfig -Root $tmp
-    Test-Check 'saved configuration comes back typed, apps sorted and unique, no gate needed' ($back.Channel -eq 'SemiAnnual' -and $back.RemoveMSI -eq $true -and (@($back.ExcludeApps) -join ',') -eq 'Access,Teams' -and (@($back.Languages) -join ',') -eq 'de-DE,en-US') ($back | ConvertTo-Json -Compress)
+    Test-Check 'saved configuration comes back typed, apps sorted and unique, no gate needed' ($back.Channel -eq 'SemiAnnual' -and $back.RemoveMSI -eq $true -and (@($back.ExcludeApps) -join ',') -eq 'Access,OneDrive,Teams' -and (@($back.Languages) -join ',') -eq 'de-DE,en-US') ($back | ConvertTo-Json -Compress)
     Test-Check 'an invalid configuration is not saved' ((Test-Throws { Set-AVDTuneOfficeConfig -Root $tmp -Config (With @{ Channel = 'x' }) }) -and (Get-AVDTuneOfficeConfig -Root $tmp).Channel -eq 'SemiAnnual') $null
     [IO.File]::WriteAllText((Join-Path $tmp 'config\office.json'), '{"Channel":"Current","Edition":"64","Product":"O365ProPlusRetail","Languages":["de-DE"],"ExcludeApps":[],"RemoveMSI":"false"}')
     Test-Check 'a saved file with "false" as text is refused (fail closed, nothing built from it)' ((Get-ThrownText { Get-AVDTuneOfficeConfig -Root $tmp }) -like '*not usable*') $null
@@ -65,7 +67,7 @@ try {
     # ---------------------------------------------------------------- configuration.xml
     $xml = New-AVDTuneOfficeXml -Config $d -Mode Install -LogPath $log
     $c = Test-AVDTuneOfficeXml $xml
-    Test-Check 'xml: Learn sample (monthly enterprise, 64, product, languages, excludes, shared licensing 1, updates FALSE, no UI)' ($c.Ok -and $c.Channel -eq 'MonthlyEnterprise' -and $c.Edition -eq '64' -and $c.Product -eq 'O365ProPlusRetail' -and (@($c.Languages) -join ',') -eq 'en-US,MatchOS' -and (@($c.ExcludeApps) -join ',') -eq 'Groove,Lync,OneDrive,Teams' -and $c.Shared -eq '1' -and $c.UpdatesEnabled -eq 'FALSE') $xml
+    Test-Check 'xml: Learn sample (monthly enterprise, 64, product, languages, excludes, shared licensing 1, updates FALSE, no UI)' ($c.Ok -and $c.Channel -eq 'MonthlyEnterprise' -and $c.Edition -eq '64' -and $c.Product -eq 'O365ProPlusRetail' -and (@($c.Languages) -join ',') -eq 'en-US,MatchOS' -and (@($c.ExcludeApps) -join ',') -eq 'Access,Bing,Groove,Lync,OneDrive,Publisher,Teams' -and $c.Shared -eq '1' -and $c.UpdatesEnabled -eq 'FALSE') $xml
     Test-Check 'xml: RemoveMSI, FORCEAPPSHUTDOWN, Display None and AcceptEULA, logging into the log folder' ($xml -match '<RemoveMSI />' -and $xml -match 'FORCEAPPSHUTDOWN' -and $xml -match 'Level="None" AcceptEULA="TRUE"' -and $xml -match [regex]::Escape($log)) $xml
     Test-Check 'xml: without RemoveMSI no element' ((New-AVDTuneOfficeXml -Config (With @{ RemoveMSI = $false }) -LogPath $log) -notmatch 'RemoveMSI') $null
     $rx = New-AVDTuneOfficeXml -Config $d -Mode Remove -LogPath $log
@@ -177,7 +179,7 @@ try {
     Test-Check 'install: the work folder is removed at the end' (@(Get-RunLog $o 'RemoveFolder *').Count -eq 1) $null
     Test-Check 'install: the configuration handed to setup.exe is the built one (shared licensing, log folder below the state root)' ($o.Store.Texts['C:\fake\temp\office-0\configuration.xml'] -match 'SharedComputerLicensing' -and $o.Store.Texts['C:\fake\temp\office-0\configuration.xml'] -match [regex]::Escape((Join-Path $tmp 'logs\office'))) $null
     $cl = @(Get-AVDTuneChangeLog -Root $tmp | Where-Object { $_.Category -eq 'Office' })
-    Test-Check 'install: run record, LastChange, change log entry Added with the settings' (@(Get-AVDTuneRun -Root $tmp | Where-Object Plan -eq 'Office install').Count -eq 1 -and $null -ne (Get-AVDTuneState $tmp).LastChange -and $cl.Count -eq 1 -and $cl[0].ChangeType -eq 'Added' -and $cl[0].Text -like '*MonthlyEnterprise*' -and $cl[0].Text -like '*excluded Groove/Lync/OneDrive/Teams*') ($cl | ConvertTo-Json -Compress)
+    Test-Check 'install: run record, LastChange, change log entry Added with the settings' (@(Get-AVDTuneRun -Root $tmp | Where-Object Plan -eq 'Office install').Count -eq 1 -and $null -ne (Get-AVDTuneState $tmp).LastChange -and $cl.Count -eq 1 -and $cl[0].ChangeType -eq 'Added' -and $cl[0].Text -like '*MonthlyEnterprise*' -and $cl[0].Text -like '*excluded Access/Bing/Groove/Lync/OneDrive/Publisher/Teams*') ($cl | ConvertTo-Json -Compress)
     Test-Check 'install: undo record says Office was not there; applied configuration kept' ((Read-AVDTuneJson (Join-Path $tmp 'config\office-undo.json')).BeforeInstalled -eq $false -and (Read-AVDTuneJson (Join-Path $tmp 'config\office-applied.json')).Channel -eq 'MonthlyEnterprise') $null
     Test-Check 'install: the state of the machine now reads green in the rows' (@(Get-AVDTuneOfficeRows -Machine $m -Config $d | Where-Object { $_.Status -eq 'red' }).Count -eq 0) $null
 
@@ -416,6 +418,299 @@ try {
     $h.Dispose()
     $canWriteAfter = try { [IO.File]::AppendAllText($hf, 'y'); $true } catch { $false }
     Test-Check 'real adapter: a held setup.exe cannot be written, deleted or renamed, can be read, and is free after the release' (-not $canWrite -and -not $canDelete -and -not $canRename -and $canRead -and $canWriteAfter) "$canWrite $canDelete $canRename $canRead $canWriteAfter"
+
+    # ---------------------------------------------------------------- issue 61: licence, languages, Outlook, install list
+    $lic = @(Get-AVDTuneOfficeLicenses)
+    Test-Check '61 licence: two choices in licence terms, the IDs stay the product IDs, each with a sentence of explanation' ($lic.Count -eq 2 -and $lic[0].Key -ceq 'O365ProPlusRetail' -and $lic[0].Name -like '*E3/E5*Apps for enterprise*' -and $lic[1].Key -ceq 'O365BusinessRetail' -and $lic[1].Name -like '*Business Premium*Apps for business*' -and -not (@($lic | Where-Object { -not $_.Text -or $_.Text.Length -lt 40 }).Count) -and (@(Get-AVDTuneOfficeProducts) -join ',') -eq 'O365ProPlusRetail,O365BusinessRetail') $null
+    Test-Check '61 licence: the name of an ID, an unknown ID stays as it is' ((Get-AVDTuneOfficeLicenseName 'O365BusinessRetail') -like '*Business Premium*' -and (Get-AVDTuneOfficeLicenseName 'ProPlus2021Volume') -ceq 'ProPlus2021Volume') $null
+    $langs = @(Get-AVDTuneOfficeLanguages)
+    Test-Check '61 languages: the common ones of the issue and MatchOS, all valid language IDs' ($langs.Count -eq 19 -and 'MatchOS' -in $langs -and (@('de-DE', 'en-US', 'en-GB', 'fr-FR', 'it-IT', 'es-ES', 'nl-NL', 'pl-PL', 'pt-PT', 'pt-BR', 'sv-SE', 'da-DK', 'nb-NO', 'fi-FI', 'cs-CZ', 'tr-TR', 'ja-JP', 'zh-CN') | Where-Object { $_ -cnotin $langs }).Count -eq 0 -and (@(Test-AVDTuneOfficeConfig (With @{ Languages = $langs })).Count -eq 0)) ($langs -join ',')
+    Test-Check '61 languages: default selection is MatchOS and en-US, en-US first (shell language) and MatchOS last' ((@($d.Languages) -join ',') -ceq 'en-US,MatchOS' -and ((@(ConvertTo-AVDTuneOfficeLanguageList @('MatchOS', 'de-DE', 'en-US')) -join ',') -ceq 'en-US,de-DE,MatchOS') -and ((@(ConvertTo-AVDTuneOfficeLanguageList @('fil-PH', 'MatchOS', 'fr-FR')) -join ',') -ceq 'fr-FR,fil-PH,MatchOS')) (@(ConvertTo-AVDTuneOfficeLanguageList @('MatchOS', 'de-DE', 'en-US')) -join ',')
+    $inst = @(Get-AVDTuneOfficeInstallApps)
+    Test-Check '61 install list: Word, Excel, PowerPoint, OneNote ticked; Access, Publisher, Groove, Lync, Bing offered but not ticked; Teams, OneDrive and Outlook are no ticks' ((@(Get-AVDTuneOfficeDefaultInstallApps) -join ',') -ceq 'Word,Excel,PowerPoint,OneNote' -and (@('Access', 'Publisher', 'Groove', 'Lync', 'Bing') | Where-Object { $_ -cnotin $inst }).Count -eq 0 -and 'Teams' -cnotin $inst -and 'OneDrive' -cnotin $inst -and 'Outlook' -cnotin $inst -and 'OutlookForWindows' -cnotin $inst) ($inst -join ',')
+    Test-Check '61 install list: the unticked apps are the ExcludeApp list, plus OneDrive and Teams always' ((@(ConvertTo-AVDTuneOfficeExcludes @('Word', 'Excel', 'PowerPoint', 'OneNote')) -join ',') -ceq 'Access,Bing,Groove,Lync,OneDrive,Publisher,Teams' -and (@($d.ExcludeApps) -join ',') -ceq 'Access,Bing,Groove,Lync,OneDrive,Publisher,Teams' -and (@(ConvertTo-AVDTuneOfficeExcludes @('Word', 'Access')) -join ',') -ceq 'Bing,Excel,Groove,Lync,OneDrive,OneNote,PowerPoint,Publisher,Teams' -and (@(ConvertTo-AVDTuneOfficeExcludes @()).Count -eq 11)) (@(ConvertTo-AVDTuneOfficeExcludes @('Word', 'Access')) -join ',')
+    Test-Check '61 install list: Teams, OneDrive, Outlook or an unknown ID cannot be ticked (they are no install apps)' ((Test-Throws { ConvertTo-AVDTuneOfficeExcludes @('Teams') }) -and (Test-Throws { ConvertTo-AVDTuneOfficeExcludes @('OneDrive') }) -and (Test-Throws { ConvertTo-AVDTuneOfficeExcludes @('Outlook') }) -and (Test-Throws { ConvertTo-AVDTuneOfficeExcludes @('word') }) -and (Test-Throws { ConvertTo-AVDTuneOfficeExcludes @('Evil') })) $null
+    $oc = @(Get-AVDTuneOfficeOutlookChoices)
+    Test-Check '61 Outlook: three choices classic, new, both; the Microsoft recommendation (both, side by side) is the default' ((@($oc | ForEach-Object Key | Sort-Object) -join ',') -ceq 'both,classic,new' -and $d.Outlook -ceq 'both' -and ($oc | Where-Object Key -eq 'both').Name -like '*recommended by Microsoft*') $null
+    Test-Check '61 Outlook: strict values (other case, empty, a number, a list and the missing property are refused); Outlook in ExcludeApps is refused' ((@('Both', 'new ', '', 'classic,new') | Where-Object { @(Test-AVDTuneOfficeConfig (With @{ Outlook = $_ })).Count -eq 0 }).Count -eq 0 -and (@(Test-AVDTuneOfficeConfig (With @{ Outlook = 1 })).Count -ge 1) -and (@(Test-AVDTuneOfficeConfig (With @{ Outlook = $null })).Count -ge 1) -and (@(Test-AVDTuneOfficeConfig (With @{ Outlook = @('both') })).Count -ge 1) -and (@(Test-AVDTuneOfficeConfig (With @{ ExcludeApps = @('Outlook') })).Count -ge 1) -and (@(Test-AVDTuneOfficeConfig (With @{ ExcludeApps = @('OutlookForWindows') })).Count -ge 1)) $null
+    $xBoth = Test-AVDTuneOfficeXml (New-AVDTuneOfficeXml -Config (With @{ Outlook = 'both' }) -LogPath $log)
+    $xClassic = Test-AVDTuneOfficeXml (New-AVDTuneOfficeXml -Config (With @{ Outlook = 'classic'; ExcludeApps = @('Access') }) -LogPath $log)
+    $xNew = Test-AVDTuneOfficeXml (New-AVDTuneOfficeXml -Config (With @{ Outlook = 'new'; ExcludeApps = @('Access') }) -LogPath $log)
+    Test-Check '61 Outlook xml: both excludes neither, classic excludes OutlookForWindows, new excludes Outlook, the unticked apps stay excluded' (((@($xBoth.ExcludeApps) -join ',') -ceq 'OneDrive,Teams') -and (@($xClassic.ExcludeApps) -join ',') -ceq 'Access,OneDrive,OutlookForWindows,Teams' -and (@($xNew.ExcludeApps) -join ',') -ceq 'Access,OneDrive,Outlook,Teams') ((@($xClassic.ExcludeApps) -join ',') + ' / ' + (@($xNew.ExcludeApps) -join ','))
+    Test-Check '61 Outlook xml: the configuration.xml of the defaults has both Outlooks (not excluded), Access/Publisher/Groove/Lync/Bing/OneDrive/Teams excluded' ($c.Ok -and 'Outlook' -notin $c.ExcludeApps -and 'OutlookForWindows' -notin $c.ExcludeApps -and (@($c.ExcludeApps) -join ',') -ceq 'Access,Bing,Groove,Lync,OneDrive,Publisher,Teams') ($c.ExcludeApps -join ',')
+    # a configuration saved before issue 61 (no Outlook setting) is converted, never guessed: exactly one Outlook excluded gives the other choice, none gives both, both excluded stays invalid
+    $old1 = '{"Channel":"Current","Edition":"64","Product":"O365ProPlusRetail","Languages":["de-DE"],"ExcludeApps":["Teams","OutlookForWindows"],"RemoveMSI":true}'
+    $old2 = '{"Channel":"Current","Edition":"64","Product":"O365ProPlusRetail","Languages":["de-DE"],"ExcludeApps":["Groove","Outlook"],"RemoveMSI":true}'
+    $old3 = '{"Channel":"Current","Edition":"64","Product":"O365ProPlusRetail","Languages":["de-DE"],"ExcludeApps":["Groove"],"RemoveMSI":true}'
+    $old4 = '{"Channel":"Current","Edition":"64","Product":"O365ProPlusRetail","Languages":["de-DE"],"ExcludeApps":["Outlook","OutlookForWindows"],"RemoveMSI":true}'
+    $cfgPath = Join-Path $tmp 'config\office.json'
+    Write-AVDTuneFile $cfgPath $old1; $g1 = Get-AVDTuneOfficeConfig -Root $tmp
+    Write-AVDTuneFile $cfgPath $old2; $g2 = Get-AVDTuneOfficeConfig -Root $tmp
+    Write-AVDTuneFile $cfgPath $old3; $g3 = Get-AVDTuneOfficeConfig -Root $tmp
+    Write-AVDTuneFile $cfgPath $old4; $g4 = Get-ThrownText { Get-AVDTuneOfficeConfig -Root $tmp }
+    Test-Check '61 old saved file: OutlookForWindows excluded = classic, Outlook excluded = new, none = both (the Outlook IDs leave ExcludeApps); both excluded is refused' ($g1.Outlook -ceq 'classic' -and (@($g1.ExcludeApps) -join ',') -ceq 'OneDrive,Teams' -and $g2.Outlook -ceq 'new' -and (@($g2.ExcludeApps) -join ',') -ceq 'Groove,OneDrive,Teams' -and $g3.Outlook -ceq 'both' -and $g4 -like '*not usable*') "$($g1.Outlook) $($g2.Outlook) $($g3.Outlook) $g4"
+    Write-AVDTuneFile $cfgPath '{"Channel":"Current","Edition":"64","Product":"O365ProPlusRetail","Languages":["de-DE"],"Outlook":"new","ExcludeApps":["Outlook"],"RemoveMSI":true}'
+    Test-Check '61 saved file with an Outlook setting is not converted: Outlook in its ExcludeApps stays refused' ((Get-ThrownText { Get-AVDTuneOfficeConfig -Root $tmp }) -like '*not usable*') $null
+    Remove-Item $cfgPath -Force
+    $savedNew = Set-AVDTuneOfficeConfig -Root $tmp -Config (With @{ Outlook = 'classic'; Languages = @('en-US', 'MatchOS') })
+    Test-Check '61 saved configuration keeps the Outlook choice' ((Get-AVDTuneOfficeConfig -Root $tmp).Outlook -ceq 'classic' -and $savedNew.Outlook -ceq 'classic') $null
+    Remove-Item $cfgPath -Force
+
+    # ---------------------------------------------------------------- issue 61: installed languages (several registry places, none documented on Learn)
+    $mL = New-Master; & $mL.RegSet $ctr 'ProductReleaseIds' 'O365ProPlusRetail' 'String'
+    $r0 = Get-Row @(Get-AVDTuneOfficeRows -Machine $mL -Config $d) 'office.languages'
+    Test-Check '61 languages detection: nothing readable says where it looked and is info, not a wrong green' ($r0.Status -eq 'info' -and $r0.Reason -like '*ProductReleaseIDs\Active*' -and $r0.Reason -like '*uninstall*' -and -not $r0.Verified) $r0.Reason
+    & $mL.RegSet "$($ctr -replace 'Configuration$', '')ProductReleaseIDs\Active\O365ProPlusRetail\en-us" 'x' 1 'DWord'
+    & $mL.RegSet "$($ctr -replace 'Configuration$', '')ProductReleaseIDs\Active\O365ProPlusRetail\x-none" 'x' 1 'DWord'
+    Test-Check '61 languages detection: the Active key is read, x-none is not a language' ((@((Get-AVDTuneOfficeState $mL).Languages) -join ',') -ceq 'en-us') (@((Get-AVDTuneOfficeState $mL).Languages) -join ',')
+    $mU = New-Master; & $mU.RegSet $ctr 'ProductReleaseIds' 'O365ProPlusRetail' 'String'
+    & $mU.RegSet 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\O365ProPlusRetail - de-de' 'DisplayName' 'Microsoft 365 Apps' 'String'
+    & $mU.RegSet 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\O365ProPlusRetail - fr-fr' 'DisplayName' 'Microsoft 365 Apps' 'String'
+    & $mU.RegSet 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\O365ProPlusRetail - x-none' 'DisplayName' 'x' 'String'
+    & $mU.RegSet 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\VisioProRetail - ja-jp' 'DisplayName' 'other product' 'String'
+    & $mU.RegSet 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\O365ProPlusRetail - de-de - evil' 'DisplayName' 'x' 'String'
+    Test-Check '61 languages detection: the uninstall entries "<product> - <culture>" (64 and 32 bit view) of the installed product only, nothing else' ((@((Get-AVDTuneOfficeState $mU).Languages | Sort-Object) -join ',') -ceq 'de-de,fr-fr') (@((Get-AVDTuneOfficeState $mU).Languages) -join ',')
+    $rowsL = @(Get-AVDTuneOfficeRows -Machine $mU -Config (With @{ Languages = @('de-DE', 'fr-FR', 'MatchOS') }))
+    Test-Check '61 languages detection: IDs of another case count as installed (de-DE = de-de) and the row is green' ((Get-Row $rowsL 'office.languages').Status -eq 'green') (Get-Row $rowsL 'office.languages').Reason
+    $mI = New-Master -NoOffice; $oI = New-AVDTuneFakeOffice -Machine $mI; Reset-OfficeFiles
+    Open-AVDTuneWriteGate -SnapshotId 'snap-check' -ConfirmedBy 'Check Runner'
+    [void](Invoke-AVDTuneOfficeRecorded -Machine $mI -O $oI -Root $tmp -Mode Install -Config (With @{ Languages = @('en-US', 'de-DE', 'MatchOS') }) -User 'admin1' -SnapshotId 'snap-check')
+    Test-Check '61 languages detection: after an install through the fake setup the installed languages are read back (round trip)' ((@((Get-AVDTuneOfficeState $mI).Languages | Sort-Object) -join ',') -ceq 'de-de,en-us') (@((Get-AVDTuneOfficeState $mI).Languages) -join ',')
+    Reset-OfficeFiles
+
+    # ---------------------------------------------------------------- issue 61: one-click fixes on the red rows
+    $mF = New-Master; & $mF.RegSet $ctr 'SharedComputerLicensing' '0' 'String'; & $mF.RegSet $ctr 'UpdatesEnabled' 'TRUE' 'String'
+    $rF = @(Get-AVDTuneOfficeRows -Machine $mF -Config $d)
+    Test-Check '61 fix rows: the red shared row has the fix "shared", the red updates row the fix "updates"' ((Get-Row $rF 'office.shared').FixAction -ceq 'shared' -and (Get-Row $rF 'office.updates').FixAction -ceq 'updates' -and (Get-Row $rF 'office.shared').Status -eq 'red') $null
+    Test-Check '61 fix rows: no other row has a fix, and every row with a fix is red' ((@($rF | Where-Object { $_.FixAction -and $_.Status -ne 'red' }).Count -eq 0) -and (@($rF | Where-Object { $_.FixAction } | ForEach-Object Id | Sort-Object) -join ',') -ceq 'office.shared,office.updates') (($rF | ForEach-Object { "$($_.Id)=$($_.Status)/$($_.FixAction)" }) -join ' ')
+    $rGreen = @(Get-AVDTuneOfficeRows -Machine (New-Master) -Config $d)
+    Test-Check '61 fix rows: a master that is right has no fix button anywhere; not installed (red) and an unsupported product (red) have none either' ((@($rGreen | Where-Object { $_.FixAction }).Count -eq 0) -and (@(Get-AVDTuneOfficeRows -Machine (New-Master -NoOffice) -Config $d | Where-Object { $_.FixAction }).Count -eq 0) -and (@(Get-AVDTuneOfficeRows -Machine $m5 -Config $d | Where-Object { $_.FixAction }).Count -eq 0)) $null
+    Test-Check '61 fix rows: a fix on a row that is not red is refused when the row is built' ((Test-Throws { & (Get-Module AVDTune.Office) { New-AVDTuneOfficeRow 'office.x' 'x' 'yellow' 'r' 'f' 'https://learn.microsoft.com/x' $true '' 'shared' } }) -and -not (Test-Throws { & (Get-Module AVDTune.Office) { New-AVDTuneOfficeRow 'office.x' 'x' 'red' 'r' 'f' 'https://learn.microsoft.com/x' $true '' 'shared' } })) $null
+    Test-Check '61 fix rows: the names of the fixes are exactly shared and updates; every red fix row names its source on Learn' ((@(Get-AVDTuneOfficeFixNames | Sort-Object) -join ',') -ceq 'shared,updates' -and (@($rF | Where-Object { $_.FixAction -and $_.Source -notmatch '^https://learn\.microsoft\.com/' }).Count -eq 0)) $null
+    $mP = New-Master; & $mP.RegSet $ctr 'UpdatesEnabled' 'TRUE' 'String'; & $mP.RegSet $pk 'enableautomaticupdates' 0 'DWord'
+    $mQ = New-Master; & $mQ.RegSet $pk 'enableautomaticupdates' 1 'DWord'
+    Test-Check '61 updates state: the policy enableautomaticupdates = 0 makes it green even when the ODT value says TRUE (Group Policy wins); policy 1 is red even when the ODT value says FALSE' ((Get-Row @(Get-AVDTuneOfficeRows -Machine $mP -Config $d) 'office.updates').Status -eq 'green' -and (Get-Row @(Get-AVDTuneOfficeRows -Machine $mP -Config $d) 'office.updates').Reason -like '*enableautomaticupdates*' -and (Get-Row @(Get-AVDTuneOfficeRows -Machine $mQ -Config $d) 'office.updates').Status -eq 'red') $null
+
+    $pk2 = 'HKLM:\SOFTWARE\Policies\Microsoft\office\16.0\common\officeupdate'; $fixS = Join-Path $tmp 'config\office-fix-shared-undo.json'; $fixU = Join-Path $tmp 'config\office-fix-updates-undo.json'
+    $mark = '2000-01-01T00:00:00.0000000Z'
+    $m = New-Master; & $m.RegSet $ctr 'SharedComputerLicensing' '0' 'String'; Reset-OfficeFiles; $m.Log.Clear()
+    Close-AVDTuneWriteGate
+    $dryF = Set-AVDTuneOfficeFix -Machine $m -Name shared -Root $tmp -WhatIf
+    Test-Check '61 fix shared: a dry run changes nothing and writes no record (also without the open gate)' ($dryF.WhatIf -and @($dryF.Results | Where-Object Status -eq 'WhatIf').Count -eq 1 -and @($m.Log | Where-Object { $_ -like 'RegSet*' }).Count -eq 0 -and -not (Test-Path $fixS)) $null
+    Test-Check '61 fix shared: refused without the open gate, nothing written, no record' ((Test-Throws { Set-AVDTuneOfficeFix -Machine $m -Name shared -Root $tmp }) -and @($m.Log | Where-Object { $_ -like 'RegSet*' }).Count -eq 0 -and -not (Test-Path $fixS)) $null
+    Open-AVDTuneWriteGate -SnapshotId 'snap-check' -ConfirmedBy 'Check Runner'
+    [void](Set-AVDTuneState -Root $tmp -Values @{ LastChange = $mark })
+    $apF = Set-AVDTuneOfficeFix -Machine $m -Name shared -Root $tmp -User 'admin1' -SnapshotId 'snap-check'
+    $clF = @(Get-AVDTuneChangeLog -Root $tmp | Where-Object { $_.Component -eq 'office.fix.shared' })
+    Test-Check '61 fix shared: String "1" under ClickToRun\Configuration, run record, LastChange, change log entry (category Office), the earlier "0" kept as String' ((& $m.RegGet $ctr 'SharedComputerLicensing') -ceq '1' -and @($m.Log | Where-Object { $_ -like 'RegSet*|SharedComputerLicensing=1 (String)' }).Count -eq 1 -and @($apF.Results | Where-Object Status -eq 'Changed').Count -eq 1 -and $apF.Results[0].Reboot -and (Get-AVDTuneState $tmp).LastChange -ne $mark -and $clF.Count -eq 1 -and $clF[0].Category -eq 'Office' -and @(Get-AVDTuneRun -Root $tmp | Where-Object Plan -eq 'Office fix: shared').Count -eq 1 -and (Read-AVDTuneJson $fixS).Previous.Value -ceq '0' -and (Read-AVDTuneJson $fixS).Previous.Type -ceq 'String') (($m.Log | Where-Object { $_ -like 'RegSet*' }) -join ' | ')
+    Test-Check '61 fix shared: the row is green afterwards' ((Get-Row @(Get-AVDTuneOfficeRows -Machine $m -Config $d) 'office.shared').Status -eq 'green') $null
+    [void](Set-AVDTuneOfficeFix -Machine $m -Name shared -Root $tmp -User 'admin1' -SnapshotId 'snap-check')
+    Test-Check '61 fix shared: a second apply is Unchanged and does not overwrite the record of the first earlier value' ((Read-AVDTuneJson $fixS).Previous.Value -ceq '0' -and @(Get-AVDTuneChangeLog -Root $tmp | Where-Object { $_.Component -eq 'office.fix.shared' }).Count -eq 1) $null
+    $upF = Undo-AVDTuneOfficeFix -Machine $m -Name shared -Root $tmp -User 'admin1' -SnapshotId 'snap-check'
+    Test-Check '61 fix shared: undo puts the earlier "0" back as String, change log "Undo:", record removed' ((& $m.RegGet $ctr 'SharedComputerLicensing') -ceq '0' -and @($m.Log | Where-Object { $_ -like 'RegSet*|SharedComputerLicensing=0 (String)' }).Count -eq 1 -and @($upF.Results | Where-Object Status -eq 'Reverted').Count -eq 1 -and -not (Test-Path $fixS) -and @(Get-AVDTuneChangeLog -Root $tmp | Where-Object { $_.Component -eq 'office.fix.shared' -and $_.Text -like 'Undo:*' }).Count -eq 1) (($upF.Results | ForEach-Object Status) -join ',')
+    Test-Check '61 fix shared: undo without a record is refused' ((Get-ThrownText { Undo-AVDTuneOfficeFix -Machine $m -Name shared -Root $tmp }) -like '*nothing to undo*') $null
+
+    $m = New-Master; & $m.RegSet $ctr 'UpdatesEnabled' 'TRUE' 'String'; Reset-OfficeFiles; $m.Log.Clear()
+    [void](Set-AVDTuneOfficeFix -Machine $m -Name updates -Root $tmp -User 'admin1' -SnapshotId 'snap-check')
+    Test-Check '61 fix updates: DWord enableautomaticupdates = 0 in the officeupdate policy key; the value was absent, so the record says so (Previous null)' ((& $m.RegGet $pk2 'enableautomaticupdates') -eq 0 -and @($m.Log | Where-Object { $_ -like 'RegSet*|enableautomaticupdates=0 (DWord)' }).Count -eq 1 -and (Test-Path $fixU) -and $null -eq (Read-AVDTuneJson $fixU).Previous) (($m.Log | Where-Object { $_ -like 'RegSet*' }) -join ' | ')
+    Test-Check '61 fix updates: the row is green afterwards (the policy wins over the ODT value TRUE)' ((Get-Row @(Get-AVDTuneOfficeRows -Machine $m -Config $d) 'office.updates').Status -eq 'green') $null
+    [void](Undo-AVDTuneOfficeFix -Machine $m -Name updates -Root $tmp -User 'admin1' -SnapshotId 'snap-check')
+    Test-Check '61 fix updates: undo removes the value that was absent' ($null -eq (& $m.RegGet $pk2 'enableautomaticupdates') -and -not (Test-Path $fixU)) $null
+    $m = New-Master; & $m.RegSet $pk2 'enableautomaticupdates' 1 'DWord'; Reset-OfficeFiles
+    [void](Set-AVDTuneOfficeFix -Machine $m -Name updates -Root $tmp -User 'admin1' -SnapshotId 'snap-check')
+    $prF = (Read-AVDTuneJson $fixU).Previous
+    Test-Check '61 fix updates: a policy that was 1 (updates on) is kept with its type and set to 0' ((& $m.RegGet $pk2 'enableautomaticupdates') -eq 0 -and $prF.Value -eq 1 -and $prF.Type -ceq 'DWord') ($prF | ConvertTo-Json -Compress)
+    [void](Undo-AVDTuneOfficeFix -Machine $m -Name updates -Root $tmp -User 'admin1' -SnapshotId 'snap-check')
+    Test-Check '61 fix updates: undo puts 1 back' ((& $m.RegGet $pk2 'enableautomaticupdates') -eq 1) $null
+    $m = New-Master; & $m.RegSet $pk2 'enableautomaticupdates' 0 'DWord'; Reset-OfficeFiles; $m.Log.Clear()
+    [void](Set-AVDTuneOfficeFix -Machine $m -Name updates -Root $tmp -User 'admin1' -SnapshotId 'snap-check')
+    Test-Check '61 fix updates: already compliant: nothing written, no record, no change log entry' (@($m.Log | Where-Object { $_ -like 'RegSet*' }).Count -eq 0 -and -not (Test-Path $fixU)) $null
+    Test-Check '61 fix: an unknown name, a name with a path, a different case are refused before anything happens' ((Test-Throws { Set-AVDTuneOfficeFix -Machine $m -Name 'evil' -Root $tmp }) -and (Test-Throws { Set-AVDTuneOfficeFix -Machine $m -Name '..\..\x' -Root $tmp }) -and (Test-Throws { Set-AVDTuneOfficeFix -Machine $m -Name 'Shared' -Root $tmp }) -and (Test-Throws { Undo-AVDTuneOfficeFix -Machine $m -Name '..\x' -Root $tmp }) -and (Test-Throws { Get-AVDTuneOfficeFixText 'evil' })) $null
+    $badFix = [ordered]@{
+        'old format without type' = '{"Previous":{"Value":"1"}}'
+        'text for a DWord' = '{"Previous":{"Value":"1","Type":"DWord"}}'
+        'unknown type' = '{"Previous":{"Value":1,"Type":"Binary"}}'
+        'type in another case' = '{"Previous":{"Value":"1","Type":"string"}}'
+        'number for a String' = '{"Previous":{"Value":1,"Type":"String"}}'
+        'Previous is text' = '{"Previous":"x"}'
+    }
+    foreach ($k in $badFix.Keys) {
+        $m = New-Master; & $m.RegSet $ctr 'SharedComputerLicensing' '1' 'String'; Write-AVDTuneFile $fixS $badFix[$k]; $m.Log.Clear()
+        Test-Check "61 fix undo record is typed: $k is refused, nothing written" ((Get-ThrownText { Undo-AVDTuneOfficeFix -Machine $m -Name shared -Root $tmp }) -like '*not usable*' -and @($m.Log | Where-Object { $_ -like 'Reg*' }).Count -eq 0) $null
+    }
+    Remove-Item $fixS -Force -ErrorAction SilentlyContinue
+    # LastChange before the attempt and also on a failure; the record stays
+    $m = New-Master; & $m.RegSet $ctr 'SharedComputerLicensing' '1' 'String'
+    Write-FixRec $fixS '{"At":"@@NOW@@","Previous":{"Value":"0","Type":"String"}}'
+    [void](Set-AVDTuneState -Root $tmp -Values @{ LastChange = $mark }); $m.Store.FailWrites = @('SharedComputerLicensing')
+    $ufF = Undo-AVDTuneOfficeFix -Machine $m -Name shared -Root $tmp -User 'admin1' -SnapshotId 'snap-check'
+    Test-Check '61 fix undo: a failing step still sets LastChange and keeps the record' (@($ufF.Results | Where-Object Status -eq 'Failed').Count -eq 1 -and (Get-AVDTuneState $tmp).LastChange -ne $mark -and (Test-Path $fixS)) (($ufF.Results | ForEach-Object Status) -join ',')
+    $m.Store.FailWrites = @()
+    Close-AVDTuneWriteGate; [void](Set-AVDTuneState -Root $tmp -Values @{ LastChange = $mark })
+    Test-Check '61 fix undo: without the open gate refused, LastChange untouched' ((Test-Throws { Undo-AVDTuneOfficeFix -Machine $m -Name shared -Root $tmp }) -and (Get-AVDTuneState $tmp).LastChange -eq $mark) $null
+    Open-AVDTuneWriteGate -SnapshotId 'snap-check' -ConfirmedBy 'Check Runner'
+    Remove-Item $fixS -Force -ErrorAction SilentlyContinue
+    $m = New-Master; & $m.RegSet $ctr 'SharedComputerLicensing' '0' 'String'; $m.Store.FailWrites = @('SharedComputerLicensing'); [void](Set-AVDTuneState -Root $tmp -Values @{ LastChange = $mark })
+    $afF = Set-AVDTuneOfficeFix -Machine $m -Name shared -Root $tmp -User 'admin1' -SnapshotId 'snap-check'
+    Test-Check '61 fix shared: a failing write sets LastChange anyway (the master may have changed)' (@($afF.Results | Where-Object Status -eq 'Failed').Count -eq 1 -and (Get-AVDTuneState $tmp).LastChange -ne $mark) (($afF.Results | ForEach-Object Status) -join ',')
+    $m.Store.FailWrites = @(); Reset-OfficeFiles
+    $txtS = Get-AVDTuneOfficeFixText 'shared'; $txtU = Get-AVDTuneOfficeFixText 'updates'
+    Test-Check '61 fix text: the confirmation names the value, the key, the restart and what Undo can not do' ($txtS -like '*SharedComputerLicensing = 1*' -and $txtS -like '*HKLM\SOFTWARE\Microsoft\Office\ClickToRun\Configuration*' -and $txtS -like '*restart*' -and $txtS -like '*Undo*not restart*' -and $txtU -like '*enableautomaticupdates = 0*' -and $txtU -like '*officeupdate*' -and $txtU -like '*wins over*') $txtS
+
+    # ---------------------------------------------------------------- 61 review findings (Undo and the update block, outdated records, marker, wrong types, always excluded)
+    $polProp = { param($mm) & $mm.RegGet $pk2 'enableautomaticupdates' }
+    # 1: the update block owns the value; Undo only discards the record
+    foreach ($case in @(@{ Name = 'absent before'; Seed = $null }, @{ Name = 'DWord 1 before'; Seed = 1 })) {
+        $m = New-Master; & $m.RegSet $ctr 'UpdatesEnabled' 'TRUE' 'String'; Reset-OfficeFiles
+        if ($null -ne $case.Seed) { & $m.RegSet $pk2 'enableautomaticupdates' $case.Seed 'DWord' }
+        [void](Set-AVDTuneOfficeFix -Machine $m -Name updates -Root $tmp -User 'admin1' -SnapshotId 'snap-check')
+        [void](Set-AVDTuneUpdateBlock -Machine $m -Root $tmp -Mode On -User 'admin1' -SnapshotId 'snap-check')
+        $m.Log.Clear(); $lcB = (Get-AVDTuneState $tmp).LastChange; $clBefore = @(Get-AVDTuneChangeLog -Root $tmp | Where-Object { $_.Component -eq 'office.fix.updates' -and $_.Text -like '*belongs to the update block*' }).Count
+        $ub = Undo-AVDTuneOfficeFix -Machine $m -Name updates -Root $tmp -User 'admin1' -SnapshotId 'snap-check'
+        $clU = @(Get-AVDTuneChangeLog -Root $tmp | Where-Object { $_.Component -eq 'office.fix.updates' -and $_.Text -like '*belongs to the update block*' })
+        Test-Check "61 undo updates with the block On ($($case.Name)): the policy stays 0, the block stays On, nothing written, only the record goes, change log says why, the result says so" ((& $polProp $m) -eq 0 -and (Get-AVDTuneUpdateBlockStatus $m).State -ceq 'On' -and @($m.Log | Where-Object { $_ -like 'Reg*' }).Count -eq 0 -and -not (Test-Path $fixU) -and $clU.Count -gt $clBefore -and $ub.Results[0].Status -ceq 'Unchanged' -and $ub.Results[0].Message -like '*belongs to the update block*' -and (Get-AVDTuneState $tmp).LastChange -eq $lcB) (($ub.Results | ConvertTo-Json -Compress))
+        [void](Set-AVDTuneUpdateBlock -Machine $m -Root $tmp -Mode Off -User 'admin1' -SnapshotId 'snap-check')
+    }
+    # 1: Fix in maintenance mode, Stop, then Undo (block On again) and Undo during the maintenance mode
+    $m = New-Master; Reset-OfficeFiles; & $m.RegSet $ctr 'UpdatesEnabled' 'TRUE' 'String'
+    [void](Set-AVDTuneUpdateBlock -Machine $m -Root $tmp -Mode On -User 'admin1' -SnapshotId 'snap-check')
+    $ctx = Start-AVDTuneMaintenance -Machine $m -Root $tmp -User 'admin1' -SnapshotId 'snap-check'
+    [void](Set-AVDTuneOfficeFix -Machine $m -Name updates -Root $tmp -User 'admin1' -SnapshotId 'snap-check')
+    $ubM = Undo-AVDTuneOfficeFix -Machine $m -Name updates -Root $tmp -User 'admin1' -SnapshotId 'snap-check'
+    Test-Check '61 undo updates during a running maintenance mode: the value is not touched, the record goes' ((& $polProp $m) -eq 0 -and $ubM.Results[0].Status -ceq 'Unchanged' -and -not (Test-Path $fixU)) (($ubM.Results | ConvertTo-Json -Compress))
+    [void](Stop-AVDTuneMaintenance -Machine $m -Root $tmp -Context $ctx); [void](Set-AVDTuneUpdateBlock -Machine $m -Root $tmp -Mode Off -User 'admin1' -SnapshotId 'snap-check')
+    $m = New-Master; Reset-OfficeFiles; & $m.RegSet $ctr 'UpdatesEnabled' 'TRUE' 'String'
+    [void](Set-AVDTuneUpdateBlock -Machine $m -Root $tmp -Mode On -User 'admin1' -SnapshotId 'snap-check')
+    $ctx = Start-AVDTuneMaintenance -Machine $m -Root $tmp -User 'admin1' -SnapshotId 'snap-check'
+    [void](Set-AVDTuneOfficeFix -Machine $m -Name updates -Root $tmp -User 'admin1' -SnapshotId 'snap-check')
+    $stopR = Stop-AVDTuneMaintenance -Machine $m -Root $tmp -Context $ctx
+    $m.Log.Clear()
+    [void](Undo-AVDTuneOfficeFix -Machine $m -Name updates -Root $tmp -User 'admin1' -SnapshotId 'snap-check')
+    Test-Check '61 undo updates after Stop-Maintenance (fix made during it): the block is On again and keeps the policy 0' ((& $polProp $m) -eq 0 -and (Get-AVDTuneUpdateBlockStatus $m).State -ceq 'On' -and @($m.Log | Where-Object { $_ -like 'Reg*' }).Count -eq 0 -and -not (Test-Path $fixU)) (($m.Log) -join ' | ')
+    [void](Set-AVDTuneUpdateBlock -Machine $m -Root $tmp -Mode Off -User 'admin1' -SnapshotId 'snap-check')
+    # counter-test: block Off and no maintenance mode: Undo still puts the earlier value back
+    $m = New-Master; Reset-OfficeFiles; & $m.RegSet $ctr 'UpdatesEnabled' 'TRUE' 'String'; & $m.RegSet $pk2 'enableautomaticupdates' 1 'DWord'
+    [void](Set-AVDTuneOfficeFix -Machine $m -Name updates -Root $tmp -User 'admin1' -SnapshotId 'snap-check')
+    $ubOff = Undo-AVDTuneOfficeFix -Machine $m -Name updates -Root $tmp -User 'admin1' -SnapshotId 'snap-check'
+    Test-Check '61 undo updates with the block Off: the earlier value 1 comes back as before' ((& $polProp $m) -eq 1 -and $ubOff.Results[0].Status -ceq 'Reverted') (($ubOff.Results | ConvertTo-Json -Compress))
+
+    # 2: an install or reconfigure discards the fix records; an Undo refuses a record older than office-applied.json
+    $m = New-Master -NoOffice; $o = New-AVDTuneFakeOffice -Machine $m; Reset-OfficeFiles
+    & $m.RegSet $pk2 'enableautomaticupdates' 1 'DWord'; & $m.RegSet $ctr 'SharedComputerLicensing' '0' 'String'
+    [void](Set-AVDTuneOfficeFix -Machine $m -Name updates -Root $tmp -User 'admin1' -SnapshotId 'snap-check'); [void](Set-AVDTuneOfficeFix -Machine $m -Name shared -Root $tmp -User 'admin1' -SnapshotId 'snap-check')
+    $m.Log.Clear()
+    $riF = Invoke-AVDTuneOfficeRecorded -Machine $m -O $o -Root $tmp -Mode Install -Config $d -User 'admin1' -SnapshotId 'snap-check'
+    Test-Check '61 install: the fix records are discarded with a change log note' ($riF.Setup.Status -eq 'Changed' -and -not (Test-Path $fixS) -and -not (Test-Path $fixU) -and (@($riF.FixRecordsDiscarded) -join ',') -ceq 'shared,updates' -and @(Get-AVDTuneChangeLog -Root $tmp | Where-Object { $_.Component -eq 'office.fix' -and $_.Text -like '*discarded*' }).Count -eq 1) ($riF.Setup.Status + ' ' + ($riF.FixRecordsDiscarded -join ','))
+    $m = New-Master; & $m.RegSet $ctr 'SharedComputerLicensing' '1' 'String'; $m.Log.Clear()
+    Write-AVDTuneFile $fixS '{"At":"2000-01-01T00:00:00.0000000Z","Previous":{"Value":"0","Type":"String"}}'
+    Write-AVDTuneFile (Join-Path $tmp 'config\office-applied.json') ($d | ConvertTo-Json -Depth 4)
+    Test-Check '61 undo: a record older than office-applied.json is refused, nothing written, the record stays' ((Get-ThrownText { Undo-AVDTuneOfficeFix -Machine $m -Name shared -Root $tmp }) -like '*older than the last Office install*' -and @($m.Log | Where-Object { $_ -like 'Reg*' }).Count -eq 0 -and (Test-Path $fixS)) $null
+    Write-FixRec $fixS '{"At":"@@NOW@@","Previous":{"Value":"0","Type":"String"}}'
+    Test-Check '61 undo: a record newer than office-applied.json is accepted' ((Undo-AVDTuneOfficeFix -Machine $m -Name shared -Root $tmp).Results[0].Status -ceq 'Reverted') $null
+    Reset-OfficeFiles
+
+    # N1: the block was switched on (state.json says so) but only the fix's own item is in place: the value still belongs to the block
+    $m = New-Master; Reset-OfficeFiles; & $m.RegSet $ctr 'UpdatesEnabled' 'TRUE' 'String'
+    [void](Set-AVDTuneOfficeFix -Machine $m -Name updates -Root $tmp -User 'admin1' -SnapshotId 'snap-check')
+    [void](Set-AVDTuneState -Root $tmp -Values @{ UpdateBlock = 'Partial' })
+    $ubG = Undo-AVDTuneOfficeFix -Machine $m -Name updates -Root $tmp -User 'admin1' -SnapshotId 'snap-check'
+    Test-Check '61 undo updates: block state Partial in state.json with only the fix item in place: Unchanged, policy stays 0, record goes' ((& $polProp $m) -eq 0 -and $ubG.Results[0].Status -ceq 'Unchanged' -and -not (Test-Path $fixU)) (($ubG.Results | ConvertTo-Json -Compress))
+    [void](Set-AVDTuneState -Root $tmp -Values @{ UpdateBlock = 'Off' })
+    # N2: a record without or with an unreadable At is invalid
+    foreach ($atJson in @('{"Previous":{"Value":"0","Type":"String"}}', '{"At":"not a date","Previous":{"Value":"0","Type":"String"}}', '{"At":"","Previous":{"Value":"0","Type":"String"}}')) {
+        $m = New-Master; & $m.RegSet $ctr 'SharedComputerLicensing' '1' 'String'; Write-AVDTuneFile $fixS $atJson; $m.Log.Clear()
+        Test-Check "61 undo: a record without a readable At is refused, nothing written ($atJson)" ((Get-ThrownText { Undo-AVDTuneOfficeFix -Machine $m -Name shared -Root $tmp }) -like '*no readable time*' -and @($m.Log | Where-Object { $_ -like 'Reg*' }).Count -eq 0 -and (Test-Path $fixS)) $null
+    }
+    Reset-OfficeFiles
+    # N3: any Office run after the record (here a failed one) makes it outdated
+    $m = New-Master; & $m.RegSet $ctr 'SharedComputerLicensing' '1' 'String'; $m.Log.Clear()
+    Write-AVDTuneFile $fixS '{"At":"2026-11-10T10:00:00.0000000Z","Previous":{"Value":"0","Type":"String"}}'
+    [void](Add-AVDTuneRun -Root $tmp -Run ([pscustomobject][ordered]@{ Id = $null; Plan = 'Office install'; Started = '2026-11-12T10:00:00.0000000Z'; Ended = '2026-11-12T10:05:00.0000000Z'; User = 'admin1'; SnapshotId = 'snap-check'; WhatIf = $false; ImageVersion = $null; Reboot = $false; Results = @([pscustomobject]@{ Id = 'office.install'; Status = 'Failed' }) }))
+    Test-Check '61 undo: an Office run (even a failed one) after the record makes it outdated: refused, nothing written' ((Get-ThrownText { Undo-AVDTuneOfficeFix -Machine $m -Name shared -Root $tmp }) -like '*later Office run*' -and @($m.Log | Where-Object { $_ -like 'Reg*' }).Count -eq 0 -and (Test-Path $fixS)) $null
+    Write-FixRec $fixS '{"At":"@@NOW@@","Previous":{"Value":"0","Type":"String"}}'
+    Test-Check '61 undo: a record newer than every Office run is accepted' ((Undo-AVDTuneOfficeFix -Machine $m -Name shared -Root $tmp).Results[0].Status -ceq 'Reverted') $null
+    Reset-OfficeFiles
+    # follow-ups: an Office run record with an unreadable Started counts as later; a record from the future is refused
+    $m = New-Master; & $m.RegSet $ctr 'SharedComputerLicensing' '1' 'String'; $m.Log.Clear()
+    Write-FixRec $fixS '{"At":"@@NOW@@","Previous":{"Value":"0","Type":"String"}}'
+    $badRun = Add-AVDTuneRun -Root $tmp -Run ([pscustomobject][ordered]@{ Id = $null; Plan = 'Office remove'; Started = 'garbage'; Ended = 'garbage'; User = 'admin1'; SnapshotId = 'snap-check'; WhatIf = $false; ImageVersion = $null; Reboot = $false; Results = @([pscustomobject]@{ Id = 'office.remove'; Status = 'Failed' }) })
+    Test-Check '61 undo: an Office run record with an unreadable Started makes the record outdated (fail closed), nothing written' ((Get-ThrownText { Undo-AVDTuneOfficeFix -Machine $m -Name shared -Root $tmp }) -like '*later Office run*' -and @($m.Log | Where-Object { $_ -like 'Reg*' }).Count -eq 0 -and (Test-Path $fixS)) $null
+    Get-ChildItem -LiteralPath (Join-Path $tmp 'runs') -Filter '*.json' | Where-Object { (Get-Content -LiteralPath $_.FullName -Raw) -like '*"garbage"*' } | Remove-Item -Force
+    $fut = [datetime]::UtcNow.AddHours(1).ToString('o'); Write-AVDTuneFile $fixS ('{"At":"' + $fut + '","Previous":{"Value":"0","Type":"String"}}'); $m.Log.Clear()
+    Test-Check '61 undo: a record with an At in the future is refused, nothing written' ((Get-ThrownText { Undo-AVDTuneOfficeFix -Machine $m -Name shared -Root $tmp }) -like '*in the future*' -and @($m.Log | Where-Object { $_ -like 'Reg*' }).Count -eq 0 -and (Test-Path $fixS)) $null
+    Write-FixRec $fixS '{"At":"@@NOW@@","Previous":{"Value":"0","Type":"String"}}'
+    Test-Check '61 undo: a record from just now is accepted' ((Undo-AVDTuneOfficeFix -Machine $m -Name shared -Root $tmp).Results[0].Status -ceq 'Reverted') $null
+    Reset-OfficeFiles
+    # 3: the change marker is set while Undo writes (fix and policies) and cleared afterwards, also when the step fails
+    $probe = @{ Seen = @() }
+    $m = New-Master; & $m.RegSet $ctr 'SharedComputerLicensing' '1' 'String'
+    $origSet = $m.RegSet
+    $m.RegSet = { param($k, $n, $v, $t) $probe.Seen += [bool](Get-AVDTuneProp (Get-AVDTuneState $tmp) 'ChangeInProgress'); & $origSet $k $n $v $t }.GetNewClosure()
+    Write-FixRec $fixS '{"At":"@@NOW@@","Previous":{"Value":"0","Type":"String"}}'
+    [void](Undo-AVDTuneOfficeFix -Machine $m -Name shared -Root $tmp -User 'admin1' -SnapshotId 'snap-check')
+    Test-Check '61 undo fix: ChangeInProgress is set while the value is written and cleared after' ($probe.Seen.Count -eq 1 -and $probe.Seen[0] -and $null -eq (Get-AVDTuneProp (Get-AVDTuneState $tmp) 'ChangeInProgress')) ($probe.Seen -join ',')
+    Reset-OfficeFiles; $probe.Seen = @()
+    $m = New-Master; & $m.RegSet $pk2 'hideupdatenotifications' 0 'DWord'
+    [void](Set-AVDTuneOfficePolicies -Machine $m -Root $tmp -User 'admin1' -SnapshotId 'snap-check')
+    $origSet = $m.RegSet
+    $m.RegSet = { param($k, $n, $v, $t) $probe.Seen += [bool](Get-AVDTuneProp (Get-AVDTuneState $tmp) 'ChangeInProgress'); & $origSet $k $n $v $t }.GetNewClosure()
+    [void](Undo-AVDTuneOfficePolicies -Machine $m -Root $tmp -User 'admin1' -SnapshotId 'snap-check')
+    Test-Check '61 undo policies: ChangeInProgress is set while values are written and cleared after' ($probe.Seen.Count -ge 1 -and @($probe.Seen | Where-Object { -not $_ }).Count -eq 0 -and $null -eq (Get-AVDTuneProp (Get-AVDTuneState $tmp) 'ChangeInProgress')) ($probe.Seen -join ',')
+    Reset-OfficeFiles
+    $m = New-Master; & $m.RegSet $ctr 'SharedComputerLicensing' '1' 'String'; $m.Store.FailWrites = @('SharedComputerLicensing')
+    Write-FixRec $fixS '{"At":"@@NOW@@","Previous":{"Value":"0","Type":"String"}}'
+    [void](Undo-AVDTuneOfficeFix -Machine $m -Name shared -Root $tmp -User 'admin1' -SnapshotId 'snap-check')
+    Test-Check '61 undo fix: the marker is cleared also when the step failed' ($null -eq (Get-AVDTuneProp (Get-AVDTuneState $tmp) 'ChangeInProgress')) $null
+    Reset-OfficeFiles
+
+    # 5: a record this call wrote goes again when the run threw; a Failed step keeps it; an older record stays
+    $m = New-Master; & $m.RegSet $ctr 'SharedComputerLicensing' '0' 'String'
+    $m.Store.FailWrites = @('SharedComputerLicensing'); [void](Set-AVDTuneOfficeFix -Machine $m -Name shared -Root $tmp -User 'admin1' -SnapshotId 'snap-check'); $m.Store.FailWrites = @()
+    Test-Check '61 fix: after a failing write the record of the call is kept (the master may have changed)' (Test-Path $fixS) $null
+    Reset-OfficeFiles
+    # a run that throws: another live AVDTune process holds the change marker (a short sleeping process of this check stands in for it), so Invoke-AVDTune throws after the record was written
+    $mT = New-Master; & $mT.RegSet $ctr 'SharedComputerLicensing' '0' 'String'
+    $sleeper = Start-Process -FilePath (Join-Path $PSHOME 'powershell.exe') -ArgumentList '-NoProfile', '-Command', 'Start-Sleep -Seconds 60' -WindowStyle Hidden -PassThru
+    try {
+        Start-Sleep -Milliseconds 500
+        [void](Set-AVDTuneState -Root $tmp -Values @{ ChangeInProgress = [ordered]@{ Started = [datetime]::UtcNow.ToString('o'); Pid = $sleeper.Id; ProcessStart = $sleeper.StartTime.ToUniversalTime().ToString('o'); ProcessName = $sleeper.ProcessName } })
+        $thrown2 = Test-Throws { Set-AVDTuneOfficeFix -Machine $mT -Name shared -Root $tmp -User 'admin1' -SnapshotId 'snap-check' }
+        Test-Check '61 fix: a run that threw leaves no record the call wrote, and nothing was changed' ($thrown2 -and -not (Test-Path $fixS) -and (& $mT.RegGet $ctr 'SharedComputerLicensing') -ceq '0') "thrown=$thrown2"
+    }
+    finally { [void](Set-AVDTuneState -Root $tmp -Values @{ ChangeInProgress = $null }); try { if (-not $sleeper.HasExited) { $sleeper.Kill() } } catch { } }
+    Reset-OfficeFiles
+    $mO = New-Master; & $mO.RegSet $ctr 'SharedComputerLicensing' '0' 'String'
+    Write-AVDTuneFile $fixS '{"At":"2026-11-15T10:00:00.0000000Z","Previous":{"Value":"0","Type":"String"}}'
+    $mO.Store.FailWrites = @('SharedComputerLicensing'); [void](Set-AVDTuneOfficeFix -Machine $mO -Name shared -Root $tmp -User 'admin1' -SnapshotId 'snap-check'); $mO.Store.FailWrites = @()
+    Test-Check '61 fix: an older record is never replaced or removed by a later call' ((Read-AVDTuneJson $fixS).At -like '2026-11-15*') $null
+    Reset-OfficeFiles
+
+    # 6: allowed types per fix, foreign Key/Name fields are ignored
+    foreach ($bad in @(@{ N = 'shared'; J = '{"Previous":{"Value":1,"Type":"DWord"}}'; T = 'DWord for shared' }, @{ N = 'shared'; J = '{"Previous":{"Value":"calc","Type":"ExpandString"}}'; T = 'ExpandString for shared' }, @{ N = 'updates'; J = '{"Previous":{"Value":"1","Type":"String"}}'; T = 'String for updates' }, @{ N = 'updates'; J = '{"Previous":{"Value":5,"Type":"QWord"}}'; T = 'QWord for updates' })) {
+        $m = New-Master; & $m.RegSet $ctr 'SharedComputerLicensing' '1' 'String'; & $m.RegSet $pk2 'enableautomaticupdates' 0 'DWord'; Write-AVDTuneFile (Join-Path $tmp "config\office-fix-$($bad.N)-undo.json") $bad.J; $m.Log.Clear()
+        Test-Check "61 fix undo record: $($bad.T) is refused, nothing written" ((Get-ThrownText { Undo-AVDTuneOfficeFix -Machine $m -Name $bad.N -Root $tmp }) -like '*not usable*' -and @($m.Log | Where-Object { $_ -like 'Reg*' }).Count -eq 0) $null
+    }
+    Reset-OfficeFiles
+    $m = New-Master; & $m.RegSet $ctr 'SharedComputerLicensing' '1' 'String'; $m.Log.Clear()
+    Write-FixRec $fixS '{"At":"@@NOW@@","Key":"HKLM:/Evil","Name":"Run","Previous":{"Value":"0","Type":"String","Key":"HKLM:/X","Name":"Y"}}'
+    [void](Undo-AVDTuneOfficeFix -Machine $m -Name shared -Root $tmp -User 'admin1' -SnapshotId 'snap-check')
+    $w = @($m.Log | Where-Object { $_ -like 'Reg*' })
+    Test-Check '61 fix undo record: foreign Key and Name fields are ignored, only the registry value of the fix is written' ($w.Count -eq 1 -and $w[0] -like '*SharedComputerLicensing=0 (String)' -and @($w | Where-Object { $_ -like '*Evil*' -or $_ -like '*|Run=*' -or $_ -like '*HKLM:/X*' }).Count -eq 0) ($w -join ' | ')
+    Reset-OfficeFiles
+    $m = New-Master; & $m.RegSet $pk2 'enableautomaticupdates' '1' 'String'; & $m.RegSet $ctr 'UpdatesEnabled' 'TRUE' 'String'; $m.Log.Clear()
+    Test-Check '61 fix updates: an earlier value of another type than DWord is refused before anything is written' ((Get-ThrownText { Set-AVDTuneOfficeFix -Machine $m -Name updates -Root $tmp -User 'admin1' -SnapshotId 'snap-check' }) -like '*registry type*' -and @($m.Log | Where-Object { $_ -like 'RegSet*' }).Count -eq 0 -and -not (Test-Path $fixU)) $null
+    Reset-OfficeFiles
+
+    # 7: OneDrive and Teams are always excluded
+    $cx = ConvertTo-AVDTuneOfficeConfig (With @{ ExcludeApps = @() })
+    $cs = Set-AVDTuneOfficeConfig -Root $tmp -Config (With @{ ExcludeApps = @('Access') })
+    $stored = [pscustomobject]@{ Channel = 'MonthlyEnterprise'; Edition = '64'; Product = 'O365ProPlusRetail'; Languages = @('de-DE'); ExcludeApps = @('Access'); RemoveMSI = $true }
+    $conv = ConvertTo-AVDTuneOfficeConfig (ConvertFrom-AVDTuneOfficeStored $stored)
+    Write-AVDTuneFile (Join-Path $tmp 'config\office.json') '{"Channel":"MonthlyEnterprise","Edition":"64","Product":"O365ProPlusRetail","Languages":["de-DE"],"Outlook":"both","ExcludeApps":[],"RemoveMSI":true}'
+    $loaded = Get-AVDTuneOfficeConfig -Root $tmp
+    $xmlAlways = New-AVDTuneOfficeXml -Config (With @{ ExcludeApps = @() }) -LogPath 'C:\ProgramData\AVDTune\logs\office'
+    Test-Check '61 OneDrive and Teams are always excluded: after the conversion, in a saved, a stored (old format) and a loaded configuration, and in the configuration.xml' ((@('OneDrive', 'Teams') | Where-Object { $_ -cnotin $cx.ExcludeApps -or $_ -cnotin $cs.ExcludeApps -or $_ -cnotin $conv.ExcludeApps -or $_ -cnotin $loaded.ExcludeApps -or $xmlAlways -notmatch "ExcludeApp ID=`"$_`"" }).Count -eq 0) (($cx.ExcludeApps) -join ',')
+    Remove-Item -LiteralPath (Join-Path $tmp 'config\office.json') -Force -ErrorAction SilentlyContinue
 
     # ---------------------------------------------------------------- source of the real adapter (not run here)
     $src = Get-Content -LiteralPath (Join-Path $repo 'Modules\AVDTune.Office.psm1') -Raw

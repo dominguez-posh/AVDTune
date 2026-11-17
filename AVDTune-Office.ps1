@@ -6,45 +6,92 @@
 $script:OffFake = $null
 if ($script:TestMode) { . (Get-TestScript 'FakeOffice.ps1'); $script:OffFake = New-AVDTuneFakeOffice -Machine $script:Machine }
 $script:OffJob = $null
-$script:OffChecks = @{}
+$script:OffChecks = [ordered]@{}
+$script:OffLangChecks = [ordered]@{}
 $script:OffLoaded = $false
 
 function Get-OffAdapter { if ($script:TestMode) { $script:OffFake } else { New-AVDTuneOfficeAdapter } }
+function Get-OffChoiceKey($Combo) { if ($Combo.SelectedItem) { [string]$Combo.SelectedItem.Key } else { '' } }
+function Set-OffChoice($Combo, [string]$Key) { $Combo.SelectedItem = @($Combo.ItemsSource | Where-Object { $_.Key -ceq $Key })[0] }   # by item: SelectedValue does not find a pscustomobject reliably
 function Get-OffFormConfig {
     [pscustomobject]@{
-        Channel = [string]$ui.CmbOffChannel.SelectedItem; Edition = [string]$ui.CmbOffEdition.SelectedItem; Product = [string]$ui.CmbOffProduct.SelectedItem
-        Languages = @(([string]$ui.TxtOffLanguages.Text -split '[,;\s]+') | Where-Object { $_ }); ExcludeApps = @($script:OffChecks.Keys | Where-Object { $script:OffChecks[$_].IsChecked } | Sort-Object); RemoveMSI = [bool]$ui.ChkOffMsi.IsChecked
+        Channel = [string]$ui.CmbOffChannel.SelectedItem; Edition = [string]$ui.CmbOffEdition.SelectedItem; Product = (Get-OffChoiceKey $ui.CmbOffLicense)
+        Languages = @(ConvertTo-AVDTuneOfficeLanguageList @($script:OffLangChecks.Keys | Where-Object { $script:OffLangChecks[$_].IsChecked }))
+        Outlook = (Get-OffChoiceKey $ui.CmbOffOutlook)
+        ExcludeApps = @(ConvertTo-AVDTuneOfficeExcludes @($script:OffChecks.Keys | Where-Object { $script:OffChecks[$_].IsChecked })); RemoveMSI = [bool]$ui.ChkOffMsi.IsChecked
     }
 }
+function Add-OffLanguageCheck([string]$Id) {
+    $cb = New-Object System.Windows.Controls.CheckBox; $cb.Content = $(if ($Id -eq 'MatchOS') { 'MatchOS (language of Windows)' } else { $Id }); $cb.Margin = '0,0,14,4'
+    [System.Windows.Automation.AutomationProperties]::SetName($cb, "Language $Id")
+    $cb.Add_Click({ try { Update-OffPreview } catch { } })
+    $script:OffLangChecks[$Id] = $cb; [void]$ui.PanelOffLanguages.Children.Add($cb)
+}
+function Update-OffHints {
+    $l = @(Get-AVDTuneOfficeLicenses | Where-Object Key -ceq (Get-OffChoiceKey $ui.CmbOffLicense))
+    $ui.TxtOffLicenseHint.Text = $(if ($l.Count) { $l[0].Text } else { '' })
+    $ui.TxtOffOutlookHint.Text = Get-AVDTuneOfficeOutlookHint
+    $ui.TxtOffAppsHint.Text = Get-AVDTuneOfficeAppsHint
+}
 function Set-OffForm($Config) {
-    $ui.CmbOffChannel.SelectedItem = [string]$Config.Channel; $ui.CmbOffEdition.SelectedItem = [string]$Config.Edition; $ui.CmbOffProduct.SelectedItem = [string]$Config.Product
-    $ui.TxtOffLanguages.Text = (@($Config.Languages) -join ', '); $ui.ChkOffMsi.IsChecked = [bool]$Config.RemoveMSI
-    foreach ($k in $script:OffChecks.Keys) { $script:OffChecks[$k].IsChecked = ($k -in @($Config.ExcludeApps)) }
+    $ui.CmbOffChannel.SelectedItem = [string]$Config.Channel; $ui.CmbOffEdition.SelectedItem = [string]$Config.Edition; Set-OffChoice $ui.CmbOffLicense ([string]$Config.Product)
+    Set-OffChoice $ui.CmbOffOutlook ([string]$Config.Outlook); $ui.ChkOffMsi.IsChecked = [bool]$Config.RemoveMSI
+    foreach ($l in @($Config.Languages)) { if ($l -and -not $script:OffLangChecks.Contains([string]$l)) { Add-OffLanguageCheck ([string]$l) } }   # a language of a saved file that the list does not offer stays visible
+    foreach ($k in @($script:OffLangChecks.Keys)) { $script:OffLangChecks[$k].IsChecked = ($k -cin @($Config.Languages)) }
+    foreach ($k in @($script:OffChecks.Keys)) { $script:OffChecks[$k].IsChecked = ($k -cnotin @($Config.ExcludeApps)) }
+    Update-OffHints
 }
 function Update-OffPreview {
     try { $ui.TxtOffPreview.Text = New-AVDTuneOfficeXml -Config (Get-OffFormConfig) -Mode Install -LogPath (Join-Path $script:StateRoot 'logs\office') }
     catch { $ui.TxtOffPreview.Text = "Not valid yet: $($_.Exception.Message)" }
 }
+function New-OffResultRow($Row) {
+    # The row of the FSLogix page plus, on a red row that has a one-click fix, a Fix button (DataContext = the fix: the style of the buttons draws Tag as an icon)
+    $grid = New-FslResultRow $Row
+    if ($Row.FixAction) {
+        $c = New-Object System.Windows.Controls.ColumnDefinition; $c.Width = 'Auto'; [void]$grid.ColumnDefinitions.Add($c)
+        $b = New-Object System.Windows.Controls.Button; $b.Content = 'Fix'; $b.DataContext = [string]$Row.FixAction; $b.Margin = '10,0,0,0'; $b.Padding = '14,4,14,4'; $b.VerticalAlignment = 'Center'
+        $b.SetValue([System.Windows.Controls.Grid]::ColumnProperty, 3)
+        [System.Windows.Automation.AutomationProperties]::SetName($b, "Fix: $($Row.Title)")
+        $b.ToolTip = "Sets only this setting; asks first. Source: $($Row.Source)"
+        $b.Add_Click({ param($src) try { Invoke-OffFix ([string]$src.DataContext) } catch { Show-Error $_.Exception.Message } })
+        [void]$grid.Children.Add($b)
+    }
+    $grid
+}
 function Update-OffRows {
     $ui.PanelOffRows.Children.Clear()
     $cfg = Get-OffFormConfig
     if (@(Test-AVDTuneOfficeConfig $cfg).Count -gt 0) { $cfg = Get-AVDTuneOfficeDefaults }
-    foreach ($r in @(Get-AVDTuneOfficeRows -Machine $script:Machine -Config $cfg)) { [void]$ui.PanelOffRows.Children.Add((New-FslResultRow $r)) }
+    foreach ($r in @(Get-AVDTuneOfficeRows -Machine $script:Machine -Config $cfg)) { [void]$ui.PanelOffRows.Children.Add((New-OffResultRow $r)) }
 }
 function Update-OffView {
     if (-not $script:OffLoaded) {
-        $ui.CmbOffChannel.ItemsSource = @(Get-AVDTuneOfficeChannels | ForEach-Object Key); $ui.CmbOffEdition.ItemsSource = @('64', '32'); $ui.CmbOffProduct.ItemsSource = @(Get-AVDTuneOfficeProducts)
-        foreach ($a in Get-AVDTuneOfficeExcludableApps) { $cb = New-Object System.Windows.Controls.CheckBox; $cb.Content = $a; $cb.Margin = '0,0,14,4'; [System.Windows.Automation.AutomationProperties]::SetName($cb, "Exclude $a"); $script:OffChecks[$a] = $cb; [void]$ui.PanelOffExclude.Children.Add($cb) }
+        $ui.CmbOffChannel.ItemsSource = @(Get-AVDTuneOfficeChannels | ForEach-Object Key); $ui.CmbOffEdition.ItemsSource = @('64', '32')
+        $ui.CmbOffLicense.ItemsSource = @(Get-AVDTuneOfficeLicenses); $ui.CmbOffOutlook.ItemsSource = @(Get-AVDTuneOfficeOutlookChoices)
+        foreach ($l in Get-AVDTuneOfficeLanguages) { Add-OffLanguageCheck $l }
+        foreach ($a in Get-AVDTuneOfficeInstallApps) { $cb = New-Object System.Windows.Controls.CheckBox; $cb.Content = $a; $cb.Margin = '0,0,14,4'; [System.Windows.Automation.AutomationProperties]::SetName($cb, "Install $a"); $script:OffChecks[$a] = $cb; [void]$ui.PanelOffInstall.Children.Add($cb) }
         try { Set-OffForm (Get-AVDTuneOfficeConfig -Root $script:StateRoot) } catch { Set-OffForm (Get-AVDTuneOfficeDefaults); $ui.TxtOffState.Text = $_.Exception.Message }
-        foreach ($c in $ui.CmbOffChannel, $ui.CmbOffEdition, $ui.CmbOffProduct) { $c.Add_SelectionChanged({ try { Update-OffPreview } catch { } }) }
-        $ui.TxtOffLanguages.Add_TextChanged({ try { Update-OffPreview } catch { } })
+        foreach ($c in $ui.CmbOffChannel, $ui.CmbOffEdition, $ui.CmbOffLicense, $ui.CmbOffOutlook) { $c.Add_SelectionChanged({ try { Update-OffHints; Update-OffPreview } catch { } }) }
         foreach ($c in @($script:OffChecks.Values) + $ui.ChkOffMsi) { $c.Add_Click({ try { Update-OffPreview } catch { } }) }
         $script:OffLoaded = $true
     }
     Update-OffPreview; Update-OffRows
 }
+function Invoke-OffFix([string]$Name) {
+    # One setting only, no ODT run: dry run first, confirmation, then the step behind the write gate
+    Assert-FslWrite
+    $dry = Set-AVDTuneOfficeFix -Machine $script:Machine -Name $Name -Root $script:StateRoot -WhatIf
+    if (@($dry.Results | Where-Object { $_.Status -eq 'WhatIf' }).Count -eq 0) { $ui.TxtOffState.Text = 'This setting is already right.'; Update-OffView; return }
+    if (-not (Confirm-Action (Get-AVDTuneOfficeFixText $Name) 'Office')) { return }
+    $run = Set-AVDTuneOfficeFix -Machine $script:Machine -Name $Name -Root $script:StateRoot -User (Get-FslUser) -SnapshotId (Get-FslGateSnapshot)
+    foreach ($r in @($run.Results)) { Register-StepResult $r }
+    $failed = @($run.Results | Where-Object Status -eq 'Failed')
+    $ui.TxtOffState.Text = $(if ($failed.Count) { "Fix failed: $($failed[0].Message)" } else { "Fix done: $(@($run.Results | Where-Object Status -eq 'Changed').Count) value changed.$(if (@($run.Results | Where-Object { $_.Reboot -and $_.Status -eq 'Changed' }).Count) { ' Restart the master before you go on.' })" })
+    Show-Toast $ui.TxtOffState.Text; Start-OverviewRefresh; Update-OffView
+}
 function Set-OffBusy([bool]$Busy) {
-    foreach ($b in $ui.BtnOffTest, $ui.BtnOffInstall, $ui.BtnOffUndo, $ui.BtnOffRemove, $ui.BtnOffSave, $ui.BtnOffPolicies, $ui.BtnOffPoliciesUndo) { $b.IsEnabled = -not $Busy }
+    foreach ($b in $ui.BtnOffTest, $ui.BtnOffInstall, $ui.BtnOffUndo, $ui.BtnOffRemove, $ui.BtnOffSave, $ui.BtnOffPolicies, $ui.BtnOffPoliciesUndo, $ui.BtnOffFixUndo) { $b.IsEnabled = -not $Busy }
     $window.Cursor = $(if ($Busy -and $script:CurrentPage -eq 'Office') { [System.Windows.Input.Cursors]::AppStarting } else { $null })
 }
 $script:OffWorkerText = @'
@@ -148,4 +195,22 @@ Add-Click $ui.BtnOffPoliciesUndo {
     $run = Undo-AVDTuneOfficePolicies -Machine $script:Machine -Root $script:StateRoot -User (Get-FslUser) -SnapshotId (Get-FslGateSnapshot)
     foreach ($r in @($run.Results)) { Register-StepResult $r }
     $ui.TxtOffState.Text = 'Office update policies: undone.'; Show-Toast $ui.TxtOffState.Text; Start-OverviewRefresh; Update-OffView
+}
+Add-Click $ui.BtnOffFixUndo {
+    Assert-FslWrite
+    $names = @(Get-AVDTuneOfficeFixRecorded -Root $script:StateRoot)
+    if ($names.Count -eq 0) { $ui.TxtOffState.Text = 'No one-click fix of this page is recorded: nothing to undo.'; return }
+    if (-not (Confirm-Action "Put back the values found before the one-click fix(es) ($($names -join ', '))? Undo does not restart the master and does not restore reset activations." 'Office')) { return }
+    $lines = @()
+    foreach ($n in $names) {
+        try {
+            $run = Undo-AVDTuneOfficeFix -Machine $script:Machine -Name $n -Root $script:StateRoot -User (Get-FslUser) -SnapshotId (Get-FslGateSnapshot)
+            foreach ($r in @($run.Results)) { Register-StepResult $r }
+            $st = @($run.Results | ForEach-Object { [string]$_.Status }) -join '/'
+            $note = @($run.Results | Where-Object { $_.Message } | ForEach-Object { [string]$_.Message }) -join ' '
+            $lines += "$n $st" + $(if ($note) { " ($note)" } else { '' })
+        }
+        catch { $lines += "$n Failed ($($_.Exception.Message))" }
+    }
+    $ui.TxtOffState.Text = "Office one-click fix undo: $($lines -join '; ')"; Show-Toast $ui.TxtOffState.Text; Start-OverviewRefresh; Update-OffView
 }
