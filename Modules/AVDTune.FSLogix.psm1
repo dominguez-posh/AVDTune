@@ -1311,7 +1311,7 @@ function New-AVDTuneFSLogixAdapter {
     }
     $a.NewTempFolder = {
         param($Root)
-        New-AVDTuneWorkFolder -Root $Root -Prefix fslogix   # created with its protected ACL in one step (#79)
+        New-AVDTuneDownloadFolder -Root $Root -Prefix fslogix   # created with its protected ACL in one step (#79)
     }
     $a.IsProtectedFolder = { param($Dir, $Root) Test-AVDTuneAdminOnlyPath -Path $Dir -Base (Split-Path $Root -Parent) }
     $a.Download = {

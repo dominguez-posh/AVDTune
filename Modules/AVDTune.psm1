@@ -20,7 +20,7 @@ $script:ChangeTypes = @('Added', 'Changed', 'Updated', 'Removed', 'Note')
 # The version of the tool (file VERSION next to Modules\) is part of every change log entry
 $script:ToolVersion = ''
 try { $versionFile = Join-Path (Split-Path $PSScriptRoot -Parent) 'VERSION'; if (Test-Path -LiteralPath $versionFile) { $script:ToolVersion = ([IO.File]::ReadAllText($versionFile)).Trim() } } catch { }
-$script:StepSections = @('Setup', 'Updates', 'Software', 'Office', 'Optimization', 'FSLogix', 'AppMasking', 'VdiComponents', 'UserExperience', 'UpdateBlock', 'Benchmark', 'Seal', 'Language')
+$script:StepSections = @('Setup', 'Updates', 'Software', 'Office', 'Optimization', 'FSLogix', 'AppMasking', 'VdiComponents', 'UserExperience', 'UpdateBlock', 'Benchmark', 'Seal', 'Language', 'Customizations')
 $script:StepModes = @('Test', 'Apply', 'Undo')
 
 #region elevation, root
@@ -911,7 +911,7 @@ function Initialize-AVDTuneTempParent {
     $parent
 }
 
-function New-AVDTuneWorkFolder {
+function New-AVDTuneDownloadFolder {
     <#
         A new work folder for downloads and staged copies (#79): <Root>\temp\<Prefix>-<guid> (without -Prefix: <guid>, the staging folder of the updates), created in one
         step with the protected ACL (New-AVDTuneOwnFolderSecurity), never with inherited rights. <Root> and <Root>\temp must be no links. Returns the path.
@@ -2453,7 +2453,7 @@ function Get-AVDTuneOverview {
 
 #endregion
 
-Export-ModuleMember -Function Get-AVDTuneDcFromNtDomain, Get-AVDTuneSystemFolder, Get-AVDTuneSystemModulePath, Set-AVDTuneSafeModulePath, Test-AVDTuneModulePathStable, Assert-AVDTuneModulePathStable, Get-AVDTuneModulePathProblems, New-AVDTunePowerShell, New-AVDTuneRunspacePool, Get-AVDTuneChocolateyRoot, Get-AVDTuneChildTool, Initialize-AVDTuneToolTemp, Get-AVDTuneChildEnvironment, Get-AVDTuneProfilePath, Get-AVDTuneHklmValue, New-AVDTuneChildStartInfo, Invoke-AVDTuneChildProcess, Invoke-AVDTuneProgram, Open-AVDTuneSystemProgram, New-AVDTuneWorkFolder, New-AVDTuneAdminFile, Set-AVDTuneProcessTemp, Initialize-AVDTuneTempParent, Test-AVDTuneWindowsSignature, Test-AVDTuneSystemProgramPath, Get-AVDTuneProp, Get-AVDTuneWebResponse, Test-AVDTuneElevated, Get-AVDTuneRoot, Test-AVDTuneDefaultRoot, Test-AVDTuneTestMode, Resolve-AVDTuneTestScript, Get-AVDTuneLongPath, Get-AVDTuneTestModeRefusal, Confirm-AVDTuneAction, ConvertTo-AVDTuneArgument, New-AVDTuneMachine, Invoke-AVDTuneMachine, Invoke-AVDTuneDefaultHiveUnload, Remove-AVDTuneTreeSafe,
+Export-ModuleMember -Function Move-AVDTuneFileReplace, Get-AVDTuneDcFromNtDomain, Get-AVDTuneSystemFolder, Get-AVDTuneSystemModulePath, Set-AVDTuneSafeModulePath, Test-AVDTuneModulePathStable, Assert-AVDTuneModulePathStable, Get-AVDTuneModulePathProblems, New-AVDTunePowerShell, New-AVDTuneRunspacePool, Get-AVDTuneChocolateyRoot, Get-AVDTuneChildTool, Initialize-AVDTuneToolTemp, Get-AVDTuneChildEnvironment, Get-AVDTuneProfilePath, Get-AVDTuneHklmValue, New-AVDTuneChildStartInfo, Invoke-AVDTuneChildProcess, Invoke-AVDTuneProgram, Open-AVDTuneSystemProgram, New-AVDTuneDownloadFolder, New-AVDTuneAdminFile, Set-AVDTuneProcessTemp, Initialize-AVDTuneTempParent, Test-AVDTuneWindowsSignature, Test-AVDTuneSystemProgramPath, Get-AVDTuneProp, Get-AVDTuneWebResponse, Test-AVDTuneElevated, Get-AVDTuneRoot, Test-AVDTuneDefaultRoot, Test-AVDTuneTestMode, Resolve-AVDTuneTestScript, Get-AVDTuneLongPath, Get-AVDTuneTestModeRefusal, Confirm-AVDTuneAction, ConvertTo-AVDTuneArgument, New-AVDTuneMachine, Invoke-AVDTuneMachine, Invoke-AVDTuneDefaultHiveUnload, Remove-AVDTuneTreeSafe,
     New-AVDTuneStateSecurity, Initialize-AVDTuneState, Read-AVDTuneAclInfo, Get-AVDTuneStateSecurityProblems, Move-AVDTuneStateToQuarantine, New-AVDTuneProtectedFolder, Assert-AVDTuneStateSecurity, Get-AVDTuneStateSecurityReport, Get-AVDTuneState, Set-AVDTuneState, Test-AVDTuneImageVersion, Get-AVDTuneNextImageVersion, Start-AVDTuneImageVersion,
     Add-AVDTuneRun, Get-AVDTuneRun, Get-AVDTuneLastChange, Get-AVDTuneChangeTimes, Get-AVDTuneChangeMarker, Invoke-AVDTuneStateLock, Get-AVDTuneChangeStopError, Test-AVDTuneChangeInProgress, Assert-AVDTuneNoForeignChange, Resolve-AVDTuneStaleChange, Start-AVDTuneChange, Stop-AVDTuneChange, Get-AVDTuneSnapshotClockBufferMinutes, ConvertTo-AVDTuneUtc, Get-AVDTuneSnapshotWindow, Test-AVDTuneSnapshotInWindow,New-AVDTuneStep, Invoke-AVDTuneStep, New-AVDTuneStepFromData, Get-AVDTuneStepCatalog, Invoke-AVDTune,
     Add-AVDTuneChangeLogEntry, Get-AVDTuneChangeLog, Get-AVDTuneChangeLogVersions, ConvertTo-AVDTuneChangeLogDocument, Export-AVDTuneChangeLog,

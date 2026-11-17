@@ -1000,7 +1000,7 @@ function New-AVDTuneVdiAdapter {
         }
         catch { @{ Ok = $false; Url = ''; Error = $_.Exception.Message } }
     }
-    $a.NewTempFolder = { param($Root) New-AVDTuneWorkFolder -Root $Root -Prefix vdi }   # created with its protected ACL in one step (#79)
+    $a.NewTempFolder = { param($Root) New-AVDTuneDownloadFolder -Root $Root -Prefix vdi }   # created with its protected ACL in one step (#79)
     $a.IsProtectedFolder = $o.IsProtectedFolder
     $a.Download = $o.Download
     $a.HoldFile = $o.HoldFile

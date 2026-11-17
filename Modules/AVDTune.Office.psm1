@@ -868,7 +868,7 @@ function New-AVDTuneOfficeAdapter {
         }
         catch { @{ Ok = $false; Text = ''; Error = $_.Exception.Message } }
     }
-    $a.NewTempFolder = { param($Root) New-AVDTuneWorkFolder -Root $Root -Prefix office }   # created with its protected ACL in one step (#79)
+    $a.NewTempFolder = { param($Root) New-AVDTuneDownloadFolder -Root $Root -Prefix office }   # created with its protected ACL in one step (#79)
     $a.IsProtectedFolder = { param($Dir, $Root) Test-AVDTuneAdminOnlyPath -Path $Dir -Base (Split-Path $Root -Parent) }
     $a.Download = {
         param($Url, $Dest, $MaxBytes)

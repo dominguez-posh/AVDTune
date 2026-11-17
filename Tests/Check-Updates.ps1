@@ -506,7 +506,7 @@ try {
     Test-Check 'Windows signature (#71): a copy of a catalog-signed Windows program is found in the catalog and runs; the file is held without write sharing until the run ends' ($null -ne $c71 -and $c71.Output -ne 'timeout' -and $swapRefused) "$($c71.ExitCode) $swapRefused"
     Test-Check 'Windows signature (#71): a Windows program outside the Windows folder is not one (Test-AVDTuneSystemProgramPath), System32 is' (-not (Test-AVDTuneSystemProgramPath -Path $unsigned) -and (Test-AVDTuneSystemProgramPath -Path (Join-Path $sys 'sc.exe'))) $null
     # #79: work folders and downloaded files with their own protected ACL, links on the way refused
-    $wf = New-AVDTuneWorkFolder -Root $tmp -Prefix office
+    $wf = New-AVDTuneDownloadFolder -Root $tmp -Prefix office
     $wacl = Get-Acl -LiteralPath $wf
     $wRules = @($wacl.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier]) | ForEach-Object { $_.IdentityReference.Value } | Sort-Object -Unique)
     $af = Join-Path $wf 'dl.bin'; $as = New-AVDTuneAdminFile -Path $af; try { $as.WriteByte(1) } finally { $as.Dispose() }
@@ -515,10 +515,10 @@ try {
     $again = Get-ThrownText { $x = New-AVDTuneAdminFile -Path $af; $x.Dispose() }
     Test-Check 'work folder (#79): created in one step with a protected ACL (no inherited rule), a downloaded file is CreateNew with an explicit protected admin-only ACL (no Users)' ($wf -like "$tmp\temp\office-*" -and $wacl.AreAccessRulesProtected -and @($wacl.GetAccessRules($false, $true, [System.Security.Principal.SecurityIdentifier])).Count -eq 0 -and @($wRules | Where-Object { $_ -notin $allowed }).Count -eq 0 -and $facl79.AreAccessRulesProtected -and @($facl79.GetAccessRules($false, $true, [System.Security.Principal.SecurityIdentifier])).Count -eq 0 -and @($fRules79 | Where-Object { $_ -notin $allowed }).Count -eq 0 -and $again) "$($wRules -join ',') | $($fRules79 -join ',') | $again"
     $src79 = ($modSrc['AVDTune.Office.psm1'] + $modSrc['AVDTune.FSLogix.psm1'] + $modSrc['AVDTune.Vdi.psm1'])
-    Test-Check 'work folder (#79): Office, FSLogix and VDI create their download folder with New-AVDTuneWorkFolder and the file with New-AVDTuneAdminFile (no CreateDirectory, no File.Create)' (([regex]::Matches($src79, 'NewTempFolder = \{[^}]*New-AVDTuneWorkFolder')).Count -eq 3 -and ([regex]::Matches($src79, 'New-AVDTuneAdminFile -Path \$Dest')).Count -eq 2 -and $src79 -notmatch 'NewTempFolder = \{[^}]*CreateDirectory' -and $src79 -notmatch '\[IO\.File\]::Create\(\$Dest\)') $null
+    Test-Check 'work folder (#79): Office, FSLogix and VDI create their download folder with New-AVDTuneDownloadFolder and the file with New-AVDTuneAdminFile (no CreateDirectory, no File.Create)' (([regex]::Matches($src79, 'NewTempFolder = \{[^}]*New-AVDTuneDownloadFolder')).Count -eq 3 -and ([regex]::Matches($src79, 'New-AVDTuneAdminFile -Path \$Dest')).Count -eq 2 -and $src79 -notmatch 'NewTempFolder = \{[^}]*CreateDirectory' -and $src79 -notmatch '\[IO\.File\]::Create\(\$Dest\)') $null
     $lroot = Join-Path $tmp 'lroot'; [void](New-Item -ItemType Directory -Path $lroot -Force); $ltarget = Join-Path $tmp 'ltarget'; [void](New-Item -ItemType Directory -Path $ltarget -Force)
     [void](& $cmd /c mklink /J (Join-Path $lroot 'temp') $ltarget)
-    $lmsg = Get-ThrownText { New-AVDTuneWorkFolder -Root $lroot -Prefix vdi }
+    $lmsg = Get-ThrownText { New-AVDTuneDownloadFolder -Root $lroot -Prefix vdi }
     Test-Check 'work folder (#79): <state>\temp as a link stops it, nothing is created in the target' ($lmsg -like '*is a link*' -and @(Get-ChildItem -LiteralPath $ltarget -Force).Count -eq 0) $lmsg
     [IO.Directory]::Delete((Join-Path $lroot 'temp'))
     # Test-AVDTuneAdminOnlyPath: a link on the way is not admin-only, whatever its ACL. An unelevated check cannot make an admin-only link, so it uses the one of Windows:

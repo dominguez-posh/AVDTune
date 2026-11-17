@@ -804,11 +804,11 @@ function New-AVDTuneUpdateAdapter {
     $u.Stage = {
         <#
             A copy of the tool in a new folder under <root>\temp; the copy is checked and run. The folder is created in one step with the protected ACL
-            (Administrators and SYSTEM only, New-AVDTuneWorkFolder, #79) and the copy gets an explicit admin-only ACL (New-AVDTuneAdminFile), so no unelevated
+            (Administrators and SYSTEM only, New-AVDTuneDownloadFolder, #79) and the copy gets an explicit admin-only ACL (New-AVDTuneAdminFile), so no unelevated
             process, not even of the same administrator, can swap the copy, and a folder left behind never looks prepared to the state folder check at the next start.
         #>
         param($Path, $Root)
-        $dir = New-AVDTuneWorkFolder -Root $Root
+        $dir = New-AVDTuneDownloadFolder -Root $Root
         $copy = Join-Path $dir (Split-Path $Path -Leaf)
         $in = [IO.File]::Open($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
         try { $out = New-AVDTuneAdminFile -Path $copy; try { $in.CopyTo($out) } finally { $out.Dispose() } } finally { $in.Dispose() }
