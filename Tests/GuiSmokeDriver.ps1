@@ -125,7 +125,7 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         Test-Smoke 'test mode: fake machine and a state folder that is not ProgramData' ($script:TestMode -and $script:Machine.Kind -eq 'Fake' -and -not (Test-AVDTuneDefaultRoot $script:StateRoot)) $script:StateRoot
         Test-Smoke 'state folders were made in the test root' ((Test-Path (Join-Path $script:StateRoot 'runs')) -and (Test-Path (Join-Path $script:StateRoot 'state.json'))) $null
         Test-Smoke 'window title and version' ($window.Title -eq "AVDTune $script:ToolVersion" -and $ui.TxtVersion.Text -like "AVDTune *") $window.Title
-        Test-Smoke 'navigation has all 16 pages in plan order' ($ui.NavList.Children.Count -eq 16 -and $ui.NavOverview -and $ui.NavProtocol -and $ui.NavSeal -and $ui.NavList.Children[0].Name -eq 'NavOverview') $ui.NavList.Children.Count
+        Test-Smoke 'navigation has all 17 pages in plan order (Customizations #85 included)' ($ui.NavList.Children.Count -eq 17 -and $ui.NavCustomizations -and $ui.NavOverview -and $ui.NavProtocol -and $ui.NavSeal -and $ui.NavList.Children[0].Name -eq 'NavOverview') $ui.NavList.Children.Count
         Test-Smoke 'Overview is the first page and shown' ($script:CurrentPage -eq 'Overview' -and $ui.PageOverview.Visibility -eq 'Visible' -and $ui.NavOverview.IsChecked) $null
         Test-Smoke 'title bar chip shows image name and no version yet' ($ui.TxtChipName.Text -eq 'GM-TEST01' -and $ui.TxtChipVersion.Text -eq 'no image version') "$($ui.TxtChipName.Text) / $($ui.TxtChipVersion.Text)"
         Test-Smoke 'identity card lists image, source image, Windows build, Office' ($ui.PanelIdentity.Children.Count -ge 8 -and (Find-Text $ui.PanelIdentity 'microsoftwindowsdesktop:office-365:win11-25h2-avd-m365:latest') -and (Find-Text $ui.PanelIdentity 'Windows 11 Enterprise multi-session 25H2, build 26100.4652') -and (Find-Text $ui.PanelIdentity '16.0.19231.20138, Monthly Enterprise Channel, x64')) $ui.PanelIdentity.Children.Count
@@ -157,7 +157,7 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         foreach ($page in $script:PageTable) {
             Show-Page $page.Key
             $window.UpdateLayout()
-            $placeholder = $page.Key -notin 'Overview', 'Protocol', 'Updates', 'UpdateBlock', 'UserExperience', 'Benchmark', 'FSLogix', 'Software', 'Office', 'VdiComponents', 'AppMasking', 'Seal', 'Environment', 'Optimization', 'Language'
+            $placeholder = $page.Key -notin 'Overview', 'Protocol', 'Updates', 'UpdateBlock', 'UserExperience', 'Benchmark', 'FSLogix', 'Software', 'Office', 'VdiComponents', 'AppMasking', 'Seal', 'Environment', 'Optimization', 'Language', 'Customizations'
             $ok =($script:CurrentPage -eq $page.Key -and $ui["Nav$($page.Key)"].IsChecked -and $ui.PagePlaceholder.Visibility -eq (ConvertTo-Vis $placeholder))
             if ($placeholder) { $ok = $ok -and $ui.TxtPhTitle.Text -eq $page.Title -and $ui.TxtPhPhase.Text -eq "Planned for phase $($page.Phase)" -and $ui.TxtPhText.Text.Length -gt 40 }
             Test-Smoke "page $($page.Key) shows" $ok $null
@@ -1205,6 +1205,57 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         Test-Smoke 'Optimization: the default user profile rows (#40) are read from the simulated hive behind the write gate, which is unloaded again' ($hiveRows.Count -ge 3 -and $hiveOk -and -not $script:Machine.Store.Hive.Loaded) "rows=$($hiveRows.Count) loads=$($script:Machine.Store.Hive.Loads) loaded=$($script:Machine.Store.Hive.Loaded) gate=$(Test-AVDTuneWriteAllowed)"
         Save-SmokeShot '56-page-optimization'
         Show-Page 'Overview'
+        $true } }
+    @{ Name = 'customizations (#85)'; Do = {
+        # the page reads in the background; every step waits until no customization job runs (the fake adapter is shared with the runspace)
+        if ($script:CustJob -or $script:CustQueued) { return $false }
+        $click = { param($b) $b.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent))) }
+        $rowButton = { param($panel, [string]$text) foreach ($g in $panel.Children) { if ($g -is [System.Windows.Controls.Grid]) { foreach ($b in $g.Children[2].Children) { if ([string]$b.Content -eq $text) { return $b } } } }; $null }
+        $fake = $script:CustFake.Store
+        switch ([int]$script:SmokeCustStep) {
+            0 {
+                if (-not (Test-AVDTuneWriteAllowed)) { Open-AVDTuneWriteGate -SnapshotId 'snap-smoke' -ConfirmedBy 'Alex Example'; $script:SmokeCustGate = $true }
+                $script:SmokeCustStep = 1; Show-Page 'Customizations'; if (-not $script:CustJob) { Start-CustJob 'Status' }; $window.UpdateLayout(); return $false   # a fresh read: the task list keeps only the newest tasks
+            }
+            1 {
+                Test-Smoke 'Customizations: the page reads the items and the library (AVDTune-Assets) as a task of the task bar' ($script:CustLibrary.State -eq 'Ready' -and @($script:CustLibrary.Files).Count -eq 4 -and @(Get-AVDTuneUiTasks | Where-Object { $_.Kind -eq 'customizations-status' -and $_.Status -eq 'succeeded' }).Count -ge 1 -and [string]$ui.PanelCustSteps.Children[0].Text -eq (T 'cust.empty.steps')) "$($script:CustLibrary.State) $(@($script:CustLibrary.Files).Count) tasks=$(@(Get-AVDTuneUiTasks | Where-Object { $_.Kind -like 'customizations*' } | ForEach-Object { $_.Status }) -join ',') first=$([string]$ui.PanelCustSteps.Children[0].Text)"
+                $ui.CmbCustKind.SelectedIndex = 2   # registry: HKCU is refused with the reason, nothing is saved
+                $script:CustForm['Name'].Text = 'Proxy'; $script:CustForm['Path'].Text = 'HKCU:\Software\Contoso'; $script:CustForm['ValueName'].Text = 'Proxy'; $script:CustForm['ValueType'].SelectedItem = 'DWord'; $script:CustForm['Value'].Text = '1'
+                & $click $ui.BtnCustSave
+                Test-Smoke 'Customizations: a registry value outside HKLM is refused in the form with the reason, nothing is saved' ($ui.TxtCustErrors.Text -like '*HKLM only*' -and -not (Test-Path (Get-AVDTuneCustomPath $script:StateRoot))) $ui.TxtCustErrors.Text
+                $script:CustForm['Path'].Text = 'HKLM:\SOFTWARE\Contoso'
+                & $click $ui.BtnCustSave
+                $ui.CmbCustKind.SelectedIndex = 1   # font from the library
+                $script:CustForm['Name'].Text = 'Corp Sans'; $script:CustForm['File'].SelectedItem = 'corp-sans.ttf'
+                & $click $ui.BtnCustSave
+                $ui.CmbCustKind.SelectedIndex = 0   # shortcut with the icon from the library
+                $script:CustForm['Name'].Text = 'CRM'; $script:CustForm['Location'].SelectedItem = 'Both'; $script:CustForm['Target'].Text = 'C:\Apps\crm.exe'; $script:CustForm['IconSource'].SelectedItem = 'Library'; $script:CustForm['IconFile'].SelectedItem = 'crm.ico'
+                & $click $ui.BtnCustSave
+                $saved = Get-AVDTuneCustomizations -Root $script:StateRoot
+                Test-Smoke 'Customizations: three items saved from the form, the library files pinned by SHA256' ($saved.Items.Count -eq 3 -and @($saved.Items | Where-Object { $_.Kind -eq 'Font' -and $_.Sha256 -match '\A[0-9a-f]{64}\z' }).Count -eq 1 -and @($saved.Items | Where-Object { $_.Kind -eq 'Shortcut' -and $_.IconSha256 -match '\A[0-9a-f]{64}\z' }).Count -eq 1) ($ui.TxtCustErrors.Text)
+                $script:SmokeCustStep = 2; return $false
+            }
+            2 {
+                Test-Smoke 'Customizations: the lists show the shortcut, the font and the own step as missing' ($ui.PanelCustShortcuts.Children.Count -eq 1 -and $ui.PanelCustFonts.Children.Count -eq 1 -and $ui.PanelCustSteps.Children.Count -eq 1 -and @($script:CustStatus.Items | Where-Object { $_.Status -eq 'NonCompliant' }).Count -eq 3) (($script:CustStatus.Items | ForEach-Object { "$($_.Name)=$($_.Status)" }) -join ', ')
+                Save-SmokeShot '57-page-customizations'
+                & $click $ui.BtnCustApplyAll
+                Test-Smoke 'Customizations: Apply all asks first and runs as a writer job' ($script:ConfirmAsked -like '*3*' -and $script:CustJob -and $script:CustJob.Kind -eq 'Apply' -and (Get-AVDTuneRunningWriter) -eq 'CustJob') $script:ConfirmAsked
+                $script:SmokeCustStep = 3; return $false
+            }
+            3 {
+                Test-Smoke 'Customizations: after Apply the master has the shortcuts, the font with its registration and the DWord; every row is in place' ($fake.Shortcuts.ContainsKey('c:\users\public\desktop\crm.lnk') -and $fake.Shortcuts.ContainsKey('c:\programdata\microsoft\windows\start menu\programs\crm.lnk') -and $fake.Files.ContainsKey('c:\windows\fonts\corp-sans.ttf') -and $fake.Registry.ContainsKey('hklm:\software\contoso|proxy') -and @($script:CustStatus.Items | Where-Object { $_.Status -ne 'Compliant' }).Count -eq 0) (($script:CustStatus.Items | ForEach-Object { "$($_.Name)=$($_.Status) $($_.Message)" }) -join ' | ')
+                Test-Smoke 'Customizations: the change log has an entry per item (category Customizations)' (@(Get-AVDTuneChangeLog -Root $script:StateRoot | Where-Object { $_.Category -eq 'Customizations' }).Count -ge 3) $null
+                $rm = & $rowButton $ui.PanelCustFonts (T 'cust.btn.remove')
+                & $click $rm
+                $script:SmokeCustStep = 4; return $false
+            }
+            4 {
+                Test-Smoke 'Customizations: Remove of the font undoes it on the master and takes it out of the list' (-not $fake.Files.ContainsKey('c:\windows\fonts\corp-sans.ttf') -and @((Get-AVDTuneCustomizations -Root $script:StateRoot).Items | Where-Object { $_.Kind -eq 'Font' }).Count -eq 0 -and [string]$ui.PanelCustFonts.Children[0].Text -eq (T 'cust.empty.fonts')) $ui.TxtCustState.Text
+                if ($script:SmokeCustGate) { Close-AVDTuneWriteGate }
+                Show-Page 'Overview'
+                return $true
+            }
+        }
         $true } }
     @{ Name = 'task bar'; Do = {
         # the flows of the earlier steps went through the one mechanism; wait (at most 30 s) until nothing runs any more

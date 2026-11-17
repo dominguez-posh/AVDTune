@@ -566,7 +566,7 @@ function Get-AVDTuneLibraryItems {
         try { $anchors = Get-AVDTuneIntuneAnchors } catch { [void]$notes.Add("Intune could not be read, so no package can be trusted: $($_.Exception.Message)") }
         $items = New-Object System.Collections.ArrayList
         foreach ($app in @(Get-PackTuneStoreApps -Store $state.Store)) {
-            if ($app -notmatch $script:SegmentPattern) { continue }
+            if ($app -notmatch $script:SegmentPattern -or $app -eq $script:AssetFolder) { continue }   # AVDTune-Assets holds the files of the customizations (#85), not a package
             foreach ($v in @(Get-AVDTuneStoreVersions -AppId $app -Store $state.Store -Notes $notes)) {
                 if (-not $v.Complete) { continue }
                 $a = $null; $key = "$app|$($v.Version)"; if ($anchors.ContainsKey($key)) { $a = $anchors[$key] }
@@ -587,6 +587,69 @@ function Get-AVDTuneLibraryItems {
     }
     finally { $script:LibraryContext = $previousContext }
 }
+
+#region library files for customizations (#85): AVDTune-Assets\manifest.json in the package store
+
+$script:AssetFolder = 'AVDTune-Assets'
+$script:AssetNamePattern = '\A[A-Za-z0-9][A-Za-z0-9._-]{0,79}\z'   # the segment rule of the package store (ConvertTo-PackTuneStorePath)
+$script:AssetMaxBytes = 200MB
+
+function Test-AVDTuneAssetName([string]$Name) { [bool]($Name -and $Name.Length -le 80 -and [regex]::IsMatch($Name, $script:AssetNamePattern, 'None', [TimeSpan]::FromMilliseconds(200)) -and $Name -notmatch '\.\.' -and $Name -notmatch '[. ]\z') }
+
+function ConvertFrom-AVDTuneAssetManifest {
+    <# Pure. The manifest of the library files ({ Files: [ { Name, Sha256, Size } ] }), typed: a row with a wrong name, hash or size is left out with a note. Returns Files and Notes. #>
+    param($Manifest)
+    $files = New-Object System.Collections.ArrayList; $notes = New-Object System.Collections.ArrayList; $seen = @{}
+    foreach ($e in @(Get-AVDTuneProp $Manifest 'Files')) {
+        if ($null -eq $e) { continue }
+        $n = Get-AVDTuneProp $e 'Name'; $h = Get-AVDTuneProp $e 'Sha256'; $z = Get-AVDTuneProp $e 'Size'
+        if ($n -isnot [string] -or -not (Test-AVDTuneAssetName $n)) { [void]$notes.Add('A file of the library manifest with an invalid name was left out.'); continue }
+        if ($h -isnot [string] -or $h -notmatch '\A[0-9a-fA-F]{64}\z') { [void]$notes.Add("$n has no valid SHA256 in the manifest: left out."); continue }
+        if (-not ($z -is [int] -or $z -is [long]) -or $z -lt 1 -or $z -gt $script:AssetMaxBytes) { [void]$notes.Add("$n has no valid size in the manifest: left out."); continue }
+        if ($seen.ContainsKey($n.ToLowerInvariant())) { [void]$notes.Add("$n is named twice in the manifest: left out."); continue }
+        $seen[$n.ToLowerInvariant()] = $true
+        [void]$files.Add([pscustomobject]@{ Name = $n; Sha256 = $h.ToLowerInvariant(); Size = [int64]$z; Extension = [IO.Path]::GetExtension($n).ToLowerInvariant() })
+    }
+    [pscustomobject]@{ Files = @($files); Notes = @($notes) }
+}
+
+function Get-AVDTuneAssetManifest {
+    <# The library files (fonts, icons, files, scripts) of the package store: <library>\AVDTune-Assets\manifest.json, read only. Returns State (Ready | NoAssets | NoSite | NoAccess | NoLibrary), Message, Files, Notes. #>
+    param([Parameter(Mandatory)]$Context)
+    $previous = $script:LibraryContext; $script:LibraryContext = $Context
+    try {
+        $state = Get-PackTuneStoreState -SiteUrl $Context.SiteUrl -Library $Context.Library
+        if ($state.State -ne 'Ready') { return [pscustomobject]@{ State = [string]$state.State; Message = [string]$state.Message; Files = @(); Notes = @() } }
+        $url = "$($script:GraphV1)/drives/$($state.Store.DriveId)/root:/$(ConvertTo-PackTuneStorePath @($script:AssetFolder, 'manifest.json')):/content"
+        $m = $null
+        try { $m = Invoke-AVDTuneLibraryGet -Url $url -Audience Sites -MaxBytes 1MB }
+        catch { if ($_.Exception.Message -like '*answered 404*') { return [pscustomobject]@{ State = 'NoAssets'; Message = "The library has no $($script:AssetFolder)\manifest.json yet."; Files = @(); Notes = @() } }; throw }
+        $r = ConvertFrom-AVDTuneAssetManifest $m
+        [pscustomobject]@{ State = 'Ready'; Message = "$(@($r.Files).Count) file(s) in the library."; Files = @($r.Files); Notes = @($r.Notes) }
+    }
+    finally { $script:LibraryContext = $previous }
+}
+
+function Save-AVDTuneAssetFile {
+    <# Downloads one library file into a new file (CreateNew) and checks its SHA256 against -Sha256 (the hash pinned when the step was saved, taken from the manifest). A different file is deleted and the call throws. #>
+    param([Parameter(Mandatory)]$Context, [Parameter(Mandatory)][string]$Name, [Parameter(Mandatory)][string]$Sha256, [Parameter(Mandatory)][string]$Destination)
+    if (-not (Test-AVDTuneAssetName $Name)) { throw "'$Name' is not a valid name of a library file." }
+    if ($Sha256 -notmatch '\A[0-9a-fA-F]{64}\z') { throw "No valid SHA256 for $Name." }
+    $previous = $script:LibraryContext; $script:LibraryContext = $Context
+    try {
+        $state = Get-PackTuneStoreState -SiteUrl $Context.SiteUrl -Library $Context.Library
+        if ($state.State -ne 'Ready') { throw "The library is not ready: $($state.Message)" }
+        $url = "$($script:GraphV1)/drives/$($state.Store.DriveId)/root:/$(ConvertTo-PackTuneStorePath @($script:AssetFolder, $Name)):/content"
+        [void](Invoke-AVDTuneLibraryGet -Url $url -Audience Sites -OutFile $Destination -MaxBytes $script:AssetMaxBytes)
+        $fs = [IO.File]::Open($Destination, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+        try { $got = Get-AVDTuneStreamHash $fs } finally { $fs.Dispose() }
+        if ($got -ne $Sha256.ToLowerInvariant()) { Remove-Item -LiteralPath $Destination -Force -ErrorAction SilentlyContinue; throw "$Name from the library does not match its SHA256 (expected $($Sha256.ToLowerInvariant()), got $got): not used." }
+        $Destination
+    }
+    finally { $script:LibraryContext = $previous }
+}
+
+#endregion
 
 function Get-AVDTuneStreamHash($Stream) {
     $Stream.Position = 0
@@ -864,4 +927,5 @@ function Get-AVDTuneSoftwareHistory {
 Export-ModuleMember -Function Get-AVDTuneSoftwareSettings, Set-AVDTuneSoftwareSettings, Test-AVDTunePackageId, Test-AVDTunePackageVersion, Test-AVDTuneSearchText, Compare-AVDTuneVersion,
     ConvertFrom-AVDTuneWingetTable, ConvertFrom-AVDTuneChocoPackages, ConvertFrom-AVDTuneIntuneNote, Get-AVDTuneInstalledSoftware, Test-AVDTuneMsiexecTrust, Invoke-AVDTuneSoftwareTool,
     Search-AVDTuneCatalog, Get-AVDTuneManagedSoftware, Test-AVDTuneLibraryUrl, Test-AVDTuneDownloadUrl, New-AVDTuneLibraryContext, Close-AVDTuneLibraryContext, Get-AVDTuneLibraryItems,
-    New-AVDTuneSoftwareItem, Get-AVDTuneCatalogArguments, Invoke-AVDTuneSoftwareRun, Get-AVDTuneSoftwareHistory, Expand-PackTuneZip, Get-AVDTuneRedirectHosts, Invoke-AVDTuneLibraryGet, Read-AVDTuneLimited, Clear-AVDTuneSoftwareWork, New-AVDTuneWorkFolder
+    New-AVDTuneSoftwareItem, Get-AVDTuneCatalogArguments, Invoke-AVDTuneSoftwareRun, Get-AVDTuneSoftwareHistory, Expand-PackTuneZip, Get-AVDTuneRedirectHosts, Invoke-AVDTuneLibraryGet, Read-AVDTuneLimited, Clear-AVDTuneSoftwareWork, New-AVDTuneWorkFolder,
+    Test-AVDTuneAssetName, ConvertFrom-AVDTuneAssetManifest, Get-AVDTuneAssetManifest, Save-AVDTuneAssetFile, Get-AVDTuneStreamHash

@@ -126,3 +126,15 @@ function Add-AVDTuneFakeLibraryPackage {
     [void]$s.Notes.Add(@{ Name = $(if ($Name) { $Name } else { $App }); Text = $text })
     $hash
 }
+
+function Add-AVDTuneFakeLibraryAsset {
+    <# A library file for the customizations (#85): AVDTune-Assets/<name> and the manifest rewritten with every asset (Name, Sha256, Size). -ManifestRows replaces the rows (bad rows for the checks). #>
+    param([Parameter(Mandatory)]$Library, [string]$Name, $Content, [object[]]$ManifestRows)
+    $s = $Library.Store
+    if ($Name) { $s.Files["AVDTune-Assets/$Name"] = $(if ($Content -is [byte[]]) { $Content } else { [Text.Encoding]::UTF8.GetBytes([string]$Content) }) }
+    $rows = if ($ManifestRows) { $ManifestRows } else {
+        @($s.Files.Keys | Where-Object { $_ -like 'AVDTune-Assets/*' -and $_ -ne 'AVDTune-Assets/manifest.json' } | Sort-Object | ForEach-Object {
+                [ordered]@{ Name = $_.Substring(15); Sha256 = ([BitConverter]::ToString([Security.Cryptography.SHA256]::Create().ComputeHash([byte[]]$s.Files[$_])) -replace '-', ''); Size = $s.Files[$_].Length } })
+    }
+    $s.Files['AVDTune-Assets/manifest.json'] = [Text.Encoding]::UTF8.GetBytes((@{ Files = @($rows) } | ConvertTo-Json -Depth 5))
+}
