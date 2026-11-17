@@ -52,7 +52,7 @@ try {
     Test-Check 'redirect: every other host, scheme, port, user info, query, ".." and a wrong file type is refused' ($wrong.Count -eq 0) ($wrong -join ', ')
     Test-Check 'redirect: the Teams bootstrapper must be an .exe, an MSI must not' ((Get-AVDTuneVdiNextUrl -Current $cur -Location 'https://download.microsoft.com/download/a/teamsbootstrapper.exe' -Kind Exe).Ok -and -not (Get-AVDTuneVdiNextUrl -Current $cur -Location 'https://download.microsoft.com/download/a/teamsbootstrapper.exe' -Kind Msi).Ok) $null
     Test-Check 'links: Test-AVDTuneVdiUrl allows only https on the listed hosts' ((Test-AVDTuneVdiUrl -Url 'https://aka.ms/x') -and -not (Test-AVDTuneVdiUrl -Url 'https://aka.ms/x' -Hosts @('download.microsoft.com')) -and -not (Test-AVDTuneVdiUrl -Url 'https://AKA.ms.evil/x')) $null
-    Test-Check 'version from a file name, and comparison' ((Get-AVDTuneVdiVersionFromUrl 'https://download.microsoft.com/download/a/MsRdcWebRTCSvc_HostSetup_1.54.2408.19001_x64.msi') -eq '1.54.2408.19001' -and (Get-AVDTuneVdiVersionFromUrl 'https://download.microsoft.com/download/a/x.msi') -eq '' -and (Compare-AVDTuneVdiVersion '1.54.2408.19001' '1.55.0.1') -eq -1 -and (Compare-AVDTuneVdiVersion '1.0' 'abc') -eq $null) $null
+    Test-Check 'version from a file name, and comparison' ((Get-AVDTuneVdiVersionFromUrl 'https://download.microsoft.com/download/a/MsRdcWebRTCSvc_HostSetup_1.54.2408.19001_x64.msi') -eq '1.54.2408.19001' -and (Get-AVDTuneVdiVersionFromUrl 'https://download.microsoft.com/download/a/x.msi') -eq '' -and (Compare-AVDTuneVdiVersion '1.54.2408.19001' '1.55.0.10001') -eq -1 -and (Compare-AVDTuneVdiVersion '1.0' 'abc') -eq $null) $null
 
     # ---------------------------------------------------------------- the signature rules (pure)
     $msSub = 'CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US'; $msCa = 'CN=Microsoft Code Signing PCA 2024, O=Microsoft Corporation, C=US'
@@ -105,9 +105,9 @@ try {
     $latest = Get-AVDTuneVdiLatest -V $e.V -Key 'webrtc'
     Test-Check 'latest: the address Microsoft names now, followed by hand, and the version in its file name; nothing downloaded' ($latest.Ok -and $latest.Version -eq '1.54.2408.19001' -and (Get-Log $e.V 'Download*').Count -eq 0 -and (Get-Log $e.V 'Resolve https://aka.ms/msrdcwebrtcsvc/msi').Count -eq 1) $latest.Error
     Test-Check 'rows: installed version equal to the latest is green' ((Get-Row (Get-AVDTuneVdiRows -Machine $e.M -V $e.V -Key 'webrtc' -Latest $latest) 'webrtc.installed').Status -eq 'green') $null
-    $newer = [pscustomobject]@{ Ok = $true; Url = 'x'; Version = '1.60.0.1'; Error = '' }
+    $newer = [pscustomobject]@{ Ok = $true; Url = 'x'; Version = '1.60.0.10001'; Error = '' }
     $wy = Get-AVDTuneVdiRows -Machine $e.M -V $e.V -Key 'webrtc' -Latest $newer
-    Test-Check 'rows: a newer version at Microsoft is yellow with both versions named, and the card is yellow' ((Get-Row $wy 'webrtc.installed').Status -eq 'yellow' -and (Get-Row $wy 'webrtc.installed').Reason -like '*1.54.2408.19001*1.60.0.1*' -and (Get-AVDTuneVdiSummaryStatus $wy) -eq 'yellow') (Get-Row $wy 'webrtc.installed').Reason
+    Test-Check 'rows: a newer version at Microsoft is yellow with both versions named, and the card is yellow' ((Get-Row $wy 'webrtc.installed').Status -eq 'yellow' -and (Get-Row $wy 'webrtc.installed').Reason -like '*1.54.2408.19001*1.60.0.10001*' -and (Get-AVDTuneVdiSummaryStatus $wy) -eq 'yellow') (Get-Row $wy 'webrtc.installed').Reason
     $e.V.Store.Redirects['https://aka.ms/msrdcwebrtcsvc/msi'] = @{ Ok = $false; Url = ''; Error = 'HTTP 503' }
     Test-Check 'latest: a failing lookup is a gray row, not an error' (-not (Get-AVDTuneVdiLatest -V $e.V -Key 'webrtc').Ok -and (Get-Row (Get-AVDTuneVdiRows -Machine $e.M -V $e.V -Key 'webrtc' -Latest (Get-AVDTuneVdiLatest -V $e.V -Key 'webrtc')) 'webrtc.installed').Status -eq 'info') $null
     $e.V.Store.Redirects['https://aka.ms/msrdcwebrtcsvc/msi'] = @{ Ok = $true; Url = 'https://evil.example/x.msi'; Error = '' }
@@ -173,7 +173,7 @@ try {
     Test-Check 'WebRTC: the Uninstall entry is detected (version) after the install' ((Get-Row $r 'webrtc.installed').Reason -like '*1.54.2408.19001*') (Get-Row $r 'webrtc.installed').Reason
     $x = Invoke-AVDTuneVdiRecorded -Machine $e.M -V $e.V -Key 'webrtc' -Root $tmp -Mode Remove
     $rm = Get-Log $e.V 'Run *' | Select-Object -Last 1
-    Test-Check 'WebRTC remove: msiexec /x with the product code read from the registry, the component is gone' ($x.Setup.Status -eq 'Changed' -and $rm -like 'Run C:\fake\System32\msiexec.exe /x {11111111-2222-3333-4444-555555555551} /qn /norestart*' -and -not (Get-AVDTuneVdiState -Machine $e.M -V $e.V -Key 'webrtc').Installed) $rm
+    Test-Check 'WebRTC remove: msiexec /x with the product code read from the registry, the component is gone' ($x.Setup.Status -eq 'Changed' -and $rm -like 'Run C:\fake\System32\msiexec.exe /x {11111111-1111-1111-1111-111111111111} /qn /norestart*' -and -not (Get-AVDTuneVdiState -Machine $e.M -V $e.V -Key 'webrtc').Installed) $rm
     Reset-Files
     $bad = New-Env -Seed @{ Header = [byte[]](0x4D, 0x5A, 0, 0, 0, 0, 0, 0) }
     $x = Invoke-AVDTuneVdiRecorded -Machine $bad.M -V $bad.V -Key 'webrtc' -Root $tmp -Mode Install
@@ -228,7 +228,7 @@ try {
     $x = Invoke-AVDTuneVdiUndo -Machine $e.M -V $e.V -Key 'webrtc' -Root $tmp -User 'admin1' -SnapshotId 'snap-1'
     Test-Check 'undo: removes what AVDTune installed, plan "Undo: ...", the undo record is gone' ($x.Setup.Status -eq 'Changed' -and -not (Get-AVDTuneVdiState -Machine $e.M -V $e.V -Key 'webrtc').Installed -and -not (Test-Path (Join-Path $tmp 'config\vdi-webrtc-undo.json')) -and @(Get-AVDTuneRun -Root $tmp | Where-Object Plan -like 'VDI Remote Desktop WebRTC*remove').Count -ge 1) $null
     Test-Check 'undo: nothing recorded is an error' ((Get-ThrownText { Invoke-AVDTuneVdiUndo -Machine $e.M -V $e.V -Key 'webrtc' -Root $tmp }) -like '*nothing to undo*') $null
-    $e = New-Env -MSeed @{ Registry = @{ "$uni\{AAAAAAAA-0000-0000-0000-000000000001}|DisplayName" = 'Remote Desktop WebRTC Redirector Service'; "$uni\{AAAAAAAA-0000-0000-0000-000000000001}|DisplayVersion" = '1.0.0.1' } }
+    $e = New-Env -MSeed @{ Registry = @{ "$uni\{AAAAAAAA-0000-0000-0000-000000000001}|DisplayName" = 'Remote Desktop WebRTC Redirector Service'; "$uni\{AAAAAAAA-0000-0000-0000-000000000001}|DisplayVersion" = '1.0.0.10001' } }
     $e.V.Store.WebrtcVersion = '1.54.2408.19001'
     [void](Invoke-AVDTuneVdiRecorded -Machine $e.M -V $e.V -Key 'webrtc' -Root $tmp)
     Test-Check 'undo: a component that was there before has no undo (older builds are not offered), the text says so and nothing is removed' ((Get-ThrownText { Invoke-AVDTuneVdiUndo -Machine $e.M -V $e.V -Key 'webrtc' -Root $tmp }) -like '*no undo*older builds*' -and (Get-AVDTuneVdiUndoText -Root $tmp -Key 'webrtc') -like '*no undo*' -and (Get-AVDTuneVdiState -Machine $e.M -V $e.V -Key 'webrtc').Installed) $null
@@ -304,6 +304,93 @@ try {
     $run = Invoke-AVDTuneVdiSettings -Machine $e.M -V $e.V -Key 'mmr' -Root $tmp -Optional @('vdi.mmr.chrome')
     Test-Check 'MMR policy: Chrome with its own extension id and update address when asked for' ((Test-AVDTuneVdiExtensionEntry -Existing ([string](& $e.M.RegGet 'HKLM:\SOFTWARE\Policies\Google\Chrome' 'ExtensionSettings')) -ExtensionId 'lfmemoeeciijgkjkgbgikoonlkabmlno' -UpdateUrl 'https://clients2.google.com/service/update2/crx')) $null
     Reset-Files
+
+    # ---------------------------------------------------------------- review findings (M1, N1, N2, N3)
+    # M1: undo of the ExtensionSettings policy only at our own entry
+    $foreign = 'zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz'
+    $e = New-Env -MSeed @{ Registry = @{ "$edge|ExtensionSettings" = $other } }
+    [void](Invoke-AVDTuneVdiSettings -Machine $e.M -V $e.V -Key 'mmr' -Root $tmp)
+    $mid = (Get-AVDTuneVdiJsonSerializer).DeserializeObject([string](& $e.M.RegGet $edge 'ExtensionSettings')); $mid[$foreign] = @{ installation_mode = 'force_installed' }
+    & $e.M.RegSet $edge 'ExtensionSettings' ((Get-AVDTuneVdiJsonSerializer).Serialize($mid)) 'String'
+    $ur = Invoke-AVDTuneVdiSettings -Machine $e.M -V $e.V -Key 'mmr' -Mode Undo -Root $tmp
+    $after = (Get-AVDTuneVdiJsonSerializer).DeserializeObject([string](& $e.M.RegGet $edge 'ExtensionSettings'))
+    Test-Check 'MMR policy undo: an entry that came after the apply stays, our entry goes back to its earlier fields, the others are untouched' (@($ur.Results | Where-Object Status -eq 'Reverted').Count -eq 1 -and @($after.Keys) -ccontains $foreign -and @($after.Keys) -ccontains 'abcdefghijklmnopabcdefghijklmnop' -and $after['*']['installation_mode'] -eq 'blocked' -and $after[$id]['toolbar_state'] -eq 'default_shown' -and -not ($after[$id].ContainsKey('installation_mode'))) ((& $e.M.RegGet $edge 'ExtensionSettings'))
+    Reset-Files
+    $e = New-Env
+    [void](Invoke-AVDTuneVdiSettings -Machine $e.M -V $e.V -Key 'mmr' -Root $tmp)
+    $mid = (Get-AVDTuneVdiJsonSerializer).DeserializeObject([string](& $e.M.RegGet $edge 'ExtensionSettings')); $mid[$foreign] = @{ installation_mode = 'allowed' }
+    & $e.M.RegSet $edge 'ExtensionSettings' ((Get-AVDTuneVdiJsonSerializer).Serialize($mid)) 'String'
+    [void](Invoke-AVDTuneVdiSettings -Machine $e.M -V $e.V -Key 'mmr' -Mode Undo -Root $tmp)
+    $after = (Get-AVDTuneVdiJsonSerializer).DeserializeObject([string](& $e.M.RegGet $edge 'ExtensionSettings'))
+    Test-Check 'MMR policy undo: the value did not exist before and a foreign entry was added: the value stays with the foreign entry only (not deleted)' (@($after.Keys).Count -eq 1 -and @($after.Keys) -ccontains $foreign) ((& $e.M.RegGet $edge 'ExtensionSettings'))
+    Reset-Files
+    $e = New-Env
+    [void](Invoke-AVDTuneVdiSettings -Machine $e.M -V $e.V -Key 'mmr' -Root $tmp)
+    [void](Invoke-AVDTuneVdiSettings -Machine $e.M -V $e.V -Key 'mmr' -Mode Undo -Root $tmp)
+    Test-Check 'MMR policy undo: the value did not exist before and only our entry is left: the value is removed' ($null -eq (& $e.M.RegGet $edge 'ExtensionSettings')) $null
+    Reset-Files
+    $e = New-Env
+    [void](Invoke-AVDTuneVdiSettings -Machine $e.M -V $e.V -Key 'mmr' -Root $tmp)
+    & $e.M.RegSet $edge 'ExtensionSettings' '{broken' 'String'
+    $logN = $e.M.Log.Count
+    $ur = Invoke-AVDTuneVdiSettings -Machine $e.M -V $e.V -Key 'mmr' -Mode Undo -Root $tmp
+    Test-Check 'MMR policy undo: invalid JSON now changes nothing and the step is Failed with the reason' (@($ur.Results | Where-Object Status -eq 'Failed').Count -eq 1 -and (& $e.M.RegGet $edge 'ExtensionSettings') -ceq '{broken' -and @($e.M.Log | Select-Object -Skip $logN | Where-Object { $_ -like 'RegSet*' -or $_ -like 'RegRemove*' }).Count -eq 0) (@($ur.Results | ForEach-Object Message) -join ',')
+    Reset-Files
+
+    # N1: the Property table of the held MSI is pinned per component
+    $webC = Get-AVDTuneVdiComponent 'webrtc'
+    $okP = @{ ProductName = 'Remote Desktop WebRTC Redirector Service'; Manufacturer = 'Microsoft Corporation'; ProductVersion = '1.54.2408.19001' }
+    function With-Prop([hashtable]$Over) { $h = @{}; foreach ($k in $okP.Keys) { $h[$k] = $okP[$k] }; foreach ($k in $Over.Keys) { $h[$k] = $Over[$k] }; $h }
+    $pc = @(
+        @{ N = 'right product'; P = $okP; I = ''; Ok = $true }
+        @{ N = 'the MMR product for the WebRTC component'; P = (With-Prop @{ ProductName = 'Remote Desktop Multimedia Redirection Service' }); I = ''; Ok = $false }
+        @{ N = 'other manufacturer'; P = (With-Prop @{ Manufacturer = 'Evil Corp' }); I = ''; Ok = $false }
+        @{ N = 'lower case product name'; P = (With-Prop @{ ProductName = 'remote desktop webrtc redirector service' }); I = ''; Ok = $false }
+        @{ N = 'older than installed'; P = (With-Prop @{ ProductVersion = '1.40.0.10001' }); I = '1.54.2408.19001'; Ok = $false }
+        @{ N = 'same as installed'; P = $okP; I = '1.54.2408.19001'; Ok = $true }
+        @{ N = 'version not readable while something is installed'; P = (With-Prop @{ ProductVersion = 'x' }); I = '1.0.0.10001'; Ok = $false }
+        @{ N = 'no properties'; P = $null; I = ''; Ok = $false }
+    )
+    $wrong = @($pc | Where-Object { (Test-AVDTuneMsiIdentity -Properties $_.P -Component $webC -InstalledVersion $_.I).Ok -ne $_.Ok } | ForEach-Object N)
+    Test-Check 'MSI identity: product name and manufacturer exact per component, nothing older than installed' ($wrong.Count -eq 0) ($wrong -join ', ')
+    $e = New-Env -Seed @{ MsiProps = @{ 'webrtc-redirector.msi' = @{ ProductName = 'Remote Desktop Multimedia Redirection Service'; Manufacturer = 'Microsoft Corporation'; ProductVersion = '1.0.2410.0' } } }
+    $x = Invoke-AVDTuneVdiRecorded -Machine $e.M -V $e.V -Key 'webrtc' -Root $tmp
+    Test-Check 'WebRTC install with the MMR MSI behind the address: refused, never started, folder removed, the file is released' ($x.Setup.Code -eq 'BadPackage' -and (Get-Log $e.V 'Run *').Count -eq 0 -and (Get-Log $e.V 'RemoveFolder*').Count -eq 1 -and @($e.V.Store.Held).Count -eq 0) $x.Setup.Message
+    Reset-Files
+    $e = New-Env -MSeed @{ Registry = @{ "$uni\{AAAAAAAA-0000-0000-0000-000000000001}|DisplayName" = 'Remote Desktop WebRTC Redirector Service'; "$uni\{AAAAAAAA-0000-0000-0000-000000000001}|DisplayVersion" = '1.99.0.10001' } }
+    $x = Invoke-AVDTuneVdiRecorded -Machine $e.M -V $e.V -Key 'webrtc' -Root $tmp
+    Test-Check 'WebRTC install of an older MSI than the installed version: Downgrade, never started, no undo record left by this call' ($x.Setup.Code -eq 'Downgrade' -and (Get-Log $e.V 'Run *').Count -eq 0 -and -not (Test-Path (Join-Path $tmp 'config\vdi-webrtc-undo.json'))) $x.Setup.Message
+    Reset-Files
+    $e = New-Env -Seed @{ MsiProps = @{ 'webrtc-redirector.msi' = $null } }
+    Test-Check 'WebRTC install: a Property table that cannot be read is refused' ((Invoke-AVDTuneVdiRecorded -Machine $e.M -V $e.V -Key 'webrtc' -Root $tmp).Setup.Code -eq 'BadPackage' -and (Get-Log $e.V 'Run *').Count -eq 0) $null
+    Reset-Files
+
+    # N2: removing an MSI component needs no download, no hold and no resolve
+    $e = New-Env
+    [void](Invoke-AVDTuneVdiRecorded -Machine $e.M -V $e.V -Key 'mmr' -Root $tmp)
+    $logN = $e.V.Log.Count
+    $x = Invoke-AVDTuneVdiRecorded -Machine $e.M -V $e.V -Key 'mmr' -Root $tmp -Mode Remove
+    $new = @($e.V.Log | Select-Object -Skip $logN)
+    Test-Check 'MMR remove: only msiexec.exe is checked and started with /x; no resolve, folder, download, header or hold' ($x.Setup.Status -eq 'Changed' -and @($new | Where-Object { $_ -like 'Resolve*' -or $_ -like 'NewTempFolder*' -or $_ -like 'Download*' -or $_ -like 'ReadHeader*' -or $_ -like 'HoldFile*' -or $_ -like 'ReadMsiProperties*' }).Count -eq 0 -and @($new | Where-Object { $_ -like 'Run C:\fake\System32\msiexec.exe /x {22222222-2222-2222-2222-222222222222} /qn /norestart' }).Count -eq 1 -and @($new | Where-Object { $_ -eq 'VerifySignature msiexec.exe' }).Count -eq 2) ($new -join ' | ')
+    Reset-Files
+    $e = New-Env
+    [void](Invoke-AVDTuneVdiRecorded -Machine $e.M -V $e.V -Key 'mmr' -Root $tmp)
+    $e.V.Store.Signatures = @{ 'msiexec.exe' = @{ Valid = $true; Subject = 'CN=Evil, O=Evil'; Issuer = 'CN=Evil CA' } }
+    $logN = $e.V.Log.Count
+    $x = Invoke-AVDTuneVdiRecorded -Machine $e.M -V $e.V -Key 'mmr' -Root $tmp -Mode Remove
+    Test-Check 'MMR remove: an msiexec.exe that is not the Windows file is not started' ($x.Setup.Code -eq 'BadSignature' -and @($e.V.Log | Select-Object -Skip $logN | Where-Object { $_ -like 'Run *' }).Count -eq 0) $x.Setup.Message
+    Reset-Files
+
+    # N3: after a timeout the folder is kept (the installation can still run in the Windows Installer service)
+    $e = New-Env -Seed @{ Exit = @{ 'webrtc-redirector.msi' = -1 } }
+    $x = Invoke-AVDTuneVdiRecorded -Machine $e.M -V $e.V -Key 'webrtc' -Root $tmp
+    Test-Check 'MSI install: a timeout keeps the folder (no RemoveFolder), releases the file, says the install can still run, and counts as a change (LastChange, undo record stay)' ($x.Setup.Status -eq 'Failed' -and $x.Setup.Code -eq 'Timeout' -and (Get-Log $e.V 'RemoveFolder*').Count -eq 0 -and @($e.V.Store.Held).Count -eq 0 -and $x.Setup.Message -like '*can still be running*C:\fake\temp\vdi-0*' -and (Test-Path (Join-Path $tmp 'config\vdi-webrtc-undo.json'))) $x.Setup.Message
+    Reset-Files
+    $e = New-Env -Seed @{ Exit = @{ 'teamsbootstrapper.exe' = -1 } }
+    $x = Invoke-AVDTuneVdiRecorded -Machine $e.M -V $e.V -Key 'teams' -Root $tmp
+    Test-Check 'Teams install: a timeout keeps the folder as well' ($x.Setup.Code -eq 'Timeout' -and (Get-Log $e.V 'RemoveFolder*').Count -eq 0) $x.Setup.Message
+    Reset-Files
+    Test-Check 'no tab characters in the Updates module comments (N5)' ((Get-Content -LiteralPath (Join-Path $repo 'Modules\AVDTune.Updates.psm1') -Raw) -notmatch "`t") $null
 
     # ---------------------------------------------------------------- OneDrive per machine through winget
     $e = New-Env

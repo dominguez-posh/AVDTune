@@ -484,7 +484,7 @@ function Update-AVDTuneNativeItem {
             # only from config\tools; it runs as a copy in a private folder that is checked right before it starts (no swap between check and start)
             $tools = Join-Path $Root 'config\tools'
             if (-not (& $U.FindTool 'teamsbootstrapper.exe' $tools)) {
-                # not in config	ools: the VDI components download it from Microsoft (fixed host, redirects checked by hand, signature, file held until the start) and run it (issue 56, #59)
+                # not in config\tools: the VDI components download it from Microsoft (fixed host, redirects checked by hand, signature, file held until the start) and run it (issue 56, #59)
                 $vdi = $U.PSObject.Properties['GetVdi']
                 if ($vdi -and (Get-Command Invoke-AVDTuneVdiPackage -ErrorAction SilentlyContinue)) {
                     $v = & $U.GetVdi

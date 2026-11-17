@@ -226,6 +226,29 @@ function Add-AVDTuneVdiExtensionEntry {
     [pscustomobject]@{ Ok = $true; Text = $s.Serialize($root); Error = '' }
 }
 
+function Remove-AVDTuneVdiExtensionEntry {
+    <#
+        Undo of Add-AVDTuneVdiExtensionEntry by merge, only at our own entry: the entry goes back to what it was before the first apply (read from the earlier text) or is removed. Other entries, also
+        those that came after the apply, stay. The whole value is removed only when it was not there before and nothing but our entry is left. Returns @{ Ok; Action Set|Remove|None; Text; Error }.
+        Invalid JSON now: nothing is changed (Ok false).
+    #>
+    param([string]$Current, [bool]$PreviousExists, [string]$PreviousText, [Parameter(Mandatory)][string]$ExtensionId)
+    $fail = { param($e) [pscustomobject]@{ Ok = $false; Action = 'None'; Text = ''; Error = $e } }
+    if ($ExtensionId -notmatch '^[a-p]{32}\z') { return & $fail 'The extension id is not valid.' }
+    if ([string]::IsNullOrWhiteSpace($Current)) { return [pscustomobject]@{ Ok = $true; Action = 'None'; Text = ''; Error = '' } }
+    $s = Get-AVDTuneVdiJsonSerializer
+    try { $root = $s.DeserializeObject($Current) } catch { return & $fail "The ExtensionSettings policy is not valid JSON now ($($_.Exception.Message)); it is not changed." }
+    if ($root -isnot [System.Collections.IDictionary]) { return & $fail 'The ExtensionSettings policy is not a JSON object now; it is not changed.' }
+    $before = $null
+    if ($PreviousExists -and -not [string]::IsNullOrWhiteSpace($PreviousText)) {
+        try { $p = $s.DeserializeObject($PreviousText) } catch { return & $fail 'The earlier ExtensionSettings text is not valid JSON; it is not changed.' }
+        if ($p -is [System.Collections.IDictionary] -and (Test-AVDTuneVdiKey $p $ExtensionId)) { $before = $p[$ExtensionId] }
+    }
+    if ($null -ne $before) { $root[$ExtensionId] = $before } elseif (Test-AVDTuneVdiKey $root $ExtensionId) { [void]$root.Remove($ExtensionId) }
+    if (@($root.Keys).Count -eq 0 -and -not $PreviousExists) { return [pscustomobject]@{ Ok = $true; Action = 'Remove'; Text = ''; Error = '' } }
+    [pscustomobject]@{ Ok = $true; Action = 'Set'; Text = $s.Serialize($root); Error = '' }
+}
+
 function Test-AVDTuneVdiExtensionEntry {
     param([string]$Existing, [Parameter(Mandatory)][string]$ExtensionId, [Parameter(Mandatory)][string]$UpdateUrl)
     if ([string]::IsNullOrWhiteSpace($Existing)) { return $false }
@@ -237,18 +260,28 @@ function Test-AVDTuneVdiExtensionEntry {
 
 function Get-AVDTuneVdiSteps {
     # Steps with Test/Apply/Undo for the chosen definitions. $Previous: id -> @{ Exists; Value; Type } (what was found before the first change).
-    param([Parameter(Mandatory)]$Defs, [hashtable]$Previous = @{})
+    param([Parameter(Mandatory)]$Defs, [hashtable]$Previous = @{}, [switch]$ForUndo)
     foreach ($d in @($Defs)) {
         $def = $d; $prev = $Previous[$def.Id]
         $test = if ($def.Kind -eq 'Extension') {
-            { param($m) $v = & $m.RegGet $def.Path $def.Name; @{ Compliant = (Test-AVDTuneVdiExtensionEntry -Existing ([string]$v) -ExtensionId $def.ExtensionId -UpdateUrl $def.UpdateUrl); State = $v } }.GetNewClosure()
+            # for the undo a text that is not valid JSON counts as "applied" so that the engine runs the undo, which refuses and ends Failed (nothing is changed)
+            { param($m) $v = & $m.RegGet $def.Path $def.Name; $ok = (Test-AVDTuneVdiExtensionEntry -Existing ([string]$v) -ExtensionId $def.ExtensionId -UpdateUrl $def.UpdateUrl); if (-not $ok -and $ForUndo -and -not [string]::IsNullOrWhiteSpace([string]$v)) { $ok = -not (Remove-AVDTuneVdiExtensionEntry -Current ([string]$v) -PreviousExists $false -PreviousText '' -ExtensionId $def.ExtensionId).Ok }; @{ Compliant = $ok; State = $v } }.GetNewClosure()
         }
         else { { param($m) $v = & $m.RegGet $def.Path $def.Name; @{ Compliant = ($null -ne $v -and [string]$v -ceq [string]$def.Value); State = $v } }.GetNewClosure() }
         $apply = if ($def.Kind -eq 'Extension') {
             { param($m) $cur = & $m.RegGet $def.Path $def.Name; $r = Add-AVDTuneVdiExtensionEntry -Existing ([string]$cur) -ExtensionId $def.ExtensionId -UpdateUrl $def.UpdateUrl; if (-not $r.Ok) { throw $r.Error }; & $m.RegSet $def.Path $def.Name $r.Text 'String' }.GetNewClosure()
         }
         else { { param($m) & $m.RegSet $def.Path $def.Name $def.Value $def.Type }.GetNewClosure() }
-        $undo = { param($m) if ($prev -and $prev.Exists) { & $m.RegSet $def.Path $def.Name $prev.Value $prev.Type } else { & $m.RegRemove $def.Path $def.Name } }.GetNewClosure()
+        $undo = if ($def.Kind -eq 'Extension') {
+            {
+                param($m)
+                $cur = & $m.RegGet $def.Path $def.Name
+                $r = Remove-AVDTuneVdiExtensionEntry -Current ([string]$cur) -PreviousExists ([bool]($prev -and $prev.Exists)) -PreviousText $(if ($prev -and $prev.Exists) { [string]$prev.Value } else { '' }) -ExtensionId $def.ExtensionId
+                if (-not $r.Ok) { throw $r.Error }
+                if ($r.Action -eq 'Remove') { & $m.RegRemove $def.Path $def.Name } elseif ($r.Action -eq 'Set') { & $m.RegSet $def.Path $def.Name $r.Text 'String' }
+            }.GetNewClosure()
+        }
+        else { { param($m) if ($prev -and $prev.Exists) { & $m.RegSet $def.Path $def.Name $prev.Value $prev.Type } else { & $m.RegRemove $def.Path $def.Name } }.GetNewClosure() }
         New-AVDTuneStep -Id $def.Id -Section VdiComponents -Title $def.Title -Why $def.Why -SourceUrl $def.Source -Test $test -Apply $apply -Undo $undo
     }
 }
@@ -326,7 +359,7 @@ function Invoke-AVDTuneVdiSettings {
         foreach ($d in $defs) { if ($known.ContainsKey($d.Id)) { $prev[$d.Id] = $known[$d.Id] } else { $prev[$d.Id] = Get-AVDTuneVdiPrevious -Machine $Machine -Def $d } }
         foreach ($k in @($known.Keys)) { if (-not $prev.ContainsKey($k)) { $prev[$k] = $known[$k] } }
     }
-    $steps = @(Get-AVDTuneVdiSteps -Defs $defs -Previous $prev)
+    $steps = @(Get-AVDTuneVdiSteps -Defs $defs -Previous $prev -ForUndo:($Mode -eq 'Undo'))
     if (-not $WhatIf) {
         if (-not (Test-AVDTuneWriteAllowed)) { throw 'The snapshot gate is not confirmed: AVDTune is read only until a snapshot newer than its last change is confirmed on the Overview.' }
         [void](Set-AVDTuneState -Root $Root -Values @{ LastChange = (& $Machine.Now).ToString('o') })
@@ -453,6 +486,26 @@ function Test-AVDTuneVdiPackageTrust {
     Test-AVDTuneToolTrust -Signature $Signature -Name 'vdi-msi' -OriginalFilenamePattern '^\z'
 }
 
+function Test-AVDTuneMsiIdentity {
+    <#
+        Pure: the Property table of an MSI (ProductName, Manufacturer, ProductVersion) against the component: ProductName must be exactly the product of the component, Manufacturer exactly
+        Microsoft Corporation, and the version must not be lower than the installed one (an unreadable version is refused when something is installed). Returns @{ Ok; Reason; Code }.
+    #>
+    param($Properties, [Parameter(Mandatory)]$Component, [string]$InstalledVersion)
+    $bad = { param($r, $c) [pscustomobject]@{ Ok = $false; Reason = $r; Code = $c } }
+    if ($null -eq $Properties -or $Properties -isnot [System.Collections.IDictionary]) { return & $bad 'The Property table of the MSI could not be read' 'BadPackage' }
+    $get = { param($k) if (Test-AVDTuneVdiKey $Properties $k) { [string]$Properties[$k] } else { '' } }
+    $name = & $get 'ProductName'; $man = & $get 'Manufacturer'; $ver = & $get 'ProductVersion'
+    if ($name -cne $Component.DisplayName) { return & $bad "The MSI is the product '$name', not '$($Component.DisplayName)'" 'BadPackage' }
+    if ($man -cne 'Microsoft Corporation') { return & $bad "The MSI names the manufacturer '$man'" 'BadPackage' }
+    if ($InstalledVersion) {
+        $cmp = Compare-AVDTuneVdiVersion $ver $InstalledVersion
+        if ($null -eq $cmp) { return & $bad "The MSI version '$ver' cannot be compared with the installed $InstalledVersion" 'BadPackage' }
+        if ($cmp -lt 0) { return & $bad "The MSI is version $ver, older than the installed $InstalledVersion" 'Downgrade' }
+    }
+    [pscustomobject]@{ Ok = $true; Reason = ''; Code = '' }
+}
+
 function Test-AVDTuneMsiHeader {
     # An MSI is an OLE compound file: D0 CF 11 E0 A1 B1 1A E1
     param([byte[]]$Bytes)
@@ -481,6 +534,23 @@ function Invoke-AVDTuneVdiPackage {
         if ($busy.Count -gt 0) { return & $out 'Failed' "Microsoft Edge or Google Chrome is running ($($busy -join ', ')). Close it (also in the background) and try again: Learn requires that for the install." 'BrowserRunning' $false }
     }
     if ($Key -ne 'teams' -and $Mode -eq 'Remove' -and -not $before.ProductCode) { return & $out 'Failed' "The product code of $($c.Title) was not found in the registry: it is not removed." 'NoProductCode' $false }
+    if ($c.Kind -eq 'Msi' -and $Mode -eq 'Remove') {
+        # nothing is downloaded or held: only msiexec.exe (Windows file, by full path) is checked and started with the product code read from the registry
+        try {
+            $runner = [string](& $V.MsiexecPath)
+            $tm = Test-AVDTuneToolTrust -Signature (& $V.VerifySignature $runner) -Name 'msiexec.exe'
+            if (-not $tm.Ok) { return & $out 'Failed' "$($tm.Reason): it is not started." 'BadSignature' $false }
+            & $say "Removing $($c.Title) ..."
+            $tm2 = Test-AVDTuneToolTrust -Signature (& $V.VerifySignature $runner) -Name 'msiexec.exe'
+            if (-not $tm2.Ok) { return & $out 'Failed' "$($tm2.Reason): it is not started." 'BadSignature' $false }
+            $run = & $V.Run $runner @('/x', $before.ProductCode, '/qn', '/norestart') 1800
+            if ($run.ExitCode -eq -1) { return & $out 'Failed' 'msiexec did not finish in time. The removal can still be running in the Windows Installer service: wait until it is done, then press Test.' 'Timeout' $false }
+            if ($run.ExitCode -notin 0, 3010, 1641) { return & $out 'Failed' "msiexec returned $($run.ExitCode).$(if ($run.ExitCode -eq 1618) { ' Another installation is running; wait for it and try again.' }) $([string]$run.Output)".Trim() "Exit$($run.ExitCode)" $false }
+            if ((Get-AVDTuneVdiState -Machine $Machine -V $V -Key $Key).Installed) { return & $out 'Failed' "The program finished but $($c.Title) is still there." 'StillInstalled' ($run.ExitCode -ne 0) }
+            return & $out 'Changed' "Removed (was $($before.Version))." '' ($run.ExitCode -ne 0)
+        }
+        catch { return & $out 'Failed' $_.Exception.Message 'Error' $false }
+    }
     $dir = $null
     try {
         & $say "Looking up $($c.Title) at Microsoft ..."
@@ -496,6 +566,11 @@ function Invoke-AVDTuneVdiPackage {
         if ($c.Kind -eq 'Msi' -and -not (Test-AVDTuneMsiHeader -Bytes @(& $V.ReadHeader $file 8))) { return & $out 'Failed' 'The downloaded file is not an MSI package: it is not started.' 'BadPackage' $false }
         try { $hold = & $V.HoldFile $file } catch { return & $out 'Failed' "$($c.File) cannot be held for the check: $($_.Exception.Message)" 'NoHold' $false }
         try {
+            if ($c.Kind -eq 'Msi') {
+                # the Property table of the held MSI names the product: webrtc and mmr cannot be swapped, and nothing older than the installed version is installed
+                $pin = Test-AVDTuneMsiIdentity -Properties (& $V.ReadMsiProperties $file) -Component $c -InstalledVersion $(if ($before.Installed) { $before.Version } else { '' })
+                if (-not $pin.Ok) { return & $out 'Failed' "$($pin.Reason): it is not started." $pin.Code $false }
+            }
             $trust = Test-AVDTuneVdiPackageTrust -Signature (& $V.VerifySignature $file) -Component $c
             if (-not $trust.Ok) { return & $out 'Failed' "$($trust.Reason): it is not started." 'BadSignature' $false }
             $runner = $file; $cmdArgs = @()
@@ -514,6 +589,11 @@ function Invoke-AVDTuneVdiPackage {
             $run = & $V.Run $runner $cmdArgs 1800
         }
         finally { if ($hold) { $hold.Dispose() } }
+        if ($run.ExitCode -eq -1) {
+            # timeout: the install can still be running in the Windows Installer service, which reads the file: the folder is NOT deleted
+            $left = $dir; $dir = $null
+            return & $out 'Failed' "$($c.File) did not finish in time. The installation can still be running in the Windows Installer service; its files stay in $left until you have checked (Test) and removed the folder by hand." 'Timeout' $false
+        }
         $reboot = $run.ExitCode -in 3010, 1641
         if ($run.ExitCode -notin 0, 3010, 1641) {
             $hint = if ($run.ExitCode -eq 1618) { ' Another installation is running; wait for it and try again.' } else { '' }
@@ -584,7 +664,7 @@ function Invoke-AVDTuneVdiRecorded {
         }
     }
     $r = Invoke-AVDTuneVdiPackage -Machine $Machine -V $V -Key $Key -Mode $Mode -Root $Root -Progress $Progress
-    $noEffect = ($r.Status -eq 'Unchanged') -or ($r.Status -eq 'Failed' -and $r.Code -cin 'BrowserRunning', 'NoProductCode', 'NoLink', 'NotProtected', 'Download', 'BadPackage', 'NoHold', 'BadSignature', 'ToolMissing', 'Lock')
+    $noEffect = ($r.Status -eq 'Unchanged') -or ($r.Status -eq 'Failed' -and $r.Code -cin 'BrowserRunning', 'NoProductCode', 'NoLink', 'NotProtected', 'Download', 'BadPackage', 'Downgrade', 'NoHold', 'BadSignature', 'ToolMissing', 'Lock')
     if ($noEffect -and $createdUndo) { Remove-Item -LiteralPath $undoPath -Force -ErrorAction SilentlyContinue }
     $id = "vdi.$Key.$(if ($Mode -eq 'Remove') { 'remove' } else { 'install' })"
     $title = if ($PlanName) { $PlanName } elseif ($Mode -eq 'Remove') { "$($c.Title) removal" } else { $c.Title }
@@ -670,6 +750,27 @@ function New-AVDTuneVdiAdapter {
     $a.Run = $u.Run
     $a.ReadHeader = { param($Path, $Count) $fs = [IO.File]::Open($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read); try { $b = New-Object byte[] $Count; $n = $fs.Read($b, 0, $Count); if ($n -lt $Count) { [byte[]]@() } else { $b } } finally { $fs.Dispose() } }
     $a.RunningProcesses = { param($Names) @(foreach ($n in $Names) { if (@(Get-Process -Name $n -ErrorAction SilentlyContinue).Count -gt 0) { $n } }) }
+    $a.ReadMsiProperties = {
+        # Property table of the (held) MSI through the Windows Installer COM object, read only; $null when it cannot be read
+        param($Path)
+        $inst = $null; $db = $null; $view = $null
+        try {
+            $inst = New-Object -ComObject WindowsInstaller.Installer
+            $db = $inst.GetType().InvokeMember('OpenDatabase', 'InvokeMethod', $null, $inst, @($Path, 0))
+            $view = $db.GetType().InvokeMember('OpenView', 'InvokeMethod', $null, $db, @('SELECT `Property`, `Value` FROM `Property`'))
+            [void]$view.GetType().InvokeMember('Execute', 'InvokeMethod', $null, $view, $null)
+            $h = @{}
+            while ($true) {
+                $rec = $view.GetType().InvokeMember('Fetch', 'InvokeMethod', $null, $view, $null)
+                if ($null -eq $rec) { break }
+                $k = [string]$rec.GetType().InvokeMember('StringData', 'GetProperty', $null, $rec, @(1)); $v = [string]$rec.GetType().InvokeMember('StringData', 'GetProperty', $null, $rec, @(2))
+                if ($k -in 'ProductName', 'Manufacturer', 'ProductVersion', 'UpgradeCode') { $h[$k] = $v }
+            }
+            $h
+        }
+        catch { $null }
+        finally { foreach ($o in $view, $db, $inst) { if ($o) { try { [void][Runtime.InteropServices.Marshal]::ReleaseComObject($o) } catch { } } } }
+    }
     $a.MsiexecPath = { Join-Path (Get-AVDTuneSystemFolder System) 'msiexec.exe' }
     # registered for a user, or only provisioned for all users (what teamsbootstrapper.exe -p leaves until the first sign-in)
     $a.AppxVersion = {
@@ -688,6 +789,6 @@ function New-AVDTuneVdiAdapter {
 #endregion
 
 Export-ModuleMember -Function Get-AVDTuneVdiComponents, Get-AVDTuneVdiComponent, Test-AVDTuneVdiUrl, Get-AVDTuneVdiNextUrl, Get-AVDTuneVdiVersionFromUrl, Compare-AVDTuneVdiVersion, Get-AVDTuneVdiUninstallEntry,
-    Get-AVDTuneVdiVcRuntime, Get-AVDTuneVdiState, Get-AVDTuneVdiSettingDefs, Get-AVDTuneVdiJsonSerializer, Add-AVDTuneVdiExtensionEntry, Test-AVDTuneVdiExtensionEntry, Get-AVDTuneVdiSteps, Get-AVDTuneVdiSettingsRows, Invoke-AVDTuneVdiSettings,
-    Get-AVDTuneVdiRows, Get-AVDTuneVdiSummaryStatus, Get-AVDTuneVdiLatest, Test-AVDTuneVdiPackageTrust, Test-AVDTuneMsiHeader, Invoke-AVDTuneVdiPackage, Invoke-AVDTuneVdiWinget, Invoke-AVDTuneVdiRecorded,
+    Get-AVDTuneVdiVcRuntime, Get-AVDTuneVdiState, Get-AVDTuneVdiSettingDefs, Get-AVDTuneVdiJsonSerializer, Add-AVDTuneVdiExtensionEntry, Remove-AVDTuneVdiExtensionEntry, Test-AVDTuneVdiExtensionEntry, Get-AVDTuneVdiSteps, Get-AVDTuneVdiSettingsRows, Invoke-AVDTuneVdiSettings,
+    Get-AVDTuneVdiRows, Get-AVDTuneVdiSummaryStatus, Get-AVDTuneVdiLatest, Test-AVDTuneVdiPackageTrust, Test-AVDTuneMsiIdentity, Test-AVDTuneMsiHeader, Invoke-AVDTuneVdiPackage, Invoke-AVDTuneVdiWinget, Invoke-AVDTuneVdiRecorded,
     Get-AVDTuneVdiUndoText, Invoke-AVDTuneVdiUndo, New-AVDTuneVdiAdapter

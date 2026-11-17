@@ -4,7 +4,7 @@
 # Everything asked is in .Log. Switches live in .Store:
 #   Redirects (hashtable entry link -> @{ Ok; Url; Error }), DownloadFails, Protected ($false = download folder not protected), Header (bytes of the file; default a real MSI header, text for the exe),
 #   Signatures (hashtable leaf -> @{ Valid; Subject; Issuer; OriginalFilename }), SwapAfterCheck ($true = the file has another signer from the second check on), HoldFails, Running (names of running processes),
-#   Exit (hashtable leaf or 'winget' -> exit code), NoEffect ($true = the program exits 0 and changes nothing), TeamsVersion, WebrtcVersion, MmrVersion, OneDriveVersion, Folders, Held (files held now).
+#   MsiProps (hashtable leaf -> properties of the MSI: ProductName, Manufacturer, ProductVersion), Exit (hashtable leaf or 'winget' -> exit code), NoEffect ($true = the program exits 0 and changes nothing), TeamsVersion, WebrtcVersion, MmrVersion, OneDriveVersion, Folders, Held (files held now).
 # All names are made up; the addresses are of the real shape but point nowhere.
 . (Join-Path $PSScriptRoot 'FakeUpdates.ps1')
 function New-AVDTuneFakeVdi {
@@ -17,13 +17,13 @@ function New-AVDTuneFakeVdi {
         }
         DownloadFails = $false; Protected = $true; Header = $null; Signatures = @{}; SwapAfterCheck = $false; HoldFails = $false; Running = @(); Exit = @{}; NoEffect = $false
         TeamsVersion = '26000.1.1.0'; WebrtcVersion = '1.54.2408.19001'; MmrVersion = '1.0.2410.0'; OneDriveVersion = '25.200.0'; Folders = @(); Held = @(); Checks = 0
-        Teams = $null; OneDrive = $false
+        Teams = $null; OneDrive = $false; MsiProps = @{}
         Log = (New-Object System.Collections.ArrayList)
     }
     foreach ($e in $Seed.GetEnumerator()) { $s[$e.Key] = $e.Value }
     $ms = $Machine
     $uni = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall'
-    $codes = @{ 'webrtc-redirector.msi' = '{11111111-2222-3333-4444-555555555551}'; 'mmr-host.msi' = '{11111111-2222-3333-4444-555555555552}' }
+    $codes = @{ 'webrtc-redirector.msi' = '{11111111-1111-1111-1111-111111111111}'; 'mmr-host.msi' = '{22222222-2222-2222-2222-222222222222}' }
     $names = @{ 'webrtc-redirector.msi' = 'Remote Desktop WebRTC Redirector Service'; 'mmr-host.msi' = 'Remote Desktop Multimedia Redirection Service' }
     $versions = @{ 'webrtc-redirector.msi' = 'WebrtcVersion'; 'mmr-host.msi' = 'MmrVersion' }
     $uf = New-AVDTuneFakeUpdates -Seed @{ Native = @{ '*winget.exe install *' = @{ ExitCode = 0; Output = 'ok' }; '*winget.exe uninstall *' = @{ ExitCode = 0; Output = 'ok' } }; Appx = @{} }
@@ -61,6 +61,12 @@ function New-AVDTuneFakeVdi {
         if (-not $win -and $s.SwapAfterCheck -and $s.Checks -ge 2) { $sig = @{ Valid = $true; Subject = 'CN=Evil Corp, O=Evil Corp, C=US'; Issuer = 'CN=Microsoft Code Signing PCA 2024, O=Microsoft Corporation, C=US' } }
         $orig = if ($sig.ContainsKey('OriginalFilename')) { [string]$sig.OriginalFilename } elseif ($leaf -like '*.msi') { '' } else { $leaf }
         [pscustomobject]@{ Valid = [bool]$sig.Valid; Status = $(if ($sig.Valid) { 'Valid' } else { 'NotSigned' }); Subject = [string]$sig.Subject; Issuer = [string]$sig['Issuer']; OriginalFilename = $orig; ProductName = ''; FileDescription = ''; FileMajor = 1 }
+    }.GetNewClosure()
+    $a.ReadMsiProperties = {
+        param($Path)
+        $leaf = Split-Path $Path -Leaf
+        [void]$s.Log.Add("ReadMsiProperties $leaf")
+        if ($s.MsiProps.ContainsKey($leaf)) { $s.MsiProps[$leaf] } else { @{ ProductName = $names[$leaf]; Manufacturer = 'Microsoft Corporation'; ProductVersion = $s[$versions[$leaf]] } }
     }.GetNewClosure()
     $a.MsiexecPath = { 'C:\fake\System32\msiexec.exe' }
     $a.Run = {
