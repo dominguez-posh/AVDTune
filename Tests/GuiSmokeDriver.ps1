@@ -9,6 +9,13 @@ $window.Left = -20000; $window.Top = -20000
 $window.ShowActivated = $false
 $window.ShowInTaskbar = $false
 
+function Complete-SmokeFslRead {
+    # #72: in test mode the read of the FSLogix page waits for the overview read (both use the fake machine, Complete-FslRead); the smoke waits for it here (at most 30 s) and takes both over
+    $sw = [Diagnostics.Stopwatch]::StartNew()
+    while ($script:OverviewJob -and -not $script:OverviewJob.Handle.IsCompleted -and $sw.ElapsedMilliseconds -lt 30000) { Start-Sleep -Milliseconds 50 }
+    Complete-OverviewRefresh
+    Complete-FslRead
+}
 function Test-Smoke([string]$Name, [bool]$Ok, $Detail) {
     $line = if ($Ok) { "PASS $Name" } else { "FAIL $Name" + $(if ($null -ne $Detail) { "  -> $Detail" } else { '' }) }
     [void]$script:SmokeResults.Add($line)
@@ -813,61 +820,70 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         $script:Machine.Store.Native[(Join-Path (Get-AVDTuneSystemFolder System) 'fltmc.exe') + ' filters'] = @{ ExitCode = 0; Output = "Filter Name  Num Instances  Altitude  Frame`r`nfrxdrv  3  135000  0`r`nfrxdrvvt  3  135100  0`r`n" }
         $script:Machine.Store.Native['*frx.exe create-vhd *'] = @{ ExitCode = 0; Output = 'created' }; $script:Machine.Store.Native['*frx.exe begin-edit-profile *'] = @{ ExitCode = 0; Output = 'cookie: 4876' }; $script:Machine.Store.Native['*frx.exe end-edit-profile *'] = @{ ExitCode = 0; Output = 'ok' }
         $script:FslFake.F.Store.Defender = @{ Paths = @('C:\Program Files\FSLogix\Apps\', 'C:\ProgramData\FSLogix\'); Processes = @('frxsvc.exe') }
+        $script:SmokeTasksSeen = @(Get-AVDTuneUiTasks)   # kept for the check of the earlier flows (the list holds the newest 100)
+        $fslDone = { Complete-FslJob; Complete-SmokeFslRead; $window.UpdateLayout() }   # #72: a change runs as a job and the page reads the master again after it; in test mode both run inline and are taken over here instead of on the timer
+        $fslRead = { Start-FslRead; Complete-SmokeFslRead; $window.UpdateLayout() }   # read again after the fake master was changed by the smoke (like opening the page again)
         Show-Page 'FSLogix'; $window.UpdateLayout()
+        $rt = @(Get-AVDTuneUiTasks | Where-Object { $_.Kind -eq 'fslogix-read' })
+        $refused = try { Assert-FslFresh; $false } catch { $_.Exception.Message -like '*still being read*' }
+        Test-Smoke 'FSLogix page (#72): the page is there at once, the read of the master runs as a task with Retry, changes are locked and refused until it is done' ($script:FslReadJob -and $rt.Count -ge 1 -and $rt[-1].Status -eq 'running' -and $rt[-1].Retry.Command -eq 'Start-FslRead' -and -not $ui.BtnFslSettingsApply.IsEnabled -and -not $ui.BtnFslDefAdd.IsEnabled -and $refused) "tasks=$($rt.Count) refused=$refused"
+        Complete-SmokeFslRead; $window.UpdateLayout()
+        $rt = @(Get-AVDTuneUiTasks | Where-Object { $_.Kind -eq 'fslogix-read' })
+        Test-Smoke 'FSLogix page (#72): after the read the task is done and the changes are open' (-not $script:FslReadJob -and $rt[-1].Status -eq 'succeeded' -and $ui.BtnFslSettingsApply.IsEnabled -and $ui.BtnFslDefAdd.IsEnabled -and $script:FslState) $rt[-1].Summary
         Test-Smoke 'FSLogix page: own page (no placeholder), the nav item is checked' ($ui.PageFSLogix.Visibility -eq 'Visible' -and $ui.PagePlaceholder.Visibility -eq 'Collapsed' -and $ui.NavFSLogix.IsChecked) $null
         Test-Smoke 'installation card: installed version, service and drivers' ($ui.TxtFslVersion.Text -like '*2.9.8884.27471*frxsvc Running*frxdrv*' -and $ui.TxtFslInstallPill.Text -eq 'Update available: 26.08') $ui.TxtFslVersion.Text
         # issue 63: the status pill against the newest release (the fake release is 26.08): older yellow, newer green, not readable grey
         $pillYellow = ($ui.TxtFslInstallPill.Text -eq 'Update available: 26.08' -and $ui.PillFslInstall.ToolTip -like '*older than the release 26.08*')
-        $script:Machine.Store.Registry['hklm:\software\fslogix\apps|installversion'] = '3.27.101.12345'; $script:FslLatestResult = $null; Update-FslInstall
+        $script:Machine.Store.Registry['hklm:\software\fslogix\apps|installversion'] = '3.27.101.12345'; $script:FslLatestResult = $null; & $fslRead
         $pillGreen = ($ui.TxtFslInstallPill.Text -eq 'Installed, up to date')
-        $script:FslFake.F.Store.Latest = @{ Ok = $false; Url = ''; Error = 'fake: no connection' }; $script:FslLatestResult = $null; Update-FslInstall
+        $script:FslFake.F.Store.Latest = @{ Ok = $false; Url = ''; Error = 'fake: no connection' }; $script:FslLatestResult = $null; & $fslRead
         $pillGrey = ($ui.TxtFslInstallPill.Text -eq 'Installed, newest version unknown' -and $ui.PillFslInstall.ToolTip -like '*fake: no connection*' -and $ui.TxtFslLatest.Text -like '*fake: no connection*')
         $script:Machine.Store.Registry['hklm:\software\fslogix\apps|installversion'] = '2.9.8884.27471'
-        $script:FslFake.F.Store.Latest = @{ Ok = $true; Url = 'https://download.microsoft.com/download/00000000-0000-0000-0000-000000000000/FSLogix_26.08.zip'; Error = '' }; $script:FslLatestResult = $null; Update-FslInstall
+        $script:FslFake.F.Store.Latest = @{ Ok = $true; Url = 'https://download.microsoft.com/download/00000000-0000-0000-0000-000000000000/FSLogix_26.08.zip'; Error = '' }; $script:FslLatestResult = $null; & $fslRead
         Test-Smoke 'status pill (#63): older = yellow with the new version, newer = green, newest not readable = grey with the reason; no download ran' ($pillYellow -and $pillGreen -and $pillGrey -and $ui.TxtFslInstallPill.Text -eq 'Update available: 26.08' -and @($script:FslFake.F.Log | Where-Object { $_ -like 'Download*' }).Count -eq 0) "$pillYellow $pillGreen $pillGrey"
         Test-Smoke 'settings: every setting of the plan as a row with its recommendation and reason, differing values marked' ($script:FslInputs.Count -ge 19 -and (Find-Text $ui.PanelFslSettings 'LockedRetryCount') -and (Find-Text $ui.PanelFslSettings 'Differs') -and (Find-Text $ui.PanelFslSettings 'Office container (ODFC), optional')) $script:FslInputs.Count
         Save-SmokeShot '50-fslogix-top-light'
         $domSidSmoke = 'S-1-5-21-1111111111-2222222222-333333333'
-        $script:FslFake.F.Store.MasterDomainSid = $domSidSmoke   # the domain SID this (fake) master resolves for <NetBIOS>\Domain Admins
+        $script:FslFake.F.Store.MasterDomainSid = $domSidSmoke; & $fslRead   # the domain SID this (fake) master resolves for <NetBIOS>\Domain Admins (read again: the confirmation names what the read found)
         # fill in the recommendation, dry run first, then write behind the gate
         $ui.BtnFslFill.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
         $ui.BtnFslSettingsTest.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
         Test-Smoke 'Test: shows what would change and writes nothing' ($ui.TxtFslSettingsState.Text -like 'Test (nothing written)*lockedretrycount*' -and (& $script:Machine.RegGet 'HKLM:\SOFTWARE\FSLogix\Profiles' 'LockedRetryCount') -eq 12 -and @(Get-AVDTuneRun -Root $script:StateRoot | Where-Object Plan -like 'FSLogix*').Count -eq 0) $ui.TxtFslSettingsState.Text
-        $ui.BtnFslSettingsApply.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
+        $ui.BtnFslSettingsApply.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent))); & $fslDone
         Test-Smoke 'Apply: the confirmation names the count, the registry has the recommended values, LastChange shown, change log written' ($script:ConfirmAsked -like 'Write * FSLogix setting*' -and (& $script:Machine.RegGet 'HKLM:\SOFTWARE\FSLogix\Profiles' 'LockedRetryCount') -eq 3 -and (& $script:Machine.RegGet 'HKLM:\SOFTWARE\FSLogix\Profiles' 'VolumeType') -eq 'vhdx' -and $ui.TxtFslSettingsState.Text -like 'LastChange:*' -and @(Get-AVDTuneChangeLog -Root $script:StateRoot | Where-Object Category -eq 'FSLogix').Count -ge 3) "$($script:ConfirmAsked) / $($ui.TxtFslSettingsState.Text)"
         Test-Smoke 'Apply (#62): the same confirmation names the list changes (exclude local Administrators and Domain Admins with DNS name and SID; include already has Everyone and is not mentioned)' ($script:ConfirmAsked -like 'Write * FSLogix setting*Also: Exclude + BUILTIN\Administrators (S-1-5-32-544), + *\Domain Admins (' + $domSidSmoke + '-512)*' -and $script:ConfirmAsked -notlike '*Include*' -and $script:FslFake.F.Store.Groups['FSLogix Profile Exclude List'] -contains ($domSidSmoke + '-512')) $script:ConfirmAsked
         Test-Smoke 'the change is in the protocol (category FSLogix)' (@($script:Protocol.Actions | Where-Object { $_.Category -eq 'fslogix' }).Count -ge 1) $null
         $tk = @(Get-AVDTuneUiTasks | Where-Object { $_.Kind -eq 'fslogix-settings' })
         Test-Smoke 'task bar: applying the settings is a task, ended as succeeded, no Retry (a change of the master)' ($tk.Count -eq 1 -and $tk[0].Status -eq 'succeeded' -and -not $tk[0].Retry -and $tk[0].Title -like '*FSLogix settings*') ($tk | ForEach-Object { $_.Status })
-        $ui.BtnFslSettingsUndo.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
+        $ui.BtnFslSettingsUndo.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent))); & $fslDone
         Test-Smoke 'Undo: the previous values are back' ((& $script:Machine.RegGet 'HKLM:\SOFTWARE\FSLogix\Profiles' 'LockedRetryCount') -eq 12 -and (& $script:Machine.RegGet 'HKLM:\SOFTWARE\FSLogix\Profiles' 'VolumeType') -eq 'vhd') $null
         $ui.BtnFslFill.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
         $script:ConfirmAsked = ''
-        $ui.BtnFslSettingsApply.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
+        $ui.BtnFslSettingsApply.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent))); & $fslDone
         Test-Smoke 'Apply (#62): the lists are already as recommended, the confirmation does not mention them' ($script:ConfirmAsked -like 'Write * FSLogix setting*' -and $script:ConfirmAsked -notlike '*Also:*') $script:ConfirmAsked
         # groups
         $ui.CmbFslList.SelectedItem = 'Exclude'
-        $ui.BtnFslExcludeAdmins.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
+        $ui.BtnFslExcludeAdmins.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent))); & $fslDone
         Test-Smoke 'groups: the local Administrators are in the exclude list; the groups of the domain controller are offered' ($script:FslFake.F.Store.Groups['FSLogix Profile Exclude List'] -contains 'S-1-5-32-544' -and $ui.TxtFslGroups.Text -like '*S-1-5-32-544*' -and @($ui.CmbFslGroup.ItemsSource) -contains 'AVD-Users') $ui.TxtFslGroupHint.Text
         # recommended lists (issue 62): one button, the contents of both lists are checked, the foreign entry stays, Undo takes only what was added
         $domAdmins = 'S-1-5-21-1111111111-2222222222-333333333-512'
         $script:FslFake.F.Store.Groups['FSLogix Profile Exclude List'] = @('S-1-5-21-9-9-9-1234')
         $script:FslFake.F.Store.Groups['FSLogix Profile Include List'] = @()
-        $ui.BtnFslListsApply.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
+        & $fslRead; $ui.BtnFslListsApply.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent))); & $fslDone
         $exl = @($script:FslFake.F.Store.Groups['FSLogix Profile Exclude List']); $inl = @($script:FslFake.F.Store.Groups['FSLogix Profile Include List'])
         Test-Smoke 'Apply recommended lists: include = Everyone; exclude = local Administrators + Domain Admins (domain SID from the DC information) + the foreign entry; the lists text shows them' ($inl.Count -eq 1 -and $inl[0] -eq 'S-1-1-0' -and $exl -contains 'S-1-5-32-544' -and $exl -contains $domAdmins -and $exl -contains 'S-1-5-21-9-9-9-1234' -and $exl.Count -eq 3 -and $ui.TxtFslGroups.Text -like "*$domAdmins*" -and $ui.TxtFslGroups.Text -like '*S-1-5-21-9-9-9-1234*' -and $script:ConfirmAsked -like '*Include + Everyone*' -and $script:ConfirmAsked -like "*Domain Admins ($domAdmins)*") "$($exl -join ',') / $($inl -join ',') / $($script:ConfirmAsked)"
-        $ui.BtnFslListsUndo.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
+        $ui.BtnFslListsUndo.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent))); & $fslDone
         $exl2 = @($script:FslFake.F.Store.Groups['FSLogix Profile Exclude List'])
         Test-Smoke 'Undo recommended lists: what was added is gone, the foreign entry stays' ($exl2.Count -eq 1 -and $exl2[0] -eq 'S-1-5-21-9-9-9-1234' -and @($script:FslFake.F.Store.Groups['FSLogix Profile Include List']).Count -eq 0) ($exl2 -join ',')
         $script:FslFake.F.Store.MasterDomainSid = 'S-1-5-21-4-4-4'
         $script:FslFake.F.Store.Groups['FSLogix Profile Exclude List'] = @(); $script:FslFake.F.Store.Groups['FSLogix Profile Include List'] = @()
         $script:ConfirmAsked = ''
-        $ui.BtnFslListsApply.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
+        & $fslRead; $ui.BtnFslListsApply.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent))); & $fslDone
         $exm = @($script:FslFake.F.Store.Groups['FSLogix Profile Exclude List'])
         Test-Smoke 'Apply recommended lists, master of another domain (#62): no Domain Admins exclude, the dialog and the hint say why' ($exm.Count -eq 1 -and $exm[0] -eq 'S-1-5-32-544' -and $script:ConfirmAsked -notlike '*Domain Admins (*' -and $script:ConfirmAsked -like '*not the domain SID of this master (S-1-5-21-4-4-4)*' -and $ui.TxtFslState.Text -like '*not the domain SID of this master*') "$($exm -join ',') / $($script:ConfirmAsked)"
-        $ui.BtnFslListsUndo.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
+        $ui.BtnFslListsUndo.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent))); & $fslDone
         $script:FslFake.F.Store.MasterDomainSid = $domSidSmoke
-        $ui.BtnFslListsApply.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
+        & $fslRead; $ui.BtnFslListsApply.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent))); & $fslDone
         $ui.CmbFslGroup.Text = 'not-a-group'
         $ui.BtnFslGroupAdd.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
         Test-Smoke 'a name that is no group and no SID is refused with the reason' ($script:LastToast -like '*neither a group of the domain nor a SID*') $script:LastToast
@@ -881,12 +897,12 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         $ui.TxtFslRedirXml.Text = $good.Replace('</Excludes>', '<Exclude Copy="0">AppData\Local\Microsoft\TokenBroker\Cache</Exclude></Excludes>')
         $ui.BtnFslRedirValidate.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
         Test-Smoke 'the token broker is refused with the single sign-on reason' ($ui.TxtFslRedirState.Text -like 'Not valid:*single sign-on*') $ui.TxtFslRedirState.Text
-        $ui.BtnFslRedirSave.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
+        $ui.BtnFslRedirSave.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent))); & $fslDone
         Test-Smoke 'saving that text is refused, nothing is written' ($script:LastToast -like '*not valid*' -and -not $script:FslFake.F.Store.Files.ContainsKey('\\storageaccount.file.core.windows.net\profiles\redirections.xml')) $script:LastToast
         $tk = @(Get-AVDTuneUiTasks | Where-Object { $_.Kind -eq 'fslogix-redirections' })
         Test-Smoke 'task bar: the refused redirections.xml is a failed task with the cause, no Retry' ($tk.Count -eq 1 -and $tk[0].Status -eq 'failed' -and $tk[0].Summary -like '*not valid*' -and -not $tk[0].Retry) ($tk | ForEach-Object { $_.Status + ' ' + $_.Summary })
         $ui.TxtFslRedirXml.Text = $good
-        $ui.BtnFslRedirSave.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
+        $ui.BtnFslRedirSave.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent))); & $fslDone
         Test-Smoke 'redirections.xml saved to the folder, the folder is in the registry' ($script:FslFake.F.Store.Files['\\storageaccount.file.core.windows.net\profiles\redirections.xml'] -ceq $good -and (& $script:Machine.RegGet 'HKLM:\SOFTWARE\FSLogix\Profiles' 'RedirXMLSourceFolder') -eq '\\storageaccount.file.core.windows.net\profiles') $null
         $tk = @(Get-AVDTuneUiTasks | Where-Object { $_.Kind -eq 'fslogix-redirections' })
         Test-Smoke 'task bar: the saved redirections.xml is a second task, succeeded' ($tk.Count -eq 2 -and $tk[1].Status -eq 'succeeded') ($tk | ForEach-Object { $_.Status })
@@ -894,22 +910,22 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         $defKey = 'C:\Users\*\AppData\Local\FSLogix\'
         $defRow = @($ui.PanelFslDefender.Children | Where-Object { $_.Children[0].Tag -eq $defKey })
         $defRow[0].Children[0].IsChecked = $false
-        $ui.BtnFslDefAdd.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
+        $ui.BtnFslDefAdd.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent))); & $fslDone
         Test-Smoke 'Defender: the unticked exclusion is not set (still Missing and unticked after the list is drawn again), the others are' ($defRow.Count -eq 1 -and $script:ConfirmAsked -like '*1 are unticked*' -and $script:FslFake.F.Store.Defender.Paths -notcontains $defKey -and $script:FslFake.F.Store.Defender.Processes -contains 'C:\Program Files\FSLogix\Apps\frxccds.exe' -and @($ui.PanelFslDefender.Children | Where-Object { $_.Children[0].Tag -eq $defKey -and $_.Children[0].IsChecked -eq $false -and $_.Children[0].IsEnabled }).Count -eq 1) "$($script:ConfirmAsked) / $($defRow.Count)"
         $tk = @(Get-AVDTuneUiTasks | Where-Object { $_.Kind -eq 'fslogix-defender' })
         Test-Smoke 'task bar: the Defender exclusions are a task, succeeded, no Retry' ($tk.Count -eq 1 -and $tk[0].Status -eq 'succeeded' -and -not $tk[0].Retry) ($tk | ForEach-Object { $_.Status })
         @($ui.PanelFslDefender.Children | Where-Object { $_.Children[0].Tag -eq $defKey })[0].Children[0].IsChecked = $true
         # Defender
-        $ui.BtnFslDefAdd.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
+        $ui.BtnFslDefAdd.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent))); & $fslDone
         Test-Smoke 'Defender: the missing exclusions are added, the list says all are set' ($ui.TxtFslDefState.Text -like '* of * exclusions are set.*' -and @((Get-AVDTuneFSLogixDefenderState -F $script:FslFake.F -VhdLocations @('\\storageaccount.file.core.windows.net\profiles')).Items | Where-Object { -not $_.Present }).Count -eq 0 -and $script:FslFake.F.Store.Defender.Processes -contains 'C:\Program Files\FSLogix\Apps\frxccds.exe') $ui.TxtFslDefState.Text
-        Show-Page 'FSLogix'; $window.UpdateLayout()
+        Show-Page 'FSLogix'; Complete-SmokeFslRead; $window.UpdateLayout()
         $sv = $ui.PageFSLogix.Children[0]
         $sv.ScrollToVerticalOffset(1100); $window.UpdateLayout(); Save-SmokeShot '51-fslogix-groups-redirections-light'
         $sv.ScrollToVerticalOffset(2400); $window.UpdateLayout(); Save-SmokeShot '52-fslogix-defender-light'
         $sv.ScrollToVerticalOffset(0)
         $true } }
     @{ Name = 'fslogix: function test'; Do = {
-        if ($script:OverviewJob -or $script:ReadyJob -or $script:ReadyQueued -or $script:FslJob) { return $false }
+        if ($script:OverviewJob -or $script:ReadyJob -or $script:ReadyQueued -or $script:FslJob -or $script:FslReadJob) { return $false }
         if (-not $script:FslTestStep) {
             $script:FslTestStep = 1
             $script:FslFake.F.Store.Acl = @{ '\\storageaccount.file.core.windows.net\profiles' = 'O:BAG:DUD:PAI(A;OICI;FA;;;WD)(A;OICI;FA;;;BA)' }
@@ -924,7 +940,7 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         Test-Smoke 'the typo in the registry is found (yellow); the write tests did not run (info); the real sign-in is info' ((@($r.Rows | Where-Object Id -eq 'fs.registry')[0].Status -eq 'yellow') -and (@($r.Rows | Where-Object Id -eq 'fs.loc1.rw')[0].Status -eq 'info') -and (@($r.Rows | Where-Object Id -eq 'fs.logon')[0].Status -eq 'info') -and @($script:FslFake.F.Log | Where-Object { $_ -like 'ShareWriteTest*' }).Count -eq 0) ((@($r.Rows | Where-Object Id -eq 'fs.registry')[0].Reason))
         Test-Smoke 'the card shows the pill, the counts and one row per check' ($ui.TxtFslTestSummary.Text -like '*without the write tests*' -and $ui.PanelFslTest.Children.Count -eq @($r.Rows).Count) "$($ui.TxtFslTestPill.Text) $($ui.PanelFslTest.Children.Count)"
         Test-Smoke 'the healthcheck follows: the readiness analysis has the FSLogix-Test row' ($script:Ready -and @($script:Ready.Rows | Where-Object Id -eq 'hy.fslogix-test').Count -eq 1) $null
-        $sv = $ui.PageFSLogix.Children[0]; Show-Page 'FSLogix'; $window.UpdateLayout()
+        $sv = $ui.PageFSLogix.Children[0]; Show-Page 'FSLogix'; Complete-SmokeFslRead; $window.UpdateLayout()
         $sv.ScrollToVerticalOffset(3000); $window.UpdateLayout(); Save-SmokeShot '53-fslogix-test-light'
         $script:ConfirmAsked = ''
         $ui.BtnFslTestWrite.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
@@ -932,7 +948,7 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         $script:FslTestStep = 2
         $true } }
     @{ Name = 'fslogix: write tests and a red result'; Do = {
-        if ($script:OverviewJob -or $script:ReadyJob -or $script:ReadyQueued -or $script:FslJob) { return $false }
+        if ($script:OverviewJob -or $script:ReadyJob -or $script:ReadyQueued -or $script:FslJob -or $script:FslReadJob) { return $false }
         if ($script:FslTestStep -eq 2) {
             $script:FslTestStep = 3
             $r = $script:FslTest
@@ -951,7 +967,7 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         $script:FslFake.F.Store.Dns = @{}
         $true } }
     @{ Name = 'fslogix: storage check'; Do = {
-        if ($script:OverviewJob -or $script:ReadyJob -or $script:ReadyQueued -or $script:FslJob) { return $false }
+        if ($script:OverviewJob -or $script:ReadyJob -or $script:ReadyQueued -or $script:FslJob -or $script:FslReadJob) { return $false }
         if (-not $script:FslStorageStep) {
             $script:FslStorageStep = 1
             $ad = @{ domainName = 'example.test'; netBiosDomainName = 'EXAMPLE'; forestName = 'example.test'; domainGuid = '11111111-2222-3333-4444-555555555555'; domainSid = 'S-1-5-21-1-2-3'; azureStorageSid = 'S-1-5-21-1-2-3-1500'; samAccountName = 'storageaccount'; accountType = 'Computer' }
@@ -973,10 +989,10 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         Test-Smoke 'password of the AD object almost expired (7 days): yellow with the rotation hint; RC4 allowed too: yellow; the ACL deviates: red with the diff offered' ($by['st.ad.password'].Status -eq 'yellow' -and $by['st.smb.kerberos'].Status -eq 'yellow' -and $by['st.acl.root'].Status -eq 'red' -and $r.AclDiff -and $ui.BtnFslAclSet.Visibility -eq 'Visible' -and $ui.TxtFslAclDiff.Text -like '*recommendation*') ($by['st.ad.password'].Reason)
         Test-Smoke 'the access test ran as the domain user; the password field is empty again and the key was not used' ($by['st.access'].Status -eq 'green' -and $ui.PwdFslPassword.Password -eq '' -and -not $r.KeyUsed -and $script:FslFake.Arm.Store.KeyRequests -eq 0) $by['st.access'].Reason
         Test-Smoke 'the result is stored, no password or token in the state folder' ((Get-AVDTuneState $script:StateRoot).StorageCheck.Account -eq 'storageaccount' -and ((Get-ChildItem $script:StateRoot -Recurse -File | ForEach-Object { [IO.File]::ReadAllText($_.FullName) }) -join "`n") -notmatch 'smoke-test-password-1|fake-storage-token|fake-arm-token') $null
-        $sv = $ui.PageFSLogix.Children[0]; Show-Page 'FSLogix'; $window.UpdateLayout()
+        $sv = $ui.PageFSLogix.Children[0]; Show-Page 'FSLogix'; Complete-SmokeFslRead; $window.UpdateLayout()
         $sv.ScrollToVerticalOffset(99999); $window.UpdateLayout(); Save-SmokeShot '55-fslogix-storage-light'
         # set the ACL after the diff
-        $ui.BtnFslAclSet.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
+        $ui.BtnFslAclSet.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent))); Complete-FslJob; Complete-SmokeFslRead
         Test-Smoke 'set the recommended ACL: the confirmation names the diff, the share got it once with attributes preserved, the change log has it' ($script:ConfirmAsked -like '*recommended ACL*diff*' -and $script:FslFake.Files.Store.Puts.Count -eq 1 -and $script:FslFake.Files.Store.Puts[0].Attributes -eq 'preserve' -and @(Get-AVDTuneChangeLog -Root $script:StateRoot | Where-Object Component -eq 'Storage ACL').Count -eq 1) $ui.TxtFslState.Text
         $true } }
     @{ Name = 'office: content, dropdowns, preselection, fix buttons (#61)'; Do = {
@@ -1129,7 +1145,8 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
     @{ Name = 'task bar'; Do = {
         # the flows of the earlier steps went through the one mechanism; wait (at most 30 s) until nothing runs any more
         if (-not $script:TaskStepStart) { $script:TaskStepStart = Get-Date }
-        $tasks = @(Get-AVDTuneUiTasks)
+        # the list keeps the newest 100 tasks; the reads and changes of the FSLogix page (#72) add many, so the tasks seen before them are kept by the smoke (same objects, merged by id)
+        $seenIds = @{}; $tasks = @(@(Get-AVDTuneUiTasks) + @($script:SmokeTasksSeen) | Where-Object { $_ -and -not $seenIds.ContainsKey([string]$_.Id) -and ($seenIds[[string]$_.Id] = $true) } | Sort-Object { [int]$_.Id })
         if (@($tasks | Where-Object { $_.Status -eq 'running' }).Count -gt 0 -and ((Get-Date) - $script:TaskStepStart).TotalSeconds -lt 30) { return $false }
         $kinds = @($tasks | ForEach-Object { $_.Kind } | Select-Object -Unique)
         $need = 'overview', 'release-start', 'readiness-start', 'stage', 'snapshot', 'update-scan', 'update-run', 'benchmark', 'watermark'

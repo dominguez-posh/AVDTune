@@ -201,7 +201,7 @@ try {
     $pNr = Get-AVDTuneFSLogixListPlan -F $fnr -Root $tmp -Answers $ansDom
     Test-Check 'master cannot resolve the domain (not domain joined): the SID of the pinned DC is used, the notice says it could not be checked' ((Format-AVDTuneFSLogixListChanges $pNr) -like "*+ $dnsN\Domain Admins ($dom-512)" -and $pNr.Notice -like '*could not be checked*' -and @($fnr.Log | Where-Object { $_ -like 'MasterDomainSid EXAMPLE' }).Count -eq 1) $pNr.Notice
     $formSrc = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\AVDTune-FSLogix.ps1') -Raw
-    Test-Check 'form: the lookup is stopped with BeginStop (no Stop() on the window thread), disposed after it has stopped, discarded when the window closes; the settings Apply names the list changes in its own confirmation' ($formSrc -notmatch '\.PS\.Stop\(\)' -and $formSrc -match 'BeginStop\(\$null, \$null\)' -and $formSrc -match 'EndStop' -and $formSrc -match 'function Close-FslLatestLookup' -and (Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\Start-AVDTune.ps1') -Raw) -match 'Close-FslLatestLookup' -and $formSrc -match 'Format-AVDTuneFSLogixListChanges \$listPlan' -and $formSrc -match 'Invoke-FslRecommendedLists -Confirmed') $null
+    Test-Check 'form: the lookup is stopped with BeginStop (no Stop() on the window thread), disposed after it has stopped, discarded when the window closes; the settings Apply names the list changes in its own confirmation' ($formSrc -notmatch '\.PS\.Stop\(\)' -and $formSrc -match 'BeginStop\(\$null, \$null\)' -and $formSrc -match 'EndStop' -and $formSrc -match 'function Close-FslLatestLookup' -and (Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\Start-AVDTune.ps1') -Raw) -match 'Close-FslLatestLookup' -and $formSrc -match 'Format-AVDTuneFSLogixListChanges \$listPlan' -and $formSrc -match "Start-FslJob 'Settings' @\{ Values = \`$vals; Lists = \[bool\]\`$listText \}") $null
     [IO.File]::WriteAllText($dirFile, $dirKeep)
 
     # ---------------------------------------------------------------- version state of the installation (issue 63)
@@ -506,6 +506,81 @@ try {
     Test-Check 'a newer green result replaces the record' ((Get-AVDTuneFSLogixTestRecord -Root $tmp).Overall -eq 'green' -and (Get-AVDTuneFSLogixTestRecord -Root $tmp).Red -eq 0) $null
     $leak = (Get-Content -LiteralPath (Join-Path $tmp 'state.json') -Raw) + (Get-Content -LiteralPath (Join-Path $tmp 'changelog.json') -Raw)
     Test-Check 'no key, token or password text in the stored records' ($leak -notmatch '(?i)accountkey|bearer|password|sig=') $null
+
+    # ---------------------------------------------------------------- the page in the background (#72): the reader and the worker of AVDTune-FSLogix.ps1, as the runspaces run them
+    $pageSrc = Get-Content -LiteralPath (Join-Path $repo 'AVDTune-FSLogix.ps1') -Raw
+    $hereText = { param($Name) $hm = [regex]::Match($pageSrc, "(?s)\`$script:$Name = @'\r?\n(.*?)\r?\n'@"); if ($hm.Success) { $hm.Groups[1].Value } else { '' } }
+    $readText = & $hereText 'FslReadText'; $workText = & $hereText 'FslWorkerText'
+    Open-AVDTuneWriteGate -SnapshotId 'snap-check' -ConfirmedBy 'Check Runner'
+    $tplPaths = @(@(Get-AVDTuneRedirectionTemplate)[0].Paths); $redirXml = New-AVDTuneRedirectionsXml -Excludes @($tplPaths[0]) -ExcludeCommonFolders 0; $redirXml2 = New-AVDTuneRedirectionsXml -Excludes $tplPaths -ExcludeCommonFolders 0
+    $mPage = New-Master -Reg @{ "$pk|LockedRetryCount" = 12; "$pk|RedirXMLSourceFolder" = $share }
+    $fPage = New-AVDTuneFakeFSLogix -Seed @{ Files = @{ "$share\redirections.xml" = $redirXml }; Groups = @{ 'FSLogix Profile Include List' = @(); 'FSLogix Profile Exclude List' = @() } }
+    $writeVerbs = '^(RegSet|RegRemove|FileWrite|FileRemove|DirRemoveEmpty|Service|Task|DefenderAdd|DefenderRemove|DeleteFile|EnsureFolder|LocalGroup|WriteText|KeyMap|RemoveFolder|NewTempFolder|Download|Expand)'
+    $snap = & ([scriptblock]::Create($readText)) @{ Machine = $mPage; F = $fPage; Root = $tmp; Answers = $null }
+    Test-Check 'page reader (#72): one read gives the installation, every setting, the lists with the plan, redirections.xml, the Defender list and the test record; it writes nothing' ($snap.Info.Installed -and $snap.Info.DriversRead -and @($snap.Settings).Count -eq @(Get-AVDTuneFSLogixSettingCatalog).Count -and @($snap.Groups.Include).Count -eq 0 -and (Format-AVDTuneFSLogixListChanges $snap.Plan) -like 'Include + Everyone*' -and $snap.RedirText -ceq $redirXml -and -not $snap.RedirError -and $snap.RedirDefault -eq $share -and @($snap.Locations) -contains $share -and $snap.Defender.Readable -and $snap.TestRecord -and @($mPage.Log | Where-Object { $_ -match $writeVerbs }).Count -eq 0 -and @($fPage.Log | Where-Object { $_ -match $writeVerbs }).Count -eq 0) "$(@($mPage.Log) -join ' | ') // $(@($fPage.Log) -join ' | ')"
+    $fBad = New-AVDTuneFakeFSLogix -Seed @{ Defender = $null }
+    $fBad | Add-Member -NotePropertyName ReadText -NotePropertyValue { param($Path) throw 'fake: the share is not reachable' } -Force
+    $snapBad = & ([scriptblock]::Create($readText)) @{ Machine = $mPage; F = $fBad; Root = $tmp; Answers = $null }
+    Test-Check 'page reader (#72): a redirections.xml that cannot be read and a Defender that cannot be read are reported in the read, the rest is read (no throw)' ($snapBad.RedirError -like '*not reachable*' -and $null -eq $snapBad.RedirText -and -not $snapBad.Defender.Readable -and @($snapBad.Settings).Count -gt 0) $snapBad.RedirError
+    $cw = @{ Root = $tmp; User = 'admin1'; SnapshotId = 'snap-check'; Machine = $mPage; F = $fPage; Answers = $null; Write = $false }
+    $cw.Args = @{ Values = @{ 'Profile:LockedRetryCount' = '3' }; Lists = $true }
+    $ws = & ([scriptblock]::Create($workText)) 'Settings' $cw
+    Test-Check 'page worker (#72): Settings writes the setting and, as confirmed, the recommended lists in the same job; both runs come back' (@($ws.Runs).Count -eq 2 -and (& $mPage.RegGet $pk 'LockedRetryCount') -eq 3 -and @($fPage.Store.Groups['FSLogix Profile Include List']) -contains 'S-1-1-0' -and @($fPage.Store.Groups['FSLogix Profile Exclude List']) -contains 'S-1-5-32-544') (@($ws.Runs).Count)
+    $cw.Args = @{ Values = @{ 'Profile:LockedRetryCount' = '15' }; Lists = $false }
+    $ws2 = & ([scriptblock]::Create($workText)) 'Settings' $cw
+    $cw.Args = @{}
+    $wu = & ([scriptblock]::Create($workText)) 'SettingsUndo' $cw
+    $cw.Args = @{ List = 'Exclude'; Action = 'Add'; Sid = 'S-1-5-21-9-9-9-1234' }
+    $wg = & ([scriptblock]::Create($workText)) 'Group' $cw
+    $cw.Args = @{ Xml = $redirXml2; Folder = $share }
+    $wr = & ([scriptblock]::Create($workText)) 'Redirections' $cw
+    $cw.Args = @{ Skip = @('C:\ProgramData\FSLogix\') }
+    $wd = & ([scriptblock]::Create($workText)) 'Defender' $cw
+    Test-Check 'page worker (#72): without the confirmed list change only the setting is written; Undo, a list member, redirections.xml and Defender (unticked one left out) run as one run each' (@($ws2.Runs).Count -eq 1 -and @($wu.Runs).Count -eq 1 -and (& $mPage.RegGet $pk 'LockedRetryCount') -eq 3 -and @($fPage.Store.Groups['FSLogix Profile Exclude List']) -contains 'S-1-5-21-9-9-9-1234' -and $fPage.Store.Files["$share\redirections.xml"] -ceq $redirXml2 -and @($fPage.Store.Defender.Paths) -notcontains 'C:\ProgramData\FSLogix\' -and @($fPage.Store.Defender.Paths) -contains 'C:\Program Files\FSLogix\Apps\' -and @($wd.Runs[0].Results | Where-Object Status -eq 'Changed').Count -eq 1) $null
+    Test-Check 'page worker (#72): an unknown kind is refused' ((Get-ThrownText { & ([scriptblock]::Create($workText)) 'Bogus' $cw }) -like '*Unknown FSLogix job*') $null
+    Close-AVDTuneWriteGate
+    $cw.Args = @{ Values = @{ 'Profile:LockedRetryCount' = '7' }; Lists = $false }
+    Test-Check 'page worker (#72): without the write gate the change is refused in the job too, nothing written' ((Test-Throws { & ([scriptblock]::Create($workText)) 'Settings' $cw }) -and (& $mPage.RegGet $pk 'LockedRetryCount') -eq 3) $null
+
+    # the runspaces of the page (#72, like #66/#67): exactly the imports of the page, a fresh runspace, the REAL machine and adapter, read only
+    $pageAst = [Management.Automation.Language.Parser]::ParseInput($pageSrc, [ref]$null, [ref]$null)
+    $rsBlockOf = { param($Fn) $f = $pageAst.Find({ param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $Fn }, $true); if ($f) { $f.Find({ param($n) $n -is [Management.Automation.Language.ScriptBlockExpressionAst] -and $n.Extent.Text -match 'Import-Module' }, $true) } }
+    $importsOf = { param($Block) @([regex]::Matches($Block.Extent.Text, "Import-Module \(Join-Path \`$AppRoot '([^']+)'\)") | ForEach-Object { $_.Groups[1].Value }) }
+    $cmdsOf = { param($Ast) @($Ast.FindAll({ param($n) $n -is [Management.Automation.Language.CommandAst] }, $true) | ForEach-Object { $_.GetCommandName() } | Where-Object { $_ -match '^\w+-AVDTune' } | Select-Object -Unique) }
+    $readBlock = & $rsBlockOf 'Start-FslRead'; $jobBlock = & $rsBlockOf 'Start-FslJob'
+    $readImports = & $importsOf $readBlock; $jobImports = & $importsOf $jobBlock
+    $readNeed = @((& $cmdsOf $readBlock) + (& $cmdsOf ([Management.Automation.Language.Parser]::ParseInput($readText, [ref]$null, [ref]$null))) | Where-Object { $_ -ne 'Import-Module' } | Select-Object -Unique)
+    $jobNeed = @((& $cmdsOf $jobBlock) + (& $cmdsOf ([Management.Automation.Language.Parser]::ParseInput($workText, [ref]$null, [ref]$null))) | Select-Object -Unique)
+    Test-Check 'page runspaces (#72): every import of the two runspaces is a literal line (no import built at run time that the check could not see)' ($readBlock -and $jobBlock -and $readImports.Count -ge 2 -and $jobImports.Count -ge 5 -and $readBlock.Extent.Text -notmatch 'Import-Module \(Join-Path \$AppRoot "' -and $jobBlock.Extent.Text -notmatch 'Import-Module \(Join-Path \$AppRoot "' -and $readNeed.Count -ge 10 -and $jobNeed.Count -ge 15) "read=$($readImports -join ',') job=$($jobImports -join ',') need=$($readNeed.Count)/$($jobNeed.Count)"
+    $runRs = {
+        param([string[]]$Imports, [bool]$DoRead)
+        $rs = [powershell]::Create()
+        try {
+            [void]$rs.AddScript({
+                    param($Repo, $Imports, $State, $ReadText, $Need, $DoRead)
+                    $ErrorActionPreference = 'Stop'
+                    foreach ($i in $Imports) { Import-Module (Join-Path $Repo $i) -Force }
+                    $missing = @($Need | Where-Object { -not (Test-Path -LiteralPath "Function:\$_") })   # the function drive: no module auto-loading that could hide a missing import (and no slow search of the module path)
+                    $snapRs = $null
+                    if ($DoRead) { $snapRs = & ([scriptblock]::Create($ReadText)) @{ Machine = (New-AVDTuneMachine); F = (New-AVDTuneFSLogixAdapter); Root = $State; Answers = $null } }   # the read of Start-FslRead: registry, fltmc, local groups, Defender; nothing written
+                    $gateSeen = $null
+                    if (-not $DoRead) { Open-AVDTuneWriteGate -SnapshotId 'check' -ConfirmedBy 'check'; $gateSeen = & (Get-Module AVDTune.FSLogix) { Test-AVDTuneWriteAllowed }; Close-AVDTuneWriteGate }   # the job opens the gate it was given: the FSLogix engine must see it (one AVDTune module)
+                    [pscustomobject]@{ Snap = $snapRs; Missing = @($missing); GateSeen = $gateSeen }
+                }).AddArgument($repo).AddArgument($Imports).AddArgument($tmp).AddArgument($readText).AddArgument($(if ($DoRead) { $readNeed } else { $jobNeed })).AddArgument($DoRead)
+            $out = $rs.Invoke() | Select-Object -Last 1
+            [pscustomobject]@{ Out = $out; Err = (@($rs.Streams.Error | ForEach-Object { $_.ToString() }) -join '; ') }
+        }
+        catch { [pscustomobject]@{ Out = $null; Err = $_.Exception.Message } }
+        finally { $rs.Dispose() }
+    }
+    $rRead = & $runRs $readImports $true
+    Test-Check 'page runspaces (#72): with exactly the imports of the read the real master is read (installation, settings, lists, Defender) and every command is known' ($rRead.Out -and @($rRead.Out.Missing).Count -eq 0 -and $rRead.Out.Snap -and @($rRead.Out.Snap.Settings).Count -eq @(Get-AVDTuneFSLogixSettingCatalog).Count -and $null -ne $rRead.Out.Snap.Info -and $null -ne $rRead.Out.Snap.Defender -and $rRead.Err -notmatch 'is not recognized|nicht erkannt' -and -not $rRead.Err) "missing=$(@($rRead.Out.Missing) -join ','); err=$($rRead.Err)"
+    $rJob = & $runRs $jobImports $false
+    Test-Check 'page runspaces (#72): with exactly the imports of the job every command of the worker (install, test, storage, every change) is known and the FSLogix engine sees the gate the job opens' ($rJob.Out -and @($rJob.Out.Missing).Count -eq 0 -and $rJob.Out.GateSeen -eq $true -and -not $rJob.Err) "missing=$(@($rJob.Out.Missing) -join ','); err=$($rJob.Err); gate=$($rJob.Out.GateSeen)"
+    # counter-test: the same check finds a missing import (the read without the FSLogix module, the job without the Storage module)
+    $rMiss = & $runRs @($readImports | Where-Object { $_ -notlike '*FSLogix*' }) $true
+    $rMissJob = & $runRs @($jobImports | Where-Object { $_ -notlike '*Storage*' }) $false
+    Test-Check 'page runspaces (#72): counter-test: without one import the read fails and the job misses commands' ((-not $rMiss.Out -or @($rMiss.Out.Missing).Count -gt 0) -and $rMiss.Err -and @($rMissJob.Out.Missing).Count -gt 0) "read: $($rMiss.Err) // job missing: $(@($rMissJob.Out.Missing) -join ',')"
 }
 finally {
     Remove-Item Env:\AVDTUNE_ROOT -ErrorAction SilentlyContinue
