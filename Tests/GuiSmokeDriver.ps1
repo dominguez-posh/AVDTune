@@ -154,6 +154,29 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         Test-Smoke 'switch back to light' ($script:Settings.Theme -eq 'Light' -and (Get-ThemeColor 'WindowBackground') -eq '#FFF3F3F3' -and $window.Background.Color.ToString() -eq '#FFF3F3F3') $null
         Show-Page 'Updates'; Save-SmokeShot '06-page-updates-light'; Show-Page 'Overview'
         $true } }
+    @{ Name = 'language'; Do = {
+        Show-Page 'Overview'
+        $window.UpdateLayout()
+        Test-Smoke 'language: English at the start, the button shows EN, the texts come from the language file' ((Get-AVDTuneLanguage) -eq 'en' -and $ui.BtnLang.Content -eq 'EN' -and $ui.BtnRefresh.Content -eq 'Refresh' -and $ui.TxtOverviewSubtitle.Text -like 'This Golden Master at a glance*') "$(Get-AVDTuneLanguage) / $($ui.BtnLang.Content)"
+        Test-Smoke 'language: the language files loaded without a problem, both with the same number of keys' ($script:LanguageInit.Problems.Count -eq 0 -and $script:LanguageInit.Keys.en -gt 100 -and $script:LanguageInit.Keys.en -eq $script:LanguageInit.Keys.de) ($script:LanguageInit.Problems -join '; ')
+        $ui.BtnLang.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
+        $window.UpdateLayout()
+        $saved = Get-Content (Join-Path $script:StateRoot 'config\ui.json') -Raw | ConvertFrom-Json
+        Test-Smoke 'language: switch to German sets the setting, the protocol language and the saved file' ((Get-AVDTuneLanguage) -eq 'de' -and $script:Settings.Language -eq 'de' -and $script:Settings.ProtocolLanguage -eq 'de' -and $ui.BtnLang.Content -eq 'DE' -and $saved.Language -eq 'de' -and $saved.ProtocolLanguage -eq 'de') $null
+        Test-Smoke 'language: navigation in German' ((Find-Text $ui.NavList ([string][char]0x00DC + 'bersicht')) -and (Find-Text $ui.NavList 'Update-Sperre') -and (Find-Text $ui.NavList 'Bereinigung und Abschluss') -and -not (Find-Text $ui.NavList 'Overview')) $null
+        Test-Smoke 'language: title bar, overview head and cards in German' ($ui.BtnRefresh.Content -eq 'Aktualisieren' -and $ui.BtnNewVersion.Content -eq 'Neue Version starten' -and $ui.TxtOverviewSubtitle.Text -like '*auf einen Blick*' -and $ui.TxtChipVersion.Text -eq 'keine Image-Version' -and (Find-Text $window.Content 'Startsequenz') -and (Find-Text $window.Content 'Bereitschaft') -and (Find-Text $window.Content ('Integrit' + [string][char]0x00E4 + 't und Updates'))) $null
+        Test-Smoke 'language: health, start sequence and identity rows in German' ((Find-Text $ui.PanelHealth 'Neustart ausstehend') -and (Find-Text $ui.PanelHealth 'AVD-Agent') -and (Find-Text $ui.PanelStages 'Offen') -and (Find-Text $ui.PanelStages '2. Anmeldung bei Microsoft 365 und Azure') -and (Find-Text $ui.PanelIdentity 'Image-Name') -and (Find-Text $ui.PanelIdentity 'Letzter Benchmark')) $null
+        Test-Smoke 'language: task bar and tooltips in German' ((Get-AVDTuneText 'task.idle') -eq ('Keine Aufgabe l' + [string][char]0x00E4 + 'uft') -and $ui.BtnLang.ToolTip -like 'Sprache: Deutsch*' -and $ui.BtnTheme.ToolTip -eq 'Hell oder dunkel' -and $ui.BoxTaskBar.ToolTip -eq 'Die Aufgaben dieser Sitzung anzeigen' -and $ui.BtnClose.ToolTip -eq ('Schlie' + [string][char]0x00DF + 'en')) $null
+        $script:LangTexts.de.Remove('title.close.tip')
+        Test-Smoke 'language: an unknown key shows itself, a missing German key falls back to English' ((Get-AVDTuneText 'does.not.exist') -eq 'does.not.exist' -and (Get-AVDTuneText 'title.close.tip') -eq 'Close') $null
+        $script:LangTexts.de['title.close.tip'] = 'Schlie' + [string][char]0x00DF + 'en'
+        Test-Smoke 'language: a page that is not translated yet keeps its English texts' ($ui.BtnUpdScan.Content -eq 'Search') $ui.BtnUpdScan.Content
+        Save-SmokeShot '03b-overview-german'
+        $ui.BtnLang.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
+        $window.UpdateLayout()
+        $saved = Get-Content (Join-Path $script:StateRoot 'config\ui.json') -Raw | ConvertFrom-Json
+        Test-Smoke 'language: back to English, everything as before' ((Get-AVDTuneLanguage) -eq 'en' -and $ui.BtnRefresh.Content -eq 'Refresh' -and $ui.TxtChipVersion.Text -eq 'no image version' -and (Find-Text $ui.NavList 'Overview') -and (Find-Text $ui.PanelHealth 'AVD agent') -and (Get-AVDTuneText 'task.idle') -eq 'No task running' -and $saved.Language -eq 'en') $null
+        $true } }
     @{ Name = 'new version'; Do = {
         Show-Page 'Overview'
         $expected = (Get-Date).ToString('yyyy.MM') + '.001'
@@ -169,10 +192,11 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         $window.UpdateLayout()
         $version = (Get-AVDTuneState $script:StateRoot).ImageVersion
         Test-Smoke 'session protocol: AVDTune title, image and the version action' ($ui.TxtProtocol.Text -like 'AVDTune session protocol*' -and $ui.TxtProtocol.Text -like "*Image: GM-TEST01 $version*" -and $ui.TxtProtocol.Text -like "*Image version $version started*" -and $ui.TxtProtocol.Text -notlike '*PackTune*') $ui.TxtProtocol.Text
-        $ui.CmbProtocolLanguage.SelectedIndex = 1
+        $ui.BtnLang.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
         Test-Smoke 'German protocol' ($ui.TxtProtocol.Text -like 'AVDTune-Sitzungsprotokoll*' -and $ui.TxtProtocol.Text -like '*Einrichtung*' -and $script:Settings.ProtocolLanguage -eq 'de') $null
         Save-SmokeShot '07-protocol-session'
-        $ui.CmbProtocolLanguage.SelectedIndex = 0
+        $ui.BtnLang.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
+        Test-Smoke 'switch back to English: the protocol follows the same switch' ($script:Settings.ProtocolLanguage -eq 'en' -and $script:Settings.Language -eq 'en' -and $ui.TxtProtocol.Text -like 'AVDTune session protocol*') $null
         $ui.SegChange.IsChecked = $true
         $window.UpdateLayout()
         Test-Smoke 'change log view: version selected, table with the automatic entry' ($ui.CmbVersion.SelectedItem -eq $version -and $ui.TxtProtocol.Text -like "# Change log GM-TEST01 $version*" -and $ui.TxtProtocol.Text -like "*Image version $version started*" -and $ui.PanelNote.Visibility -eq 'Visible') $ui.TxtProtocol.Text

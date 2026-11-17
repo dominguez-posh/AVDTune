@@ -7,8 +7,8 @@
 $script:StartContext = New-AVDTuneStartContext
 $script:OpenStage = ''
 $script:Form = @{}
-$script:StageKinds = @{ Done = @('SuccessBg', 'Success', 'Done'); Pending = @('AccentSubtle', 'Primary', 'To do'); Locked = @('Hover', 'MutedText', 'Waiting'); Skipped = @('Hover', 'MutedText', 'Skipped'); Failed = @('ErrorBg', 'Danger', 'Failed') }
-$script:StageButton = @{ Environment = @('Answer', 'Change'); SignIn = @('Sign in', 'Sign in again'); Domain = @('Connect', 'Show'); Snapshot = @('Open', 'Open') }
+$script:StageKinds = @{ Done = @('SuccessBg', 'Success'); Pending = @('AccentSubtle', 'Primary'); Locked = @('Hover', 'MutedText'); Skipped = @('Hover', 'MutedText'); Failed = @('ErrorBg', 'Danger') }   # the text of a pill: stage.pill.<status>
+# the buttons of the stages: stage.btn.<id>.todo and stage.btn.<id>.done
 $script:SnapTimer = New-Object System.Windows.Threading.DispatcherTimer
 $script:SnapTimer.Interval = [TimeSpan]::FromMilliseconds($(if ($script:SmokeOn) { 300 } else { 4000 }))
 $script:PendingSnapshot = $null
@@ -108,18 +108,17 @@ function Update-StartView {
         Set-Brush $pill ([System.Windows.Controls.Border]::StyleProperty) 'Pill'
         $pill.Padding = '10,2'; $pill.VerticalAlignment = 'Center'
         Set-Brush $pill ([System.Windows.Controls.Border]::BackgroundProperty) $kind[0]
-        $pt = New-Object System.Windows.Controls.TextBlock; $pt.Text = $kind[2]; $pt.FontSize = 12; $pt.FontWeight = 'SemiBold'
+        $pt = New-Object System.Windows.Controls.TextBlock; $pt.Text = T "stage.pill.$(([string]$stage.Status).ToLowerInvariant())"; $pt.FontSize = 12; $pt.FontWeight = 'SemiBold'
         Set-Brush $pt ([System.Windows.Controls.TextBlock]::ForegroundProperty) $kind[1]
         $pill.Child = $pt
-        $title = New-Object System.Windows.Controls.TextBlock; $title.Text = "$number. $($stage.Title)"; $title.FontWeight = 'SemiBold'; $title.VerticalAlignment = 'Center'; $title.SetValue([System.Windows.Controls.Grid]::ColumnProperty, 1)
-        $detail = New-Object System.Windows.Controls.TextBlock; $detail.Text = [string]$stage.Detail; $detail.TextWrapping = 'Wrap'; $detail.VerticalAlignment = 'Center'; $detail.SetValue([System.Windows.Controls.Grid]::ColumnProperty, 2)
+        $title = New-Object System.Windows.Controls.TextBlock; $title.Text = "$number. $(Convert-AVDTuneEngineText 'stage.title.' ([string]$stage.Title))"; $title.FontWeight = 'SemiBold'; $title.VerticalAlignment = 'Center'; $title.SetValue([System.Windows.Controls.Grid]::ColumnProperty, 1)
+        $detail = New-Object System.Windows.Controls.TextBlock; $detail.Text = Convert-AVDTuneEngineText 'stage.detail.' ([string]$stage.Detail); $detail.TextWrapping = 'Wrap'; $detail.VerticalAlignment = 'Center'; $detail.SetValue([System.Windows.Controls.Grid]::ColumnProperty, 2)
         $detail.Margin = '0,0,12,0'
         Set-Brush $detail ([System.Windows.Controls.TextBlock]::ForegroundProperty) $(if ($stage.Status -eq 'Failed') { 'Danger' } else { 'MutedText' })
         [void]$grid.Children.Add($pill); [void]$grid.Children.Add($title); [void]$grid.Children.Add($detail)
         if ($stage.Status -ne 'Skipped') {
             $btn = New-Object System.Windows.Controls.Button
-            $label = $script:StageButton[$stage.Id]
-            $btn.Content = $(if ($stage.Status -eq 'Done') { $label[1] } else { $label[0] })
+            $btn.Content = T "stage.btn.$(([string]$stage.Id).ToLowerInvariant()).$(if ($stage.Status -eq 'Done') { 'done' } else { 'todo' })"
             $btn.DataContext = [string]$stage.Id; $btn.Name = "BtnStage$($stage.Id)"; $btn.VerticalAlignment = 'Center'; $btn.SetValue([System.Windows.Controls.Grid]::ColumnProperty, 3)
             if ($stage.Status -eq 'Pending' -or $stage.Status -eq 'Failed') { Set-Brush $btn ([System.Windows.Controls.Control]::StyleProperty) 'PrimaryButton' }
             $btn.IsEnabled = ($stage.Status -ne 'Locked')
@@ -150,7 +149,7 @@ function Update-RollbackCard {
     $show = (Test-AVDTuneWriteAllowed) -and $gate -and $gate.Value
     $ui.BoxRollback.Visibility = ConvertTo-Vis ([bool]$show)
     if ($show) {
-        $ui.TxtRollback.Text = "If a run goes wrong, go back to the snapshot $($gate.Value.SnapshotName): create a managed disk from it (Azure portal: the snapshot > Create disk; or az disk create --source), stop (deallocate) this VM, swap the OS disk (VM > Disks > Swap OS disk) and start it again. The rollback goes back to the state of the snapshot: the start of the version (everything done in this version since then is gone) or, for a snapshot of the current state, to that state, so note what was done in the protocol first."
+        $ui.TxtRollback.Text = T 'start.rollback' $gate.Value.SnapshotName
     }
 }
 
@@ -173,8 +172,8 @@ function Open-Stage([string]$Id) {
 
 # ---------------------------------------------------------------- 1. first-run questions
 function Build-EnvironmentForm {
-    $ui.TxtStageTitle.Text = '1. First-run questions: the planned AVD environment'
-    $ui.TxtStageIntro.Text = 'The answers decide which steps and pages exist (for example no domain step with Microsoft Entra ID only). They are saved in environment.json without secrets and can be changed later; a change goes into the change log.'
+    $ui.TxtStageTitle.Text = T 'stage.env.title'
+    $ui.TxtStageIntro.Text = T 'stage.env.intro'
     $existing = Get-AVDTuneEnvironment $script:StateRoot
     $answers = Get-AVDTuneEnvironmentAnswers $existing
     $f = $script:Form; $f.Combos = @{}; $f.Texts = @{}
@@ -192,9 +191,9 @@ function Build-EnvironmentForm {
     $auth = New-Object System.Windows.Controls.ComboBox; $auth.Width = 430; $auth.Name = 'QAzureFilesAuth'
     $auth.Add_SelectionChanged({ try { Update-EnvironmentPreview } catch { } })
     $f.AuthCombo = $auth; $f.AuthWanted = [string]$answers.AzureFilesAuth
-    [void]$ui.PanelStageBody.Children.Add((New-FormRow 'Azure Files authentication' $auth))
+    [void]$ui.PanelStageBody.Children.Add((New-FormRow (T 'stage.env.azurefiles') $auth))
     # No tenant field: the tenant comes from the sign-in (issue #11). The client ID is optional: empty means AVDTune creates its own app registration.
-    foreach ($t in @(@('VNet', 'Network: virtual network of the session hosts'), @('Subnet', 'Network: subnet of the session hosts'), @('ClientId', 'Client ID of the app registration (optional)'), @('SnapshotNamePattern', 'Snapshot name: {OsDisk} {VM} {ImageVersion} {DD} {MM} {YYYY}, {N} = number of the day'))) {
+    foreach ($t in @(@('VNet', (T 'stage.env.vnet')), @('Subnet', (T 'stage.env.subnet')), @('ClientId', (T 'stage.env.clientid')), @('SnapshotNamePattern', (T 'stage.env.snapname')))) {
         $tb = New-Object System.Windows.Controls.TextBox; $tb.Width = 430; $tb.Text = [string]$answers.($t[0]); $tb.MaxLength = 255; $tb.Name = "T$($t[0])"
         $tb.Add_TextChanged({ try { Update-EnvironmentPreview } catch { } })
         $f.Texts[$t[0]] = $tb
@@ -204,13 +203,13 @@ function Build-EnvironmentForm {
     if ([string]$answers.TenantId) {
         # The saved tenant is shown, not edited; forgetting it is the only way to change it (the next sign-in sets it again, change log)
         $forget = New-Object System.Windows.Controls.CheckBox; $forget.Name = 'ChkForgetTenant'; $forget.VerticalAlignment = 'Center'
-        $forget.Content = "Forget the saved tenant $($answers.TenantId) (the next sign-in sets it again)"
+        $forget.Content = T 'stage.env.forget' $answers.TenantId
         $f.ForgetTenant = $forget
-        [void]$ui.PanelStageBody.Children.Add((New-FormRow 'Tenant (from the sign-in)' $forget 'Forget the saved tenant'))
+        [void]$ui.PanelStageBody.Children.Add((New-FormRow (T 'stage.env.tenant') $forget (T 'stage.env.forget.name')))
     }
     $f.Preview = New-Text '' 'Hint' '0,10,0,0'
     [void]$ui.PanelStageBody.Children.Add($f.Preview)
-    $ui.BtnStageAction.Content = 'Save the answers'
+    $ui.BtnStageAction.Content = T 'stage.env.save'
     $script:StageAction = { Save-EnvironmentForm }
     Update-EnvironmentPreview
 }
@@ -244,9 +243,9 @@ function Update-EnvironmentPreview {
         $a = Get-EnvironmentFormAnswers
         $check = Test-AVDTuneEnvironmentAnswers $a
         $plan = Resolve-AVDTuneEnvironmentPlan $a
-        $lines = @($plan.Notes) + @($check.Warnings | ForEach-Object { "Note: $_" }) + @($check.Errors | ForEach-Object { "Problem: $_" })
-        if (-not ([string]$a.ClientId).Trim()) { $lines += "No client ID: at the sign-in AVDTune creates (or finds) its own app registration 'AVDTune' with admin consent; an administrator signs in for that once." }
-        $lines += 'The tenant is not asked: it comes from the sign-in and is saved.'
+        $lines = @($plan.Notes) + @($check.Warnings | ForEach-Object { T 'stage.env.note' $_ }) + @($check.Errors | ForEach-Object { T 'stage.env.problem' $_ })
+        if (-not ([string]$a.ClientId).Trim()) { $lines += T 'stage.env.noclient' }
+        $lines += T 'stage.env.notenant'
         $f.Preview.Text = $lines -join "`n"
         Set-Brush $f.Preview ([System.Windows.Controls.TextBlock]::ForegroundProperty) $(if ($check.Errors.Count -gt 0) { 'Danger' } else { 'MutedText' })
         $ui.BtnStageAction.IsEnabled = ($check.Errors.Count -eq 0)
@@ -261,18 +260,18 @@ function Save-EnvironmentForm {
     if ($forget -and $script:StartContext.Session) { Disconnect-AVDTuneSession $script:StartContext.Session }   # a session of the old tenant does not stay
     $note = if ($result.Changes.Count -gt 0) { 'changed: ' + ($result.Changes -join '; ') } else { 'saved' }
     Add-StartProtocol 'First-run questions answered (identity model)' $note
-    Show-Toast 'The answers are saved.'
+    Show-Toast (T 'stage.env.saved')
     Close-Stage
     Update-StartView
     if ($script:CurrentPage -eq 'Protocol') { Update-ProtocolView }
     # First run: the small question about the desktop shortcut (installed copy only; otherwise the hint to install first)
-    if ($firstRun -and -not (Show-ShortcutQuestion) -and (Get-AVDTuneShortcutOffer -Root $script:StateRoot -Mode (Get-ShortcutMode)) -eq 'Install') { Show-Toast 'The answers are saved. A desktop shortcut can be created once AVDTune is installed (Integrity and updates).' }
+    if ($firstRun -and -not (Show-ShortcutQuestion) -and (Get-AVDTuneShortcutOffer -Root $script:StateRoot -Mode (Get-ShortcutMode)) -eq 'Install') { Show-Toast (T 'stage.env.saved.shortcut') }
 }
 
 # ---------------------------------------------------------------- 2. sign-in
 function Build-SignInForm {
-    $ui.TxtStageTitle.Text = '2. Microsoft 365 and Azure sign-in'
-    $ui.TxtStageIntro.Text = 'One normal Microsoft sign-in in an embedded window: you sign in yourself. AVDTune gets four tokens from it, one for Microsoft Graph, one for the SharePoint site, one for Azure Resource Manager and one for Azure Storage (the NTFS rows of the FSLogix check; optional, an older app registration without it signs in without that token and says so). Microsoft puts every consented permission of a resource into its token, so both Graph tokens carry all Graph permissions listed here; extra permissions are reported as a warning. The tokens live in memory only and are removed on closing, on sign out and by Finish.'
+    $ui.TxtStageTitle.Text = T 'stage.signin.title'
+    $ui.TxtStageIntro.Text = T 'stage.signin.intro'
     $session = $script:StartContext.Session
     foreach ($key in (Get-AVDTuneAudience).Keys) {
         $a = (Get-AVDTuneAudience)[$key]
@@ -281,31 +280,31 @@ function Build-SignInForm {
     $e = Get-AVDTuneEnvironment $script:StateRoot
     $tenant = if ($e) { [string]$e.SignIn.TenantId } else { '' }
     $client = if ($e) { [string]$e.SignIn.ClientId } else { '' }
-    [void]$ui.PanelStageBody.Children.Add((New-InfoRow 'Tenant' $(if ($tenant) { $tenant } else { 'Taken from the sign-in (tid of the token) and saved' })))
-    [void]$ui.PanelStageBody.Children.Add((New-InfoRow 'App registration' $(if ($client) { $client } else { "None yet: AVDTune creates its own app registration 'AVDTune' first" })))
+    [void]$ui.PanelStageBody.Children.Add((New-InfoRow (T 'stage.signin.tenant') $(if ($tenant) { $tenant } else { T 'stage.signin.tenant.none' })))
+    [void]$ui.PanelStageBody.Children.Add((New-InfoRow (T 'stage.signin.app') $(if ($client) { $client } else { T 'stage.signin.app.none' })))
     $f = $script:Form
     $f.Account = New-Object System.Windows.Controls.TextBox; $f.Account.Width = 320; $f.Account.MaxLength = 254; $f.Account.Name = 'TxtSignInAccount'
     $f.Account.Text = if ($session -and $session.Account) { [string]$session.Account } else { '' }
-    [void]$ui.PanelStageBody.Children.Add((New-FormRow 'Account (name@domain, optional)' $f.Account 'Account for the sign-in'))
+    [void]$ui.PanelStageBody.Children.Add((New-FormRow (T 'stage.signin.account') $f.Account (T 'stage.signin.account.name')))
     $hint = if (-not $client) {
-        "First sign-in: you sign in with an administrator account through Microsoft's app 'Microsoft Graph Command Line Tools' (Application.ReadWrite.All, DelegatedPermissionGrant.ReadWrite.All). AVDTune creates its own app registration 'AVDTune' (or reuses the one it created and saved before, after checking it) (public client, http://localhost, no secret), grants the admin consent for the permissions above and then signs you in with it. Needs Application Administrator or Cloud Application Administrator, and Privileged Role Administrator (or Global Administrator) for the consent."
+        T 'stage.signin.hint.first'
     }
-    elseif (-not $tenant) { 'With the account AVDTune finds the tenant of its domain; without it the sign-in goes through organizations (only for a multi-tenant app registration). The tenant of the sign-in is saved.' }
-    else { 'The app registration needs these permissions with admin consent, Azure Service Management and Azure Storage user_impersonation included: see docs\start-sequence.md.' }
+    elseif (-not $tenant) { T 'stage.signin.hint.tenant' }
+    else { T 'stage.signin.hint.ok' }
     $ui.PanelStageBody.Children.Add((New-Text $hint 'Hint' '0,8,0,0')) | Out-Null
     if ($session -and $session.Connected) {
         $info = Get-AVDTuneSessionInfo $session
-        Set-StageMessage ("Signed in as $($info.Account)" + $(if ($info.Name) { " ($($info.Name))" }) + '. Tokens: ' + (($info.Audiences | ForEach-Object { "$($_.Audience) until $(([datetime]$_.ExpiresOn).ToLocalTime().ToString('HH:mm'))" }) -join ', ') + '.') 'ok'
-        $ui.BtnStageAction.Content = 'Sign in again'
-        $ui.BtnStageAction2.Content = 'Sign out (remove the tokens)'; $ui.BtnStageAction2.Visibility = 'Visible'
+        Set-StageMessage (T 'stage.signin.signedin' $info.Account $(if ($info.Name) { " ($($info.Name))" } else { '' }) (($info.Audiences | ForEach-Object { T 'stage.signin.until' $_.Audience (([datetime]$_.ExpiresOn).ToLocalTime().ToString('HH:mm')) }) -join ', ')) 'ok'
+        $ui.BtnStageAction.Content = T 'stage.btn.signin.done'
+        $ui.BtnStageAction2.Content = T 'stage.signin.signout'; $ui.BtnStageAction2.Visibility = 'Visible'
         $script:StageAction2 = { Invoke-SignOut }
     }
     else {
-        $ui.BtnStageAction.Content = 'Sign in'
+        $ui.BtnStageAction.Content = T 'stage.btn.signin.todo'
         $f = $script:StartContext.Failures['SignIn']; if ($f) { Set-StageMessage ([string]$f) 'error' }
         if ($client) {
             # Another administrator: runs the setup with his account (assignment + his own consent); also checks the saved registration
-            $ui.BtnStageAction2.Content = 'Set up again (authorize this administrator)'; $ui.BtnStageAction2.Visibility = 'Visible'
+            $ui.BtnStageAction2.Content = T 'stage.signin.setup'; $ui.BtnStageAction2.Visibility = 'Visible'
             $script:StageAction2 = { Invoke-SignIn -Setup }
         }
     }
@@ -313,15 +312,15 @@ function Build-SignInForm {
 }
 function Invoke-SignIn([switch]$Setup) {
     $e = Get-AVDTuneEnvironment $script:StateRoot
-    if (-not $e) { throw 'Answer the first-run questions first.' }
+    if (-not $e) { throw (T 'stage.detail.signin.locked') }
     $account = if ($script:Form.Account) { ([string]$script:Form.Account.Text).Trim() } else { '' }
-    if ($account -and -not (Get-AVDTuneAccountDomain $account)) { Set-StageMessage 'The account must look like name@domain (or leave it empty).' 'error'; return }
+    if ($account -and -not (Get-AVDTuneAccountDomain $account)) { Set-StageMessage (T 'stage.signin.badaccount') 'error'; return }
     $setup = $Setup -or -not [string]$e.SignIn.ClientId
-    if ($setup -and -not (Confirm-Action "An administrator signs in with Microsoft's app 'Microsoft Graph Command Line Tools' and the permissions Application.ReadWrite.All and DelegatedPermissionGrant.ReadWrite.All. The setup adds the permissions of AVDTune's registration, among them Azure Service Management user_impersonation and Azure Storage user_impersonation (NTFS rows of the FSLogix check), and creates the service principals of Microsoft's apps Azure Service Management and Azure Storage in your tenant when they are missing. AVDTune uses the setup permissions only to $(if ($e.SignIn.ClientId) { "check its saved app registration $($e.SignIn.ClientId) (a new one replaces it when it is not safe)" } else { "create its own app registration 'AVDTune'" }), to assign your account to it and to grant the consent for your account only.`n`n$(Get-AVDTuneSetupConsentNote)`n`nContinue?" 'Set up the AVDTune app registration')) { return }
+    if ($setup -and -not (Confirm-Action (T 'stage.signin.confirm' $(if ($e.SignIn.ClientId) { T 'stage.signin.confirm.check' $e.SignIn.ClientId } else { T 'stage.signin.confirm.create' }) (Get-AVDTuneSetupConsentNote)) (T 'stage.signin.confirm.title'))) { return }
     $session = New-AVDTuneSession -Auth (Get-StartAuth) -TempRoot (Get-StartTempRoot)
     try {
-        $result = Invoke-Busy $(if ($setup) { 'The setup sign-in window is open: sign in with an administrator account ...' } else { 'The sign-in window is open: sign in with the account that manages this master ...' }) {
-            Invoke-AVDTuneStartSignIn -Root $script:StateRoot -Session $session -Account $account -User ([string]$env:USERNAME) -RetryDelaySeconds $(if ($script:TestMode) { 0 } else { 5 }) -Setup:$setup } -TaskTitle 'Signing in to Microsoft 365 and Azure' -Done 'Signed in'
+        $result = Invoke-Busy $(if ($setup) { T 'stage.signin.busy.setup' } else { T 'stage.signin.busy' }) {
+            Invoke-AVDTuneStartSignIn -Root $script:StateRoot -Session $session -Account $account -User ([string]$env:USERNAME) -RetryDelaySeconds $(if ($script:TestMode) { 0 } else { 5 }) -Setup:$setup } -TaskTitle (T 'stage.signin.task') -Done (T 'stage.signin.done')
         $info = $result.Info
         foreach ($n in @($result.Notes)) { Add-StartProtocol $(if ($n -like 'Warning:*' -or $n -like 'Note:*') { 'Warning: app registration' } else { 'Sign-in: tenant and app registration' }) $n }
         # The full text was in the confirmation; the protocol keeps the short form (notes are cut at 200 characters)
@@ -340,7 +339,7 @@ function Invoke-SignIn([switch]$Setup) {
     Add-StartProtocol 'Microsoft 365 and Azure sign-in' ("Signed in as $($info.Account): " + (($info.Audiences | ForEach-Object { "$($_.Audience) ($($_.Scopes -join ', '))" }) -join '; '))
     $missing = @($info.Unavailable | ForEach-Object { $_.Reason })
     foreach ($w in @($info.Warnings)) { Add-StartProtocol $(if ($w -in $missing) { 'Warning: sign-in without the Storage token' } else { 'Warning: sign-in token with extra permissions' }) $w }
-    Show-Toast "Signed in as $($info.Account)."
+    Show-Toast (T 'stage.signin.toast' $info.Account)
     Close-Stage
     Update-StartView
     Start-ReadyJob 'Start' ''   # the Azure checks of the readiness analysis can read now
@@ -349,15 +348,15 @@ function Invoke-SignOut {
     if ($script:StartContext.Session) { Disconnect-AVDTuneSession $script:StartContext.Session }
     $left = @(Get-AVDTuneSignInLeftovers -TempRoot (Get-StartTempRoot))
     Add-StartProtocol 'Tokens removed' ('Sign-in tokens removed from memory' + $(if ($left.Count -gt 0) { "; $($left.Count) profile folder(s) of the sign-in window could not be deleted yet" } else { '; profiles of the sign-in window deleted' })) $(if ($left.Count -gt 0) { 'failed' } else { 'ok' })
-    Show-Toast 'The tokens are removed from memory.'
+    Show-Toast (T 'stage.signin.signedout')
     Close-Stage
     Update-StartView
 }
 
 # ---------------------------------------------------------------- 3. domain controller
 function Build-DomainForm {
-    $ui.TxtStageTitle.Text = '3. Domain controller'
-    $ui.TxtStageIntro.Text = 'This master is not domain joined, so enter a domain controller and a domain account. AVDTune connects over LDAPS (certificate pinned) and reads the domain, OUs, groups with their SIDs and the site. The password is only kept in memory while you work here.'
+    $ui.TxtStageTitle.Text = T 'stage.dom.title'
+    $ui.TxtStageIntro.Text = T 'stage.dom.intro'
     $f = $script:Form
     $e = Get-AVDTuneEnvironment $script:StateRoot
     $dc = Get-AVDTuneProp $e 'Dc'
@@ -366,30 +365,30 @@ function Build-DomainForm {
     $f.Server.Add_TextChanged({ try { Clear-DomainPending } catch { } })
     $f.User = New-Object System.Windows.Controls.TextBox; $f.User.Width = 320; $f.User.Text = [string](Get-AVDTuneProp $dc 'User'); $f.User.Name = 'TxtDcUser'
     $f.PasswordBox = New-Object System.Windows.Controls.PasswordBox; $f.PasswordBox.Width = 320; $f.PasswordBox.Name = 'PwdDc'; $f.PasswordBox.MaxLength = 256
-    [void]$ui.PanelStageBody.Children.Add((New-FormRow 'Domain controller (IP or name)' $f.Server))
-    [void]$ui.PanelStageBody.Children.Add((New-FormRow 'Domain account (DOMAIN\user or UPN)' $f.User))
-    [void]$ui.PanelStageBody.Children.Add((New-FormRow 'Password' $f.PasswordBox))
-    $ui.PanelStageBody.Children.Add((New-Text 'The account needs the right to read the directory and, in phase 3, to create groups in an OU. A simple bind in clear text is never used.' 'Hint' '0,6,0,0')) | Out-Null
+    [void]$ui.PanelStageBody.Children.Add((New-FormRow (T 'stage.dom.server') $f.Server))
+    [void]$ui.PanelStageBody.Children.Add((New-FormRow (T 'stage.dom.user') $f.User))
+    [void]$ui.PanelStageBody.Children.Add((New-FormRow (T 'stage.dom.password') $f.PasswordBox))
+    $ui.PanelStageBody.Children.Add((New-Text (T 'stage.dom.hint') 'Hint' '0,6,0,0')) | Out-Null
     $f.Summary = New-MonoBox '' 170; $f.Summary.Visibility = 'Collapsed'
     [void]$ui.PanelStageBody.Children.Add($f.Summary)
     if ($script:StartContext.Directory) { Show-DirectorySummary $script:StartContext.Directory $script:StartContext.DirectorySecurity }
-    $ui.BtnStageAction.Content = 'Connect and read'
+    $ui.BtnStageAction.Content = T 'stage.dom.connect'
     $script:StageAction = { Invoke-DomainConnect }
 }
 function Show-DirectorySummary($Info, [string]$Security) {
     $f = $script:Form
     $lines = New-Object System.Collections.Generic.List[string]
-    $lines.Add("Domain:        $($Info.DnsName)  (NetBIOS $($Info.NetBiosName))")
-    $lines.Add("Domain controller: $($Info.DcDnsName)  site $($Info.Site)")
-    $lines.Add("Levels:        domain $($Info.DomainLevel), forest $($Info.ForestLevel)")
-    $lines.Add("Connection:    $Security")
-    $lines.Add("Naming context: $($Info.DefaultNamingContext)")
-    $lines.Add("OUs ($($Info.OuCount)):")
+    $lines.Add((T 'stage.dom.sum.domain' $Info.DnsName $Info.NetBiosName))
+    $lines.Add((T 'stage.dom.sum.dc' $Info.DcDnsName $Info.Site))
+    $lines.Add((T 'stage.dom.sum.levels' $Info.DomainLevel $Info.ForestLevel))
+    $lines.Add((T 'stage.dom.sum.connection' $Security))
+    $lines.Add((T 'stage.dom.sum.naming' $Info.DefaultNamingContext))
+    $lines.Add((T 'stage.dom.sum.ous' $Info.OuCount))
     $walk = { param($nodes, $depth) foreach ($n in $nodes) { if ($lines.Count -lt 40) { $lines.Add(('  ' * $depth) + '  ' + $n.Name) }; & $walk $n.Children ($depth + 1) } }
     & $walk $Info.OuTree 0
-    $lines.Add("Groups ($(@($Info.Groups).Count)):")
+    $lines.Add((T 'stage.dom.sum.groups' (@($Info.Groups).Count)))
     foreach ($g in @($Info.Groups | Select-Object -First 12)) { $lines.Add("  $($g.Name)  $($g.Sid)") }
-    if (@($Info.Warnings).Count -gt 0) { $lines.Add('Not read: ' + (@($Info.Warnings) -join '; ')) }
+    if (@($Info.Warnings).Count -gt 0) { $lines.Add((T 'stage.dom.sum.notread') + (@($Info.Warnings) -join '; ')) }
     $f.Summary.Text = $lines -join "`r`n"; $f.Summary.Visibility = 'Visible'
 }
 function Format-Thumbprint([string]$Hex) { (($Hex -split '(?<=\G.{2})' | Where-Object { $_ }) -join ':') }
@@ -404,24 +403,24 @@ function Invoke-DomainConnect {
     # -ConfirmedServer: the server whose LDAP 389 warning was accepted; it must still be the one in the form, otherwise nothing is confirmed
     param([string]$ConfirmedServer)
     $f = $script:Form
-    if ($f.PasswordBox.SecurePassword.Length -eq 0) { Set-StageMessage 'Enter the password of the domain account.' 'error'; return }
+    if ($f.PasswordBox.SecurePassword.Length -eq 0) { Set-StageMessage (T 'stage.dom.nopassword') 'error'; return }
     $e = Get-AVDTuneEnvironment $script:StateRoot
     $server = $f.Server.Text.Trim(); $user = $f.User.Text.Trim()
     $f.Secure = $f.PasswordBox.SecurePassword
     $ldap = Get-StartLdap
     $pins = Get-AVDTuneDcPins $e
-    $r = Invoke-Busy "Connecting to $server ..." { Connect-AVDTuneDirectory -Ldap $ldap -Server $server -User $user -Password $f.Secure -Pins $pins -ConfirmedServer $(if ($ConfirmedServer -and $ConfirmedServer -ieq $server) { $ConfirmedServer } else { '' }) } -TaskTitle 'Connecting to the domain controller' -Done 'Connected'
+    $r = Invoke-Busy (T 'stage.dom.busy' $server) { Connect-AVDTuneDirectory -Ldap $ldap -Server $server -User $user -Password $f.Secure -Pins $pins -ConfirmedServer $(if ($ConfirmedServer -and $ConfirmedServer -ieq $server) { $ConfirmedServer } else { '' }) } -TaskTitle (T 'stage.dom.task') -Done (T 'stage.dom.task.done')
     switch ($r.Status) {
         'NeedsConfirmation' {
             # LDAPS does not answer: no bind until the administrator accepts the named risk; the acceptance goes into the protocol
             Set-StageMessage ("$($r.Message)`n$($r.Warning)") 'warn'
             Add-StartProtocol "Domain controller without LDAPS ($server)" "LDAPS 636 does not answer ($($r.Reason)); nothing sent, waiting for the confirmation" 'skipped'
             $f.PendingServer = $server
-            $ui.BtnStageAction2.Content = 'I accept the risk: connect over LDAP 389'; $ui.BtnStageAction2.Visibility = 'Visible'
+            $ui.BtnStageAction2.Content = T 'stage.dom.accept'; $ui.BtnStageAction2.Visibility = 'Visible'
             $script:StageAction2 = {
                 $srv = $script:Form.PendingServer
-                if (-not $srv -or $srv -ine $script:Form.Server.Text.Trim()) { Clear-DomainPending; Set-StageMessage 'The server name changed after the warning. Connect again to see the warning for this server.' 'error'; return }
-                if (-not (Confirm-Action ((Get-AVDTuneLdapRiskText -Server $srv) + "`n`nConnect to $srv over LDAP 389 anyway?") 'Connect without LDAPS')) { return }
+                if (-not $srv -or $srv -ine $script:Form.Server.Text.Trim()) { Clear-DomainPending; Set-StageMessage (T 'stage.dom.namechanged') 'error'; return }
+                if (-not (Confirm-Action ((Get-AVDTuneLdapRiskText -Server $srv) + "`n`n" + (T 'stage.dom.confirm.ldap' $srv)) (T 'stage.dom.confirm.ldap.title'))) { return }
                 Add-StartProtocol "Domain controller without LDAPS confirmed ($srv)" ("Confirmed by $env:USERDOMAIN\$env:USERNAME" + $(if ($script:StartContext.Session -and $script:StartContext.Session.Account) { " (signed in as $($script:StartContext.Session.Account))" }) + ': ' + $(if (Test-AVDTuneIpAddress $srv) { 'NTLM over 389, server not authenticated' } else { 'Kerberos over 389, no certificate pin' }))
                 $ui.BtnStageAction2.Visibility = 'Collapsed'
                 Invoke-DomainConnect -ConfirmedServer $srv
@@ -429,10 +428,10 @@ function Invoke-DomainConnect {
         }
         'NeedsPin' {
             $c = $r.Certificate
-            Set-StageMessage ("First contact with $server over LDAPS. Nothing was sent yet. Check that this is your domain controller's certificate:`nSubject: $($c.Subject)`nIssuer: $($c.Issuer)`nValid: $(([string]$c.NotBefore).Substring(0, [Math]::Min(10, ([string]$c.NotBefore).Length))) to $(([string]$c.NotAfter).Substring(0, [Math]::Min(10, ([string]$c.NotAfter).Length)))`nSHA-256: $(Format-Thumbprint ([string]$c.Sha256))`nSHA-1 thumbprint: $(Format-Thumbprint ([string]$c.Thumbprint))`nChain (extra information, the pin is the trust): $(if ($c.PSObject.Properties['ChainStatus']) { $c.ChainStatus } else { 'unknown' })`nName: $(if ($c.PSObject.Properties['NameMatches']) { if ($c.NameMatches) { "matches $server" } else { "does not match $server" } } else { 'unknown' })") 'warn'
+            Set-StageMessage (T 'stage.dom.pin' $server $c.Subject $c.Issuer (([string]$c.NotBefore).Substring(0, [Math]::Min(10, ([string]$c.NotBefore).Length))) (([string]$c.NotAfter).Substring(0, [Math]::Min(10, ([string]$c.NotAfter).Length))) (Format-Thumbprint ([string]$c.Sha256)) (Format-Thumbprint ([string]$c.Thumbprint)) $(if ($c.PSObject.Properties['ChainStatus']) { $c.ChainStatus } else { T 'stage.dom.unknown' }) $(if ($c.PSObject.Properties['NameMatches']) { if ($c.NameMatches) { T 'stage.dom.name.match' $server } else { T 'stage.dom.name.nomatch' $server } } else { T 'stage.dom.unknown' })) 'warn'
             $f.PendingCert = $c; $f.PendingServer = $server
-            $ui.BtnStageAction.Content = 'Connect and read'
-            $ui.BtnStageAction2.Content = 'Pin this certificate and continue'; $ui.BtnStageAction2.Visibility = 'Visible'
+            $ui.BtnStageAction.Content = T 'stage.dom.connect'
+            $ui.BtnStageAction2.Content = T 'stage.dom.pinbtn'; $ui.BtnStageAction2.Visibility = 'Visible'
             $script:StageAction2 = {
                 [void](Set-AVDTuneDcPin -Root $script:StateRoot -Server $script:Form.PendingServer -Certificate $script:Form.PendingCert -User ([string]$env:USERNAME))
                 Add-StartProtocol "Domain controller certificate pinned ($($script:Form.PendingServer))" "SHA-256 $((Format-Thumbprint ([string]$script:Form.PendingCert.Sha256)))"
@@ -444,9 +443,9 @@ function Invoke-DomainConnect {
             Set-StageMessage $r.Message 'error'
             Add-StartProtocol "Domain controller certificate changed ($server)" 'Connection stopped, nothing was sent' 'failed'
             $f.PendingCert = $r.Certificate; $f.PendingServer = $server
-            $ui.BtnStageAction2.Content = 'The change is expected: pin the new certificate'; $ui.BtnStageAction2.Visibility = 'Visible'
+            $ui.BtnStageAction2.Content = T 'stage.dom.repinbtn'; $ui.BtnStageAction2.Visibility = 'Visible'
             $script:StageAction2 = {
-                if (-not (Confirm-Action "Replace the pinned certificate of $($script:Form.PendingServer) by the one with SHA-256 $((Format-Thumbprint ([string]$script:Form.PendingCert.Sha256)))? Only do this if the certificate of the domain controller was renewed on purpose." 'Replace the pinned certificate')) { return }
+                if (-not (Confirm-Action (T 'stage.dom.confirm.repin' $script:Form.PendingServer (Format-Thumbprint ([string]$script:Form.PendingCert.Sha256))) (T 'stage.dom.confirm.repin.title'))) { return }
                 [void](Set-AVDTuneDcPin -Root $script:StateRoot -Server $script:Form.PendingServer -Certificate $script:Form.PendingCert -User ([string]$env:USERNAME) -Replace)
                 Add-StartProtocol "Domain controller certificate re-pinned ($($script:Form.PendingServer))" "new SHA-256 $((Format-Thumbprint ([string]$script:Form.PendingCert.Sha256)))"
                 $ui.BtnStageAction2.Visibility = 'Collapsed'
@@ -460,7 +459,7 @@ function Invoke-DomainConnect {
         }
         'Connected' {
             try {
-                $info = Invoke-Busy 'Reading the domain, OUs and groups ...' { Get-AVDTuneDirectoryInfo -Ldap $ldap -Connection $r.Connection } -TaskTitle 'Reading the domain, OUs and groups' -Done 'Read'
+                $info = Invoke-Busy (T 'stage.dom.reading') { Get-AVDTuneDirectoryInfo -Ldap $ldap -Connection $r.Connection } -TaskTitle (T 'stage.dom.reading.task') -Done (T 'stage.dom.reading.done')
             }
             catch {
                 Disconnect-AVDTuneDirectory -Ldap $ldap -Connection $r.Connection
@@ -478,7 +477,7 @@ function Invoke-DomainConnect {
             Add-StartProtocol "Domain controller read ($server)" "$($info.DnsName) ($($info.NetBiosName)), $($info.OuCount) OUs, $(@($info.Groups).Count) groups, site $($info.Site); $($r.Security)"
             $f.PasswordBox.Clear(); $f.Secure.Dispose(); $f.Secure = $null
             Show-DirectorySummary $info $r.Security
-            Set-StageMessage 'The domain is read. The password is cleared.' 'ok'
+            Set-StageMessage (T 'stage.dom.read') 'ok'
             $ui.BtnStageAction.Visibility = 'Collapsed'
             Update-StartView
             return
@@ -490,21 +489,21 @@ function Invoke-DomainConnect {
 
 # ---------------------------------------------------------------- 4. snapshot gate
 function Build-SnapshotForm {
-    $ui.TxtStageTitle.Text = '4. Snapshot gate'
-    $ui.TxtStageIntro.Text = 'One snapshot per image version: before AVDTune changes the master there must be a finished snapshot of its OS disk from after the last change of the previous version and before the first change of this one. A snapshot made after the last change (the current state) counts too, so Create snapshot now is always usable; a rollback goes back to the start of the version or to that current state. Create one here (incremental, named by the pattern of this environment) or choose an existing one, then confirm it with your first and last name. When AVDTune already changed the master in this version, choose a snapshot from the start of the version or one made after the last change; snapshots that do not count are grey with the reason. Until then every page is read only.'
+    $ui.TxtStageTitle.Text = T 'stage.snap.title'
+    $ui.TxtStageIntro.Text = T 'stage.snap.intro'
     $f = $script:Form
     $f.Info = New-Object System.Windows.Controls.StackPanel
     [void]$ui.PanelStageBody.Children.Add($f.Info)
     $f.SnapList = New-Object System.Windows.Controls.ComboBox; $f.SnapList.Width = 620; $f.SnapList.Name = 'CmbSnapshot'
-    [void]$ui.PanelStageBody.Children.Add((New-FormRow 'Snapshot to confirm' $f.SnapList))
+    [void]$ui.PanelStageBody.Children.Add((New-FormRow (T 'stage.snap.toconfirm') $f.SnapList))
     $f.SnapList.Visibility = 'Collapsed'
     $f.Phrase = New-Text (Get-AVDTuneGateText) $null '0,10,0,6'; $f.Phrase.FontWeight = 'SemiBold'
     [void]$ui.PanelStageBody.Children.Add($f.Phrase)
     $f.NameBox = New-Object System.Windows.Controls.TextBox; $f.NameBox.Width = 320; $f.NameBox.Name = 'TxtConfirmName'; $f.NameBox.MaxLength = 100
-    [void]$ui.PanelStageBody.Children.Add((New-FormRow 'Your first and last name' $f.NameBox 'Your first and last name to confirm the snapshot'))
-    $ui.PanelStageBody.Children.Add((New-Text 'Shared admin accounts are fine: the protocol and the change log record the typed name together with the signed-in Microsoft account and the Windows account.' 'Hint' '0,4,0,0')) | Out-Null
-    $ui.BtnStageAction.Content = 'Confirm'
-    $ui.BtnStageAction2.Content = 'Create snapshot now'; $ui.BtnStageAction2.Visibility = 'Visible'
+    [void]$ui.PanelStageBody.Children.Add((New-FormRow (T 'stage.snap.name') $f.NameBox (T 'stage.snap.name.aut')))
+    $ui.PanelStageBody.Children.Add((New-Text (T 'stage.snap.hint') 'Hint' '0,4,0,0')) | Out-Null
+    $ui.BtnStageAction.Content = T 'stage.snap.confirm'
+    $ui.BtnStageAction2.Content = T 'stage.snap.create'; $ui.BtnStageAction2.Visibility = 'Visible'
     $script:StageAction = { Invoke-SnapshotConfirm }
     $script:StageAction2 = { Invoke-SnapshotCreate }
     Update-SnapshotForm
@@ -527,13 +526,13 @@ function Update-SnapshotForm {
     $f.LastChange = $f.Window.LastChange
     $e = Get-AVDTuneEnvironment $script:StateRoot
     $f.NamePattern = [string](Get-AVDTuneEnvironmentAnswers $e).SnapshotNamePattern
-    foreach ($row in @(@('VM', $vm.VmName), @('Resource group', $vm.ResourceGroup), @('OS disk', $vm.OsDiskName), @('Image version', $(if ($f.ImageVersion) { $f.ImageVersion } else { 'none yet: Create snapshot starts the first one' })),
-            @('Last change by AVDTune', $(if ($f.LastChange) { $f.LastChange.ToString('yyyy-MM-dd HH:mm') } else { 'none yet: every finished snapshot counts' })),
-            @('First change in this version', $(if ($f.Window.FirstChange) { "$($f.Window.FirstChange.ToString('yyyy-MM-dd HH:mm')): choose a snapshot from the start of the version (before it) or one made after the last change (the current state)" } else { 'none yet: this is the start of the version' })), @('Name pattern', $f.NamePattern))) {
-        [void]$f.Info.Children.Add((New-InfoRow $row[0] ([string]$row[1])))
+    foreach ($row in @(@('stage.snap.row.vm', $vm.VmName), @('stage.snap.row.rg', $vm.ResourceGroup), @('stage.snap.row.disk', $vm.OsDiskName), @('stage.snap.row.version', $(if ($f.ImageVersion) { $f.ImageVersion } else { T 'stage.snap.val.noversion' })),
+            @('stage.snap.row.last', $(if ($f.LastChange) { $f.LastChange.ToString('yyyy-MM-dd HH:mm') } else { T 'stage.snap.val.nolast' })),
+            @('stage.snap.row.first', $(if ($f.Window.FirstChange) { T 'stage.snap.val.first' $f.Window.FirstChange.ToString('yyyy-MM-dd HH:mm') } else { T 'stage.snap.val.nofirst' })), @('stage.snap.row.pattern', $f.NamePattern))) {
+        [void]$f.Info.Children.Add((New-InfoRow (T $row[0]) ([string]$row[1])))
     }
     try {
-        $list = Invoke-Busy 'Looking for snapshots of the OS disk ...' { @(Get-AVDTuneOsDiskSnapshots -Arm (Get-StartArm) -Token (Get-ArmToken) -Vm $vm -Window $f.Window) } -TaskTitle 'Looking for snapshots of the OS disk' -Done 'Looked'
+        $list = Invoke-Busy (T 'stage.snap.looking') { @(Get-AVDTuneOsDiskSnapshots -Arm (Get-StartArm) -Token (Get-ArmToken) -Vm $vm -Window $f.Window) } -TaskTitle (T 'stage.snap.looking.task') -Done (T 'stage.snap.looking.done')
     }
     catch {
         $script:StartContext.Failures['Snapshot'] = $_.Exception.Message
@@ -550,9 +549,9 @@ function Update-SnapshotForm {
     $items = New-Object System.Collections.ArrayList
     foreach ($s in $list) {
         $item = New-Object System.Windows.Controls.ComboBoxItem
-        $when = if ($s.Created) { $s.Created.ToString('yyyy-MM-dd HH:mm') } else { 'time unknown' }
-        $text = "$($s.Name)  ($when, $($s.State), $(if ($s.ByAVDTune) { 'made by AVDTune' } else { 'made by someone else' }))"
-        if ($s.Valid) { $text += $(if ($s.Kind -eq 'CurrentState') { ' - current state (after the last change)' } else { ' - start of the version' }) } else { $text += " - does not count: $($s.Reason)" }
+        $when = if ($s.Created) { $s.Created.ToString('yyyy-MM-dd HH:mm') } else { T 'stage.snap.timeunknown' }
+        $text = T 'stage.snap.item' $s.Name $when $s.State $(if ($s.ByAVDTune) { T 'stage.snap.byus' } else { T 'stage.snap.byother' })
+        if ($s.Valid) { $text += $(if ($s.Kind -eq 'CurrentState') { T 'stage.snap.current' } else { T 'stage.snap.start' }) } else { $text += T 'stage.snap.nocount' $s.Reason }
         $tb = New-Text $text $null; $tb.MaxWidth = 700
         $item.Content = $tb; $item.Tag = $s; $item.IsEnabled = [bool]$s.Valid
         if (-not $s.Valid) { Set-Brush $tb ([System.Windows.Controls.TextBlock]::ForegroundProperty) 'MutedText'; $item.ToolTip = $s.Reason }
@@ -567,7 +566,7 @@ function Update-SnapshotForm {
     $ui.BtnStageAction2.IsEnabled = $true
     $others = @($list | Where-Object { -not $_.Valid }).Count
     $kind = if ($valid.Count -gt 0) { 'ok' } else { 'warn' }
-    Set-StageMessage ($gate.Detail + $(if ($others -gt 0) { " ($others snapshot(s) of this disk are grey: they do not count, the reason is shown.)" })) $kind
+    Set-StageMessage ($gate.Detail + $(if ($others -gt 0) { ' ' + (T 'stage.snap.grey' $others) })) $kind
 }
 function Invoke-SnapshotCreate {
     $f = $script:Form
@@ -575,13 +574,13 @@ function Invoke-SnapshotCreate {
         # the snapshot name and tags carry the image version: start the first one here (asks first)
         Start-NewVersion
         $f.ImageVersion = [string](Get-AVDTuneState $script:StateRoot).ImageVersion
-        if (-not $f.ImageVersion) { Set-StageMessage 'The snapshot needs an image version: start a new version first.' 'error'; return }
+        if (-not $f.ImageVersion) { Set-StageMessage (T 'stage.snap.needversion') 'error'; return }
         Update-SnapshotForm
     }
     if ($script:PendingSnapshot) { return }
     $vm = $f.Vm
     try {
-        $started = Invoke-Busy 'Asking Azure to create the incremental snapshot ...' { Start-AVDTuneSnapshot -Arm (Get-StartArm) -Token (Get-ArmToken) -Vm $vm -ImageVersion $f.ImageVersion -User ([string]$script:StartContext.Session.Account) -At (& $script:Machine.Now) -NamePattern $f.NamePattern -ExistingNames @(@($f.Snapshots) | Where-Object { $_ } | ForEach-Object { $_.Name }) -ExistingSnapshots @(@($f.Snapshots) | Where-Object { $_ }) } -TaskTitle 'Asking Azure to create the snapshot' -Done 'Request accepted'
+        $started = Invoke-Busy (T 'stage.snap.asking') { Start-AVDTuneSnapshot -Arm (Get-StartArm) -Token (Get-ArmToken) -Vm $vm -ImageVersion $f.ImageVersion -User ([string]$script:StartContext.Session.Account) -At (& $script:Machine.Now) -NamePattern $f.NamePattern -ExistingNames @(@($f.Snapshots) | Where-Object { $_ } | ForEach-Object { $_.Name }) -ExistingSnapshots @(@($f.Snapshots) | Where-Object { $_ }) } -TaskTitle (T 'stage.snap.asking.task') -Done (T 'stage.snap.asking.done')
     }
     catch {
         $script:StartContext.Failures['Snapshot'] = $_.Exception.Message
@@ -591,9 +590,9 @@ function Invoke-SnapshotCreate {
         return
     }
     $script:PendingSnapshot = $started
-    $script:SnapTask = Start-AVDTuneUiTask -Kind 'snapshot' -Title "Snapshot $($started.Name)" -Step 'Being created in Azure'   # runs until the timer below sees it ready or failed
+    $script:SnapTask = Start-AVDTuneUiTask -Kind 'snapshot' -Title (T 'stage.snap.task' $started.Name) -Step (T 'stage.snap.task.step')   # runs until the timer below sees it ready or failed
     $ui.BtnStageAction2.IsEnabled = $false; $ui.BtnStageAction.IsEnabled = $false
-    Set-StageMessage "Snapshot $($started.Name) is being created in Azure. This can take a few minutes; the window stays usable." 'info'
+    Set-StageMessage (T 'stage.snap.creating' $started.Name) 'info'
     $script:SnapTimer.Start()
 }
 $script:SnapTimer.Add_Tick({
@@ -604,20 +603,20 @@ $script:SnapTimer.Add_Tick({
             if ($s.State -eq 'Succeeded') {
                 $script:SnapTimer.Stop(); $script:PendingSnapshot = $null
                 Add-StartProtocol 'Snapshot of the OS disk created' "$($p.Name) (incremental)"
-                Complete-AVDTuneUiTask $script:SnapTask -Summary "Snapshot $($p.Name) is ready"
+                Complete-AVDTuneUiTask $script:SnapTask -Summary (T 'stage.snap.ready' $p.Name)
                 if ($script:OpenStage -eq 'Snapshot') { Update-SnapshotForm }
-                Show-Toast "Snapshot $($p.Name) is ready."
+                Show-Toast (T 'stage.snap.ready.toast' $p.Name)
             }
             elseif ($s.State -in 'Failed', 'Canceled') {
                 $script:SnapTimer.Stop(); $script:PendingSnapshot = $null
-                $script:StartContext.Failures['Snapshot'] = "The snapshot $($p.Name) failed in Azure."
+                $script:StartContext.Failures['Snapshot'] = T 'stage.snap.failed' $p.Name
                 Add-StartProtocol 'Snapshot of the OS disk' "$($p.Name) failed in Azure" 'failed'
-                Complete-AVDTuneUiTask $script:SnapTask -Failed -Summary "The snapshot $($p.Name) failed in Azure."
+                Complete-AVDTuneUiTask $script:SnapTask -Failed -Summary (T 'stage.snap.failed' $p.Name)
                 Set-StageMessage $script:StartContext.Failures['Snapshot'] 'error'
                 $ui.BtnStageAction2.IsEnabled = $true
                 Update-StartView
             }
-            elseif ($s.Percent -ne $null) { Set-StageMessage "Snapshot $($p.Name): $([int]$s.Percent) percent ..." 'info'; Update-AVDTuneUiTask $script:SnapTask -Step "Being created in Azure: $([int]$s.Percent) percent" -Percent ([int]$s.Percent) }
+            elseif ($s.Percent -ne $null) { Set-StageMessage (T 'stage.snap.percent' $p.Name ([int]$s.Percent)) 'info'; Update-AVDTuneUiTask $script:SnapTask -Step (T 'stage.snap.task.percent' ([int]$s.Percent)) -Percent ([int]$s.Percent) }
         }
         catch {
             $script:SnapTimer.Stop(); $script:PendingSnapshot = $null
@@ -628,9 +627,9 @@ $script:SnapTimer.Add_Tick({
     })
 function Invoke-SnapshotConfirm {
     $f = $script:Form
-    if (-not $f.Valid -or $f.Valid.Count -eq 0) { Set-StageMessage 'There is no valid snapshot to confirm (after the last change of the previous version and before the first change of this one).' 'error'; return }
+    if (-not $f.Valid -or $f.Valid.Count -eq 0) { Set-StageMessage (T 'stage.snap.novalid') 'error'; return }
     $snapshot = if ($f.SnapList.SelectedItem -and $f.SnapList.SelectedItem.Tag) { $f.SnapList.SelectedItem.Tag } else { $null }
-    if (-not $snapshot -or -not $snapshot.Valid) { Set-StageMessage 'Choose one of the snapshots that count (the grey ones cannot be confirmed).' 'error'; return }
+    if (-not $snapshot -or -not $snapshot.Valid) { Set-StageMessage (T 'stage.snap.choose') 'error'; return }
     $session = $script:StartContext.Session
     if (-not $f.ImageVersion) {
         # Confirming an existing snapshot before any image version (found on the test VM): check the name first,
@@ -639,7 +638,7 @@ function Invoke-SnapshotConfirm {
         if (-not $check.Ok) { Set-StageMessage $check.Message 'error'; return }
         Start-NewVersion
         $f.ImageVersion = [string](Get-AVDTuneState $script:StateRoot).ImageVersion
-        if (-not $f.ImageVersion) { Set-StageMessage 'The confirmation is recorded in an image version: start a new version first.' 'error'; return }
+        if (-not $f.ImageVersion) { Set-StageMessage (T 'stage.snap.needversion2') 'error'; return }
     }
     try {
         $record = Confirm-AVDTuneSnapshotGate -Root $script:StateRoot -Snapshot $snapshot -TypedName $f.NameBox.Text -SignedInAccount $(if ($session) { [string]$session.Account } else { '' }) -WindowsAccount "$env:USERDOMAIN\$env:USERNAME" -ImageVersion $f.ImageVersion -Machine $script:Machine -Arm (Get-StartArm) -Token (Get-ArmToken) -Vm $f.Vm
@@ -648,7 +647,7 @@ function Invoke-SnapshotConfirm {
     $made = if ($record.CreatedByAVDTune) { 'yes' } else { 'no' }
     Add-StartProtocol 'Snapshot gate confirmed' "$($record.SnapshotName), created $(([datetime]$record.SnapshotCreated).ToString('yyyy-MM-dd HH:mm')), by AVDTune: $made, confirmed by $($record.ConfirmedBy) (Microsoft account $($record.SignedInAccount), Windows account $($record.WindowsAccount)), ID $($record.SnapshotId); $($record.Mode) in version $($record.ImageVersion), snapshot kind $($record.SnapshotKind)$(if ($record.FirstChange) { ", first change of the version $(([datetime]$record.FirstChange).ToString('yyyy-MM-dd HH:mm'))" })"
     $script:StartContext.Failures.Remove('Snapshot')
-    Show-Toast 'Snapshot confirmed. The pages can change the master now.'
+    Show-Toast (T 'stage.snap.confirmed')
     Close-Stage
     Update-StartView
     if ($script:CurrentPage -eq 'Protocol') { Update-ProtocolView }

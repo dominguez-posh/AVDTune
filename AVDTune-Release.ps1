@@ -7,10 +7,9 @@
 $script:Rel = @{ ComputerName = [string](& $script:Machine.ComputerName); Status = $null; Latest = $null; CheckError = ''; Job = $null; Restart = ''; Info = $null }
 $script:RelFakeHttp = $null   # test hook: a fake HTTP adapter for the smoke driver
 $script:RelInstallRoot = $(if ($script:TestMode) { Join-Path $script:StateRoot 'install-test' } else { Get-AVDTuneInstallRoot })
-$script:RelOriginalBanner = [string]$ui.TxtReadOnly.Text
-$script:RelPill = @{
-    ok = @('SuccessBg', 'Success', 'Verified'); bad = @('ErrorBg', 'Danger', 'Files changed'); dev = @('Hover', 'Text', 'Development copy'); unprotected = @('WarningBg', 'Warning', 'Not protected')
-    unverified = @('WarningBg', 'Warning', 'Not verified'); running = @('Hover', 'MutedText', 'Checking'); failed = @('ErrorBg', 'Danger', 'Check failed')
+$script:RelPill = @{   # the text of a pill is rel.pill.<key>
+    ok = @('SuccessBg', 'Success'); bad = @('ErrorBg', 'Danger'); dev = @('Hover', 'Text'); unprotected = @('WarningBg', 'Warning')
+    unverified = @('WarningBg', 'Warning'); running = @('Hover', 'MutedText'); failed = @('ErrorBg', 'Danger')
 }
 if ($script:TestMode) { . (Get-TestScript 'FakeRelease.ps1') }
 
@@ -61,12 +60,12 @@ function Set-RelBusy([bool]$Busy) {
 
 function Get-RelTaskTitle([string]$Kind, [string]$Argument) {
     switch ($Kind) {
-        'Start' { 'Integrity check and update check of AVDTune' } 'Check' { 'Checking for a new AVDTune version' } 'Install' { "Updating AVDTune to version $Argument" }
-        'Back' { 'Going back to the previous AVDTune version' } 'Repair' { 'Repairing the AVDTune files' } default { "AVDTune $Kind" }
+        'Start' { T 'rel.task.start' } 'Check' { T 'rel.task.check' } 'Install' { T 'rel.task.install' $Argument }
+        'Back' { T 'rel.task.back' } 'Repair' { T 'rel.task.repair' } default { "AVDTune $Kind" }
     }
 }
 function Start-RelJob([string]$Kind, [string]$Argument = '') {
-    if ($script:Rel.Job) { throw 'Another check of the tool is still running.' }
+    if ($script:Rel.Job) { throw (T 'rel.err.busy') }
     $ctx = @{
         Kind = $Kind; Argument = $Argument; AppRoot = $script:AppRoot; InstallRoot = $script:RelInstallRoot; StateRoot = $script:StateRoot; User = [string]$env:USERNAME
         Version = $(if ($script:Rel.Info.Version) { $script:Rel.Info.Version } else { [string]$script:ToolVersion }); EarlyAccess = [bool](Get-AVDTuneReleaseSettings $script:StateRoot).EarlyAccess
@@ -74,7 +73,7 @@ function Start-RelJob([string]$Kind, [string]$Argument = '') {
     }
     Set-RelBusy $true
     # the checks are read only and can be started again from the list; install, back and repair change the tool and are started on the card
-    $task = Start-AVDTuneUiTask -Kind "release-$($Kind.ToLower())" -Title (Get-RelTaskTitle $Kind $Argument) -Step $(if ($Kind -in 'Start', 'Check') { 'Comparing the files and asking GitHub for the latest release' } else { 'Downloading and checking against the SHA256 of the manifest' }) -Retry $(if ($Kind -in 'Start', 'Check') { @{ Command = 'Start-RelJob'; Arguments = @($Kind) } })
+    $task = Start-AVDTuneUiTask -Kind "release-$($Kind.ToLower())" -Title (Get-RelTaskTitle $Kind $Argument) -Step $(if ($Kind -in 'Start', 'Check') { T 'rel.task.step.check' } else { T 'rel.task.step.install' }) -Retry $(if ($Kind -in 'Start', 'Check') { @{ Command = 'Start-RelJob'; Arguments = @($Kind) } })
     if ($script:TestMode) {
         # inline: the fakes are closures of this runspace (same reason as the readiness check)
         $res = $null; $err = ''
@@ -98,47 +97,48 @@ function Update-ReleaseView {
     $pair = $script:RelPill[$key]
     Set-Brush $ui.PillRelease ([System.Windows.Controls.Border]::BackgroundProperty) $pair[0]
     Set-Brush $ui.TxtRelStatus ([System.Windows.Controls.TextBlock]::ForegroundProperty) $pair[1]
-    $ui.TxtRelStatus.Text = $pair[2]
+    $ui.TxtRelStatus.Text = T "rel.pill.$key"
     $mode = if ($script:Rel.Info) { [string]$script:Rel.Info.Mode } else { '' }
-    $detail = if ($s) { [string]$s.Message + $(if (@($s.Warnings).Count -gt 0) { "`r`n" + (@($s.Warnings) -join "`r`n") }) } else { 'Comparing the files with the release ...' }
+    $detail = if ($s) { [string]$s.Message + $(if (@($s.Warnings).Count -gt 0) { "`r`n" + (@($s.Warnings) -join "`r`n") }) } else { T 'rel.comparing' }
     if ($script:Rel.Restart) { $detail = $script:Rel.Restart + "`r`n" + $detail }
     $ui.TxtRelDetail.Text = $detail
     $files = @()
     if ($s -and ($s.Status -eq 'bad' -or @($s.Acl).Count -gt 0)) {
-        $files += @($s.Acl | ForEach-Object { "folder    $_" })
+        $files += @($s.Acl | ForEach-Object { T 'rel.file.folder' $_ })
     }
     if ($s -and $s.Status -eq 'bad') {
-        $files += @($s.Changed | ForEach-Object { "changed   $_" }) + @($s.Missing | ForEach-Object { "missing   $_" }) + @($s.Extra | ForEach-Object { "extra     $_" })
+        $files += @($s.Changed | ForEach-Object { T 'rel.file.changed' $_ }) + @($s.Missing | ForEach-Object { T 'rel.file.missing' $_ }) + @($s.Extra | ForEach-Object { T 'rel.file.extra' $_ })
     }
     $ui.TxtRelFiles.Text = ($files -join "`r`n")
     $ui.TxtRelFiles.Visibility = ConvertTo-Vis ($files.Count -gt 0)
     $ui.BtnRelRepair.Visibility = ConvertTo-Vis ([bool]($s -and $s.Status -eq 'bad' -and $mode -eq 'Installed' -and -not $script:Rel.Restart))
     $skip = [bool]($s -and $s.Status -eq 'unverified' -and $mode -eq 'Installed' -and $s.Blocked)
     $ui.PanelRelSkip.Visibility = ConvertTo-Vis $skip
-    if ($skip) { $ui.TxtRelSkipHint.Text = "To continue without the check, type the name of this computer ($($script:Rel.ComputerName)). This is written to the protocol and the change log." }
+    if ($skip) { $ui.TxtRelSkipHint.Text = T 'rel.skiphint' $script:Rel.ComputerName }
     $latest = $script:Rel.Latest
     $notes = ''
     if ($latest) {
-        $notes = if ($latest.Newer) { "Version $($latest.Version)$(if ($latest.Prerelease) { ' (early access)' }) is available, released $(([string]$latest.Date).Substring(0, 10)). Release notes:`r`n$($latest.Notes)" } else { "AVDTune $($latest.Version) is the newest version$(if ($latest.Prerelease) { ' (early access)' })." }
+        $early = $(if ($latest.Prerelease) { T 'rel.early.note' } else { '' })
+        $notes = if ($latest.Newer) { T 'rel.newer' $latest.Version $early ([string]$latest.Date).Substring(0, 10) $latest.Notes } else { T 'rel.newest' $latest.Version $early }
     }
-    elseif ($script:Rel.CheckError) { $notes = "Update check: $($script:Rel.CheckError)" }
+    elseif ($script:Rel.CheckError) { $notes = T 'rel.checkerr' $script:Rel.CheckError }
     $ui.TxtRelNotes.Text = $notes
     $ui.TxtRelNotes.Visibility = ConvertTo-Vis ([bool]$notes)
-    $offerInstall = $false; $installText = 'Install update'
+    $offerInstall = $false; $installText = T 'rel.install'
     if ($latest -and -not $script:Rel.Restart -and ($s -and $s.Status -ne 'bad')) {
-        if ($mode -eq 'Installed' -and $latest.Newer) { $offerInstall = $true; $installText = "Install $($latest.Version)" }
-        elseif ($mode -eq 'Unprotected' -and ($latest.Newer -or $latest.Version -eq $script:Rel.Info.Version)) { $offerInstall = $true; $installText = "Install $($latest.Version) in $($script:RelInstallRoot)" }
-        elseif ($script:TestMode -and $latest.Newer) { $offerInstall = $true; $installText = "Install $($latest.Version)" }
+        if ($mode -eq 'Installed' -and $latest.Newer) { $offerInstall = $true; $installText = T 'rel.install.version' $latest.Version }
+        elseif ($mode -eq 'Unprotected' -and ($latest.Newer -or $latest.Version -eq $script:Rel.Info.Version)) { $offerInstall = $true; $installText = T 'rel.install.in' $latest.Version $script:RelInstallRoot }
+        elseif ($script:TestMode -and $latest.Newer) { $offerInstall = $true; $installText = T 'rel.install.version' $latest.Version }
     }
     $ui.BtnRelInstall.Content = $installText
     $ui.BtnRelInstall.Visibility = ConvertTo-Vis $offerInstall
     $inst = Get-AVDTuneInstallState $script:RelInstallRoot
     $ui.BtnRelBack.Visibility = ConvertTo-Vis ([bool]($inst -and $inst.Previous -and ($mode -eq 'Installed' -or $script:TestMode) -and -not $script:Rel.Restart))
-    if ($inst -and $inst.Previous) { $ui.BtnRelBack.Content = "Back to version $($inst.Previous)" }
+    $ui.BtnRelBack.Content = $(if ($inst -and $inst.Previous) { T 'rel.back.version' $inst.Previous } else { T 'rel.back' })
     $ui.ChkRelEarly.IsChecked = [bool](Get-AVDTuneReleaseSettings $script:StateRoot).EarlyAccess
     # the banner on the other pages says why AVDTune is read only
     $block = Get-AVDTuneWriteBlock
-    $ui.TxtReadOnly.Text = $(if ($block) { "Read only: $block (see the card Integrity and updates on the Overview)" } else { $script:RelOriginalBanner })
+    $ui.TxtReadOnly.Text = $(if ($block) { T 'rel.banner.block' $block } else { T 'shell.readonly' })
 }
 
 function Complete-RelResult($Job, $Res, [string]$Err) {
@@ -147,7 +147,7 @@ function Complete-RelResult($Job, $Res, [string]$Err) {
     $kind = $Job.Kind
     if ($Err) {
         Complete-AVDTuneUiTask $Job.Task -Failed -Summary $Err
-        if ($kind -eq 'Start') { Set-AVDTuneWriteBlock "the integrity check could not run ($Err)."; $script:Rel.Status = [pscustomobject]@{ Status = 'failed'; Message = "The integrity check could not run: $Err"; Warnings = @(); Changed = @(); Missing = @(); Extra = @() } }
+        if ($kind -eq 'Start') { Set-AVDTuneWriteBlock "the integrity check could not run ($Err)."; $script:Rel.Status = [pscustomobject]@{ Status = 'failed'; Message = (T 'rel.err.check' $Err); Warnings = @(); Changed = @(); Missing = @(); Extra = @() } }
         else { Show-Error $Err; Add-RelProtocol "AVDTune $kind" $Err 'failed' }
         Update-ReleaseView
         return
@@ -155,12 +155,12 @@ function Complete-RelResult($Job, $Res, [string]$Err) {
     if ($kind -eq 'Start') {
         if ($Res.Error) {
             Set-AVDTuneWriteBlock "the integrity check could not run ($($Res.Error))."
-            $script:Rel.Status = [pscustomobject]@{ Status = 'failed'; Message = "The integrity check could not run: $($Res.Error)"; Warnings = @(); Changed = @(); Missing = @(); Extra = @() }
+            $script:Rel.Status = [pscustomobject]@{ Status = 'failed'; Message = (T 'rel.err.check' $Res.Error); Warnings = @(); Changed = @(); Missing = @(); Extra = @() }
         }
         else {
             $script:Rel.Status = $Res.Status
             Set-AVDTuneIntegrityBlock $Res.Status
-            if ($Res.Status.Status -eq 'bad') { Add-RelProtocol 'Warning: AVDTune files differ from the release' ("$($Res.Status.Changed.Count) changed, $($Res.Status.Missing.Count) missing, $($Res.Status.Extra.Count) extra; read only until repaired") 'failed'; Show-Toast 'The files of AVDTune do not match the release. AVDTune is read only until you repair it on the Overview.' }
+            if ($Res.Status.Status -eq 'bad') { Add-RelProtocol 'Warning: AVDTune files differ from the release' ("$($Res.Status.Changed.Count) changed, $($Res.Status.Missing.Count) missing, $($Res.Status.Extra.Count) extra; read only until repaired") 'failed'; Show-Toast (T 'rel.toast.bad') }
             elseif ($Res.Status.Status -eq 'unverified') { Add-RelProtocol 'AVDTune files not verified' $Res.Status.Message 'skipped' }
         }
     }
@@ -170,10 +170,10 @@ function Complete-RelResult($Job, $Res, [string]$Err) {
         $script:Rel.Restart = $r.Text
         Add-RelProtocol "AVDTune $(@{ Install = 'update'; Back = 'switched back'; Repair = 'repaired' }[$kind])" $r.Text $(if ($kind -eq 'Repair' -and -not $r.Ok) { 'failed' } else { 'ok' })
         Show-Toast $r.Text
-        if ($kind -eq 'Repair' -and $r.Ok) { $script:Rel.Status = [pscustomobject]@{ Status = 'bad'; Message = 'Repaired. AVDTune stays read only in this session: restart it (the code that is running was loaded from the files that were wrong).'; Warnings = @(); Changed = @(); Missing = @(); Extra = @() } }
-        if ($kind -eq 'Repair' -and -not $r.Ok) { $script:Rel.Status = [pscustomobject]@{ Status = 'bad'; Message = "Not everything could be repaired: $(@($r.Failed) -join '; ')"; Warnings = @(); Changed = @($r.Remaining.Changed); Missing = @($r.Remaining.Missing); Extra = @($r.Remaining.Extra) } ; $script:Rel.Restart = '' }
+        if ($kind -eq 'Repair' -and $r.Ok) { $script:Rel.Status = [pscustomobject]@{ Status = 'bad'; Message = (T 'rel.repaired'); Warnings = @(); Changed = @(); Missing = @(); Extra = @() } }
+        if ($kind -eq 'Repair' -and -not $r.Ok) { $script:Rel.Status = [pscustomobject]@{ Status = 'bad'; Message = (T 'rel.notrepaired' (@($r.Failed) -join '; ')); Warnings = @(); Changed = @($r.Remaining.Changed); Missing = @($r.Remaining.Missing); Extra = @($r.Remaining.Extra) } ; $script:Rel.Restart = '' }
     }
-    $summary = if ($kind -in 'Install', 'Back', 'Repair') { [string]$Res.Result.Text } elseif ($kind -eq 'Start' -and $Res.Error) { "The integrity check could not run: $($Res.Error)" } elseif ($Res.CheckError) { "Update check: $($Res.CheckError)" } elseif ($kind -eq 'Start') { [string]$script:Rel.Status.Message } elseif ($script:Rel.Latest.Newer) { "Version $($script:Rel.Latest.Version) is available" } else { 'AVDTune is up to date' }
+    $summary = if ($kind -in 'Install', 'Back', 'Repair') { [string]$Res.Result.Text } elseif ($kind -eq 'Start' -and $Res.Error) { T 'rel.err.check' $Res.Error } elseif ($Res.CheckError) { T 'rel.checkerr' $Res.CheckError } elseif ($kind -eq 'Start') { [string]$script:Rel.Status.Message } elseif ($script:Rel.Latest.Newer) { T 'rel.summary.available' $script:Rel.Latest.Version } else { T 'rel.summary.current' }
     Complete-AVDTuneUiTask $Job.Task -Failed:([bool]($Res.Error -or $Res.CheckError -or ($kind -eq 'Start' -and $script:Rel.Status.Status -in 'bad', 'failed') -or ($kind -eq 'Repair' -and -not $Res.Result.Ok))) -Summary $summary
     Update-ReleaseView
     if ($script:CurrentPage -eq 'Protocol') { Update-ProtocolView }
@@ -205,25 +205,25 @@ Add-Click $ui.BtnRelCheck { Start-RelJob 'Check'; if ($script:Rel.Job -and $scri
 $ui.ChkRelEarly.Add_Click({ try { [void](Set-AVDTuneReleaseSettings $script:StateRoot ([bool]$ui.ChkRelEarly.IsChecked)); Start-RelJob 'Check'; if ($script:Rel.Job -and $script:Rel.Job.Inline) { Complete-RelJob } } catch { Show-Error $_.Exception.Message } })
 Add-Click $ui.BtnRelInstall {
     $v = [string]$script:Rel.Latest.Version
-    if (-not (Confirm-Action "Install AVDTune $v next to the current version? ZIP and every file are checked against the SHA256 of the release manifest first. The current version stays and you can go back to it. Nothing changes until AVDTune is started again." 'Install update')) { return }
+    if (-not (Confirm-Action (T 'rel.ask.install' $v) (T 'rel.install'))) { return }
     Start-RelJob 'Install' $v; if ($script:Rel.Job.Inline) { Complete-RelJob }
 }
 Add-Click $ui.BtnRelRepair {
-    if (-not (Confirm-Action "Download version $($script:Rel.Info.Version) again from GitHub, check it, and put the changed and missing files right and remove the extra ones? AVDTune stays read only until it is started again." 'Repair AVDTune')) { return }
+    if (-not (Confirm-Action (T 'rel.ask.repair' $script:Rel.Info.Version) (T 'rel.ask.repair.title'))) { return }
     Start-RelJob 'Repair'; if ($script:Rel.Job.Inline) { Complete-RelJob }
 }
 Add-Click $ui.BtnRelBack {
     $p = [string](Get-AVDTuneInstallState $script:RelInstallRoot).Previous
-    if (-not (Confirm-Action "Go back to version $p? Its files are checked against the saved manifest first. It takes effect when AVDTune is started again." 'Previous version')) { return }
+    if (-not (Confirm-Action (T 'rel.ask.back' $p) (T 'rel.ask.back.title'))) { return }
     Start-RelJob 'Back'; if ($script:Rel.Job.Inline) { Complete-RelJob }
 }
 Add-Click $ui.BtnRelSkip {
     $r = Confirm-AVDTuneUnverified -StateRoot $script:StateRoot -Name $ui.TxtRelSkipName.Text -Expected $script:Rel.ComputerName -User ([string]$env:USERNAME)
     Add-RelProtocol 'AVDTune continued without the integrity check' $r.Text 'skipped'
     $script:Rel.Status.Blocked = $false
-    $script:Rel.Status.Message = $script:Rel.Status.Message + ' Continued without the check on request.'
+    $script:Rel.Status.Message = $script:Rel.Status.Message + ' ' + (T 'rel.skipped')
     $ui.TxtRelSkipName.Text = ''
-    Show-Toast 'AVDTune continues without the integrity check. It is in the protocol.'
+    Show-Toast (T 'rel.toast.skip')
     Update-ReleaseView
 }
 # ---------------------------------------------------------------- desktop shortcut (issue #15)
@@ -235,17 +235,17 @@ function Get-ShortcutMode { if ($script:TestMode -and $script:ShortcutTestMode) 
 function Update-ShortcutRow {
     $installed = (Get-ShortcutMode) -eq 'Installed'
     $link = $null; try { $link = Get-AVDTuneDesktopShortcut -Folder (Get-ShortcutDesktop) -InstallRoot $script:RelInstallRoot } catch { }
-    $ui.BtnRelShortcut.Content = $(if ($link) { 'Remove desktop shortcut' } else { 'Create desktop shortcut' })
+    $ui.BtnRelShortcut.Content = $(if ($link) { T 'sc.remove' } else { T 'sc.create' })
     $ui.BtnRelShortcut.IsEnabled = ($installed -or [bool]$link)
-    $ui.TxtRelShortcut.Text = if (-not $installed -and -not $link) { 'Desktop shortcut: install AVDTune first (it points to the installed copy in the install folder).' }
-    elseif ($link -and -not $link.Matches) { "Desktop shortcut on your desktop, but it does not point to $($script:RelInstallRoot) as administrator; create it again." }
-    elseif ($link) { 'Desktop shortcut on your desktop (only yours, runs as administrator).' }
-    else { 'No desktop shortcut. It goes on your desktop only, never on the Public Desktop.' }
+    $ui.TxtRelShortcut.Text = if (-not $installed -and -not $link) { T 'sc.state.notinstalled' }
+    elseif ($link -and -not $link.Matches) { T 'sc.state.wrong' $script:RelInstallRoot }
+    elseif ($link) { T 'sc.state.ok' }
+    else { T 'sc.state.none' }
 }
 function New-ShortcutNow {
     $link = New-AVDTuneDesktopShortcut -InstallRoot $script:RelInstallRoot -Folder (Get-ShortcutDesktop)
     Add-RelProtocol 'Desktop shortcut created' "$($link.Path) -> $($link.Target) $($link.Arguments) (run as administrator)"
-    Show-Toast 'The shortcut is on your desktop.'
+    Show-Toast (T 'sc.toast.created')
 }
 function Show-ShortcutQuestion {
     # The small question of the first start, in the card below the stages. Returns $true when it was shown.
@@ -257,15 +257,15 @@ function Show-ShortcutQuestion {
     Reset-StageButtons
     $ui.BoxStage.Visibility = 'Visible'
     $ui.TxtStageMessage.Text = ''
-    $ui.TxtStageTitle.Text = 'Desktop shortcut'
-    $ui.TxtStageIntro.Text = 'Create a shortcut to AVDTune on your desktop? It goes on your desktop only (this Windows account), never on the Public Desktop, so it does not end up in the image for every user. AVDTune asks once; the Integrity and updates card can create or remove it later.'
+    $ui.TxtStageTitle.Text = T 'sc.title'
+    $ui.TxtStageIntro.Text = T 'sc.intro'
     $spec = Get-AVDTuneShortcutSpec $script:RelInstallRoot
-    [void]$ui.PanelStageBody.Children.Add((New-InfoRow 'Starts' "$($spec.Target) $($spec.Arguments)"))
-    [void]$ui.PanelStageBody.Children.Add((New-InfoRow 'Folder' $spec.WorkingDirectory))
-    [void]$ui.PanelStageBody.Children.Add((New-InfoRow 'Runs' 'as administrator (Windows asks for confirmation)'))
-    [void]$ui.PanelStageBody.Children.Add((New-InfoRow 'Desktop' (Get-ShortcutDesktop)))
-    $ui.BtnStageAction.Content = 'Create the shortcut'
-    $ui.BtnStageAction2.Content = 'No, thanks'; $ui.BtnStageAction2.Visibility = 'Visible'
+    [void]$ui.PanelStageBody.Children.Add((New-InfoRow (T 'sc.row.starts') "$($spec.Target) $($spec.Arguments)"))
+    [void]$ui.PanelStageBody.Children.Add((New-InfoRow (T 'sc.row.folder') $spec.WorkingDirectory))
+    [void]$ui.PanelStageBody.Children.Add((New-InfoRow (T 'sc.row.runs') (T 'sc.row.runs.value')))
+    [void]$ui.PanelStageBody.Children.Add((New-InfoRow (T 'sc.row.desktop') (Get-ShortcutDesktop)))
+    $ui.BtnStageAction.Content = T 'sc.btn.create'
+    $ui.BtnStageAction2.Content = T 'sc.btn.no'; $ui.BtnStageAction2.Visibility = 'Visible'
     $script:StageAction = {
         try { New-ShortcutNow; Set-AVDTuneShortcutAnswer -Root $script:StateRoot -Answer Yes; Close-Stage; Update-ShortcutRow }
         catch { Set-StageMessage $_.Exception.Message 'error' }
@@ -279,7 +279,7 @@ Add-Click $ui.BtnRelShortcut {
     if ($link) {
         [void](Remove-AVDTuneDesktopShortcut -Folder (Get-ShortcutDesktop))
         Add-RelProtocol 'Desktop shortcut removed' $link.Path
-        Show-Toast 'The shortcut is removed from your desktop.'
+        Show-Toast (T 'sc.toast.removed')
     }
     elseif ((Get-ShortcutMode) -eq 'Installed') { New-ShortcutNow; Set-AVDTuneShortcutAnswer -Root $script:StateRoot -Answer Yes }
     Update-ShortcutRow

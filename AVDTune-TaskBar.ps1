@@ -46,12 +46,10 @@ function New-TaskRow($Task) {
     $logBtn = New-Object System.Windows.Controls.Button
     Set-Brush $logBtn ([System.Windows.Controls.Control]::StyleProperty) 'LinkButton'
     $logBtn.FontSize = 13; $logBtn.Margin = '8,0'; $logBtn.VerticalAlignment = 'Center'; $logBtn.Uid = [string][int]$Task.Id; $logBtn.Visibility = 'Collapsed'   # Uid carries the id (Tag is the icon glyph of the theme's buttons)
-    $logBtn.Content = 'Show log'
     [System.Windows.Controls.Grid]::SetColumn($logBtn, 1)
     $retryBtn = New-Object System.Windows.Controls.Button
     Set-Brush $retryBtn ([System.Windows.Controls.Control]::StyleProperty) 'SmallButton'
-    $retryBtn.Content = 'Retry'; $retryBtn.Margin = '4,0,12,0'; $retryBtn.Uid = [string][int]$Task.Id; $retryBtn.Visibility = 'Collapsed'
-    [System.Windows.Automation.AutomationProperties]::SetName($retryBtn, "Retry: $($Task.Title)")
+    $retryBtn.Margin = '4,0,12,0'; $retryBtn.Uid = [string][int]$Task.Id; $retryBtn.Visibility = 'Collapsed'   # texts: Update-TaskRow (also after a switch of the language)
     [System.Windows.Controls.Grid]::SetColumn($retryBtn, 2)
     $pill = New-Object System.Windows.Controls.Border
     Set-Brush $pill ([System.Windows.Controls.Border]::StyleProperty) 'Pill'
@@ -72,7 +70,6 @@ function New-TaskRow($Task) {
     Set-Brush $logBox ([System.Windows.Controls.Control]::FontFamilyProperty) 'MonoFont'
     Set-Brush $logBox ([System.Windows.Controls.Control]::ForegroundProperty) 'Text'
     $logBox.FontSize = 12; $logBox.MaxHeight = 170; $logBox.VerticalScrollBarVisibility = 'Auto'
-    [System.Windows.Automation.AutomationProperties]::SetName($logBox, "Log: $($Task.Title)")
     $logBorder.Child = $logBox
     foreach ($el in $grid, $bar, $logBorder) { [void]$stack.Children.Add($el) }
     $border.Child = $stack
@@ -88,12 +85,15 @@ function Update-TaskRow($Row, $Task) {
     $Row.Title.Text = [string]$Task.Title
     $took = Format-AVDTuneUiTaskDuration $Task.Started $Task.Finished
     $detail = switch ($status) {
-        'running' { if ($Task.Step) { [string]$Task.Step } else { 'Starting' } }
+        'running' { if ($Task.Step) { [string]$Task.Step } else { T 'task.starting' } }
         default { [string]$Task.Summary }
     }
     $Row.Sub.Text = (@($detail, $took) | Where-Object { $_ }) -join "  $script:TaskDot  "
     Set-Brush $Row.Sub ([System.Windows.Controls.TextBlock]::ForegroundProperty) $(if ($status -eq 'failed') { 'Danger' } else { 'MutedText' })
-    $Row.PillText.Text = Get-AVDTuneUiTaskLabel $status
+    $Row.PillText.Text = T "task.status.$status"
+    $Row.RetryBtn.Content = T 'task.retry'
+    [System.Windows.Automation.AutomationProperties]::SetName($Row.RetryBtn, (T 'task.retry.name' $Task.Title))
+    [System.Windows.Automation.AutomationProperties]::SetName($Row.LogBox, (T 'task.log.name' $Task.Title))
     Set-TaskPill $Row.Pill $Row.PillText $status
     if ($status -eq 'running') {
         $kind = if ($null -eq $Task.Percent) { 'indeterminate' } else { 'determinate' }
@@ -108,7 +108,7 @@ function Update-TaskRow($Row, $Task) {
     $Row.RetryBtn.Visibility = ConvertTo-Vis ($status -eq 'failed' -and [bool]$Task.Retry)
     $log = @(Get-AVDTuneUiTaskLog $Task)
     $Row.LogBtn.Visibility = ConvertTo-Vis ($log.Count -gt 0)
-    $Row.LogBtn.Content = $(if ($Row.LogOpen) { 'Hide log' } else { 'Show log' })
+    $Row.LogBtn.Content = $(if ($Row.LogOpen) { T 'task.hidelog' } else { T 'task.showlog' })
     $Row.LogBorder.Visibility = ConvertTo-Vis ($Row.LogOpen -and $log.Count -gt 0)
     if ($Row.LogOpen -and $Row.LogCount -ne $log.Count) {
         $Row.LogCount = $log.Count
@@ -131,7 +131,7 @@ function Invoke-TaskRetry([int]$Id) {
     if (-not $task -or $task.Status -ne 'failed' -or -not $task.Retry) { return }
     $retry = $task.Retry
     $name = [string]$retry.Command
-    if ($name -notmatch '^[A-Za-z]+-[A-Za-z]+$' -or -not (Get-Command -Name $name -CommandType Function -ErrorAction SilentlyContinue)) { throw 'This task cannot be started again.' }
+    if ($name -notmatch '^[A-Za-z]+-[A-Za-z]+$' -or -not (Get-Command -Name $name -CommandType Function -ErrorAction SilentlyContinue)) { throw (T 'task.err.noretry') }
     $task.Retry = $null   # one retry per failed task: the new run is a task of its own
     Step-UiTaskVersion    # the row redraws without its button
     $arguments = @($retry.Arguments)
@@ -160,7 +160,7 @@ function Update-TaskList([bool]$Force) {
     }
     $failed = @($tasks | Where-Object { $_.Status -eq 'failed' }).Count
     $ui.TxtTaskEmpty.Visibility = ConvertTo-Vis ($tasks.Count -eq 0)
-    $ui.TxtTaskSummary.Text = $(if ($tasks.Count) { "$($tasks.Count) task$(if ($tasks.Count -ne 1) { 's' }), $($running.Count) running$(if ($failed) { ", $failed failed" })" } else { '' })
+    $ui.TxtTaskSummary.Text = $(if ($tasks.Count) { T 'task.summary' (T $(if ($tasks.Count -eq 1) { 'task.count.one' } else { 'task.count.many' }) $tasks.Count) $running.Count $(if ($failed) { T 'task.summary.failed' $failed } else { '' }) } else { '' })
     $script:TaskBarSeen = $version
 }
 
@@ -172,32 +172,32 @@ function Update-TaskBar {
             Set-TaskProgress $ui.PbTask $bar.Percent 'show'
             Set-Brush $ui.DotTask ([System.Windows.Shapes.Shape]::FillProperty) 'Primary'
             $ui.TxtTaskTitle.Text = $bar.Title
-            $ui.TxtTaskStep.Text = $(if ($bar.Step) { $bar.Step } else { 'Starting ...' })
+            $ui.TxtTaskStep.Text = $(if ($bar.Step) { $bar.Step } else { T 'task.bar.starting' })
             Set-Brush $ui.TxtTaskStep ([System.Windows.Controls.TextBlock]::ForegroundProperty) 'MutedText'
             $ui.PillTaskCount.Visibility = ConvertTo-Vis ($bar.Running -gt 1)
-            $ui.TxtTaskCount.Text = "+$($bar.Running - 1) more"
-            $ui.PillTaskCount.ToolTip = "$($bar.Running) tasks are running"
+            $ui.TxtTaskCount.Text = T 'task.more' ($bar.Running - 1)
+            $ui.PillTaskCount.ToolTip = T 'task.running.tip' $bar.Running
             $ui.PillTaskResult.Visibility = 'Collapsed'
         }
         'Result' {
             Set-TaskProgress $ui.PbTask $null 'hidden'
             Set-Brush $ui.DotTask ([System.Windows.Shapes.Shape]::FillProperty) $(if ($bar.Ok) { 'SuccessDot' } else { 'Danger' })
             $ui.TxtTaskTitle.Text = $bar.Title
-            $ui.TxtTaskStep.Text = $bar.Result
+            $ui.TxtTaskStep.Text = Get-AVDTuneEngineText $(if ($bar.Ok) { 'task.status.succeeded' } else { 'task.status.failed' }) $bar.Result
             Set-Brush $ui.TxtTaskStep ([System.Windows.Controls.TextBlock]::ForegroundProperty) $(if ($bar.Ok) { 'MutedText' } else { 'Danger' })
             $ui.PillTaskCount.Visibility = 'Collapsed'
-            $ui.TxtTaskResult.Text = $(if ($bar.Ok) { 'Done' } else { 'Failed' })
+            $ui.TxtTaskResult.Text = $(if ($bar.Ok) { T 'task.status.succeeded' } else { T 'task.status.failed' })
             Set-TaskPill $ui.PillTaskResult $ui.TxtTaskResult $(if ($bar.Ok) { 'succeeded' } else { 'failed' })
             $ui.PillTaskResult.Visibility = 'Visible'
         }
         default {
             Set-TaskProgress $ui.PbTask $null 'hidden'
             Set-Brush $ui.DotTask ([System.Windows.Shapes.Shape]::FillProperty) 'MutedText'
-            $ui.TxtTaskTitle.Text = 'No task running'
-            $ui.TxtTaskStep.Text = $(if ($bar.Count) { "$($bar.Count) task$(if ($bar.Count -ne 1) { 's' }) in this session" } else { '' })
+            $ui.TxtTaskTitle.Text = T 'task.idle'
+            $ui.TxtTaskStep.Text = $(if ($bar.Count) { T 'task.insession' $bar.Count $(if ($bar.Count -ne 1) { T 'task.plural' } else { '' }) } else { '' })
             Set-Brush $ui.TxtTaskStep ([System.Windows.Controls.TextBlock]::ForegroundProperty) 'MutedText'
             $ui.PillTaskCount.Visibility = 'Collapsed'
-            $ui.TxtTaskResult.Text = "$($bar.Failed) failed"
+            $ui.TxtTaskResult.Text = T 'task.failedcount' $bar.Failed
             Set-TaskPill $ui.PillTaskResult $ui.TxtTaskResult 'failed'
             $ui.PillTaskResult.Visibility = ConvertTo-Vis ($bar.Failed -gt 0)
         }
@@ -210,7 +210,7 @@ function Show-TaskList([bool]$Open) {
     $script:TaskListOpen = $Open
     $ui.BoxTaskList.Visibility = ConvertTo-Vis $Open
     $ui.TxtTaskChevron.Text = [string][char]$(if ($Open) { 0xE70D } else { 0xE70E })
-    $ui.BoxTaskBar.ToolTip = $(if ($Open) { 'Hide the tasks of this session' } else { 'Show the tasks of this session' })
+    $ui.BoxTaskBar.ToolTip = $(if ($Open) { T 'task.bar.hide' } else { T 'task.bar.show' })
     if ($Open) { Update-TaskList $true }
 }
 $ui.BoxTaskBar.Add_MouseLeftButtonUp({ try { Show-TaskList (-not $script:TaskListOpen) } catch { } })
@@ -231,4 +231,5 @@ function Invoke-UiTaskInline {
     $inlineOut
 }
 
+Show-TaskList $false   # the tooltip of the bar in the chosen language
 Update-TaskBar
