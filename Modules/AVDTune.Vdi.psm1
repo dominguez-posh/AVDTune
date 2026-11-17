@@ -711,6 +711,249 @@ function Invoke-AVDTuneVdiUndo {
 
 #endregion
 
+#region session host cards (issue 77): RDP Shortpath, time zone redirection, Defender for Endpoint onboarding
+
+<#
+    Three cards next to the components: nothing to install, only the state of the session host and the settings Microsoft Learn names for it. Read only, except one value:
+      * shortpath: the RDP transport protocols policy (SelectTransport, Learn names the value) must not be 1 = "Use only TCP"; the fix removes the local policy value (= Not configured, one of the two
+        ways Learn gives) with undo. The listener for managed networks, the inbound firewall rule and the public network path (STUN/TURN) are shown only: Learn configures them through Intune or
+        Group Policy and names no registry value for them.
+      * timezone: fEnableTimeZoneRedirection is shown only. It belongs to the Optimization page (entry optimization.timezone-redirection, in the default preset) with its own undo; a second owner
+        here would let two undo records fight over one value (the same rule as Teams disableAutoUpdate and the update block).
+      * mde: status only (senseGuid, OnboardingState, the Sense service, the VDI onboarding scripts in the startup folder). No onboarding package in AVDTune (it is tenant specific) and no setting:
+        the DeviceTagging VDI value of Learn is for legacy MMA-based servers only.
+    Writes go through Start-/Stop-AVDTuneChange (marker and LastChange), the write gate, a run record, a change log entry (category VDI) and the undo record config\vdi-<key>-settings-undo.json
+    (values found before the first change, never overwritten).
+#>
+$script:SrcHost = @{
+    Shortpath = "$script:Learn/azure/virtual-desktop/configure-rdp-shortpath"
+    ShortpathAbout = "$script:Learn/azure/virtual-desktop/rdp-shortpath"
+    MasterImage = "$script:Learn/azure/virtual-desktop/set-up-customize-master-image"
+    MdeVdi = "$script:Learn/defender-endpoint/configure-endpoints-vdi"
+    MdeTrouble = "$script:Learn/defender-endpoint/troubleshoot-onboarding"
+}
+$script:TsPolicy = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services'
+$script:ShortpathPort = 3390
+$script:MdeKey = 'HKLM:\SOFTWARE\Microsoft\Windows Advanced Threat Protection'
+$script:MdeScripts = @('Onboard-NonPersistentMachine.ps1', 'WindowsDefenderATPOnboardingScript.cmd')
+$script:HostCards = @(
+    [pscustomobject]@{ Key = 'shortpath'; Title = 'RDP Shortpath'; Source = $script:SrcHost.Shortpath
+        Text = 'UDP transport for the remote session. Public networks (STUN, TURN) work without a setting on the session host when UDP is allowed outbound; managed networks need the listener (policy) and an inbound port. Only the transport policy is changed here.' }
+    [pscustomobject]@{ Key = 'timezone'; Title = 'Time zone redirection'; Source = $script:SrcHost.MasterImage
+        Text = 'Sessions take the time zone of the client. The value is set and undone on the Optimization page (entry "Time zone redirection on"); this card only shows it.' }
+    [pscustomobject]@{ Key = 'mde'; Title = 'Defender for Endpoint (non-persistent VDI)'; Source = $script:SrcHost.MdeVdi
+        Text = 'Status only. The master must not be onboarded; non-persistent session hosts are onboarded at start by the VDI onboarding script from the Defender portal (tenant specific, not part of AVDTune).' }
+)
+function Get-AVDTuneVdiHostCards { @($script:HostCards) }
+function Get-AVDTuneVdiHostCard([string]$Key) { $c = @($script:HostCards | Where-Object { $_.Key -ceq $Key }); if ($c.Count -ne 1) { throw "Unknown VDI card '$Key'." }; $c[0] }
+
+function Get-AVDTuneVdiHostSettingDefs {
+    # Kind NotValue: compliant when the value is absent or not BadValue; Apply removes the value (= policy Not configured); Undo puts the typed value found before back.
+    param([Parameter(Mandatory)][string]$Key)
+    switch ($Key) {
+        'shortpath' {
+            @([pscustomobject]@{ Id = 'vdi.shortpath.udp'; Kind = 'NotValue'; Path = $script:TsPolicy; Name = 'SelectTransport'; Type = 'DWord'; BadValue = 1; Optional = $false; Reboot = $true
+                    Title = 'RDP transport: UDP allowed (policy not "Use only TCP")'; Why = 'With "Use only TCP" no RDP Shortpath connection is possible. Learn: set the policy Select RDP transport protocols to Not configured (or UDP and TCP).'
+                    Source = $script:SrcHost.Shortpath; Verified = $true; Note = 'A Group Policy or Intune setting of the same policy writes the value again at the next refresh: change it there.' })
+        }
+        default { @() }
+    }
+}
+
+function Test-AVDTuneVdiPortList {
+    # Pure: does a firewall port list ("3390", "3000-4000,5000", "*" or "Any") contain the port
+    param([string]$List, [int]$Port)
+    if (-not $List -or $List.Length -gt 2000) { return $false }
+    foreach ($p in $List.Split(',')) {
+        $t = $p.Trim()
+        if ($t -ceq '*' -or $t -eq 'Any') { return $true }
+        $m = $null; try { $m = [regex]::Match($t, '\A(\d{1,5})(?:-(\d{1,5}))?\z', 'None', [TimeSpan]::FromMilliseconds(200)) } catch { continue }   # data of the firewall: timeout and length limit
+        if (-not $m.Success) { continue }
+        $lo = [int]$m.Groups[1].Value; $hi = if ($m.Groups[2].Success) { [int]$m.Groups[2].Value } else { $lo }
+        if ($Port -ge $lo -and $Port -le $hi) { return $true }
+    }
+    $false
+}
+
+function Get-AVDTuneVdiHostSteps {
+    param([Parameter(Mandatory)]$Defs, [hashtable]$Previous = @{})
+    foreach ($d in @($Defs)) {
+        $def = $d; $prev = $Previous[$def.Id]
+        if ($def.Kind -cne 'NotValue') { throw "Unknown kind '$($def.Kind)' of $($def.Id)." }
+        $test = { param($m) $v = & $m.RegGet $def.Path $def.Name; @{ Compliant = -not ($null -ne $v -and [string]$v -ceq [string]$def.BadValue); State = $v } }.GetNewClosure()
+        $apply = { param($m) & $m.RegRemove $def.Path $def.Name }.GetNewClosure()
+        $undo = { param($m) if ($prev -and $prev.Exists) { & $m.RegSet $def.Path $def.Name $prev.Value $prev.Type } }.GetNewClosure()
+        New-AVDTuneStep -Id $def.Id -Section VdiComponents -Title $def.Title -Why $def.Why -SourceUrl $def.Source -Reboot ([bool]$def.Reboot) -Test $test -Apply $apply -Undo $undo
+    }
+}
+
+function Read-AVDTuneVdiHostUndo {
+    # Typed read of config\vdi-<key>-settings-undo.json (the same shape as the component settings); $null when there is none; anything not exactly typed is an error and changes nothing
+    param([string]$Root, [string]$Key)
+    $path = Get-AVDTuneVdiSettingsUndoPath $Root $Key
+    $u = Read-AVDTuneJson $path
+    if (-not $u) { return $null }
+    $ids = @(Get-AVDTuneVdiHostSettingDefs -Key $Key | ForEach-Object Id)
+    $bad = "The undo record of the $Key settings (config\vdi-$Key-settings-undo.json) is not usable"
+    $pp = Get-AVDTuneProp $u 'Previous'
+    if ($pp -isnot [System.Management.Automation.PSCustomObject]) { throw "$bad. Nothing was changed." }
+    $prev = @{}
+    foreach ($p in $pp.PSObject.Properties) {
+        $e = $p.Value; $exists = Get-AVDTuneProp $e 'Exists'; $type = Get-AVDTuneProp $e 'Type'; $val = Get-AVDTuneProp $e 'Value'
+        $ok = ($p.Name -cin $ids) -and $exists -is [bool] -and ((-not $exists) -or ($type -is [string] -and (
+                    ($type -ceq 'DWord' -and ($val -is [int] -or ($val -is [long] -and $val -ge [int]::MinValue -and $val -le [uint32]::MaxValue))) -or
+                    ($type -ceq 'QWord' -and ($val -is [int] -or $val -is [long])) -or ($type -cin 'String', 'ExpandString' -and $val -is [string]))))
+        if (-not $ok) { throw "${bad}: '$($p.Name)' has no typed value. Nothing was changed." }
+        if ($exists -and $type -ceq 'DWord') { $l = [int64]$val; if ($l -gt [int]::MaxValue) { $l -= 4294967296 }; $val = [int]$l }
+        $prev[$p.Name] = @{ Exists = $exists; Value = $val; Type = [string]$type }
+    }
+    $prev
+}
+
+function Get-AVDTuneVdiHostConfirmText {
+    # The confirmation: every value that would change, old -> new. '' when nothing would change.
+    param([Parameter(Mandatory)]$Machine, [Parameter(Mandatory)][string]$Key, [ValidateSet('Apply', 'Undo')][string]$Mode = 'Apply', [string]$Root = (Get-AVDTuneRoot))
+    $c = Get-AVDTuneVdiHostCard $Key
+    $show = { param($x) if ($null -eq $x) { 'not set' } else { [string]$x } }
+    $lines = @()
+    if ($Mode -eq 'Apply') {
+        foreach ($d in @(Get-AVDTuneVdiHostSettingDefs -Key $Key)) { $v = & $Machine.RegGet $d.Path $d.Name; if ($null -ne $v -and [string]$v -ceq [string]$d.BadValue) { $lines += "$($d.Name): $(& $show $v) -> not set (policy Not configured)" } }
+        if ($lines.Count -eq 0) { return '' }
+        return "Change the $($c.Title) setting(s) on this master? $($lines -join '; '). The earlier value is kept for Undo. Restart the master for it to take effect; a Group Policy or Intune setting of the same policy sets it again."
+    }
+    $prev = Read-AVDTuneVdiHostUndo -Root $Root -Key $Key
+    if ($null -eq $prev) { return '' }
+    foreach ($d in @(Get-AVDTuneVdiHostSettingDefs -Key $Key | Where-Object { $prev.ContainsKey($_.Id) })) { $p = $prev[$d.Id]; $lines += "$($d.Name): $(& $show (& $Machine.RegGet $d.Path $d.Name)) -> $(if ($p.Exists) { & $show $p.Value } else { 'not set' })" }
+    if ($lines.Count -eq 0) { return '' }
+    "Put back the $($c.Title) value(s) found before the first change? $($lines -join '; ')."
+}
+
+function Invoke-AVDTuneVdiHostSettings {
+    <#
+        Apply (the recommended values) or Undo (the values found before the first apply) of a session host card. Behind the write gate; marker and LastChange through Start-/Stop-AVDTuneChange,
+        only when a step would change something (a test that finds everything set changes nothing and writes nothing). Run record, change log entry (category VDI) per changed, undone or failed step.
+        The undo record keeps the values found first and only gets ids that were not in it yet. WhatIf changes nothing and needs no gate.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)]$Machine, [Parameter(Mandatory)][string]$Key, [ValidateSet('Apply', 'Undo')][string]$Mode = 'Apply', [string]$Root = (Get-AVDTuneRoot), [string]$User, [string]$SnapshotId, [switch]$WhatIf)
+    $card = Get-AVDTuneVdiHostCard $Key
+    $all = @(Get-AVDTuneVdiHostSettingDefs -Key $Key)
+    if ($all.Count -eq 0) { throw "$($card.Title) has no settings to change: it only shows the state." }
+    if (-not $WhatIf -and -not (Test-AVDTuneWriteAllowed)) { throw 'The snapshot gate is not confirmed: AVDTune is read only until a snapshot newer than its last change is confirmed on the Overview.' }
+    $undoPath = Get-AVDTuneVdiSettingsUndoPath $Root $Key
+    $rec = Read-AVDTuneVdiHostUndo -Root $Root -Key $Key   # a damaged record stops here, before anything is changed
+    $prev = @{}
+    if ($Mode -eq 'Undo') {
+        if ($null -eq $rec) { throw "There is nothing to undo: no $($card.Title) settings change was recorded." }
+        $prev = $rec; $defs = @($all | Where-Object { $prev.ContainsKey($_.Id) })
+    }
+    else {
+        $defs = @($all | Where-Object { -not $_.Optional })
+        foreach ($d in $defs) { if ($rec -and $rec.ContainsKey($d.Id)) { $prev[$d.Id] = $rec[$d.Id] } else { $prev[$d.Id] = Get-AVDTuneVdiPrevious -Machine $Machine -Def $d } }
+    }
+    $steps = @(Get-AVDTuneVdiHostSteps -Defs $defs -Previous $prev)
+    $plan = "VDI $($card.Title) settings$(if ($Mode -eq 'Undo') { ' undo' })"
+    $dry = @(foreach ($s in $steps) { Invoke-AVDTuneStep -Step $s -Machine $Machine -Mode $Mode -WhatIf })
+    if ($WhatIf -or @($dry | Where-Object { $_.Status -eq 'WhatIf' }).Count -eq 0) { return [pscustomobject]@{ Plan = $plan; WhatIf = [bool]$WhatIf; Results = @($dry) } }
+    $owner = Start-AVDTuneChange -Root $Root   # marker and LastChange through the central helpers: also a failed write may have changed the master
+    try {
+        if ($Mode -eq 'Apply') {
+            $would = @($dry | Where-Object { $_.Status -eq 'WhatIf' } | ForEach-Object Id)   # only what is changed now: a value found as wanted needs no record
+            $new = @($defs | Where-Object { $_.Id -cin $would -and (-not $rec -or -not $rec.ContainsKey($_.Id)) })
+            if ($new.Count -gt 0) {
+                $out = [ordered]@{}
+                if ($rec) { foreach ($k in $rec.Keys) { $out[$k] = [ordered]@{ Exists = $rec[$k].Exists; Value = $rec[$k].Value; Type = $rec[$k].Type } } }
+                foreach ($d in $new) { $out[$d.Id] = [ordered]@{ Exists = $prev[$d.Id].Exists; Value = $prev[$d.Id].Value; Type = $prev[$d.Id].Type } }
+                $at = if ($rec) { [string](Get-AVDTuneProp (Read-AVDTuneJson $undoPath) 'At') } else { (& $Machine.Now).ToString('o') }
+                Write-AVDTuneFile $undoPath ([ordered]@{ At = $at; Previous = $out } | ConvertTo-Json -Depth 6)
+            }
+        }
+        $results = @(foreach ($s in $steps) { Invoke-AVDTuneStep -Step $s -Machine $Machine -Mode $Mode })
+        $state = Get-AVDTuneState $Root
+        $ended = (& $Machine.Now).ToString('o')
+        $saved = [pscustomobject][ordered]@{ Id = $null; Plan = $plan; Started = $ended; Ended = $ended; User = $User; SnapshotId = $SnapshotId; WhatIf = $false; ImageVersion = $state.ImageVersion; Reboot = [bool](@($results | Where-Object { $_.Reboot }).Count); Results = @($results) }
+        [void](Add-AVDTuneRun -Root $Root -Run $saved)
+        if ($state.ImageVersion) {
+            foreach ($r in @($results | Where-Object { $_.Status -in 'Changed', 'Reverted', 'Failed' })) {
+                $type = if ($r.Status -eq 'Failed') { 'Note' } else { 'Changed' }
+                $text = switch ($r.Status) { 'Failed' { "$($r.Title): FAILED - $($r.Message)" } 'Reverted' { "Undo: $($r.Title)" } default { $r.Title } }
+                [void](Add-AVDTuneChangeLogEntry -Root $Root -Version $state.ImageVersion -Category 'VDI' -Component $card.Title -ChangeType $type -Text $text -User $User -SnapshotId $SnapshotId -RunId ([string]$saved.Id) -Source Step)
+            }
+        }
+        if ($Mode -eq 'Undo' -and @($results | Where-Object { $_.Status -eq 'Failed' }).Count -eq 0) { Remove-Item -LiteralPath $undoPath -Force -ErrorAction SilentlyContinue }
+        [pscustomobject]@{ Plan = $plan; WhatIf = $false; Results = @($results) }
+    }
+    finally { Stop-AVDTuneChange -Root $Root -Owner $owner }
+}
+
+function Get-AVDTuneVdiHostRows {
+    # The test of a session host card (read only). Status green | yellow | red | info like the component cards.
+    param([Parameter(Mandatory)]$Machine, [Parameter(Mandatory)]$V, [Parameter(Mandatory)][string]$Key)
+    $card = Get-AVDTuneVdiHostCard $Key
+    $rows = New-Object System.Collections.ArrayList
+    $add = { param($r) [void]$rows.Add($r) }
+    switch ($Key) {
+        'shortpath' {
+            $sp = $script:SrcHost.Shortpath; $port = $script:ShortpathPort
+            $t = & $Machine.RegGet $script:TsPolicy 'SelectTransport'
+            if ($null -eq $t) { & $add (New-AVDTuneVdiRow 'shortpath.udp' 'UDP transport' 'green' 'The policy Select RDP transport protocols is not configured: UDP and TCP are used (the Windows default).' '' $sp $true) }
+            elseif ([string]$t -ceq '1') { & $add (New-AVDTuneVdiRow 'shortpath.udp' 'UDP transport' 'yellow' 'The policy Select RDP transport protocols is "Use only TCP" (SelectTransport = 1): no RDP Shortpath connection is possible.' 'Press "Set recommended settings" (removes the local value = Not configured), or change the Group Policy or Intune setting that sets it.' $sp $true) }
+            elseif ([string]$t -ceq '2') { & $add (New-AVDTuneVdiRow 'shortpath.udp' 'UDP transport' 'green' 'The policy Select RDP transport protocols allows UDP or TCP (SelectTransport = 2).' '' $sp $true) }
+            else { & $add (New-AVDTuneVdiRow 'shortpath.udp' 'UDP transport' 'info' "SelectTransport = $t. Learn describes only 1 (Use only TCP) and 2 (UDP or TCP); only 1 switches UDP off."'' $sp $false) }
+            $listen = $null; try { $listen = & $V.UdpListener $port } catch { $listen = $null }
+            if ($listen -eq $true) { & $add (New-AVDTuneVdiRow 'shortpath.managed' 'Managed networks: listener' 'green' "A UDP listener is open on port $port (the default port of RDP Shortpath for managed networks)." '' $sp $false 'Learn names the port and the policy, not a way to read the listener; AVDTune reads the open UDP ports of Windows.') }
+            elseif ($listen -eq $false) { & $add (New-AVDTuneVdiRow 'shortpath.managed' 'Managed networks: listener' 'info' "No UDP listener on port $port. Only needed for RDP Shortpath for managed networks (ExpressRoute private peering or VPN); turn on the policy Enable RDP Shortpath for managed networks through Intune or Group Policy (Azure Virtual Desktop administrative template) and restart. A different port set in the policy is not read here." '' $sp $false 'Learn names the port and the policy, not a way to read the listener; AVDTune reads the open UDP ports of Windows.') }
+            else { & $add (New-AVDTuneVdiRow 'shortpath.managed' 'Managed networks: listener' 'info' 'The open UDP ports could not be read.' '' $sp $false) }
+            $fw = $null; try { $fw = & $V.FirewallUdpIn $port } catch { $fw = $null }
+            $fwNote = 'Read from the rules of Windows Firewall (enabled, inbound, allow, UDP, local port); the profile of the rule and other firewalls (NSG) are not checked.'
+            if ($null -eq $fw) { & $add (New-AVDTuneVdiRow 'shortpath.firewall' 'Managed networks: inbound port' 'info' 'The Windows Firewall rules could not be read.' '' $sp $false $fwNote) }
+            elseif ($fw) { & $add (New-AVDTuneVdiRow 'shortpath.firewall' 'Managed networks: inbound port' 'green' "An enabled inbound rule allows UDP port $port." '' $sp $true $fwNote) }
+            elseif ($listen -eq $true) { & $add (New-AVDTuneVdiRow 'shortpath.firewall' 'Managed networks: inbound port' 'yellow' "The listener is on but no enabled inbound rule allows UDP port ${port}: clients cannot reach it." "Allow the port inbound through the firewall policy of Intune or Group Policy (Learn)." $sp $true $fwNote) }
+            else { & $add (New-AVDTuneVdiRow 'shortpath.firewall' 'Managed networks: inbound port' 'info' "No inbound rule for UDP port $port. Only needed together with the listener for managed networks (allow it through the firewall policy of Intune or Group Policy)." '' $sp $true $fwNote) }
+            & $add (New-AVDTuneVdiRow 'shortpath.public' 'Public networks (STUN, TURN)' 'info' 'Nothing to set on the session host: works when UDP is allowed outbound from the session host subnet (to any address on ports 1024-65535, and to the TURN relay 51.5.0.0/16 on 3478) and the host pool networking settings are Default or Enabled. Test from a client with avdnettest.exe.' '' $script:SrcHost.ShortpathAbout $true)
+            $ter = $null; try { $ter = & $V.TeredoType } catch { $ter = $null }
+            & $add (New-AVDTuneVdiRow 'shortpath.teredo' 'Teredo (optional)' 'info' $(if ($ter) { "Teredo type: $ter. Learn: optional, adds NAT traversal candidates in IPv4-only networks (Set-NetTeredoConfiguration -Type Enterpriseclient on hosts and clients)." } else { 'The Teredo setting could not be read. Learn: optional, adds NAT traversal candidates in IPv4-only networks.' }) '' $sp $true)
+        }
+        'timezone' {
+            $v = & $Machine.RegGet $script:TsPolicy 'fEnableTimeZoneRedirection'
+            if ($null -ne $v -and [string]$v -ceq '1') { & $add (New-AVDTuneVdiRow 'timezone.redirect' 'Allow time zone redirection' 'green' 'On (fEnableTimeZoneRedirection = 1): sessions use the time zone of the client.' '' $card.Source $true) }
+            else { & $add (New-AVDTuneVdiRow 'timezone.redirect' 'Allow time zone redirection' 'yellow' "Off$(if ($null -ne $v) { " (fEnableTimeZoneRedirection = $v)" }): every user sees the time zone of the session host." 'Turn on "Time zone redirection on" on the Optimization page (it keeps the earlier value for Undo), or the policy Allow time zone redirection through Group Policy or Intune.' $card.Source $true) }
+            $tz = [string](& $Machine.RegGet 'HKLM:\SYSTEM\CurrentControlSet\Control\TimeZoneInformation' 'TimeZoneKeyName')
+            & $add (New-AVDTuneVdiRow 'timezone.host' 'Time zone of the master' 'info' $(if ($tz) { "$tz. Sysprep and new session hosts can reset it; with redirection the users do not depend on it. Set it on the Language and region page." } else { 'Not readable.' }) '' $card.Source $false)
+        }
+        'mde' {
+            $guid = [string](& $Machine.RegGet $script:MdeKey 'senseGuid')
+            $os = & $Machine.RegGet "$script:MdeKey\Status" 'OnboardingState'
+            $svc = & $Machine.ServiceGet 'Sense'
+            $run = $svc -and [string]$svc.Status -eq 'Running'
+            if ($guid.Trim()) { & $add (New-AVDTuneVdiRow 'mde.master' 'Master not onboarded' 'red' 'This master is onboarded (senseGuid is set). Clones carry the same identifier and do not show up as new devices.' 'Offboard the master and remove the local registration data as Learn describes (Update VDI images), then take a new snapshot.' $script:SrcHost.MdeVdi $true) }
+            elseif ($null -ne $os -and [string]$os -ceq '1') { & $add (New-AVDTuneVdiRow 'mde.master' 'Master not onboarded' 'red' 'OnboardingState = 1: the sensor reports this master as onboarded.' 'Offboard the master and remove the local registration data as Learn describes (Update VDI images).' $script:SrcHost.MdeTrouble $true) }
+            elseif ($run) { & $add (New-AVDTuneVdiRow 'mde.master' 'Master not onboarded' 'yellow' 'The sensor service (Sense) is running although no onboarding is stored: the master may be onboarding right now.' 'Check the Defender portal and the Sense event log; do not onboard the master.' $script:SrcHost.MdeVdi $true) }
+            else { & $add (New-AVDTuneVdiRow 'mde.master' 'Master not onboarded' 'green' 'No onboarding on this master (no senseGuid, OnboardingState not 1, Sense not running).' '' $script:SrcHost.MdeVdi $true) }
+            $sText = if (-not $svc) { 'The Sense service is not present (Feature on Demand Microsoft.Windows.Sense.Client missing?): the onboarding script cannot start it on the session hosts.' } else { "Sense: $($svc.Status), start type $($svc.StartType). OnboardingState: $(if ($null -eq $os) { 'not set' } else { $os })." }
+            & $add (New-AVDTuneVdiRow 'mde.sense' 'Sensor service (Sense)' $(if ($svc) { 'info' } else { 'yellow' }) $sText $(if ($svc) { '' } else { 'Install the Sense Feature on Demand (Learn: troubleshoot onboarding, event 15).' }) $script:SrcHost.MdeTrouble $true)
+            $dir = Join-Path (Get-AVDTuneSystemFolder System) 'GroupPolicy\Machine\Scripts\Startup'
+            $found = @($script:MdeScripts | Where-Object { & $V.Exists (Join-Path $dir $_) })
+            $model = if ($found -contains 'Onboard-NonPersistentMachine.ps1') { 'single entry for each device' } elseif ($found.Count -gt 0) { 'multiple entries for each device' } else { '' }
+            if ($model) { & $add (New-AVDTuneVdiRow 'mde.script' 'VDI onboarding script' 'green' "In the startup folder ($($found -join ', ')): $model. The script onboards each session host when it starts." '' $script:SrcHost.MdeVdi $true 'Only the files are checked; whether the startup script is registered in Group Policy (Scripts, Startup) is not read.') }
+            else { & $add (New-AVDTuneVdiRow 'mde.script' 'VDI onboarding script' 'info' "Not in the startup folder. For non-persistent session hosts download the package 'VDI onboarding scripts for non-persistent endpoints' in the Defender portal, copy the script(s) to $dir and add them as startup script (Learn). Not needed when the hosts are onboarded another way (Intune, for persistent hosts)." '' $script:SrcHost.MdeVdi $true 'The package is tenant specific: AVDTune does not ship or download it.') }
+            $tag = & $Machine.RegGet 'HKLM:\SOFTWARE\Policies\Microsoft\Windows Advanced Threat Protection\DeviceTagging' 'VDI'
+            & $add (New-AVDTuneVdiRow 'mde.tag' 'VDI device tag' 'info' "$(if ($null -ne $tag) { "DeviceTagging VDI = $tag. " })Learn names this value (VDI = NonPersistent) only for legacy MMA-based servers; Windows 11 multi-session does not need it, so AVDTune does not set it." '' $script:SrcHost.MdeVdi $true)
+        }
+    }
+    @($rows)
+}
+
+function Get-AVDTuneVdiHostSummary {
+    # The pill of a session host card: red, yellow, green or info (nothing could be told)
+    param($Rows)
+    $r = @($Rows)
+    foreach ($s in 'red', 'yellow', 'green') { if (@($r | Where-Object { $_.Status -eq $s }).Count -gt 0) { return $s } }
+    'info'
+}
+
+#endregion
+
 #region real adapter
 
 function New-AVDTuneVdiAdapter {
@@ -792,6 +1035,23 @@ function New-AVDTuneVdiAdapter {
     $a.FileVersion = $u.FileVersion
     $a.Exists = $u.Exists
     $a.OneDrivePath = { & $u.Path 'OneDrive' }.GetNewClosure()
+    # session host cards (issue 77), read only: open UDP ports of Windows, inbound allow rules of Windows Firewall, Teredo type. $null when it cannot be read.
+    $a.UdpListener = { param($Port) try { @([System.Net.NetworkInformation.IPGlobalProperties]::GetIPGlobalProperties().GetActiveUdpListeners() | Where-Object { $_.Port -eq [int]$Port }).Count -gt 0 } catch { $null } }
+    $a.FirewallUdpIn = {
+        param($Port)
+        $fw = $null
+        try {
+            $fw = New-Object -ComObject HNetCfg.FwPolicy2
+            foreach ($r in @($fw.Rules)) {
+                # Enabled, inbound (1), allow (1), UDP (17), the local port in the list
+                if ($r.Enabled -and $r.Direction -eq 1 -and $r.Action -eq 1 -and $r.Protocol -eq 17 -and (Test-AVDTuneVdiPortList -List ([string]$r.LocalPorts) -Port ([int]$Port))) { return $true }
+            }
+            $false
+        }
+        catch { $null }
+        finally { if ($fw) { try { [void][Runtime.InteropServices.Marshal]::ReleaseComObject($fw) } catch { } } }
+    }
+    $a.TeredoType = { try { [string](Get-NetTeredoConfiguration -ErrorAction Stop).Type } catch { $null } }
     [pscustomobject]$a
 }
 
@@ -801,3 +1061,6 @@ Export-ModuleMember -Function Get-AVDTuneVdiComponents, Get-AVDTuneVdiComponent,
     Get-AVDTuneVdiVcRuntime, Get-AVDTuneVdiState, Get-AVDTuneVdiSettingDefs, Get-AVDTuneVdiJsonSerializer, Add-AVDTuneVdiExtensionEntry, Remove-AVDTuneVdiExtensionEntry, Test-AVDTuneVdiExtensionEntry, Get-AVDTuneVdiSteps, Get-AVDTuneVdiSettingsRows, Invoke-AVDTuneVdiSettings,
     Get-AVDTuneVdiRows, Get-AVDTuneVdiSummaryStatus, Get-AVDTuneVdiLatest, Test-AVDTuneVdiPackageTrust, Test-AVDTuneMsiIdentity, Test-AVDTuneMsiHeader, Invoke-AVDTuneVdiPackage, Invoke-AVDTuneVdiWinget, Invoke-AVDTuneVdiRecorded,
     Get-AVDTuneVdiUndoText, Invoke-AVDTuneVdiUndo, New-AVDTuneVdiAdapter
+# session host cards (issue 77): a second list, so that the list above stays as it is
+Export-ModuleMember -Function Get-AVDTuneVdiHostCards, Get-AVDTuneVdiHostCard, Get-AVDTuneVdiHostSettingDefs, Test-AVDTuneVdiPortList, Get-AVDTuneVdiHostSteps, Read-AVDTuneVdiHostUndo, Get-AVDTuneVdiHostConfirmText,
+    Invoke-AVDTuneVdiHostSettings, Get-AVDTuneVdiHostRows, Get-AVDTuneVdiHostSummary

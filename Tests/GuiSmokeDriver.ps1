@@ -592,6 +592,36 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         Test-Smoke 'Language page: the page shows the result, de-DE is now installed and fixed, the task finished' ($ui.TxtLangState.Text -like 'Language and region:*change*restart*' -and -not $script:LangChecks['de-DE'].IsEnabled -and @(Get-AVDTuneUiTasks | Where-Object { $_.Kind -eq 'language-all' -and $_.Status -eq 'succeeded' }).Count -eq 1) $ui.TxtLangState.Text
         if ($script:LangSmoke -eq 1) { $script:LangSmoke = 2; & $click $ui.BtnLangUndo; return $false }
         $true } }
+    @{ Name = 'vdi page: session host cards (#77)'; Do = {
+        if ($script:OverviewJob -or $script:ReadyJob -or $script:LangJob -or $script:VdiJob) { return $false }   # the fake machine is not thread safe; the VDI job completes on the window timer
+        $click = { param($b) $b.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent))) }
+        $tsKey = 'hklm:\software\policies\microsoft\windows nt\terminal services|selecttransport'
+        $pillText = { param($k) [string]$script:VdiCards[$k].PillHost.Content.Child.Text }
+        if (-not $script:VdiHostSmoke) {
+            $script:VdiHostSmoke = 1
+            $script:Machine.Store.Registry[$tsKey] = 1   # "Use only TCP"
+            Show-Page 'VdiComponents'; $window.UpdateLayout()
+            & $click $ui.BtnVdiTest
+            $window.UpdateLayout()
+            Test-Smoke 'VDI page (#77): three session host cards after the components (RDP Shortpath, time zone redirection, Defender for Endpoint); only Shortpath has buttons' ($script:VdiCards.ContainsKey('shortpath') -and $script:VdiCards.ContainsKey('timezone') -and $script:VdiCards.ContainsKey('mde') -and $script:VdiCards['shortpath'].Buttons.Count -eq 2 -and $script:VdiCards['timezone'].Buttons.Count -eq 0 -and $script:VdiCards['mde'].Buttons.Count -eq 0 -and $ui.PanelVdiCards.Children.Count -eq 7 -and (Find-Text $ui.PanelVdiCards 'Defender for Endpoint (non-persistent VDI)')) "$($ui.PanelVdiCards.Children.Count) cards"
+            Test-Smoke 'VDI page (#77): Test shows Shortpath "Use only TCP" as Check open, the rows of all three cards are there, nothing was changed' ((& $pillText 'shortpath') -eq 'Check open' -and $script:VdiCards['shortpath'].Rows.Children.Count -eq 5 -and $script:VdiCards['timezone'].Rows.Children.Count -eq 2 -and $script:VdiCards['mde'].Rows.Children.Count -eq 4 -and $script:Machine.Store.Registry[$tsKey] -eq 1 -and $ui.TxtVdiState.Text -like 'Tested*') "$(& $pillText 'shortpath') / $($ui.TxtVdiState.Text)"
+            Save-SmokeShot '32-vdi-host-cards'
+            $script:ConfirmAsked = ''
+            & $click $script:VdiCards['shortpath'].Buttons.Settings
+            Test-Smoke 'VDI page (#77): Set recommended settings asks first with old -> new and the restart, then runs as a VDI task' ($script:ConfirmAsked -like '*SelectTransport: 1 -> not set*Restart*' -and $script:VdiJob -and $script:VdiJob.Kind -eq 'HostSettings') $script:ConfirmAsked
+            return $false
+        }
+        if ($script:VdiHostSmoke -eq 1) {
+            Test-Smoke 'VDI page (#77): the setting is applied: value removed, pill As recommended, change log VDI, the task finished' (-not $script:Machine.Store.Registry.ContainsKey($tsKey) -and (& $pillText 'shortpath') -ne 'Check open' -and $ui.TxtVdiState.Text -like 'RDP Shortpath: 1 changed*Restart*' -and @(Get-AVDTuneChangeLog -Root $script:StateRoot | Where-Object { $_.Category -eq 'VDI' -and $_.Component -eq 'RDP Shortpath' }).Count -ge 1 -and @(Get-AVDTuneUiTasks | Where-Object { $_.Kind -eq 'vdi-hostsettings' -and $_.Status -eq 'succeeded' }).Count -eq 1) "$(& $pillText 'shortpath') / $($ui.TxtVdiState.Text)"
+            $script:VdiHostSmoke = 2
+            $script:ConfirmAsked = ''
+            & $click $script:VdiCards['shortpath'].Buttons.SettingsUndo
+            Test-Smoke 'VDI page (#77): Undo settings asks first with not set -> 1' ($script:ConfirmAsked -like '*SelectTransport: not set -> 1*' -and $script:VdiJob) $script:ConfirmAsked
+            return $false
+        }
+        Test-Smoke 'VDI page (#77): Undo puts "Use only TCP" back (the value found before) and the pill shows it again' ($script:Machine.Store.Registry[$tsKey] -eq 1 -and (& $pillText 'shortpath') -eq 'Check open' -and $ui.TxtVdiState.Text -like 'RDP Shortpath: 1 undone*') "$(& $pillText 'shortpath') / $($ui.TxtVdiState.Text)"
+        $script:Machine.Store.Registry.Remove($tsKey)
+        $true } }
     @{ Name = 'update block page'; Do = {
         if ($script:OverviewJob -or $script:ReadyJob) { return $false }   # the fake machine is not thread safe: never change it while the overview job reads it
         if (-not $script:BlkStep) {

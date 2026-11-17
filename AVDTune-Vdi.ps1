@@ -63,7 +63,55 @@ function Build-VdiCards {
         [void]$ui.PanelVdiCards.Children.Add($border)
         $script:VdiCards[$c.Key] = $card
     }
+    Build-VdiHostCards
     $script:VdiBuilt = $true
+}
+
+# The session host cards (issue 77): RDP Shortpath, time zone redirection, Defender for Endpoint. Rows from the module; buttons only for a card with settings (Shortpath).
+function Build-VdiHostCards {
+    foreach ($c in Get-AVDTuneVdiHostCards) {
+        $card = @{ Buttons = @{}; Checks = @{}; Host = $true }
+        $border = New-Object System.Windows.Controls.Border; Set-Brush $border ([System.Windows.Controls.Border]::StyleProperty) 'CardBox'; Set-Brush $border ([System.Windows.Controls.Border]::BackgroundProperty) 'Card'; $border.Margin = '0,16,0,0'; $border.Padding = '20,16'
+        $stack = New-Object System.Windows.Controls.StackPanel
+        $head = New-Object System.Windows.Controls.Grid
+        foreach ($w in '*', 'Auto') { $cd = New-Object System.Windows.Controls.ColumnDefinition; $cd.Width = $w; [void]$head.ColumnDefinitions.Add($cd) }
+        $title = New-Object System.Windows.Controls.TextBlock; $title.Text = $c.Title; Set-Brush $title ([System.Windows.Controls.TextBlock]::StyleProperty) 'CardTitle'
+        $card.Title = $title; [void]$head.Children.Add($title)
+        $pillHost = New-Object System.Windows.Controls.ContentControl; $pillHost.SetValue([System.Windows.Controls.Grid]::ColumnProperty, 1); $card.PillHost = $pillHost; [void]$head.Children.Add($pillHost)
+        [void]$stack.Children.Add($head)
+        $hint = New-Object System.Windows.Controls.TextBlock; $hint.Text = $c.Text; $hint.TextWrapping = 'Wrap'; $hint.Margin = '0,4,0,0'; Set-Brush $hint ([System.Windows.Controls.TextBlock]::StyleProperty) 'Hint'; [void]$stack.Children.Add($hint)
+        $rows = New-Object System.Windows.Controls.StackPanel; $rows.Margin = '0,8,0,0'; $card.Rows = $rows; [void]$stack.Children.Add($rows)
+        if (@(Get-AVDTuneVdiHostSettingDefs -Key $c.Key).Count -gt 0) {
+            $bar = New-Object System.Windows.Controls.WrapPanel; $bar.Margin = '0,12,0,0'
+            $card.Buttons.Settings = New-VdiButton 'Set recommended settings' $c.Key 'HostSettings' "Set the recommended values for $($c.Title)" $true
+            $card.Buttons.SettingsUndo = New-VdiButton 'Undo settings' $c.Key 'HostUndo' "Put the values of $($c.Title) back"
+            foreach ($b in $card.Buttons.Settings, $card.Buttons.SettingsUndo) { [void]$bar.Children.Add($b) }
+            [void]$stack.Children.Add($bar)
+        }
+        $border.Child = $stack
+        [void]$ui.PanelVdiCards.Children.Add($border)
+        $script:VdiCards[$c.Key] = $card
+    }
+}
+function Update-VdiHostView($V) {
+    foreach ($c in Get-AVDTuneVdiHostCards) {
+        $card = $script:VdiCards[$c.Key]
+        $card.Rows.Children.Clear()
+        $rows = @(Get-AVDTuneVdiHostRows -Machine $script:Machine -V $V -Key $c.Key)
+        foreach ($r in $rows) { [void]$card.Rows.Children.Add((New-FslResultRow $r)) }
+        $st = Get-AVDTuneVdiHostSummary $rows
+        $card.PillHost.Content = New-FslPillBlock $st $(switch ($st) { 'green' { 'As recommended' } 'yellow' { 'Check open' } 'red' { 'Action needed' } default { 'Cannot be told' } })
+    }
+}
+function Get-VdiTitle([string]$Key) { if (@(Get-AVDTuneVdiHostCards | Where-Object { $_.Key -ceq $Key }).Count -gt 0) { (Get-AVDTuneVdiHostCard $Key).Title } else { (Get-AVDTuneVdiComponent $Key).Title } }
+function Invoke-VdiHostAction([string]$Key, [string]$Act) {
+    $c = Get-AVDTuneVdiHostCard $Key
+    Assert-FslWrite
+    $mode = if ($Act -eq 'HostUndo') { 'Undo' } else { 'Apply' }
+    $text = Get-AVDTuneVdiHostConfirmText -Machine $script:Machine -Key $Key -Mode $mode -Root $script:StateRoot
+    if (-not $text) { $ui.TxtVdiState.Text = $(if ($mode -eq 'Undo') { "$($c.Title): there is nothing to undo." } else { "$($c.Title): the recommended settings are already set." }); return }
+    if (-not (Confirm-Action $text 'VDI components')) { return }
+    Start-VdiJob $Act $Key; $ui.TxtVdiState.Text = "$($c.Title): $(if ($mode -eq 'Undo') { 'undoing' } else { 'setting' }) ..."
 }
 
 function Update-VdiView {
@@ -77,6 +125,7 @@ function Update-VdiView {
         $st = Get-AVDTuneVdiSummaryStatus $rows
         $card.PillHost.Content = New-FslPillBlock $st $(switch ($st) { 'green' { 'Current' } 'yellow' { 'Update or setting open' } 'red' { 'Not installed' } default { 'Unknown' } })
     }
+    Update-VdiHostView $v
 }
 function Set-VdiBusy([bool]$Busy) {
     foreach ($card in $script:VdiCards.Values) { foreach ($b in $card.Buttons.Values) { $b.IsEnabled = -not $Busy } }
@@ -91,6 +140,8 @@ switch ($Kind) {
     'Remove' { Invoke-AVDTuneVdiRecorded -Machine $C.Machine -V $C.V -Key $C.Key -Root $C.Root -Mode Remove -User $C.User -SnapshotId $C.SnapshotId -Progress $C.Progress }
     'Undo' { Invoke-AVDTuneVdiUndo -Machine $C.Machine -V $C.V -Key $C.Key -Root $C.Root -User $C.User -SnapshotId $C.SnapshotId -Progress $C.Progress }
     'Latest' { $h = @{}; foreach ($k in 'webrtc', 'mmr') { $h[$k] = Get-AVDTuneVdiLatest -V $C.V -Key $k }; $h }
+    'HostSettings' { Invoke-AVDTuneVdiHostSettings -Machine $C.Machine -Key $C.Key -Root $C.Root -Mode Apply -User $C.User -SnapshotId $C.SnapshotId }
+    'HostUndo' { Invoke-AVDTuneVdiHostSettings -Machine $C.Machine -Key $C.Key -Root $C.Root -Mode Undo -User $C.User -SnapshotId $C.SnapshotId }
 }
 '@
 function Start-VdiJob([string]$Kind, [string]$Key) {
@@ -98,8 +149,8 @@ function Start-VdiJob([string]$Kind, [string]$Key) {
     if ($Kind -ne 'Latest') { Assert-NoOtherWriter }   # the look-up of the newest versions only reads (#66)
     $gate = if ($Kind -eq 'Latest') { $null } else { Get-AVDTuneWriteGate }
     $common = @{ Root = $script:StateRoot; User = (Get-FslUser); SnapshotId = (Get-FslGateSnapshot); Key = $Key }
-    $name = if ($Key) { (Get-AVDTuneVdiComponent $Key).Title } else { 'VDI components' }
-    $title = switch ($Kind) { 'Install' { "Installing or updating $name" } 'Remove' { "Removing $name" } 'Latest' { 'Looking up the newest versions at Microsoft' } default { "Undoing the change of $name" } }
+    $name = if ($Key) { Get-VdiTitle $Key } else { 'VDI components' }
+    $title = switch ($Kind) { 'Install' { "Installing or updating $name" } 'Remove' { "Removing $name" } 'Latest' { 'Looking up the newest versions at Microsoft' } 'HostSettings' { "Setting $name" } 'HostUndo' { "Undoing the settings of $name" } default { "Undoing the change of $name" } }
     $task = Start-AVDTuneUiTask -Kind "vdi-$($Kind.ToLower())" -Title $title -Step 'Starting'
     if ($script:TestMode) {
         $c = $common.Clone(); $c.Machine = $script:Machine; $c.V = $script:VdiFake; $c.Progress = $null
@@ -146,6 +197,14 @@ function Complete-VdiJob {
         Complete-AVDTuneUiTask $job.Task -Summary $ui.TxtVdiState.Text
         Update-VdiView; return
     }
+    if ($job.Kind -in 'HostSettings', 'HostUndo') {
+        foreach ($r in @($result.Results)) { Register-StepResult $r }
+        $failed = @($result.Results | Where-Object Status -eq 'Failed')
+        $done = @($result.Results | Where-Object { $_.Status -in 'Changed', 'Reverted' }).Count
+        $ui.TxtVdiState.Text = "$(Get-VdiTitle $job.Key): $done $(if ($job.Kind -eq 'HostUndo') { 'undone' } else { 'changed' })$(if ($failed.Count) { ", $($failed.Count) failed: $($failed[0].Message)" }).$(if (@($result.Results | Where-Object { $_.Reboot }).Count) { ' Restart the master for it to take effect.' })"
+        Complete-AVDTuneUiTask $job.Task -Failed:([bool]$failed.Count) -Summary $ui.TxtVdiState.Text
+        Show-Toast $ui.TxtVdiState.Text; Start-OverviewRefresh; Update-VdiView; return
+    }
     Register-StepResult $result.Result
     $ui.TxtVdiState.Text = "$((Get-AVDTuneVdiComponent $job.Key).Title): $($result.Setup.Status). $($result.Setup.Message)$(if ($result.Result.Reboot) { ' Restart the master before you go on.' })"
     Complete-AVDTuneUiTask $job.Task -Failed:([bool]($result.Setup.Status -eq 'Failed')) -Summary $ui.TxtVdiState.Text
@@ -158,6 +217,7 @@ $script:Timer.Add_Tick({ try { Complete-VdiJob } catch { Show-Error $_.Exception
 function Get-VdiOptional([string]$Key) { @($script:VdiCards[$Key].Checks.Keys | Where-Object { $script:VdiCards[$Key].Checks[$_].IsChecked }) }
 
 function Invoke-VdiAction([string]$Key, [string]$Act) {
+    if ($Act -in 'HostSettings', 'HostUndo') { Invoke-VdiHostAction $Key $Act; return }
     $c = Get-AVDTuneVdiComponent $Key
     Assert-FslWrite
     switch ($Act) {

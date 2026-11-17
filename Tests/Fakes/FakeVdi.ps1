@@ -5,6 +5,7 @@
 #   Redirects (hashtable entry link -> @{ Ok; Url; Error }), DownloadFails, Protected ($false = download folder not protected), Header (bytes of the file; default a real MSI header, text for the exe),
 #   Signatures (hashtable leaf -> @{ Valid; Subject; Issuer; OriginalFilename }), SwapAfterCheck ($true = the file has another signer from the second check on), HoldFails, Running (names of running processes),
 #   MsiProps (hashtable leaf -> properties of the MSI: ProductName, Manufacturer, ProductVersion), Exit (hashtable leaf or 'winget' -> exit code), NoEffect ($true = the program exits 0 and changes nothing), TeamsVersion, WebrtcVersion, MmrVersion, OneDriveVersion, Folders, Held (files held now).
+#   Session host cards (issue 77): UdpListening / FirewallUdp ($true, $false or $null = cannot be read), TeredoType, Files (full paths that exist, e.g. the Defender VDI onboarding scripts).
 # All names are made up; the addresses are of the real shape but point nowhere.
 . (Join-Path $PSScriptRoot 'FakeUpdates.ps1')
 function New-AVDTuneFakeVdi {
@@ -18,6 +19,7 @@ function New-AVDTuneFakeVdi {
         DownloadFails = $false; Protected = $true; Header = $null; Signatures = @{}; SwapAfterCheck = $false; HoldFails = $false; Running = @(); Exit = @{}; NoEffect = $false
         TeamsVersion = '26000.1.1.0'; WebrtcVersion = '1.54.2408.19001'; MmrVersion = '1.0.2410.0'; OneDriveVersion = '25.200.0'; Folders = @(); Held = @(); Checks = 0
         Teams = $null; OneDrive = $false; MsiProps = @{}
+        UdpListening = $false; FirewallUdp = $false; TeredoType = 'Default'; Files = @()
         Log = (New-Object System.Collections.ArrayList)
     }
     foreach ($e in $Seed.GetEnumerator()) { $s[$e.Key] = $e.Value }
@@ -92,7 +94,10 @@ function New-AVDTuneFakeVdi {
     $a.RunningProcesses = { param($Names) [void]$s.Log.Add('RunningProcesses'); @($Names | Where-Object { $_ -in @($s.Running) }) }.GetNewClosure()
     $a.AppxVersion = { param($Name) if ($Name -eq 'MSTeams') { $s.Teams } else { $null } }.GetNewClosure()
     $a.OneDrivePath = { 'C:\fake\Program Files\Microsoft OneDrive\OneDrive.exe' }
-    $a.Exists = { param($Path) [bool]$s.OneDrive }.GetNewClosure()
+    $a.Exists = { param($Path) if ($Path -like '*OneDrive*') { [bool]$s.OneDrive } else { @($s.Files | Where-Object { $_ -eq $Path }).Count -gt 0 } }.GetNewClosure()
+    $a.UdpListener = { param($Port) [void]$s.Log.Add("UdpListener $Port"); $s.UdpListening }.GetNewClosure()
+    $a.FirewallUdpIn = { param($Port) [void]$s.Log.Add("FirewallUdpIn $Port"); $s.FirewallUdp }.GetNewClosure()
+    $a.TeredoType = { $s.TeredoType }.GetNewClosure()
     $a.FileVersion = { param($Path) if ($s.OneDrive) { $s.OneDriveVersion } else { $null } }.GetNewClosure()
     [pscustomobject]$a
 }
