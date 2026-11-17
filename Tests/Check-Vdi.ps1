@@ -487,14 +487,125 @@ try {
     $r3 = Invoke-AVDTuneUpdateRun -Machine $u3.M -U $u3.U -Root $tmp -Items @([pscustomobject]@{ Id = 'teams'; Group = 'Teams'; Title = 'Teams'; Installed = '1'; Kb = ''; Selectable = $true }) -User 'admin1'
     Test-Check 'Updates page: without the component adapter the old message stays (ToolMissing)' ($r3.Results[-1].Status -eq 'Failed' -and $r3.Results[-1].Code -eq 'ToolMissing') ($r3.Results[-1] | ConvertTo-Json -Compress)
 
+    # ---------------------------------------------------------------- session host cards (issue 77): RDP Shortpath, time zone redirection, Defender for Endpoint
+    $tsp = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services'
+    $atp = 'HKLM:\SOFTWARE\Microsoft\Windows Advanced Threat Protection'
+    $startup = Join-Path (Get-AVDTuneSystemFolder System) 'GroupPolicy\Machine\Scripts\Startup'
+    function Get-HostRows($E, [string]$Key) { @(Get-AVDTuneVdiHostRows -Machine $E.M -V $E.V -Key $Key) }
+    function Get-Writes($E) { @($E.M.Log | Where-Object { $_ -like 'RegSet*' -or $_ -like 'RegRemove*' }) }
+    Test-Check 'host cards: shortpath, timezone, mde in this order; only Shortpath has a setting, time zone and Defender are status only' (((Get-AVDTuneVdiHostCards | ForEach-Object Key) -join ',') -eq 'shortpath,timezone,mde' -and @(Get-AVDTuneVdiHostSettingDefs -Key 'shortpath').Count -eq 1 -and @(Get-AVDTuneVdiHostSettingDefs -Key 'timezone').Count -eq 0 -and @(Get-AVDTuneVdiHostSettingDefs -Key 'mde').Count -eq 0 -and (Test-Throws { Get-AVDTuneVdiHostCard 'teams' })) $null
+    $portCases = [ordered]@{ '3390' = $true; '3000-4000' = $true; '80, 3390' = $true; '*' = $true; 'Any' = $true; '3391' = $false; '' = $false; '4000-3000' = $false; 'abc' = $false; '33900' = $false; '1-3389,3391-9999' = $false }
+    $wrong = @($portCases.Keys | Where-Object { (Test-AVDTuneVdiPortList -List $_ -Port 3390) -ne $portCases[$_] })
+    Test-Check 'firewall port list: single port, range, list, any; other ports, inverted ranges and text are not the port' ($wrong.Count -eq 0) ($wrong -join ' | ')
+
+    # Shortpath (read only rows)
+    $e = New-Env
+    $rows = Get-HostRows $e 'shortpath'
+    Test-Check 'Shortpath: default master (no policy, no listener, no rule): UDP green, managed networks and port info (optional), public networks info, pill green, nothing written' ((Get-Row $rows 'shortpath.udp').Status -eq 'green' -and (Get-Row $rows 'shortpath.managed').Status -eq 'info' -and (Get-Row $rows 'shortpath.firewall').Status -eq 'info' -and (Get-Row $rows 'shortpath.public').Status -eq 'info' -and (Get-Row $rows 'shortpath.public').Reason -like '*51.5.0.0/16*3478*' -and (Get-AVDTuneVdiHostSummary $rows) -eq 'green' -and (Get-Writes $e).Count -eq 0 -and (Get-Log $e.V 'UdpListener 3390').Count -eq 1) (($rows | ForEach-Object { "$($_.Id)=$($_.Status)" }) -join ',')
+    $e = New-Env -MSeed @{ Registry = @{ "$tsp|SelectTransport" = 1 } }
+    $rows = Get-HostRows $e 'shortpath'
+    Test-Check 'Shortpath: SelectTransport = 1 (Use only TCP) is yellow with the fix, the pill yellow' ((Get-Row $rows 'shortpath.udp').Status -eq 'yellow' -and (Get-Row $rows 'shortpath.udp').Fix -like '*Set recommended settings*' -and (Get-AVDTuneVdiHostSummary $rows) -eq 'yellow') $null
+    $e = New-Env -MSeed @{ Registry = @{ "$tsp|SelectTransport" = 2 } }
+    Test-Check 'Shortpath: SelectTransport = 2 (UDP or TCP) is green; an undescribed value is info' ((Get-Row (Get-HostRows $e 'shortpath') 'shortpath.udp').Status -eq 'green' -and (Get-Row (Get-HostRows (New-Env -MSeed @{ Registry = @{ "$tsp|SelectTransport" = 7 } }) 'shortpath') 'shortpath.udp').Status -eq 'info') $null
+    $e = New-Env -Seed @{ UdpListening = $true; FirewallUdp = $false }
+    $rows = Get-HostRows $e 'shortpath'
+    Test-Check 'Shortpath: listener on but no inbound rule for UDP 3390 is yellow (Learn: allow the port inbound)' ((Get-Row $rows 'shortpath.managed').Status -eq 'green' -and (Get-Row $rows 'shortpath.firewall').Status -eq 'yellow' -and (Get-AVDTuneVdiHostSummary $rows) -eq 'yellow') $null
+    $e = New-Env -Seed @{ UdpListening = $true; FirewallUdp = $true }
+    $rows = Get-HostRows $e 'shortpath'
+    Test-Check 'Shortpath: listener and inbound rule are green' ((Get-Row $rows 'shortpath.firewall').Status -eq 'green' -and (Get-AVDTuneVdiHostSummary $rows) -eq 'green') $null
+    $e = New-Env -Seed @{ UdpListening = $null; FirewallUdp = $null; TeredoType = $null }
+    $rows = Get-HostRows $e 'shortpath'
+    Test-Check 'Shortpath: probes that cannot be read are info "could not be read", never green' ((Get-Row $rows 'shortpath.managed').Reason -like '*could not be read*' -and (Get-Row $rows 'shortpath.firewall').Status -eq 'info' -and (Get-Row $rows 'shortpath.firewall').Reason -like '*could not be read*' -and (Get-Row $rows 'shortpath.teredo').Reason -like '*could not be read*') $null
+    $e = New-Env; $e.V.UdpListener = { throw 'boom' }
+    Test-Check 'Shortpath: a probe that throws is "could not be read" (the test does not fail)' ((Get-Row (Get-HostRows $e 'shortpath') 'shortpath.managed').Reason -like '*could not be read*') $null
+
+    # time zone (read only; the Optimization page owns the value)
+    $e = New-Env -MSeed @{ Registry = @{ "$tsp|fEnableTimeZoneRedirection" = 1; 'HKLM:\SYSTEM\CurrentControlSet\Control\TimeZoneInformation|TimeZoneKeyName' = 'W. Europe Standard Time' } }
+    $rows = Get-HostRows $e 'timezone'
+    Test-Check 'time zone: fEnableTimeZoneRedirection = 1 is green, the time zone of the master is shown, pill green' ((Get-Row $rows 'timezone.redirect').Status -eq 'green' -and (Get-Row $rows 'timezone.host').Reason -like 'W. Europe Standard Time*' -and (Get-AVDTuneVdiHostSummary $rows) -eq 'green') $null
+    $e = New-Env
+    $rows = Get-HostRows $e 'timezone'
+    Test-Check 'time zone: off is yellow and the fix names the Optimization page (owner of the value and its undo); the card has no setting and Invoke refuses' ((Get-Row $rows 'timezone.redirect').Status -eq 'yellow' -and (Get-Row $rows 'timezone.redirect').Fix -like '*Optimization page*' -and (Get-ThrownText { Invoke-AVDTuneVdiHostSettings -Machine $e.M -Key 'timezone' -Root $tmp -WhatIf }) -like '*only shows the state*' -and (Get-Writes $e).Count -eq 0) $null
+    Test-Check 'time zone: the Optimization data still has the entry the card points to (optimization.timezone-redirection, fEnableTimeZoneRedirection = 1)' ((Get-Content -LiteralPath (Join-Path $repo 'data\optimization.json') -Raw) -match '"Id":\s+"optimization\.timezone-redirection"[\s\S]{0,900}?"Name":\s+"fEnableTimeZoneRedirection"[\s\S]{0,120}?"Value":\s+1') $null
+
+    # Defender for Endpoint (status only)
+    $e = New-Env -MSeed @{ Registry = @{ "$atp|senseGuid" = '11111111-2222-3333-4444-555555555555' }; Services = @(@{ Name = 'Sense'; Status = 'Running' }) }
+    $rows = Get-HostRows $e 'mde'
+    Test-Check 'Defender: a master with senseGuid is red (clones carry the same id), pill red, nothing written' ((Get-Row $rows 'mde.master').Status -eq 'red' -and (Get-Row $rows 'mde.master').Fix -like '*Offboard*' -and (Get-AVDTuneVdiHostSummary $rows) -eq 'red' -and (Get-Writes $e).Count -eq 0) $null
+    $e = New-Env -MSeed @{ Registry = @{ "$atp\Status|OnboardingState" = 1 }; Services = @(@{ Name = 'Sense'; Status = 'Running' }) }
+    Test-Check 'Defender: OnboardingState = 1 is red as well' ((Get-Row (Get-HostRows $e 'mde') 'mde.master').Status -eq 'red') $null
+    $e = New-Env -MSeed @{ Services = @(@{ Name = 'Sense'; Status = 'Running' }) }
+    Test-Check 'Defender: Sense running without onboarding data is yellow (onboarding right now?)' ((Get-Row (Get-HostRows $e 'mde') 'mde.master').Status -eq 'yellow') $null
+    $e = New-Env -MSeed @{ Services = @(@{ Name = 'Sense'; Status = 'Stopped'; StartType = 'Manual' }) }
+    $rows = Get-HostRows $e 'mde'
+    Test-Check 'Defender: not onboarded and Sense stopped is green, Sense shown as info, no script is info, the device tag is info (legacy MMA only), pill green' ((Get-Row $rows 'mde.master').Status -eq 'green' -and (Get-Row $rows 'mde.sense').Status -eq 'info' -and (Get-Row $rows 'mde.sense').Reason -like '*Stopped*Manual*' -and (Get-Row $rows 'mde.script').Status -eq 'info' -and (Get-Row $rows 'mde.tag').Reason -like '*legacy MMA*' -and (Get-AVDTuneVdiHostSummary $rows) -eq 'green') (($rows | ForEach-Object { "$($_.Id)=$($_.Status)" }) -join ',')
+    $e = New-Env
+    Test-Check 'Defender: no Sense service is yellow (the Feature on Demand is missing; the onboarding script could not start it)' ((Get-Row (Get-HostRows $e 'mde') 'mde.sense').Status -eq 'yellow') $null
+    $e = New-Env -Seed @{ Files = @((Join-Path $startup 'Onboard-NonPersistentMachine.ps1'), (Join-Path $startup 'WindowsDefenderATPOnboardingScript.cmd')) } -MSeed @{ Services = @(@{ Name = 'Sense'; Status = 'Stopped' }) }
+    $r1 = Get-Row (Get-HostRows $e 'mde') 'mde.script'
+    $e = New-Env -Seed @{ Files = @((Join-Path $startup 'WindowsDefenderATPOnboardingScript.cmd')) } -MSeed @{ Services = @(@{ Name = 'Sense'; Status = 'Stopped' }) }
+    $r2 = Get-Row (Get-HostRows $e 'mde') 'mde.script'
+    Test-Check 'Defender: the VDI onboarding scripts in the startup folder are green and name the model (single entry with Onboard-NonPersistentMachine.ps1, multiple entries with the .cmd only)' ($r1.Status -eq 'green' -and $r1.Reason -like '*single entry*' -and $r2.Status -eq 'green' -and $r2.Reason -like '*multiple entries*') "$($r1.Reason) | $($r2.Reason)"
+    Test-Check 'Defender: no onboarding package or tenant data in the repository (no .onboarding blob, no WindowsDefenderATPOnboardingPackage file)' (@(Get-ChildItem -LiteralPath $repo -Recurse -File -ErrorAction SilentlyContinue | Where-Object { $_.FullName -notlike '*\.git\*' -and ($_.Name -like 'WindowsDefenderATP*' -or $_.Name -like 'Onboard-NonPersistentMachine*' -or $_.Extension -eq '.onboarding') }).Count -eq 0) $null
+
+    # the Shortpath setting: gate, confirmation old -> new, undo record never overwritten, marker and LastChange, run record, change log VDI
+    Reset-Files
+    Close-AVDTuneWriteGate
+    $e = New-Env -MSeed @{ Registry = @{ "$tsp|SelectTransport" = 1 } }
+    Test-Check 'Shortpath setting: with the gate closed nothing is written (WhatIf works without the gate)' ((Get-ThrownText { Invoke-AVDTuneVdiHostSettings -Machine $e.M -Key 'shortpath' -Root $tmp }) -like '*snapshot gate*' -and (Get-Writes $e).Count -eq 0 -and @((Invoke-AVDTuneVdiHostSettings -Machine $e.M -Key 'shortpath' -Root $tmp -WhatIf).Results | Where-Object Status -eq 'WhatIf').Count -eq 1 -and (Get-Writes $e).Count -eq 0 -and -not (Test-Path (Join-Path $tmp 'config\vdi-shortpath-settings-undo.json'))) $null
+    Open-Gate
+    $txt = Get-AVDTuneVdiHostConfirmText -Machine $e.M -Key 'shortpath' -Mode Apply -Root $tmp
+    Test-Check 'Shortpath setting: the confirmation names the value old -> new, the restart and the Group Policy that can set it again' ($txt -like '*SelectTransport: 1 -> not set*Restart*Group Policy*') $txt
+    [void](Set-AVDTuneState -Root $tmp -Values @{ LastChange = '2020-01-01T00:00:00.0000000' })
+    $runsBefore = @(Get-AVDTuneRun -Root $tmp).Count
+    $run = Invoke-AVDTuneVdiHostSettings -Machine $e.M -Key 'shortpath' -Root $tmp -User 'admin1' -SnapshotId 'snap-1'
+    $u = Get-Content -LiteralPath (Join-Path $tmp 'config\vdi-shortpath-settings-undo.json') -Raw | ConvertFrom-Json
+    $st = Get-AVDTuneState $tmp
+    Test-Check 'Shortpath setting: Apply removes SelectTransport (= Not configured), restart flagged, undo record typed (DWord 1), run record, change log VDI, LastChange set, marker gone' (@($run.Results | Where-Object Status -eq 'Changed').Count -eq 1 -and $null -eq (& $e.M.RegGet $tsp 'SelectTransport') -and $run.Results[0].Reboot -and $u.Previous.'vdi.shortpath.udp'.Exists -eq $true -and $u.Previous.'vdi.shortpath.udp'.Value -eq 1 -and $u.Previous.'vdi.shortpath.udp'.Type -eq 'DWord' -and @(Get-AVDTuneRun -Root $tmp).Count -eq $runsBefore + 1 -and @(Get-AVDTuneRun -Root $tmp | Where-Object Plan -eq 'VDI RDP Shortpath settings').Count -eq 1 -and @(Get-AVDTuneChangeLog -Root $tmp | Where-Object { $_.Category -eq 'VDI' -and $_.Component -eq 'RDP Shortpath' -and $_.ChangeType -eq 'Changed' }).Count -eq 1 -and [string]$st.LastChange -ne '2020-01-01T00:00:00.0000000' -and -not (Get-AVDTuneChangeMarker -Root $tmp)) ($run.Results | ForEach-Object { "$($_.Id)=$($_.Status) $($_.Message)" }) -join ','
+    $before = (Get-AVDTuneState $tmp).LastChange; $runsBefore = @(Get-AVDTuneRun -Root $tmp).Count; $logN = $e.M.Log.Count
+    $run = Invoke-AVDTuneVdiHostSettings -Machine $e.M -Key 'shortpath' -Root $tmp -User 'admin1'
+    Test-Check 'Shortpath setting: Apply when it is already set changes nothing and writes nothing (no LastChange, no run record); the confirmation text is empty' ($run.Results[0].Status -eq 'Unchanged' -and (Get-AVDTuneState $tmp).LastChange -eq $before -and @(Get-AVDTuneRun -Root $tmp).Count -eq $runsBefore -and @($e.M.Log | Select-Object -Skip $logN | Where-Object { $_ -like 'RegSet*' -or $_ -like 'RegRemove*' }).Count -eq 0 -and -not (Get-AVDTuneVdiHostConfirmText -Machine $e.M -Key 'shortpath' -Root $tmp)) $null
+    $at = $u.At
+    & $e.M.RegSet $tsp 'SelectTransport' 1 'DWord'   # a policy refresh sets it again
+    [void](Invoke-AVDTuneVdiHostSettings -Machine $e.M -Key 'shortpath' -Root $tmp)
+    $u2 = Get-Content -LiteralPath (Join-Path $tmp 'config\vdi-shortpath-settings-undo.json') -Raw | ConvertFrom-Json
+    Test-Check 'Shortpath setting: a second Apply keeps the undo record as it was (never overwritten)' ($u2.At -eq $at -and $u2.Previous.'vdi.shortpath.udp'.Value -eq 1) ($u2 | ConvertTo-Json -Compress)
+    $txt = Get-AVDTuneVdiHostConfirmText -Machine $e.M -Key 'shortpath' -Mode Undo -Root $tmp
+    $run = Invoke-AVDTuneVdiHostSettings -Machine $e.M -Key 'shortpath' -Mode Undo -Root $tmp -User 'admin1'
+    Test-Check 'Shortpath setting: Undo confirmation names not set -> 1; Undo puts DWord 1 back, change log "Undo:", the record is removed; a second Undo has nothing to undo' ($txt -like '*SelectTransport: not set -> 1*' -and $run.Results[0].Status -eq 'Reverted' -and (& $e.M.RegGet $tsp 'SelectTransport') -eq 1 -and (& $e.M.RegGetRaw $tsp 'SelectTransport').Kind -eq 'DWord' -and @(Get-AVDTuneChangeLog -Root $tmp | Where-Object { $_.Category -eq 'VDI' -and $_.Text -like 'Undo: RDP transport*' }).Count -eq 1 -and -not (Test-Path (Join-Path $tmp 'config\vdi-shortpath-settings-undo.json')) -and (Get-ThrownText { Invoke-AVDTuneVdiHostSettings -Machine $e.M -Key 'shortpath' -Mode Undo -Root $tmp }) -like '*nothing to undo*') "$txt / $($run.Results[0].Status)"
+    # a record that is not exactly typed is refused before anything is changed
+    Write-AVDTuneFile (Join-Path $tmp 'config\vdi-shortpath-settings-undo.json') '{ "At": "x", "Previous": { "vdi.shortpath.udp": { "Exists": true, "Value": "1", "Type": "DWord" } } }'
+    $logN = $e.M.Log.Count
+    Test-Check 'Shortpath setting: an undo record with an untyped value is refused by Apply and Undo, nothing is written' ((Get-ThrownText { Invoke-AVDTuneVdiHostSettings -Machine $e.M -Key 'shortpath' -Mode Undo -Root $tmp }) -like '*not usable*' -and (Get-ThrownText { Invoke-AVDTuneVdiHostSettings -Machine $e.M -Key 'shortpath' -Root $tmp }) -like '*not usable*' -and @($e.M.Log | Select-Object -Skip $logN | Where-Object { $_ -like 'RegSet*' -or $_ -like 'RegRemove*' }).Count -eq 0 -and (& $e.M.RegGet $tsp 'SelectTransport') -eq 1) $null
+    Write-AVDTuneFile (Join-Path $tmp 'config\vdi-shortpath-settings-undo.json') '{ "At": "x", "Previous": { "vdi.other": { "Exists": false } } }'
+    Test-Check 'Shortpath setting: an undo record with an unknown id is refused' ((Get-ThrownText { Invoke-AVDTuneVdiHostSettings -Machine $e.M -Key 'shortpath' -Mode Undo -Root $tmp }) -like '*not usable*') $null
+    Reset-Files
+    # a failing undo keeps the record and is a change (LastChange) with a change log note
+    [void](Invoke-AVDTuneVdiHostSettings -Machine $e.M -Key 'shortpath' -Root $tmp)
+    $e.M.Store.FailWrites = @('Terminal Services|SelectTransport')
+    [void](Set-AVDTuneState -Root $tmp -Values @{ LastChange = '2020-01-01T00:00:00.0000000' })
+    $run = Invoke-AVDTuneVdiHostSettings -Machine $e.M -Key 'shortpath' -Mode Undo -Root $tmp
+    Test-Check 'Shortpath setting: a failing Undo is Failed, keeps the undo record, sets LastChange and writes a change log note; the marker is gone' ($run.Results[0].Status -eq 'Failed' -and (Test-Path (Join-Path $tmp 'config\vdi-shortpath-settings-undo.json')) -and [string](Get-AVDTuneState $tmp).LastChange -ne '2020-01-01T00:00:00.0000000' -and @(Get-AVDTuneChangeLog -Root $tmp | Where-Object { $_.Category -eq 'VDI' -and $_.ChangeType -eq 'Note' -and $_.Text -like '*FAILED*' }).Count -ge 1 -and -not (Get-AVDTuneChangeMarker -Root $tmp)) $run.Results[0].Message
+    $e.M.Store.FailWrites = @()
+    Reset-Files
+    $src77 = Get-Content -LiteralPath (Join-Path $repo 'Modules\AVDTune.Vdi.psm1') -Raw
+    $fn = [regex]::Match($src77, '(?s)function Invoke-AVDTuneVdiHostSettings \{.*?\r?\n\}\r?\n').Value
+    Test-Check 'Shortpath setting: the write path uses Start-/Stop-AVDTuneChange (stop in finally) and the step engine, no direct registry call' ($fn -match 'Start-AVDTuneChange -Root \$Root' -and $fn -match 'finally \{ Stop-AVDTuneChange -Root \$Root -Owner \$owner \}' -and $fn -match 'Invoke-AVDTuneStep' -and $fn -notmatch 'RegSet|RegRemove|Set-ItemProperty|New-ItemProperty') $null
+    $page = Get-Content -LiteralPath (Join-Path $repo 'AVDTune-Vdi.ps1') -Raw
+    Test-Check 'page: the host settings run as a VDI job (background task, writer VdiJob) after the write gate, the writer check and a confirmation' ($page -match "'HostSettings' \{ Invoke-AVDTuneVdiHostSettings" -and $page -match "'HostUndo' \{ Invoke-AVDTuneVdiHostSettings" -and $page -match '(?s)function Invoke-VdiHostAction.*?Assert-FslWrite.*?Confirm-Action.*?Start-VdiJob \$Act \$Key') $null
+
     # ---------------------------------------------------------------- the real adapter (source and construction; never run here)
     $src = Get-Content -LiteralPath (Join-Path $repo 'Modules\AVDTune.Vdi.psm1') -Raw
     $real = New-AVDTuneVdiAdapter
     Test-Check 'real adapter: redirects are followed by hand (AllowAutoRedirect false), https and fixed hosts only, no PATH lookup, no shell, no Invoke-WebRequest' ($src -match 'AllowAutoRedirect = \$false' -and $src -notmatch 'AllowAutoRedirect = \$true' -and $src -notmatch 'Get-Command (?!Resolve-AVDTuneSoftwareError)|Invoke-WebRequest|Invoke-Expression|Start-Process|cmd\.exe|UseShellExecute = \$true') $null
     $rp = [regex]::Match($src, '(?s)\$a\.ReadMsiProperties = \{.*?\r?\n    \}\r?\n').Value
     Test-Check 'real adapter: the MSI Property table is read with the direct COM calls, every record is released at once and the view is closed (the file is not held until the garbage collection)' ($rp -match 'OpenDatabase\(\$Path, 0\)' -and $rp -match 'ReleaseComObject\(\$rec\)' -and $rp -match '\$view\.Close\(\)' -and $rp -notmatch 'InvokeMember') $null
-    Test-Check 'real adapter: constructs and has every member the flow uses' ((@('Resolve', 'NewTempFolder', 'IsProtectedFolder', 'Download', 'HoldFile', 'RemoveFolder', 'VerifySignature', 'Run', 'ReadHeader', 'RunningProcesses', 'MsiexecPath', 'AppxVersion', 'FileVersion', 'Exists', 'OneDrivePath', 'U') | Where-Object { $null -eq $real.$_ }).Count -eq 0) $null
+    Test-Check 'real adapter: constructs and has every member the flow uses' ((@('Resolve', 'NewTempFolder', 'IsProtectedFolder', 'Download', 'HoldFile', 'RemoveFolder', 'VerifySignature', 'Run', 'ReadHeader', 'RunningProcesses', 'MsiexecPath', 'AppxVersion', 'FileVersion', 'Exists', 'OneDrivePath', 'U', 'UdpListener', 'FirewallUdpIn', 'TeredoType') | Where-Object { $null -eq $real.$_ }).Count -eq 0) $null
     Test-Check 'the fake has every member of the real adapter (the fake stays in step)' ((@($real.PSObject.Properties.Name | Where-Object { $_ -ne 'Kind' }) | Where-Object { $null -eq (New-AVDTuneFakeVdi -Machine (New-AVDTuneFakeMachine)).$_ }).Count -eq 0) $null
+    $probeSrc = [regex]::Match($src, '(?s)\$a\.UdpListener = .*?\$a\.TeredoType = [^\r\n]*').Value
+    Test-Check 'real adapter (#77): the session host probes only read (open UDP ports, firewall rules through HNetCfg.FwPolicy2, Teredo type), nothing is set, the COM object is released' ($probeSrc -match 'GetActiveUdpListeners' -and $probeSrc -match 'HNetCfg\.FwPolicy2' -and $probeSrc -match 'ReleaseComObject\(\$fw\)' -and $probeSrc -match 'Get-NetTeredoConfiguration' -and $probeSrc -notmatch 'Set-Net|New-NetFirewallRule|Rules\.Add|Rules\.Remove|netsh') $null
+    $pl = & $real.UdpListener 3390; $pf = & $real.FirewallUdpIn 3390
+    Test-Check 'real adapter (#77): the two read-only probes answer true, false or $null on this computer (no error)' (($pl -is [bool] -or $null -eq $pl) -and ($pf -is [bool] -or $null -eq $pf)) "$pl / $pf"
     $rr = & $real.Resolve 'https://evil.example/x' 'Msi'
     $rr2 = & $real.Resolve 'http://aka.ms/avdmmr/msi' 'Msi'
     Test-Check 'real adapter: an entry link outside aka.ms and go.microsoft.com, or over http, is refused before any request' (-not $rr.Ok -and -not $rr2.Ok -and $rr.Error -like '*not on aka.ms*') $rr.Error
