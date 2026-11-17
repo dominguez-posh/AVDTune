@@ -2,6 +2,7 @@
 # Nothing here touches the computer it runs on. Dot-source FakeMachine.ps1 first, then: Add-AVDTuneOptimizationFakeMembers $m -Appx @('Microsoft.BingNews') -Defender @{ PUAProtection = 0 }
 # $m.Store.FailWrites = @('part') makes AppxRemove and MpSet throw when the name contains the part (error path checks); $m.Store.Appx and $m.Store.Mp hold the state.
 # Like the real system, Get-MpPreference answers 0 for a setting that was never set; $m.Store.MpUnreported = @('Name') makes MpGet answer $null (setting not reported).
+# $m.Store.MpAbsent = $true makes MpGet throw like a host without Defender (command missing); $m.Store.MpError = 'text' makes it throw any other read error.
 # $m.Store.RegKinds['path|name'] = 'Binary' (lower case key) makes RegInfo report another kind than DWord/String.
 
 function Add-AVDTuneOptimizationFakeMembers {
@@ -23,6 +24,8 @@ function Add-AVDTuneOptimizationFakeMembers {
         }.GetNewClosure())
     $Machine | Add-Member -NotePropertyName MpGet -NotePropertyValue ({
             param($Name)
+            if ($store.MpAbsent) { throw [System.Management.Automation.CommandNotFoundException]::new('The term Get-MpPreference is not recognized.') }   # no Defender on this host
+            if ($store.MpError) { throw [string]$store.MpError }   # any other read error (a policy, a damaged WMI)
             if (@($store.MpUnreported) -contains [string]$Name) { return $null }
             if ($store.Mp.ContainsKey([string]$Name)) { $store.Mp[[string]$Name] } else { 0 }
         }.GetNewClosure())

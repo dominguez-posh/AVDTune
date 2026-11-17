@@ -19,7 +19,7 @@ function Get-MaskAnswers { $e = $null; try { $e = Get-AVDTuneEnvironment $script
 function Get-MaskDirectory { $d = $null; try { $d = Read-AVDTuneJson (Join-Path $script:StateRoot 'config\directory.json') } catch { }; if ($d -and (Get-AVDTuneProp $d 'Directory')) { $d.Directory } else { $null } }
 function Get-MaskGroupSam($G) { $s = [string](Get-AVDTuneProp $G 'Sam'); if ($s) { $s } else { [string]$G.Name } }
 function Get-MaskGateSnapshot { $g = Get-AVDTuneWriteGate; if ($g) { [string]$g.SnapshotId } else { '' } }
-function Assert-MaskWrite { if (-not (Test-AVDTuneWriteAllowed)) { throw 'Read only: confirm a snapshot of today on the Overview first.' } }
+function Assert-MaskWrite { if (-not (Test-AVDTuneWriteAllowed)) { throw 'Read only: confirm a snapshot of today on the Overview first.' }; Assert-NoOtherWriter }
 
 function New-MaskText([string]$Text, [string]$Style = '', [string]$Margin = '0') {
     $t = New-Object System.Windows.Controls.TextBlock; $t.Text = $Text; $t.TextWrapping = 'Wrap'; $t.Margin = $Margin

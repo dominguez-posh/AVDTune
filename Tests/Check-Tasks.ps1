@@ -139,5 +139,19 @@ $xaml = [IO.File]::ReadAllText((Join-Path $repo 'UI\AVDTune.xaml'))
 $barXaml = $xaml.Substring($xaml.IndexOf('x:Name="BoxTaskBar"'))
 Test-Check 'the bar XAML uses DynamicResource only (follows the light/dark switch)' ($barXaml -notmatch 'StaticResource' -and $barXaml -notmatch '"#[0-9A-Fa-f]{6}"') $null
 
+# #66: one writer at a time. Every start of an operation that changes the master (job or inline) asks the central check first; a start that lacks it is a finding.
+$writerStarts = @(
+    @('AVDTune-Optimization.ps1', 'Start-OptChange'), @('AVDTune-FSLogix.ps1', 'Start-FslJob'), @('AVDTune-FSLogix.ps1', 'Assert-FslWrite'), @('AVDTune-Office.ps1', 'Start-OffJob'),
+    @('AVDTune-Readiness.ps1', 'Start-ReadyJob'), @('AVDTune-Readiness.ps1', 'Start-ReadyFix'), @('AVDTune-UserExperience.ps1', 'Start-WatermarkChange'), @('AVDTune-AppMasking.ps1', 'Assert-MaskWrite'),
+    @('AVDTune-Updates.ps1', 'Start-UpdateRun'), @('AVDTune-Updates.ps1', 'Start-BlockChange'), @('AVDTune-Software.ps1', 'Start-SwRun'), @('AVDTune-Seal.ps1', 'Start-SealJob'))
+$missingGuard = @()
+foreach ($w in $writerStarts) {
+    $ast = [Management.Automation.Language.Parser]::ParseFile((Join-Path $repo $w[0]), [ref]$null, [ref]$null)
+    $fn = $ast.Find({ param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $w[1] }, $true)
+    $body = if ($fn) { $fn.Extent.Text } else { '' }
+    if ($body -notmatch 'Assert-NoOtherWriter' -and $body -notmatch "foreach \(\`$other in 'SealJob'") { $missingGuard += "$($w[0]):$($w[1])" }
+}
+Test-Check 'writers (#66): every start of an operation that changes the master calls the central Assert-NoOtherWriter' ($missingGuard.Count -eq 0) ($missingGuard -join ', ')
+
 if ($script:failed -gt 0) { throw "$script:failed check(s) failed." }
 'Check-Tasks: all checks passed.'

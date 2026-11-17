@@ -14,6 +14,7 @@ $script:OptChecked = @{}        # id -> $true / $false; filled from the defaults
 $script:OptInitDone = $false
 $script:OptOnlyOpen = $false
 $script:OptBuilding = $false
+$script:OptStale = $false         # the last read failed: the list is older than the master
 $script:OptRun = $null           # the background Apply or Undo (one at a time)
 $script:OptJob = $null           # the background read of the state (one at a time)
 
@@ -115,32 +116,32 @@ function Complete-OptRead {
     if ($job.Inline) { if ($script:OverviewJob) { return } }   # test mode: not while the overview reads the same fake machine on its own thread
     elseif (-not $job.Handle.IsCompleted) { return }
     $script:OptJob = $null
-    $status = $null; $err = ''
+    $status = $null; $err = ''; $streamErr = ''
     if ($job.Inline) {
         try { $status = Get-AVDTuneOptimizationStatus -Machine $script:Machine -Root $script:StateRoot } catch { $err = $_.Exception.Message }
     }
     else {
         try {
             $status = @($job.PS.EndInvoke($job.Handle)) | Select-Object -Last 1
-            if ($job.PS.Streams.Error.Count -gt 0) { $err = $job.PS.Streams.Error[0].Exception.Message }
+            if ($job.PS.Streams.Error.Count -gt 0) { $streamErr = $job.PS.Streams.Error[0].Exception.Message }
         }
         catch { $err = $_.Exception.Message }
         finally { $job.PS.Dispose() }
     }
-    if (-not $err -and -not $status) { $err = 'No result.' }
+    if (-not $status -and -not $err) { $err = $(if ($streamErr) { $streamErr } else { 'No result.' }) }
     if (-not $err) {
-        $script:OptStatus = $status
+        $script:OptStatus = $status; $script:OptStale = $false
         if ($status.DataValid -and -not $script:OptInitDone) {
             foreach ($r in $status.Rows) { $script:OptChecked[$r.Id] = [bool]$r.Default }
             $script:OptInitDone = $true
         }
         Complete-AVDTuneUiTask $job.Task -Summary $(if ($status.DataValid) { "$($status.Rows.Count) entries read" } else { 'The optimization data is not valid' })
     }
-    else { Complete-AVDTuneUiTask $job.Task -Failed -Summary "The state could not be read: $err" }
+    else { Complete-AVDTuneUiTask $job.Task -Failed -Summary "The state could not be read: $err"; if ($script:OptStatus) { $script:OptStale = $true } }   # the list on screen is older than the master: nothing can be applied from it
     Set-OptBusy $false
     if ($script:CurrentPage -eq 'Optimization') {
         Show-OptList
-        if ($err) { $ui.TxtOptSummary.Text = "The state could not be read: $err Press Refresh state to try again."; Show-Error "The optimization state could not be read: $err" }
+        if ($err) { $ui.TxtOptSummary.Text = "The state could not be read: $err $(if ($script:OptStatus) { 'The list shows the earlier state; Apply and Undo wait for a successful read.' }) Press Refresh state to try again."; Show-Error "The optimization state could not be read: $err" }
     }
 }
 $script:Timer.Add_Tick({ try { Complete-OptRead } catch { Show-Error $_.Exception.Message } })
@@ -161,21 +162,25 @@ function Update-OptPresetStatus {
     # The three presets say whether their set is in place on this host: green with a check when every entry of the set is in place (entries that are not on this host count
     # as in place), otherwise neutral with "x of y in place". Nothing while the state is being read or run, or when the data is not valid. "Nothing" has no status.
     $st = $script:OptStatus
-    $show = [bool]($st -and $st.DataValid -and -not $script:OptJob -and -not $script:OptRun)
+    $show = [bool]($st -and $st.DataValid -and -not $script:OptJob -and -not $script:OptRun -and -not $script:OptStale)
     foreach ($name in 'recommended', 'conservative', 'all') {
         $b = $ui.OptPresets[$name]; $label = [string]$b.Tag
         $b.ClearValue([System.Windows.Controls.Button]::ForegroundProperty)
         if (-not $show) { $b.Content = $label; $b.ToolTip = $null; continue }
         $ids = @(Get-AVDTuneOptimizationPresetIds -Entries $st.Rows -Preset $name)
         $rows = @($st.Rows | Where-Object { $_.Id -in $ids })
-        $done = @($rows | Where-Object { -not $_.Present -or $_.Compliant }).Count
-        if ($rows.Count -gt 0 -and $done -eq $rows.Count) {
+        $here = @($rows | Where-Object { $_.Present })
+        $away = $rows.Count - $here.Count
+        $done = @($here | Where-Object { $_.Compliant }).Count + $away   # entries that are not on this host count as in place
+        $awayText = $(if ($away -gt 0) { " $away of them $(if ($away -eq 1) { 'is' } else { 'are' }) not on this host (counted as in place)." } else { '' })
+        # green only when at least one entry of the set is on this host and every entry that is, is in place (a set that is all "not on this host" says nothing)
+        if ($here.Count -gt 0 -and $done -eq $rows.Count) {
             $b.Content = "$label  $([char]0x2713) in place"; Set-Brush $b ([System.Windows.Controls.Button]::ForegroundProperty) 'Success'
-            $b.ToolTip = "All $($rows.Count) entries of this set are in place (entries that are not on this host count as in place)."
+            $b.ToolTip = "All $($rows.Count) entries of this set are in place.$awayText"
         }
         else {
             $b.Content = "$label  ($done of $($rows.Count) in place)"
-            $b.ToolTip = "$done of $($rows.Count) entries of this set are in place (entries that are not on this host count as in place)."
+            $b.ToolTip = "$done of $($rows.Count) entries of this set are in place.$awayText"
         }
     }
 }
@@ -193,7 +198,7 @@ function Show-OptList {
             $ui.TxtOptSummary.Text = ''; $ui.BtnOptApply.IsEnabled = $false; $ui.BtnOptUndo.IsEnabled = $false
             return
         }
-        $ui.BtnOptApply.IsEnabled = -not ($script:OptJob -or $script:OptRun); $ui.BtnOptUndo.IsEnabled = -not ($script:OptJob -or $script:OptRun)
+        $ui.BtnOptApply.IsEnabled = -not ($script:OptJob -or $script:OptRun -or $script:OptStale); $ui.BtnOptUndo.IsEnabled = -not ($script:OptJob -or $script:OptRun -or $script:OptStale)
         $pillStyle = @{ Low = @('SuccessBg', 'Success'); Medium = @('WarningBg', 'Warning'); High = @('ErrorBg', 'Danger') }
         foreach ($cat in (Get-AVDTuneOptimizationCategoryOrder)) {
             $rows = @($st.Rows | Where-Object { $_.Category -eq $cat })
@@ -252,14 +257,15 @@ function Update-OptSummary {
 
 function Update-OptView {
     $ui.ChkOptOnlyOpen.IsChecked = $script:OptOnlyOpen
-    if (-not $script:OptStatus -and -not $script:OptJob) { Start-OptRead }   # the page is there at once; the rows follow when the read is done
+    if ((-not $script:OptStatus -or $script:OptStale) -and -not $script:OptJob -and -not $script:OptRun) { Start-OptRead }   # the page is there at once; the rows follow when the read is done
     Show-OptList
 }
 
 function Start-OptChange([string]$Mode) {
     if ($script:OptJob) { throw 'The state of the master is still being read. Wait until it is done.' }
     if ($script:OptRun) { throw 'Another optimization run is still running.' }
-    foreach ($other in 'UpdJob', 'BenchJob', 'SealJob', 'SwJob', 'FslJob', 'OffJob') { if (Get-Variable -Scope Script -Name $other -ValueOnly -ErrorAction SilentlyContinue) { throw 'Another operation is still running. Wait until it is done.' } }
+    if ($script:OptStale) { throw 'The last read of the state failed, so the list may be out of date. Press Refresh state first.' }
+    Assert-NoOtherWriter
     if (-not (Test-AVDTuneWriteAllowed)) { throw 'Read only: confirm a snapshot of today on the Overview first.' }
     $st = $script:OptStatus
     if (-not $st -or -not $st.DataValid) { throw 'The optimization data is not valid; nothing can be applied.' }
@@ -311,6 +317,7 @@ function Start-OptRun([string]$Mode, [string[]]$Ids, [bool]$ConfirmIrr, [string]
         $script:OptRun = @{ PS = $ps; Handle = $ps.BeginInvoke(); Task = $task; Mode = $Mode }
     }
     Set-OptBusy $true
+    Set-ShutdownBlock $true   # log off and shut down wait for the run, like for the other operations
     Show-OptList
 }
 function Complete-OptRun {
@@ -319,20 +326,23 @@ function Complete-OptRun {
     if ($job.Inline) { if ($script:OverviewJob) { return } }
     elseif (-not $job.Handle.IsCompleted) { return }
     $script:OptRun = $null
-    $result = $null; $err = ''
+    $result = $null; $err = ''; $streamErr = ''
     if ($job.Inline) {
         try { $result = Invoke-AVDTuneOptimization -Machine $script:Machine -Root $script:StateRoot -Ids $job.Ids -Mode $job.Mode -ConfirmIrreversible:$job.ConfirmIrr -User $job.User -SnapshotId $job.Gate.SnapshotId } catch { $err = $_.Exception.Message }
     }
     else {
         try {
             $result = @($job.PS.EndInvoke($job.Handle)) | Select-Object -Last 1
-            if ($job.PS.Streams.Error.Count -gt 0) { $err = $job.PS.Streams.Error[0].Exception.Message }
+            if ($job.PS.Streams.Error.Count -gt 0) { $streamErr = $job.PS.Streams.Error[0].Exception.Message }
         }
         catch { $err = $_.Exception.Message }
         finally { $job.PS.Dispose() }
     }
-    if (-not $err -and -not $result) { $err = 'No result.' }
+    # a result that is there is always evaluated (the run may have changed things); an error of the stream is reported in addition (#66)
+    if (-not $result -and -not $err) { $err = $(if ($streamErr) { $streamErr } else { 'No result.' }) }
     Set-OptBusy $false
+    Set-ShutdownBlock $false
+    if ($err -and $result) { $streamErr = $err; $err = '' }
     if ($err) {
         Complete-AVDTuneUiTask $job.Task -Failed -Summary "Optimization $($job.Mode.ToLowerInvariant()) failed: $err"
         Show-Error "Optimization $($job.Mode.ToLowerInvariant()) failed: $err"
@@ -345,6 +355,7 @@ function Complete-OptRun {
         [void](Add-AVDTuneProtocolNote -Protocol $script:Protocol -Group 'optimization' -Subject $text)
         Save-Protocol
         Start-OverviewRefresh
+        if ($streamErr) { Show-Error "The optimization run also reported an error: $streamErr" }
     }
     if ($script:CloseWhenDone -and -not $script:UpdJob -and -not $script:BenchJob -and -not $script:SealJob -and -not $script:SwJob) { if ($err) { $script:CloseWhenDone = $false } else { $window.Close(); return } }
     Start-OptRead   # the state after the run (also after a failed one); Apply stays locked until it is read

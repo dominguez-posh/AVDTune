@@ -152,7 +152,7 @@ Add-Click $ui.BtnEnvPlan {
 }
 Add-Click $ui.BtnEnvApply {
     if (-not $script:EnvPlan) { throw 'Make the plan first.' }
-    if (-not (Test-AVDTuneWriteAllowed)) { throw 'Read only: confirm a snapshot of today on the Overview first.' }
+    if (-not (Test-AVDTuneWriteAllowed)) { throw 'Read only: confirm a snapshot of today on the Overview first.' }; Assert-NoOtherWriter
     $p = $script:EnvPlan
     $lines = @($p.Steps | Where-Object { $_.Action -in 'Create', 'Update' } | ForEach-Object { "$($_.Action): $($_.Title)" }) -join "`n"
     if (-not (Confirm-Action "Create or change exactly these Azure resources?`n`n$lines`n`nPlan $($p.Hash)" 'Environment')) { return }
@@ -176,7 +176,7 @@ Add-Click $ui.BtnEnvUndoPlan {
 }
 Add-Click $ui.BtnEnvUndo {
     if (-not $script:EnvUndoPlan) { throw 'Show what can be taken back first.' }
-    if (-not (Test-AVDTuneWriteAllowed)) { throw 'Read only: confirm a snapshot of today on the Overview first.' }
+    if (-not (Test-AVDTuneWriteAllowed)) { throw 'Read only: confirm a snapshot of today on the Overview first.' }; Assert-NoOtherWriter
     $p = $script:EnvUndoPlan
     $lines = @($p.Steps | Where-Object { $_.Action -in 'Delete', 'Restore' } | ForEach-Object { "$($_.Action): $($_.Id)" }) -join "`n"
     if (-not (Confirm-Action "Take back exactly this?`n`n$lines`n`nPlan $($p.Hash)" 'Environment')) { return }
@@ -199,7 +199,7 @@ Add-Click $ui.BtnEnvMasterTest {
     $ui.TxtEnvMaster.Text = (@($r | ForEach-Object { $_.Results } | ForEach-Object { "$($_.Title): $($_.Status)" })) -join '; '
 }
 Add-Click $ui.BtnEnvMasterApply {
-    if (-not (Test-AVDTuneWriteAllowed)) { throw 'Read only: confirm a snapshot of today on the Overview first.' }
+    if (-not (Test-AVDTuneWriteAllowed)) { throw 'Read only: confirm a snapshot of today on the Overview first.' }; Assert-NoOtherWriter
     $pl = Get-EnvPlanned
     if (-not (Confirm-Action "Write these FSLogix settings to the registry of this master?`n`nEnabled = 1`nVHDLocations = $(Get-AVDTuneEnvVhdLocation $pl.Spec)$(if ($pl.Identity -eq 'EntraKerberos') { '`nCloudKerberosTicketRetrievalEnabled = 1' })" 'Environment')) { return }
     $r = @(Set-AVDTuneEnvMaster -Machine $script:Machine -Spec $pl.Spec -Identity $pl.Identity -Root $script:StateRoot -User (Get-EnvUser) -SnapshotId (Get-EnvGateSnapshot))

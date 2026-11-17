@@ -78,6 +78,7 @@ function New-ReadyTask([string]$Kind, [string]$FixId) {
 function Start-ReadyJob([string]$Kind, [string]$FixId) {
     # Kind: Start | Erstanalyse | Healthcheck | Manual (analysis) or Fix. A request while one runs is queued (the newest one wins).
     # Test mode: the inline run waits while the Overview refresh uses the same fake machine on its own thread (the timer starts it afterwards)
+    if ($Kind -eq 'Fix') { Assert-NoOtherWriter }   # a fix changes the master (#66)
     if ($script:ReadyJob -or ($script:TestMode -and $script:OverviewJob)) { $script:ReadyQueued = @{ Kind = $Kind; FixId = $FixId }; return }
     $tok = Get-ReadyToken
     $gate = Get-AVDTuneWriteGate
@@ -259,7 +260,7 @@ function Update-ReadyView {
     if ($needAck) { $ui.TxtReadyAckHint.Text = "To finish, confirm every yellow and not checkable item by typing its name (separated by spaces or commas): $($open -join ', ')" }
 }
 function Start-ReadyFix([string]$FixId) {
-    if (-not (Test-AVDTuneWriteAllowed)) { throw 'Read only: confirm a snapshot of today on the Overview first.' }
+    if (-not (Test-AVDTuneWriteAllowed)) { throw 'Read only: confirm a snapshot of today on the Overview first.' }; Assert-NoOtherWriter
     $row = @($script:Ready.Rows | Where-Object { $_.FixId -eq $FixId } | Select-Object -First 1)
     $ask = if ($FixId -eq 'readiness.updateblock-on') { 'Switch the update block on?' } else { "$($row[0].Title)?`nIt takes effect after the next restart of the master." }
     if (-not (Confirm-Action $ask 'Fix')) { return }

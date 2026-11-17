@@ -539,6 +539,8 @@ $script:SessionEndingHandler = [System.Windows.SessionEndingCancelEventHandler]{
 
 $window.Add_Closed({
     try { [System.Windows.Application]::Current.remove_SessionEnding($script:SessionEndingHandler) } catch { }   # a handler left on the application keeps the process from ending
+    try { if ($script:OptSessionEnding) { [System.Windows.Application]::Current.remove_SessionEnding($script:OptSessionEnding) } } catch { }
+    try { if ($script:SwSessionEnding) { [System.Windows.Application]::Current.remove_SessionEnding($script:SwSessionEnding) } } catch { }   # the handlers of the pages too: a handler left on the application keeps the process from ending
     $script:Timer.Stop()
     try { $script:SnapTimer.Stop() } catch { }
     try { if ($script:StartContext.Session) { Disconnect-AVDTuneSession $script:StartContext.Session } } catch { }   # tokens leave the memory with the window

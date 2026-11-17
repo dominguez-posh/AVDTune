@@ -133,3 +133,24 @@ function Get-AVDTuneUiTaskBar {
 }
 
 function Get-AVDTuneUiTaskLabel([string]$Status) { switch ($Status) { 'running' { 'Running' } 'succeeded' { 'Done' } default { 'Failed' } } }
+
+# Who may change the master at the same time: nobody. The operations that change it run in the background (their jobs, one script variable each) or inline on the window
+# thread, and state.json, the snapshot gate marker and the machine itself are not made for two writers at once (#66). Every start of such an operation (and every inline writer)
+# calls Assert-NoOtherWriter first. A new job adds the name of its script variable to the list; a job that is read only in some of its kinds names them.
+$script:WriterJobVariables = @('OptRun', 'UpdJob', 'BenchJob', 'SealJob', 'SwJob', 'FslJob', 'OffJob', 'ReadyJob')
+$script:WriterReadOnlyKinds = @{ UpdJob = @('Scan'); SwJob = @('Scan'); ReadyJob = @('Start', 'Erstanalyse', 'Healthcheck', 'Manual') }
+function Get-AVDTuneRunningWriter {
+    # The name of the running job that changes the master, '' when there is none
+    foreach ($name in $script:WriterJobVariables) {
+        $job = Get-Variable -Scope Script -Name $name -ValueOnly -ErrorAction SilentlyContinue
+        if (-not $job) { continue }
+        $kind = $null; try { $kind = [string]$job.Kind } catch { }
+        if ($kind -and $script:WriterReadOnlyKinds.ContainsKey($name) -and $kind -in $script:WriterReadOnlyKinds[$name]) { continue }
+        return $name
+    }
+    ''
+}
+function Assert-NoOtherWriter {
+    $w = Get-AVDTuneRunningWriter
+    if ($w) { throw "Another operation that changes the master is still running ($w). Wait until it is done." }
+}

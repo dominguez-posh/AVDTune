@@ -115,7 +115,7 @@ function Test-WmFormChanged {
     (($r.Settings | ConvertTo-Json -Compress -Depth 5) -ne ($script:WmSaved | ConvertTo-Json -Compress -Depth 5))
 }
 function Start-WatermarkChange([string]$Mode) {
-    if (-not (Test-AVDTuneWriteAllowed)) { throw 'Read only: confirm a snapshot of today on the Overview first.' }
+    if (-not (Test-AVDTuneWriteAllowed)) { throw 'Read only: confirm a snapshot of today on the Overview first.' }; Assert-NoOtherWriter
     $st = Get-AVDTuneWatermarkStatus -Machine $script:Machine -Root $script:StateRoot -SourceRoot $script:WmSourceRoot
     $ask = switch ($Mode) {
         'On' {

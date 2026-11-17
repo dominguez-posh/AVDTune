@@ -205,7 +205,7 @@ function Update-UpdatesView {
     if (-not $ui.TxtUpdKbs.IsKeyboardFocused) { $ui.TxtUpdKbs.Text = ($s.ExcludedKbs -join ', ') }
 }
 function Start-UpdateRun([object[]]$Items) {
-    if (-not (Test-AVDTuneWriteAllowed)) { throw 'Read only: confirm a snapshot of today on the Overview first.' }
+    if (-not (Test-AVDTuneWriteAllowed)) { throw 'Read only: confirm a snapshot of today on the Overview first.' }; Assert-NoOtherWriter
     $list = @($Items | Where-Object { $_.Selectable })
     if ($list.Count -eq 0) { throw 'Nothing is selected.' }
     $block = Get-AVDTuneUpdateBlockStatus $script:Machine
@@ -257,7 +257,7 @@ function Update-UpdateBlockView {
     }
 }
 function Start-BlockChange([string]$Mode) {
-    if (-not (Test-AVDTuneWriteAllowed)) { throw 'Read only: confirm a snapshot of today on the Overview first.' }
+    if (-not (Test-AVDTuneWriteAllowed)) { throw 'Read only: confirm a snapshot of today on the Overview first.' }; Assert-NoOtherWriter
     $ask = if ($Mode -eq 'Off') { 'Switch the update block off? Users can then see and run updates until you switch it on again. Do this only for work on the master.' } else { 'Switch the update block on?' }
     if (-not (Confirm-Action $ask 'Update block')) { return }
     Start-UpdJob "Block-$Mode" $null

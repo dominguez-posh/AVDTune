@@ -639,14 +639,16 @@ try {
                 foreach ($i in $Imports) { Import-Module (Join-Path $Repo $i) -Force }
                 $st = Get-AVDTuneOptimizationStatus -Machine (New-AVDTuneMachine) -Root $State -DataPath $Data   # the read of Start-OptRead, one registry entry, nothing written
                 $cmds = @('Invoke-AVDTuneOptimization', 'Open-AVDTuneWriteGate', 'New-AVDTuneMachine', 'Get-AVDTuneOptimizationStatus' | Where-Object { -not (Get-Command $_ -ErrorAction SilentlyContinue) })   # what the run of Start-OptRun calls
-                [pscustomobject]@{ Status = $st; Missing = @($cmds) }
+                Open-AVDTuneWriteGate -SnapshotId 'check' -ConfirmedBy 'check'   # as the run does; the engine of the Optimization module must see the gate the page opened (one instance of the AVDTune module)
+                $gateSeen = & (Get-Module AVDTune.Optimization) { Test-AVDTuneWriteAllowed }
+                [pscustomobject]@{ Status = $st; Missing = @($cmds); GateSeen = $gateSeen }
             }).AddArgument($repo).AddArgument($pageImports).AddArgument($state).AddArgument($oneReg)
         $res = $rs.Invoke() | Select-Object -Last 1
         $rsErr = @($rs.Streams.Error | ForEach-Object { $_.ToString() }) -join '; '
     }
     catch { $res = $null; $rsErr = $_.Exception.Message }
     finally { $rs.Dispose() }
-    Test-Check 'page runspaces (#66): with exactly the imports of the page the real machine reads a registry entry and the commands of the run are known (no unknown command, no error)' ($res -and $pageImports.Count -ge 2 -and $res.Status.DataValid -and @($res.Status.Rows).Count -eq 1 -and -not $res.Status.Rows[0].Failed -and @($res.Missing).Count -eq 0 -and $rsErr -notmatch 'is not recognized|nicht erkannt' -and -not $rsErr) "imports=$($pageImports -join ","); missing=$(@($res.Missing) -join ","); err=$rsErr; valid=$($res.Status.DataValid) rows=$(@($res.Status.Rows).Count) failed=$(@($res.Status.Rows)[0].Failed) msg=$(@($res.Status.Rows)[0].Message) errs=$($res.Status.DataErrors -join ";")"
+    Test-Check 'page runspaces (#66): with exactly the imports of the page the real machine reads a registry entry and the commands of the run are known (no unknown command, no error)' ($res -and $pageImports.Count -ge 2 -and $res.Status.DataValid -and @($res.Status.Rows).Count -eq 1 -and -not $res.Status.Rows[0].Failed -and @($res.Missing).Count -eq 0 -and $res.GateSeen -eq $true -and $rsErr -notmatch 'is not recognized|nicht erkannt' -and -not $rsErr) "imports=$($pageImports -join ","); missing=$(@($res.Missing) -join ","); err=$rsErr; valid=$($res.Status.DataValid) rows=$(@($res.Status.Rows).Count) failed=$(@($res.Status.Rows)[0].Failed) msg=$(@($res.Status.Rows)[0].Message) errs=$($res.Status.DataErrors -join ";")"
 
     # ---------------------------------------------------------------- the page (built in code, off-screen; the window is never shown; stubs for the helpers of Start-AVDTune.ps1)
     Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase
@@ -669,6 +671,8 @@ try {
     function Save-Protocol { }
     function Start-OverviewRefresh { }
     function Show-Error([string]$Text) { [void]$script:Errors.Add($Text) }
+    $script:ShutBlocks = New-Object System.Collections.ArrayList; function Set-ShutdownBlock([bool]$On) { [void]$script:ShutBlocks.Add($On) }
+    $tasksText = Get-Content -Raw (Join-Path $repo 'AVDTune-Tasks.ps1'); Invoke-Expression $tasksText.Substring($tasksText.IndexOf('$script:WriterJobVariables'))   # Assert-NoOtherWriter, the one function every writer calls (#66)
     $script:Errors = New-Object System.Collections.ArrayList; $script:Tasks = New-Object System.Collections.ArrayList
     function Start-AVDTuneUiTask { param($Kind, $Title, $Step, $Percent, $Retry) $t = @{ Kind = $Kind; Title = $Title; Status = 'running'; Retry = $Retry }; [void]$script:Tasks.Add($t); $t }
     function Complete-AVDTuneUiTask { param($Task, [switch]$Failed, $Summary) $Task.Status = $(if ($Failed) { 'failed' } else { 'succeeded' }); $Task.Summary = $Summary }
@@ -713,7 +717,68 @@ try {
     Test-Check 'presets: while the state is read there is no status' (@('recommended', 'conservative', 'all' | Where-Object { $ui.OptPresets[$_].Content -match 'in place' }).Count -eq 0) $ui.OptPresets['recommended'].Content
     Complete-OptRead
     Test-Check 'presets: after the read the status is back' ($ui.OptPresets['recommended'].Content -match 'in place') $null
-    $script:OptStatus = $keepSt; Show-OptList
+    # ---- review M2: a Defender read error that is not "no Defender here" is a problem row, never "not on this host" or "in place"
+    $script:Machine.Store.MpError = 'policy blocks Get-MpPreference'
+    Start-OptRead; Complete-OptRead
+    $defRows = @($script:OptStatus.Rows | Where-Object { $_.Kind -eq 'DefenderPref' })
+    Test-Check 'defender (#66): another read error than "no Defender" gives a failed row (Present, not in place, with the message), not "not on this host"' ($defRows.Count -gt 0 -and @($defRows | Where-Object { -not $_.Present -or -not $_.Failed -or $_.Compliant -or $_.Message -notlike '*policy blocks*' }).Count -eq 0) "rows=$($defRows.Count)"
+    Test-Check 'defender (#66): with such failed rows the set "everything" is not green' ($ui.OptPresets['all'].Content -notlike "*$([char]0x2713)*") $ui.OptPresets['all'].Content
+    $script:Machine.Store.MpError = $null; $script:Machine.Store.MpAbsent = $true
+    Start-OptRead; Complete-OptRead
+    $defRows = @($script:OptStatus.Rows | Where-Object { $_.Kind -eq 'DefenderPref' })
+    Test-Check 'defender (#66): "no Defender on this host" (command or WMI namespace missing) is not present and not a failure' ($defRows.Count -gt 0 -and @($defRows | Where-Object { $_.Present -or $_.Failed }).Count -eq 0) "rows=$($defRows.Count)"
+    $script:Machine.Store.MpAbsent = $false
+    Test-Check 'defender (#66): the check for "no Defender" accepts the missing cmdlet and nothing else' ((Test-OptDefenderAbsent (& { try { & 'Get-MpPreference-does-not-exist' } catch { $_ } })) -and -not (Test-OptDefenderAbsent (& { try { throw 'access denied' } catch { $_ } }))) $null
+    $script:OptStatus = & $mk { param($rs) foreach ($r in $rs) { $r.Present = $false; $r.Compliant = $false } }
+    Show-OptList
+    Test-Check 'presets (#66): a set whose entries are all not on this host is not green, the tooltip says so' (@('recommended', 'conservative', 'all' | Where-Object { $ui.OptPresets[$_].Content -like "*$([char]0x2713)*" }).Count -eq 0 -and $ui.OptPresets['all'].ToolTip -like '*not on this host*') $ui.OptPresets['all'].Content
+    $script:OptStatus = & $mk { param($rs) $v = @($rs | Where-Object Id -eq $naId)[0]; $v.Present = $false; $v.Compliant = $false }
+    Show-OptList
+    Test-Check 'presets (#66): the tooltip counts the entries that are not on this host' ($ui.OptPresets['all'].ToolTip -like '*1 of them is not on this host*') $ui.OptPresets['all'].ToolTip
+    # ---- review N1: after a failed read the list is marked old; nothing can be applied from it until a read succeeds
+    $script:OptStatus = & $mk { param($rs) }
+    $script:OptStale = $false; Show-OptList
+    $keepM = $script:Machine; $script:Machine = $null
+    Start-OptRead; Complete-OptRead
+    Test-Check 'stale (#66): after a failed read the old list stays but Apply, Undo and the preset status are locked, Apply throws and the page says so' ($script:OptStale -and $script:OptStatus -and -not $ui.BtnOptApply.IsEnabled -and -not $ui.BtnOptUndo.IsEnabled -and $ui.BtnOptRefresh.IsEnabled -and @('recommended', 'conservative', 'all' | Where-Object { $ui.OptPresets[$_].Content -match 'in place' }).Count -eq 0 -and (Test-Throws { Start-OptChange 'Apply' }) -and $ui.TxtOptSummary.Text -like '*earlier state*') $ui.TxtOptSummary.Text
+    $script:Machine = $keepM
+    Start-OptRead; Complete-OptRead
+    Test-Check 'stale (#66): the next successful read opens everything again' (-not $script:OptStale -and $ui.BtnOptApply.IsEnabled -and $ui.OptPresets['recommended'].Content -match 'in place') $null
+    # ---- review M1: one writer at a time
+    $script:OptRun = @{ Mode = 'Apply' }
+    $seen = ((Get-AVDTuneRunningWriter) -eq 'OptRun') -and (Test-Throws { Assert-NoOtherWriter }) -and (Test-Throws { Start-OptChange 'Apply' })
+    $script:OptRun = $null
+    Test-Check 'writers (#66): a running optimization run is seen by the central check and Start-OptChange refuses' $seen $null
+    foreach ($w in 'UpdJob', 'BenchJob', 'SealJob', 'SwJob', 'FslJob', 'OffJob') {
+        Set-Variable -Scope Script -Name $w -Value @{ Kind = 'Run' }
+        $blocked = (Test-Throws { Assert-NoOtherWriter }) -and (Test-Throws { Start-OptChange 'Apply' })
+        Remove-Variable -Scope Script -Name $w
+        Test-Check "writers (#66): a running $w stops Apply and Undo of the optimization" $blocked $null
+    }
+    $script:ReadyJob = @{ Kind = 'Fix' }; $fixBlocks = Test-Throws { Assert-NoOtherWriter }; $script:ReadyJob = @{ Kind = 'Manual' }; $anaFree = -not (Test-Throws { Assert-NoOtherWriter }); $script:ReadyJob = $null
+    $script:UpdJob = @{ Kind = 'Scan' }; $scanFree = -not (Test-Throws { Assert-NoOtherWriter }); $script:UpdJob = $null
+    Test-Check 'writers (#66): a readiness fix counts as a writer, the readiness analysis and an update search do not' ($fixBlocks -and $anaFree -and $scanFree) $null
+    # ---- review N2/N3: shutdown block while the run goes; a result that is there is evaluated even when the stream also has an error
+    $script:ShutBlocks.Clear()
+    $keepM2 = $script:Machine; $keepChecked = $script:OptChecked.Clone()   # the run below changes a machine of its own, not the one of the page tests that follow
+    $script:Machine = New-AVDTuneFakeMachine -Seed @{ Now = [datetime]'2026-11-15T12:00:00' }; [void](Add-AVDTuneOptimizationFakeMembers $script:Machine -Appx @() -Defender @{})
+    $script:Asked.Clear(); $script:Answers.Enqueue($true); $script:Answers.Enqueue($true)
+    Open-AVDTuneWriteGate -SnapshotId 'snap-1' -ConfirmedBy 'admin1'
+    Set-OptPreset 'conservative'
+    Start-OptChange 'Apply'
+    $blockOn = ($script:ShutBlocks.Count -eq 1 -and $script:ShutBlocks[0] -eq $true)
+    Complete-OptRun
+    Test-Check 'run (#66): log off and shut down are held back while the run goes and released at its end' ($blockOn -and $script:ShutBlocks.Count -eq 2 -and $script:ShutBlocks[1] -eq $false) ($script:ShutBlocks -join ',')
+    Complete-OptRead
+    Close-AVDTuneWriteGate
+    $script:Machine = $keepM2; $script:OptChecked = $keepChecked; $script:Asked.Clear(); $script:Answers.Clear()
+    $rsN = [powershell]::Create(); [void]$rsN.AddScript({ $ErrorActionPreference = 'Continue'; Write-Error 'late problem'; [pscustomobject]@{ Results = @(); Changed = 2; Failed = 0; Skipped = 0; Reboot = $false } })
+    $tN = Start-AVDTuneUiTask -Kind 'optimization' -Title 'x' -Step 'y'
+    $script:Errors.Clear(); $hN = $rsN.BeginInvoke(); while (-not $hN.IsCompleted) { Start-Sleep -Milliseconds 20 }
+    $script:OptRun = @{ PS = $rsN; Handle = $hN; Task = $tN; Mode = 'Apply' }
+    Complete-OptRun; Complete-OptRead
+    Test-Check 'run (#66): a result that is there is evaluated (task succeeded, 2 changes) and the error of the stream is reported in addition' ($tN.Status -eq 'succeeded' -and $tN.Summary -like '*2 change*' -and @($script:Errors | Where-Object { $_ -like '*also reported*late problem*' }).Count -eq 1) "$($tN.Status) $($tN.Summary) errors=$($script:Errors -join '|')"
+    $script:OptStatus = $keepSt; $script:OptStale = $false; Show-OptList
     $rowsShown = @($ui.PanelOptList.Children | Where-Object { $_ -is [System.Windows.Controls.Grid] })
     Test-Check 'page: the list shows a row per entry with a checkbox, reason, source and state' ($rowsShown.Count -eq $entries.Count -and ($rowsShown[0].Children[0] -is [System.Windows.Controls.CheckBox]) -and ($rowsShown[0].Children[1].Children.Count -ge 3)) "$($rowsShown.Count) rows"
     $selectedBefore = @(Get-OptSelectedRows)
@@ -744,7 +809,7 @@ try {
     Test-Check 'run: the click returns at once with a running task and without a change; Apply, Undo and a second run are locked' ($script:OptRun -and $script:Tasks[-1].Kind -eq 'optimization' -and $script:Tasks[-1].Status -eq 'running' -and -not $script:Tasks[-1].Retry -and $script:Machine.Store.Appx.ContainsKey('microsoft.bingnews') -and -not $ui.BtnOptApply.IsEnabled -and -not $ui.BtnOptUndo.IsEnabled -and (Test-Throws { Start-OptChange 'Apply' }) -and (Test-Throws { Start-OptRead }) -eq $false -and $script:OptJob -eq $null) $null
     $script:CloseWhenDone = $false
     Complete-OptRun
-    Test-Check 'run: the task ends as succeeded with the summary' (@($script:Tasks | Where-Object { $_.Kind -eq 'optimization' -and $_.Status -eq 'succeeded' -and $_.Summary -like 'Optimization apply*' }).Count -eq 1) $null
+    Test-Check 'run: the task ends as succeeded with the summary' (@($script:Tasks | Where-Object { $_.Kind -eq 'optimization' })[-1].Status -eq 'succeeded' -and @($script:Tasks | Where-Object { $_.Kind -eq 'optimization' })[-1].Summary -like 'Optimization apply*') $null
     Test-Check 'page: after both confirmations the entries are applied, the AppX is gone and the toast reports it' (-not $script:Machine.Store.Appx.ContainsKey('microsoft.bingnews') -and (& $script:Machine.ServiceGet 'MapsBroker').StartType -eq 'Disabled' -and $script:Toasts[-1] -like 'Optimization apply: *change(s)*') $script:Toasts[-1]
     Test-Check 'page load: after Apply the state is read again in the background and Apply stays locked until it is done' ($script:OptJob -and -not $ui.BtnOptApply.IsEnabled) $null
     Complete-OptRead

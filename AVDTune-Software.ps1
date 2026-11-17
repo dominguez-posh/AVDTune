@@ -305,7 +305,7 @@ function Update-SoftwareView {
 
 # ---------------------------------------------------------------- actions
 function Start-SwRun([object[]]$Items, [string]$Question) {
-    if (-not (Test-AVDTuneWriteAllowed)) { throw 'Read only: confirm a snapshot of today on the Overview first.' }
+    if (-not (Test-AVDTuneWriteAllowed)) { throw 'Read only: confirm a snapshot of today on the Overview first.' }; Assert-NoOtherWriter
     $list = @($Items | Where-Object { $_ })
     if ($list.Count -eq 0) { throw 'Nothing to do.' }
     if (-not $Question) { $Question = "Run $($list.Count) software change(s) on this master?" }
