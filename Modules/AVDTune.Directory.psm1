@@ -218,6 +218,14 @@ function Get-AVDTuneDirectoryInfo {
         }
         catch { [void]$warnings.Add("NetBIOS name not read: $($_.Exception.Message)") }
     }
+    # The SID of the domain itself (objectSid of the domain object), read, never guessed. Only the strict form S-1-5-21-x-y-z is kept.
+    $domainSid = ''
+    try {
+        $dom = @(& $Ldap.Search $Connection $defaultNc '(objectClass=*)' 'Base' @('objectSid'))
+        if ($dom.Count -gt 0) { $cand = ConvertTo-AVDTuneSid (Get-AVDTuneAttr $dom[0] 'objectSid'); if ($cand -match '\AS-1-5-21-[0-9]{1,10}-[0-9]{1,10}-[0-9]{1,10}\z') { $domainSid = $cand } else { [void]$warnings.Add('The domain SID has an unexpected format and is not used.') } }
+        else { [void]$warnings.Add('The domain SID was not returned.') }
+    }
+    catch { [void]$warnings.Add("Domain SID not read: $($_.Exception.Message)") }
     $ous = @()
     try {
         $ous = @(& $Ldap.Search $Connection $defaultNc '(objectClass=organizationalUnit)' 'Subtree' @('name', 'distinguishedName') | ForEach-Object {
@@ -240,7 +248,7 @@ function Get-AVDTuneDirectoryInfo {
     $dl = Get-AVDTuneAttr $r 'domainFunctionality'; $fl = Get-AVDTuneAttr $r 'forestFunctionality'; $cl = Get-AVDTuneAttr $r 'domainControllerFunctionality'
     [pscustomobject]@{
         DnsName = (Get-AVDTuneDnFromNc $defaultNc); NetBiosName = $netbios; DcDnsName = [string](Get-AVDTuneAttr $r 'dnsHostName'); Site = $site
-        DefaultNamingContext = $defaultNc; RootDomainNamingContext = [string](Get-AVDTuneAttr $r 'rootDomainNamingContext'); ConfigurationNamingContext = $configNc
+        DefaultNamingContext = $defaultNc; DomainSid = $domainSid; RootDomainNamingContext = [string](Get-AVDTuneAttr $r 'rootDomainNamingContext'); ConfigurationNamingContext = $configNc
         SchemaNamingContext = [string](Get-AVDTuneAttr $r 'schemaNamingContext')
         DomainLevel = (Get-AVDTuneLevelName $dl); ForestLevel = (Get-AVDTuneLevelName $fl); DcLevel = (Get-AVDTuneLevelName $cl)
         OuCount = $ous.Count; OuTree = @(Get-AVDTuneOuTree $ous); Groups = @($groups | Sort-Object Name); Warnings = @($warnings)

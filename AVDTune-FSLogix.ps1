@@ -17,6 +17,9 @@ $script:FslTest = $null
 $script:FslStorage = $null
 $script:FslTemplateBoxes = @{}
 $script:FslLatest = $null
+$script:FslStopping = @()   # lookups that BeginStop was called for, disposed when they have stopped
+$script:FslLatestLookup = $null   # the running read-only lookup of the newest release (issue 63)
+$script:FslLatestResult = $null   # @{ Result (Get-AVDTuneFSLogixLatest); At }: cached, 60 minutes when it worked, 5 minutes when it did not
 $script:FslSharedGate = $null
 
 function Get-FslAdapter { if ($script:TestMode) { $script:FslFake.F } else { if (-not $script:RealFsl) { $script:RealFsl = New-AVDTuneFSLogixAdapter }; $script:RealFsl } }
@@ -59,16 +62,74 @@ function New-FslResultRow($Row) {
 }
 
 # ---------------------------------------------------------------- the form: installation
+function Start-FslLatestLookup {
+    # Reads the newest release (HEAD on the Microsoft link, no download, 15 s limit) with the same function as the Updates page, in the background; cached.
+    if ($script:FslLatestLookup) { return }
+    $r = $script:FslLatestResult
+    if ($r -and ((Get-Date) - $r.At).TotalMinutes -lt $(if ($r.Result.Ok) { 60 } else { 5 })) { return }
+    if ($script:TestMode) { $script:FslLatestResult = @{ Result = (Get-AVDTuneFSLogixLatest -F $script:FslFake.F); At = (Get-Date) }; return }
+    $ps = [powershell]::Create()
+    [void]$ps.AddScript({
+            param($AppRoot)
+            $ErrorActionPreference = 'Stop'
+            Import-Module (Join-Path $AppRoot 'Modules\AVDTune.psm1') -Force
+            Import-Module (Join-Path $AppRoot 'Modules\AVDTune.FSLogix.psm1') -Force
+            Get-AVDTuneFSLogixLatest -F (New-AVDTuneFSLogixAdapter)
+        }).AddArgument($script:AppRoot)
+    $script:FslLatestLookup = @{ PS = $ps; Handle = $ps.BeginInvoke(); Started = (Get-Date) }
+}
+function Stop-FslLookupAsync($Job) {
+    # never Stop() on the window thread (it waits for the runspace): BeginStop, and the tick that follows disposes it when it has stopped (the UI never blocks)
+    try { $script:FslStopping += @(@{ PS = $Job.PS; Handle = $Job.PS.BeginStop($null, $null) }) } catch { try { $Job.PS.Dispose() } catch { } }
+}
+function Clear-FslStopped {
+    $keep = @()
+    foreach ($j in @($script:FslStopping)) {
+        if (-not $j) { continue }
+        if ($j.Handle.IsCompleted) { try { $j.PS.EndStop($j.Handle) } catch { }; try { $j.PS.Dispose() } catch { } } else { $keep += $j }
+    }
+    $script:FslStopping = @($keep)
+}
+function Close-FslLatestLookup {
+    # the window is closing: a lookup that still runs is stopped without waiting (the process ends right after); its runspace is discarded
+    $job = $script:FslLatestLookup; $script:FslLatestLookup = $null
+    if ($job) { try { [void]$job.PS.BeginStop($null, $null) } catch { } }
+    foreach ($j in @($script:FslStopping)) { if ($j) { try { $j.PS.Dispose() } catch { } } }
+    $script:FslStopping = @()
+}
+function Complete-FslLatestLookup {
+    Clear-FslStopped
+    $job = $script:FslLatestLookup
+    if (-not $job) { return }
+    $late = ((Get-Date) - $job.Started).TotalSeconds -gt 45
+    if (-not $job.Handle.IsCompleted -and -not $late) { return }
+    $script:FslLatestLookup = $null
+    $res = $null
+    if ($job.Handle.IsCompleted) {
+        try { $res = @($job.PS.EndInvoke($job.Handle)) | Select-Object -Last 1; if ($job.PS.Streams.Error.Count -gt 0) { $res = [pscustomobject]@{ Ok = $false; Error = $job.PS.Streams.Error[0].Exception.Message } } }
+        catch { $res = [pscustomobject]@{ Ok = $false; Error = $_.Exception.Message } }
+        finally { $job.PS.Dispose() }
+    }
+    else { Stop-FslLookupAsync $job; $res = [pscustomobject]@{ Ok = $false; Error = 'The lookup took longer than 45 seconds.' } }
+    if (-not $res) { $res = [pscustomobject]@{ Ok = $false; Error = 'The lookup returned nothing.' } }
+    $script:FslLatestResult = @{ Result = $res; At = (Get-Date) }
+    if ($script:CurrentPage -eq 'FSLogix') { Update-FslInstall }
+}
 function Update-FslInstall {
     $info = Get-AVDTuneFSLogixInfo -Machine $script:Machine
+    $vs = $null
     if ($info.Installed) {
-        Set-FslPill $ui.PillFslInstall $ui.TxtFslInstallPill 'green'; $ui.TxtFslInstallPill.Text = 'Installed'
+        Start-FslLatestLookup
+        $vs = Get-AVDTuneFSLogixVersionState -Installed $info.Version -Latest $(if ($script:FslLatestResult) { $script:FslLatestResult.Result })
+        if ($script:FslLatestLookup -and -not $script:FslLatestResult) { Set-FslPill $ui.PillFslInstall $ui.TxtFslInstallPill 'info'; $ui.TxtFslInstallPill.Text = 'Installed, checking for updates ...' }
+        else { Set-FslPill $ui.PillFslInstall $ui.TxtFslInstallPill $vs.Pill; $ui.TxtFslInstallPill.Text = $vs.Text }
+        $ui.PillFslInstall.ToolTip = $(if ($vs.Reason) { $vs.Reason } else { $null })
         $svc = if ($info.Frxsvc.Present) { "frxsvc $($info.Frxsvc.Status)" } else { 'frxsvc missing' }
         $drv = if (-not $info.DriversRead) { 'drivers not read' } elseif ($info.Drivers.Count -gt 0) { "drivers: $($info.Drivers -join ', ')" } else { 'no filter driver loaded' }
         $ui.TxtFslVersion.Text = "FSLogix $($info.Version); $svc; $drv"
     }
     else { Set-FslPill $ui.PillFslInstall $ui.TxtFslInstallPill 'red'; $ui.TxtFslInstallPill.Text = 'Not installed'; $ui.TxtFslVersion.Text = 'FSLogix is not installed on this master.' }
-    $ui.TxtFslLatest.Text = $(if ($script:FslLatest) { $script:FslLatest } else { 'The newest release is looked up when you press Install or update (Microsoft download page; the file is checked for the Microsoft signature before it runs, in a folder only administrators can write to).' })
+    $ui.TxtFslLatest.Text = $(if ($vs -and $vs.State -in 'Update', 'Unknown' -and $vs.Reason -and -not $script:FslLatest) { $vs.Reason } elseif ($script:FslLatest) { $script:FslLatest } else { 'The newest release is looked up when you press Install or update (Microsoft download page; the file is checked for the Microsoft signature before it runs, in a folder only administrators can write to).' })
 }
 
 # ---------------------------------------------------------------- the form: settings
@@ -151,9 +212,15 @@ Add-Click $ui.BtnFslSettingsApply {
     Assert-FslWrite
     $vals = Get-FslFormValues
     if ($vals.Count -eq 0) { throw 'Nothing to change: every filled value equals the current one.' }
-    if (-not (Confirm-Action "Write $($vals.Count) FSLogix setting(s) to the registry of this master?" 'FSLogix settings')) { return }
+    # the same Apply also sets the recommended lists: what it would change there is worked out first and named in this one confirmation (nothing is said when the lists stay as they are)
+    $listPlan = Get-AVDTuneFSLogixListPlan -F (Get-FslAdapter) -Root $script:StateRoot -Answers (Get-FslAnswers)
+    $listText = Format-AVDTuneFSLogixListChanges $listPlan
+    $askText = "Write $($vals.Count) FSLogix setting(s) to the registry of this master?$(if ($listText) { " Also: $listText.$(if ($listPlan.Notice) { ' ' + $listPlan.Notice })" })"
+    if (-not (Confirm-Action $askText 'FSLogix settings')) { return }
     $run = Invoke-FslChange -Kind 'fslogix-settings' -Title 'Applying FSLogix settings' -Step "Writing $($vals.Count) setting(s) to the registry" -Block { Set-AVDTuneFSLogixSettings -Machine $script:Machine -Root $script:StateRoot -Values $vals -User (Get-FslUser) -SnapshotId (Get-FslGateSnapshot) }
-    Show-FslRun $run 'FSLogix settings'; Update-FslView
+    Show-FslRun $run 'FSLogix settings'
+    if (@($run.Results | Where-Object { $_.Status -eq 'Failed' }).Count -eq 0) { Invoke-FslRecommendedLists -Confirmed }
+    Update-FslView
 }
 Add-Click $ui.BtnFslSettingsUndo {
     Assert-FslWrite
@@ -177,6 +244,9 @@ function Update-FslGroups {
     $ui.TxtFslGroups.Text = "Include list ($($g.IncludeName)):`r`n  $(& $fmt $g.Include)`r`nExclude list ($($g.ExcludeName)):`r`n  $(& $fmt $g.Exclude)"
     $ch = Get-FslGroupChoices
     foreach ($cmb in $ui.CmbFslGroup, $ui.CmbFslUsersGroup, $ui.CmbFslAdminsGroup) { $keepText = $cmb.Text; $cmb.ItemsSource = @($ch.Groups | ForEach-Object { $_.Name }); $cmb.Text = $keepText }
+    $plan = Get-AVDTuneFSLogixListPlan -F (Get-FslAdapter) -Root $script:StateRoot -Answers (Get-FslAnswers)
+    $want = @(foreach ($l in 'Include', 'Exclude') { $x = @($plan.Entries | Where-Object { $_.List -eq $l }); if ($x.Count -gt 0) { "$($l.ToLowerInvariant()) $((@($x | ForEach-Object { $_.Label })) -join ', ')" } }) -join '; '
+    $ui.TxtFslListsNotice.Text = "Recommended: $want.$(if ($plan.Notice) { ' ' + $plan.Notice })"
     $ui.TxtFslGroupHint.Text = $(if ($ch.Source -eq 'Directory') { "$(@($ch.Groups).Count) groups from the domain controller. Pick one or type a SID." } else { $ch.Hint })
 }
 function Invoke-FslGroupChange([string]$Action, [string]$Text) {
@@ -187,6 +257,30 @@ function Invoke-FslGroupChange([string]$Action, [string]$Text) {
     if (-not (Confirm-Action "$Action $sid in the FSLogix $list list?" 'FSLogix lists')) { return }
     $run = Set-AVDTuneFSLogixGroupMember -Machine $script:Machine -F (Get-FslAdapter) -Root $script:StateRoot -List $list -Action $Action -Sid $sid -User (Get-FslUser) -SnapshotId (Get-FslGateSnapshot)
     Show-FslRun $run "FSLogix $list list"; Update-FslGroups
+}
+function Invoke-FslRecommendedLists([switch]$Confirmed) {
+    # Include = Everyone (only while the list is empty), Exclude = local Administrators (+ Domain Admins of a domain SID that was checked); the settings Apply asks for this in its own
+    # confirmation and calls this with -Confirmed. Nothing to change = nothing asked, nothing written.
+    $plan = Get-AVDTuneFSLogixListPlan -F (Get-FslAdapter) -Root $script:StateRoot -Answers (Get-FslAnswers)
+    $text = Format-AVDTuneFSLogixListChanges $plan
+    if (-not $Confirmed) {
+        if (-not $text) { $ui.TxtFslState.Text = "The recommended lists are already set.$(if ($plan.Notice) { ' ' + $plan.Notice })"; Show-Toast $ui.TxtFslState.Text; return }
+        if (-not (Confirm-Action "Set the recommended lists? $text.$(if ($plan.Notice) { ' ' + $plan.Notice })" 'FSLogix lists')) { return }
+    }
+    elseif (-not $text) { return }
+    $run = Invoke-FslChange -Kind 'fslogix-lists' -Title 'Applying the recommended FSLogix lists' -Step 'Setting the include and exclude lists' -Block { Set-AVDTuneFSLogixRecommendedLists -Machine $script:Machine -F (Get-FslAdapter) -Root $script:StateRoot -Answers (Get-FslAnswers) -User (Get-FslUser) -SnapshotId (Get-FslGateSnapshot) }
+    Show-FslRun $run 'FSLogix lists'
+    if ($run.Notice) { $ui.TxtFslState.Text = "$($ui.TxtFslState.Text) $($run.Notice)" }
+    Update-FslGroups
+}
+Add-Click $ui.BtnFslListsApply { Assert-FslWrite; Invoke-FslRecommendedLists }
+Add-Click $ui.BtnFslListsUndo {
+    Assert-FslWrite
+    if (-not (Confirm-Action 'Remove the members that the last Apply recommended lists added? Entries that were there before stay.' 'Undo')) { return }
+    $run = Invoke-FslChange -Kind 'fslogix-lists' -Title 'Undo of the recommended FSLogix lists' -Step 'Removing the members that were added' -Block { Undo-AVDTuneFSLogixRecommendedLists -Machine $script:Machine -F (Get-FslAdapter) -Root $script:StateRoot -User (Get-FslUser) -SnapshotId (Get-FslGateSnapshot) }
+    Show-FslRun $run 'Undo of the FSLogix lists'
+    if ($run.Notice) { $ui.TxtFslState.Text = "$($ui.TxtFslState.Text) $($run.Notice)"; Show-Toast $ui.TxtFslState.Text }
+    Update-FslGroups
 }
 $ui.CmbFslList.ItemsSource = @('Exclude', 'Include'); $ui.CmbFslList.SelectedIndex = 0
 Add-Click $ui.BtnFslGroupAdd { Invoke-FslGroupChange 'Add' ([string]$ui.CmbFslGroup.Text) }
@@ -206,7 +300,8 @@ function Build-FslTemplate {
     }
 }
 function Update-FslRedirections {
-    if (-not $ui.TxtFslRedirFolder.IsKeyboardFocused) { $cur = [string](& $script:Machine.RegGet 'HKLM:\SOFTWARE\FSLogix\Profiles' 'RedirXMLSourceFolder'); if ($cur -and -not $ui.TxtFslRedirFolder.Text) { $ui.TxtFslRedirFolder.Text = $cur } }
+    # prefilled: the folder set in the registry, otherwise <ProgramData>\AVDTune-Public\FSLogix\Redirections; only the groups are left to pick (the folder is created protected on save)
+    if (-not $ui.TxtFslRedirFolder.IsKeyboardFocused -and -not $ui.TxtFslRedirFolder.Text) { $ui.TxtFslRedirFolder.Text = Get-AVDTuneRedirectionsDefaultFolder $script:Machine }
     if (-not $ui.TxtFslRedirXml.Text) {
         $target = Get-AVDTuneRedirectionsTarget $script:Machine
         if ($target) { $text = & (Get-FslAdapter).ReadText $target; if ($null -ne $text) { $ui.TxtFslRedirXml.Text = $text; $ui.TxtFslRedirState.Text = "Read from $target." } }
@@ -461,6 +556,7 @@ function Complete-FslJob {
     Update-FslView
 }
 $script:Timer.Add_Tick({ try { Complete-FslJob } catch { Show-Error $_.Exception.Message } })
+$script:Timer.Add_Tick({ try { Complete-FslLatestLookup } catch { } })
 
 Add-Click $ui.BtnFslTest { Start-FslJob 'Test' @{ Write = $false }; $ui.TxtFslState.Text = 'Running the function test ...' }
 Add-Click $ui.BtnFslTestWrite {

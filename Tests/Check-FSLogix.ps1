@@ -107,6 +107,130 @@ try {
     $ch1 = Get-AVDTuneFSLogixGroupChoices -Root $tmp -Answers ([pscustomobject]@{ DomainController = 'OnPremises' })
     Test-Check 'group choices with the domain information: the groups with SIDs' ($ch1.Source -eq 'Directory' -and $ch1.Groups[0].Sid -eq $sddlUsers) $null
 
+    # ---------------------------------------------------------------- recommended lists (issue 62)
+    $dom = 'S-1-5-21-1111111111-2222222222-333333333'
+    Test-Check 'SID validation is anchored (\A...\z): a trailing newline or a prefix is no SID; the domain SID is strict S-1-5-21-x-y-z' (-not (Test-AVDTuneSid "S-1-1-0`n") -and -not (Test-AVDTuneSid "x S-1-1-0") -and (Test-AVDTuneSid 'S-1-1-0') -and (Test-AVDTuneDomainSid $dom) -and -not (Test-AVDTuneDomainSid "$dom`n") -and -not (Test-AVDTuneDomainSid 'S-1-5-21-1-2') -and -not (Test-AVDTuneDomainSid 'S-1-5-32-544') -and -not (Test-AVDTuneDomainSid "$dom-512") -and -not (Test-AVDTuneDomainSid 'S-1-5-21-a-b-c')) $null
+    $dirFile = Join-Path $tmp 'config\directory.json'; $dirKeep = Get-Content -LiteralPath $dirFile -Raw
+    $setDir = { param($info) if ($null -eq $info) { Remove-Item -LiteralPath $dirFile -Force -ErrorAction SilentlyContinue } else { Write-AVDTuneFile $dirFile (([ordered]@{ ReadAt = '2026-11-17'; Directory = $info }) | ConvertTo-Json -Depth 6) } }
+    $ansDom = [pscustomobject]@{ DomainController = 'OnPremises' }; $ansEntra = [pscustomobject]@{ DomainController = 'None' }
+    & $setDir @{ DomainSid = $dom; Groups = @() }
+    $rDom = Get-AVDTuneFSLogixRecommendedLists -Root $tmp -Answers $ansDom
+    Test-Check 'with a domain: include Everyone, exclude local Administrators and Domain Admins (domain SID from the DC information + -512), no notice' ((@($rDom.Include) -join ',') -eq 'S-1-1-0' -and (@($rDom.Exclude) -join ',') -eq "S-1-5-32-544,$dom-512" -and $rDom.Notice -eq '') (@($rDom.Exclude) -join ',')
+    $rEntra = Get-AVDTuneFSLogixRecommendedLists -Root $tmp -Answers $ansEntra
+    Test-Check 'without a domain (Entra only): only the local administrators, with a visible notice, even when an old directory.json is there' ((@($rEntra.Exclude) -join ',') -eq 'S-1-5-32-544' -and $rEntra.Notice -like '*Entra*') $rEntra.Notice
+    & $setDir $null
+    $rNoSid = Get-AVDTuneFSLogixRecommendedLists -Root $tmp -Answers $ansDom
+    Test-Check 'domain SID missing: only the local administrators, notice says the SID is not known and not guessed' ((@($rNoSid.Exclude) -join ',') -eq 'S-1-5-32-544' -and $rNoSid.Notice -like '*not known*guess*') $rNoSid.Notice
+    & $setDir @{ DomainSid = "$dom-1104"; Groups = @(@{ Name = 'Domain Admins'; Sid = "$dom-512" }) }
+    $rBad = Get-AVDTuneFSLogixRecommendedLists -Root $tmp -Answers $ansDom
+    Test-Check 'a malformed domain SID in the file is not used, and a Domain Admins group SID in the groups is not taken instead (no guessing)' ((@($rBad.Exclude) -join ',') -eq 'S-1-5-32-544' -and $rBad.Notice -like '*not known*') $rBad.Notice
+
+    & $setDir @{ DomainSid = $dom; Groups = @() }
+    $fl = New-AVDTuneFakeFSLogix -Seed @{ Groups = @{ 'FSLogix Profile Include List' = @('S-1-1-0'); 'FSLogix Profile Exclude List' = @('S-1-5-21-9-9-9-1234') } }
+    $wi = Set-AVDTuneFSLogixRecommendedLists -Machine $m -F $fl -Root $tmp -Answers $ansDom -WhatIf
+    Test-Check 'Test (WhatIf) changes nothing and writes no undo entry' (@($fl.Store.Groups['FSLogix Profile Exclude List']).Count -eq 1 -and -not (Test-Path -LiteralPath (Get-AVDTuneFSLogixListsUndoPath $tmp))) $null
+    $ap = Set-AVDTuneFSLogixRecommendedLists -Machine $m -F $fl -Root $tmp -Answers $ansDom -User 'admin1' -SnapshotId 'snap-check'
+    $ex = @($fl.Store.Groups['FSLogix Profile Exclude List']); $inc = @($fl.Store.Groups['FSLogix Profile Include List'])
+    Test-Check 'Apply: Everyone stays in include (unchanged), local Administrators and Domain Admins added by SID, the foreign entry stays' (@($ap.Results | Where-Object Status -eq 'Changed').Count -eq 2 -and @($ap.Results | Where-Object Status -eq 'Unchanged').Count -eq 1 -and $ex -contains 'S-1-5-32-544' -and $ex -contains "$dom-512" -and $ex -contains 'S-1-5-21-9-9-9-1234' -and $inc.Count -eq 1 -and $inc[0] -eq 'S-1-1-0') ($ex -join ',')
+    Test-Check 'Apply goes through the gate: change log entries, and the log only names SIDs' (@(Get-AVDTuneChangeLog -Root $tmp | Where-Object Category -eq 'FSLogix').Count -ge 2) $null
+    $ap2 = Set-AVDTuneFSLogixRecommendedLists -Machine $m -F $fl -Root $tmp -Answers $ansDom -User 'admin1' -SnapshotId 'snap-check'
+    Test-Check 'Apply again: everything unchanged, the undo stack has no second entry' (@($ap2.Results | Where-Object Status -eq 'Changed').Count -eq 0 -and @((Read-AVDTuneJson (Get-AVDTuneFSLogixListsUndoPath $tmp)).Entries).Count -eq 1) $null
+    $un = Undo-AVDTuneFSLogixRecommendedLists -Machine $m -F $fl -Root $tmp -User 'admin1' -SnapshotId 'snap-check'
+    $ex2 = @($fl.Store.Groups['FSLogix Profile Exclude List'])
+    Test-Check 'Undo: exactly what Apply added is gone, the foreign entry and Everyone stay, the undo file is gone' ($ex2.Count -eq 1 -and $ex2[0] -eq 'S-1-5-21-9-9-9-1234' -and @($fl.Store.Groups['FSLogix Profile Include List']) -contains 'S-1-1-0' -and -not (Test-Path -LiteralPath (Get-AVDTuneFSLogixListsUndoPath $tmp))) ($ex2 -join ',')
+    Test-Check 'Undo without an earlier Apply is refused with the reason' ((Get-ThrownText { Undo-AVDTuneFSLogixRecommendedLists -Machine $m -F $fl -Root $tmp -User 'admin1' -SnapshotId 'snap-check' }) -like '*nothing to undo*') $null
+    $fe = New-AVDTuneFakeFSLogix
+    $null = Set-AVDTuneFSLogixRecommendedLists -Machine $m -F $fe -Root $tmp -Answers $ansEntra -User a -SnapshotId 'snap-check'
+    $null = Set-AVDTuneFSLogixGroupMember -Machine $m -F $fe -Root $tmp -List Exclude -Action Add -Sid 'S-1-5-21-7-7-7-500' -User a -SnapshotId 'snap-check'
+    $null = Set-AVDTuneFSLogixRecommendedLists -Machine $m -F $fe -Root $tmp -Answers $ansDom -User a -SnapshotId 'snap-check'
+    $null = Undo-AVDTuneFSLogixRecommendedLists -Machine $m -F $fe -Root $tmp -User a -SnapshotId 'snap-check'
+    Test-Check 'two Applies, one Undo: the older undo entry is not overwritten and stays; only the newest Apply is undone, a later foreign entry stays' (@((Read-AVDTuneJson (Get-AVDTuneFSLogixListsUndoPath $tmp)).Entries).Count -eq 1 -and @($fe.Store.Groups['FSLogix Profile Exclude List']) -contains 'S-1-5-21-7-7-7-500' -and @($fe.Store.Groups['FSLogix Profile Exclude List']) -contains 'S-1-5-32-544' -and @($fe.Store.Groups['FSLogix Profile Exclude List']) -notcontains "$dom-512") $null
+    Remove-Item -LiteralPath (Get-AVDTuneFSLogixListsUndoPath $tmp) -Force -ErrorAction SilentlyContinue
+    $fm = New-AVDTuneFakeFSLogix -Seed @{ Groups = @{} }
+    $miss = Set-AVDTuneFSLogixRecommendedLists -Machine $m -F $fm -Root $tmp -Answers $ansDom -User a -SnapshotId 'snap-check'
+    Test-Check 'FSLogix not installed (no local groups): first step Failed with the reason, the rest skipped, no undo entry' (@($miss.Results | Where-Object Status -eq 'Failed').Count -eq 1 -and @($miss.Results | Where-Object Status -eq 'Skipped').Count -eq 2 -and -not (Test-Path -LiteralPath (Get-AVDTuneFSLogixListsUndoPath $tmp))) $null
+    Close-AVDTuneWriteGate
+    $noGate = Get-ThrownText { Set-AVDTuneFSLogixRecommendedLists -Machine $m -F $fl -Root $tmp -Answers $ansDom -User a -SnapshotId 'x' }
+    Open-AVDTuneWriteGate -SnapshotId 'snap-check' -ConfirmedBy 'Check Runner'
+    Test-Check 'without the write gate the lists are not written (counter-test)' (@($fl.Store.Groups['FSLogix Profile Exclude List']).Count -eq 1 -and (@($fl.Store.Groups['FSLogix Profile Exclude List']) -notcontains 'S-1-5-32-544')) $noGate
+
+    # ---------------------------------------------------------------- review findings of the lists (issue 62): dialog text, Everyone only for an empty include list, undo stack after the run, [0-9], domain SID of the master
+    $dnsN = 'example.test'
+    & $setDir @{ DomainSid = $dom; DnsName = $dnsN; NetBiosName = 'EXAMPLE'; Groups = @() }
+    $fp = New-AVDTuneFakeFSLogix -Seed @{ MasterDomainSid = $dom; Groups = @{ 'FSLogix Profile Include List' = @(); 'FSLogix Profile Exclude List' = @('S-1-5-21-9-9-9-1234') } }
+    $plan = Get-AVDTuneFSLogixListPlan -F $fp -Root $tmp -Answers $ansDom
+    $want = "Include + Everyone; Exclude + BUILTIN\Administrators (S-1-5-32-544), + $dnsN\Domain Admins ($dom-512)"
+    Test-Check 'dialog text: the planned list changes are named with labels and SIDs, the Domain Admins with the DNS name of directory.json' ((Format-AVDTuneFSLogixListChanges $plan) -eq $want -and $plan.Notice -eq '') (Format-AVDTuneFSLogixListChanges $plan)
+    $null = Set-AVDTuneFSLogixRecommendedLists -Machine $m -F $fp -Root $tmp -Answers $ansDom -User a -SnapshotId 'snap-check'
+    $plan2 = Get-AVDTuneFSLogixListPlan -F $fp -Root $tmp -Answers $ansDom
+    Test-Check 'nothing to change in the lists: the dialog text is empty (nothing is mentioned)' ((Format-AVDTuneFSLogixListChanges $plan2) -eq '' -and @($plan2.Entries | Where-Object Change).Count -eq 0) (Format-AVDTuneFSLogixListChanges $plan2)
+    Remove-Item -LiteralPath (Get-AVDTuneFSLogixListsUndoPath $tmp) -Force -ErrorAction SilentlyContinue
+    $fr = New-AVDTuneFakeFSLogix -Seed @{ MasterDomainSid = $dom; Groups = @{ 'FSLogix Profile Include List' = @('S-1-5-21-5-5-5-1100'); 'FSLogix Profile Exclude List' = @() } }
+    $planR = Get-AVDTuneFSLogixListPlan -F $fr -Root $tmp -Answers $ansDom
+    $apR = Set-AVDTuneFSLogixRecommendedLists -Machine $m -F $fr -Root $tmp -Answers $ansDom -User a -SnapshotId 'snap-check'
+    Test-Check 'Include = {AVD-Users}: unchanged after Apply (Everyone not added), a notice names the restriction, the dialog text has no Include part' (@($fr.Store.Groups['FSLogix Profile Include List']).Count -eq 1 -and $fr.Store.Groups['FSLogix Profile Include List'][0] -eq 'S-1-5-21-5-5-5-1100' -and $planR.Notice -like '*Include list is restricted to S-1-5-21-5-5-5-1100; Everyone not added*' -and (Format-AVDTuneFSLogixListChanges $planR) -notlike '*Include*' -and $apR.Notice -like '*Everyone not added*') $planR.Notice
+    Remove-Item -LiteralPath (Get-AVDTuneFSLogixListsUndoPath $tmp) -Force -ErrorAction SilentlyContinue
+    $ff = New-AVDTuneFakeFSLogix -Seed @{ MasterDomainSid = $dom; LocalGroupAddFails = @('S-1-1-0'); Groups = @{ 'FSLogix Profile Include List' = @(); 'FSLogix Profile Exclude List' = @() } }
+    $null = Set-AVDTuneFSLogixRecommendedLists -Machine $m -F $ff -Root $tmp -Answers $ansDom -User a -SnapshotId 'snap-check'
+    Test-Check 'the first step throws: nothing was changed, so no undo entry is written' (-not (Test-Path -LiteralPath (Get-AVDTuneFSLogixListsUndoPath $tmp))) $null
+    $ff2 = New-AVDTuneFakeFSLogix -Seed @{ MasterDomainSid = $dom; LocalGroupAddFails = @('S-1-5-32-544'); Groups = @{ 'FSLogix Profile Include List' = @(); 'FSLogix Profile Exclude List' = @() } }
+    $run2 = Set-AVDTuneFSLogixRecommendedLists -Machine $m -F $ff2 -Root $tmp -Answers $ansDom -User a -SnapshotId 'snap-check'
+    $stk = Read-AVDTuneJson (Get-AVDTuneFSLogixListsUndoPath $tmp)
+    Test-Check 'a later step throws: the undo stack has only the SIDs that were really changed (Everyone), not the ones that failed or were skipped' (@($run2.Results | Where-Object Status -eq 'Failed').Count -eq 1 -and @($stk.Entries).Count -eq 1 -and @($stk.Entries[0].Added).Count -eq 1 -and $stk.Entries[0].Added[0].Sid -eq 'S-1-1-0' -and $stk.Entries[0].Added[0].List -eq 'Include') (ConvertTo-Json $stk -Depth 6 -Compress)
+    Remove-Item -LiteralPath (Get-AVDTuneFSLogixListsUndoPath $tmp) -Force -ErrorAction SilentlyContinue
+    $fh = New-AVDTuneFakeFSLogix -Seed @{ MasterDomainSid = $dom; Groups = @{ 'FSLogix Profile Include List' = @('S-1-1-0'); 'FSLogix Profile Exclude List' = @() } }
+    $null = Set-AVDTuneFSLogixRecommendedLists -Machine $m -F $fh -Root $tmp -Answers $ansDom -User a -SnapshotId 'snap-check'
+    $hand = Set-AVDTuneFSLogixGroupMember -Machine $m -F $fh -Root $tmp -List Exclude -Action Add -Sid 'S-1-5-32-544' -User a -SnapshotId 'snap-check'
+    $unH = Undo-AVDTuneFSLogixRecommendedLists -Machine $m -F $fh -Root $tmp -User a -SnapshotId 'snap-check'
+    $exH = @($fh.Store.Groups['FSLogix Profile Exclude List'])
+    Test-Check 'Exclude admins by hand after the Apply, then Undo: the admins stay (reported), what Apply added alone is removed' ($hand.Results[0].Status -eq 'Unchanged' -and $exH -contains 'S-1-5-32-544' -and $exH -notcontains "$dom-512" -and $unH.Notice -like '*S-1-5-32-544*added by hand*' -and -not (Test-Path -LiteralPath (Get-AVDTuneFSLogixListsUndoPath $tmp))) "$($exH -join ',') / $($unH.Notice)"
+    $fp2 = New-AVDTuneFakeFSLogix -Seed @{ MasterDomainSid = $dom; Groups = @{ 'FSLogix Profile Include List' = @('S-1-1-0'); 'FSLogix Profile Exclude List' = @('S-1-5-32-544') } }
+    Write-AVDTuneFile (Get-AVDTuneFSLogixListsUndoPath $tmp) (([ordered]@{ Entries = @([ordered]@{ At = '2026-11-17T10:00:00.0000000+00:00'; Added = @([ordered]@{ List = 'Exclude'; Sid = 'S-1-5-32-544' }); Previous = [ordered]@{ Include = @('S-1-1-0'); Exclude = @('S-1-5-32-544') } }) }) | ConvertTo-Json -Depth 8)
+    $unP = Undo-AVDTuneFSLogixRecommendedLists -Machine $m -F $fp2 -Root $tmp -User a -SnapshotId 'snap-check'
+    Test-Check 'Undo does not remove a SID that was in the list before the Apply (Previous), it reports it' (@($fp2.Store.Groups['FSLogix Profile Exclude List']) -contains 'S-1-5-32-544' -and $unP.Notice -like '*before the Apply*') $unP.Notice
+    $ar = ([string][char]0x0665) + [char]0x0664 + [char]0x0664
+    Test-Check 'SID regexes take ASCII digits only: an Arabic-Indic digit is no SID digit (counter-test), also in the domain SID' (-not (Test-AVDTuneSid "S-1-5-32-$ar") -and (Test-AVDTuneSid 'S-1-5-32-544') -and -not (Test-AVDTuneDomainSid "S-1-5-21-1-2-$ar") -and (Test-AVDTuneDomainSid 'S-1-5-21-1-2-3')) $null
+    $srcRx = @(foreach ($f in 'Modules\AVDTune.FSLogix.psm1', 'Modules\AVDTune.Directory.psm1') { Get-Content -LiteralPath (Join-Path $PSScriptRoot "..\$f") | Where-Object { $_ -match 'AS-1-' -and $_ -match '\\d' } })
+    Test-Check 'the SID patterns in FSLogix.psm1 and Directory.psm1 use [0-9], never \d' ($srcRx.Count -eq 0) ($srcRx -join ' | ')
+    $fbad = New-AVDTuneFakeFSLogix -Seed @{ MasterDomainSid = 'S-1-5-21-4-4-4'; Groups = @{ 'FSLogix Profile Include List' = @('S-1-1-0'); 'FSLogix Profile Exclude List' = @() } }
+    $pBad = Get-AVDTuneFSLogixListPlan -F $fbad -Root $tmp -Answers $ansDom
+    $apBad = Set-AVDTuneFSLogixRecommendedLists -Machine $m -F $fbad -Root $tmp -Answers $ansDom -User a -SnapshotId 'snap-check'
+    Test-Check 'domain SID of the DC information differs from the domain of the master: no Domain Admins exclude, a notice with both SIDs, the local Administrators are still excluded' (@($fbad.Store.Groups['FSLogix Profile Exclude List']).Count -eq 1 -and $fbad.Store.Groups['FSLogix Profile Exclude List'][0] -eq 'S-1-5-32-544' -and $pBad.Notice -like "*$dnsN*not the domain SID of this master (S-1-5-21-4-4-4)*" -and (Format-AVDTuneFSLogixListChanges $pBad) -notlike '*Domain Admins*' -and $apBad.Notice -eq $pBad.Notice) $pBad.Notice
+    Remove-Item -LiteralPath (Get-AVDTuneFSLogixListsUndoPath $tmp) -Force -ErrorAction SilentlyContinue
+    $fnr = New-AVDTuneFakeFSLogix -Seed @{ MasterDomainSid = ''; Groups = @{ 'FSLogix Profile Include List' = @('S-1-1-0'); 'FSLogix Profile Exclude List' = @() } }
+    $pNr = Get-AVDTuneFSLogixListPlan -F $fnr -Root $tmp -Answers $ansDom
+    Test-Check 'master cannot resolve the domain (not domain joined): the SID of the pinned DC is used, the notice says it could not be checked' ((Format-AVDTuneFSLogixListChanges $pNr) -like "*+ $dnsN\Domain Admins ($dom-512)" -and $pNr.Notice -like '*could not be checked*' -and @($fnr.Log | Where-Object { $_ -like 'MasterDomainSid EXAMPLE' }).Count -eq 1) $pNr.Notice
+    $formSrc = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\AVDTune-FSLogix.ps1') -Raw
+    Test-Check 'form: the lookup is stopped with BeginStop (no Stop() on the window thread), disposed after it has stopped, discarded when the window closes; the settings Apply names the list changes in its own confirmation' ($formSrc -notmatch '\.PS\.Stop\(\)' -and $formSrc -match 'BeginStop\(\$null, \$null\)' -and $formSrc -match 'EndStop' -and $formSrc -match 'function Close-FslLatestLookup' -and (Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\Start-AVDTune.ps1') -Raw) -match 'Close-FslLatestLookup' -and $formSrc -match 'Format-AVDTuneFSLogixListChanges \$listPlan' -and $formSrc -match 'Invoke-FslRecommendedLists -Confirmed') $null
+    [IO.File]::WriteAllText($dirFile, $dirKeep)
+
+    # ---------------------------------------------------------------- version state of the installation (issue 63)
+    $latOk = Get-AVDTuneFSLogixLatest -F (New-AVDTuneFakeFSLogix)
+    $vNew = Get-AVDTuneFSLogixVersionState -Installed '3.27.101.12345' -Latest $latOk
+    $vOld = Get-AVDTuneFSLogixVersionState -Installed '3.25.404.12345' -Latest $latOk
+    $vOld2 = Get-AVDTuneFSLogixVersionState -Installed '2.9.8884.27471' -Latest $latOk
+    Test-Check 'version state: not older than the newest release is green' ($vNew.State -eq 'Current' -and $vNew.Pill -eq 'green') ($vNew | ConvertTo-Json -Compress)
+    Test-Check 'version state: older (3.25 against 26.08, and 2.9) is yellow "Update available: 26.08"' ($vOld.State -eq 'Update' -and $vOld.Pill -eq 'yellow' -and $vOld.Text -eq 'Update available: 26.08' -and $vOld2.Pill -eq 'yellow' -and $vOld2.Text -eq 'Update available: 26.08') ($vOld | ConvertTo-Json -Compress)
+    $latBad = Get-AVDTuneFSLogixLatest -F (New-AVDTuneFakeFSLogix -Seed @{ Latest = @{ Ok = $false; Url = ''; Error = 'fake: no connection' } })
+    $vUn = Get-AVDTuneFSLogixVersionState -Installed '3.25.404.12345' -Latest $latBad
+    Test-Check 'version state: newest release not readable is grey "Installed, newest version unknown" with the reason, never green' ($vUn.State -eq 'Unknown' -and $vUn.Pill -eq 'unknown' -and $vUn.Text -eq 'Installed, newest version unknown' -and $vUn.Reason -like '*fake: no connection*') ($vUn | ConvertTo-Json -Compress)
+    $latOdd = Get-AVDTuneFSLogixLatest -F (New-AVDTuneFakeFSLogix -Seed @{ Latest = @{ Ok = $true; Url = 'https://download.microsoft.com/x/FSLogix-latest.zip'; Error = '' } })
+    $latHost = Get-AVDTuneFSLogixLatest -F (New-AVDTuneFakeFSLogix -Seed @{ Latest = @{ Ok = $true; Url = 'https://evil.example/FSLogix_99.99.zip'; Error = '' } })
+    Test-Check 'version state: a release name without <yy>.<mm> and a foreign host are grey (no guessing)' ((Get-AVDTuneFSLogixVersionState -Installed '3.25.404.12345' -Latest $latOdd).Pill -eq 'unknown' -and (Get-AVDTuneFSLogixVersionState -Installed '3.25.404.12345' -Latest $latHost).Pill -eq 'unknown') $null
+    $lat0826 = $latOk   # fake release 26.08
+    $lat1126 = Get-AVDTuneFSLogixLatest -F (New-AVDTuneFakeFSLogix -Seed @{ Latest = @{ Ok = $true; Url = 'https://download.microsoft.com/download/00000000-0000-0000-0000-000000000000/FSLogix_26.11.zip'; Error = '' } })
+    $lat0226 = Get-AVDTuneFSLogixLatest -F (New-AVDTuneFakeFSLogix -Seed @{ Latest = @{ Ok = $true; Url = 'https://download.microsoft.com/download/00000000-0000-0000-0000-000000000000/FSLogix_26.02.zip'; Error = '' } })
+    $lat0926 = Get-AVDTuneFSLogixLatest -F (New-AVDTuneFakeFSLogix -Seed @{ Latest = @{ Ok = $true; Url = 'https://download.microsoft.com/download/00000000-0000-0000-0000-000000000000/FSLogix_26.09.zip'; Error = '' } })
+    Test-Check 'version state, build 3.26.826 (Learn: 26-08-26): against 26.08 (table of the release notes) green, against 26.11 yellow' ((Get-AVDTuneFSLogixVersionState -Installed '3.26.826.17182' -Latest $lat0826).Pill -eq 'green' -and (Get-AVDTuneFSLogixVersionState -Installed '3.26.826.17182' -Latest $lat1126).Pill -eq 'yellow' -and (Get-AVDTuneFSLogixVersionState -Installed '3.26.826.17182' -Latest $lat1126).Text -eq 'Update available: 26.11') $null
+    Test-Check 'version state: 3.25.1128 (four digit month) against 26.02 is yellow (older year); 3.26.102 against 26.01 green; 3.26.101 against 26.01 yellow (older day, table)' ((Get-AVDTuneFSLogixVersionState -Installed '3.25.1128.5000' -Latest $lat0226).Pill -eq 'yellow' -and (Get-AVDTuneFSLogixVersionState -Installed '3.26.102.18413' -Latest (Get-AVDTuneFSLogixLatest -F (New-AVDTuneFakeFSLogix -Seed @{ Latest = @{ Ok = $true; Url = 'https://download.microsoft.com/d/FSLogix_26.01.zip'; Error = '' } }))).Pill -eq 'green' -and (Get-AVDTuneFSLogixVersionState -Installed '3.26.101.18413' -Latest (Get-AVDTuneFSLogixLatest -F (New-AVDTuneFakeFSLogix -Seed @{ Latest = @{ Ok = $true; Url = 'https://download.microsoft.com/d/FSLogix_26.01.zip'; Error = '' } }))).Pill -eq 'yellow') $null
+    $vOne = Get-AVDTuneFSLogixVersionState -Installed '3.26.826.17182' -Latest $lat0926
+    Test-Check 'version state: the release name is not always the build month (25.09 is build 822): a build one month before an unknown release is grey, not yellow and not green' ($vOne.Pill -eq 'unknown' -and $vOne.Reason -like '*one month before*' -and (Get-AVDTuneFSLogixVersionState -Installed '3.25.822.19044' -Latest (Get-AVDTuneFSLogixLatest -F (New-AVDTuneFakeFSLogix -Seed @{ Latest = @{ Ok = $true; Url = 'https://download.microsoft.com/d/FSLogix_25.09.zip'; Error = '' } }))).Pill -eq 'green') $vOne.Reason
+    Test-Check 'version state: 2.9.x is yellow; a foreign format (no dotted 4 part version, 4.x, a build part that is no date) is grey' ((Get-AVDTuneFSLogixVersionState -Installed '2.9.8884.27471' -Latest $latOk).Pill -eq 'yellow' -and (Get-AVDTuneFSLogixVersionState -Installed '26.08' -Latest $latOk).Pill -eq 'unknown' -and (Get-AVDTuneFSLogixVersionState -Installed '4.26.826.1' -Latest $latOk).Pill -eq 'unknown' -and (Get-AVDTuneFSLogixVersionState -Installed '3.26.1326.1' -Latest $latOk).Pill -eq 'unknown' -and (Get-AVDTuneFSLogixVersionState -Installed '3.26.50.12345' -Latest $latOk).Pill -eq 'unknown' -and (Get-AVDTuneFSLogixVersionState -Installed "3.26.826.1`n" -Latest $latOk).Pill -eq 'unknown') $null
+    Test-Check 'version state: no latest read yet is grey; not installed is red; an unreadable installed version is grey' ((Get-AVDTuneFSLogixVersionState -Installed '3.25.101.12345' -Latest $null).Pill -eq 'unknown' -and (Get-AVDTuneFSLogixVersionState -Installed '' -Latest $latOk).Pill -eq 'red' -and (Get-AVDTuneFSLogixVersionState -Installed 'abc' -Latest $latOk).Pill -eq 'unknown') $null
+    $fRead = New-AVDTuneFakeFSLogix
+    [void](Get-AVDTuneFSLogixLatest -F $fRead)
+    Test-Check 'the lookup is read only: no download, no folder, no file (HEAD of the link only)' (@($fRead.Log | Where-Object { $_ -notlike 'LatestRelease' }).Count -eq 0) ($fRead.Log -join ',')
+
     # ---------------------------------------------------------------- redirections.xml
     $tpl = @(Get-AVDTuneRedirectionTemplate)
     Test-Check 'template: Windows, Edge, Chrome, Teams, Office; only Teams is verified (Learn)' ((($tpl.Group | Sort-Object) -join ',') -eq 'Chrome,Edge,Office,Teams,Windows' -and @($tpl | Where-Object Verified).Count -eq 1 -and ($tpl | Where-Object Group -eq 'Teams').Paths.Count -eq 5) $null
@@ -150,6 +274,51 @@ try {
     Test-Check 'RedirXMLSourceFolder with .. is refused by the validation (counter-test L4)' ((Test-AVDTuneFSLogixValue $by['Profile:RedirXMLSourceFolder'] 'C:\Windows\..\Users\x') -like '*..*' -and (Test-AVDTuneFSLogixValue $by['Profile:RedirXMLSourceFolder'] "$share\..\other") -like '*..*')
     Test-Check 'the real adapter refuses .. and a local folder that users can change, for read, write and delete (counter-test L4)' ((Get-ThrownText { & $real.WriteText 'C:\Windows\..\Users\x\redirections.xml' 'x' }) -like "*'..'*" -and (Get-ThrownText { & $real.WriteText (Join-Path $userDir 'redirections.xml') 'x' }) -like '*users*' -and (Get-ThrownText { & $real.ReadText (Join-Path $userDir 'redirections.xml') }) -like '*users*' -and (Get-ThrownText { & $real.DeleteFile (Join-Path $userDir 'redirections.xml') }) -like '*users*' -and -not (Test-Path -LiteralPath (Join-Path $userDir 'redirections.xml'))) $null
     Test-Check 'a UNC target is not blocked by that check (the share is the administrator''s choice)' ($null -eq (Get-ThrownText { Assert-AVDTuneRedirectionsPath "$share\redirections.xml" })) $null
+    # issue 68: the folder field is prefilled, the folder is created protected, a foreign folder is refused
+    $pdDir = [Environment]::GetFolderPath('CommonApplicationData')
+    $defFolder = Join-Path $pdDir 'AVDTune-Public\FSLogix\Redirections'
+    Test-Check 'prefill: the value set in the registry wins (68)' ((Get-AVDTuneRedirectionsDefaultFolder (New-Master -Reg @{ "$pk|RedirXMLSourceFolder" = $share })) -eq $share) $null
+    Test-Check 'prefill: without a registry value it is <ProgramData>\AVDTune-Public\FSLogix\Redirections (not ProgramData\FSLogix) from the system folder, not hard coded (68)' ((Get-AVDTuneRedirectionsDefaultFolder (New-Master)) -eq $defFolder -and $defFolder -like '*\AVDTune-Public\FSLogix\Redirections' -and $defFolder -notlike '*\ProgramData\FSLogix\*' -and ((Get-Content -LiteralPath (Join-Path $repo 'Modules\AVDTune.FSLogix.psm1') -Raw) -notmatch "'C:\\ProgramData\\FSLogix\\Redirections")) $defFolder
+    $r68 = New-AVDTuneFakeFSLogix; $m68 = New-Master
+    $s68 = Save-AVDTuneRedirections -Machine $m68 -F $r68 -Root $tmp -Xml $xml -Folder $defFolder -User 'admin1' -SnapshotId 'snap-check'
+    $ix = [array]::IndexOf(@($r68.Log), "EnsureFolder $defFolder"); $iw = [array]::IndexOf(@($r68.Log), "WriteText $defFolder\redirections.xml")
+    Test-Check 'save: a missing local folder is created first, then the file is written, the folder is in the registry (68)' ($ix -ge 0 -and $iw -gt $ix -and $r68.Store.Files["$defFolder\redirections.xml"] -ceq $xml -and (& $m68.RegGet $pk 'RedirXMLSourceFolder') -eq $defFolder -and @($s68.Results | Where-Object Status -eq 'Changed').Count -eq 3) (($s68.Results | ForEach-Object Status) -join ',')
+    $r68b = New-AVDTuneFakeFSLogix -Seed @{ FolderKinds = @{ $defFolder = 'Safe' } }
+    [void](Save-AVDTuneRedirections -Machine (New-Master) -F $r68b -Root $tmp -Xml $xml -Folder $defFolder -User 'admin1' -SnapshotId 'snap-check')
+    Test-Check 'save: a folder that is there and safe is used as it is, not created again (68)' (@($r68b.Log | Where-Object { $_ -like 'EnsureFolder*' }).Count -eq 0 -and $r68b.Store.Files.ContainsKey("$defFolder\redirections.xml")) $null
+    $r68c = New-AVDTuneFakeFSLogix -Seed @{ FolderKinds = @{ $defFolder = 'Unsafe' } }; $m68c = New-Master
+    $why68 = Get-ThrownText { Save-AVDTuneRedirections -Machine $m68c -F $r68c -Root $tmp -Xml $xml -Folder $defFolder -User 'admin1' -SnapshotId 'snap-check' }
+    Test-Check 'save: a folder with foreign rights is refused with the reason, nothing written, nothing set (68, counter-test)' ($why68 -like '*not used*not safe*' -and $r68c.Store.Files.Count -eq 0 -and $null -eq (& $m68c.RegGet $pk 'RedirXMLSourceFolder') -and @($r68c.Log | Where-Object { $_ -like 'EnsureFolder*' -or $_ -like 'WriteText*' }).Count -eq 0) $why68
+    $dryM = Save-AVDTuneRedirections -Machine (New-Master) -F (New-AVDTuneFakeFSLogix) -Root $tmp -Xml $xml -Folder $defFolder -WhatIf
+    Test-Check 'dry run lists the folder step and creates nothing (68)' ($dryM.WhatIf -and @($dryM.Results | Where-Object { $_.Id -eq 'fslogix.redirections.folder' }).Count -eq 1) (($dryM.Results | ForEach-Object Id) -join ',')
+    # the real rule (68): foreign folders and links are refused, a folder made by the real adapter is protected
+    $fakePd = Join-Path $tmp 'fakeprogramdata'; [void](New-Item -ItemType Directory -Path "$fakePd\FSLogix\Foreign" -Force)
+    $me = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+    $stF = Get-AVDTuneRedirectionsFolderState -Folder "$fakePd\FSLogix\Foreign" -DataRoot $fakePd
+    Test-Check 'real rule: an existing folder with a foreign owner or foreign write rights is Unsafe, the reason names it (68)' ($stF.Kind -eq 'Unsafe' -and $stF.Reason -match 'owner|write access') $stF.Reason
+    Test-Check 'real rule: a local folder outside ProgramData that users can change, a path with .. are Unsafe (issue 10 rule kept), a share is not judged (68)' ((Get-AVDTuneRedirectionsFolderState -Folder $userDir).Kind -eq 'Unsafe' -and (Get-AVDTuneRedirectionsFolderState -Folder 'C:\Windows\..\x').Kind -eq 'Unsafe' -and (Get-AVDTuneRedirectionsFolderState -Folder $share).Kind -eq 'Share') $null
+    $jTarget = Join-Path $tmp 'jtarget'; [void](New-Item -ItemType Directory -Path $jTarget -Force); $jLink = "$fakePd\FSLogix\Link"
+    & cmd.exe /c mklink /J "$jLink" "$jTarget" | Out-Null
+    $stL = Get-AVDTuneRedirectionsFolderState -Folder "$jLink\Redirections" -DataRoot $fakePd -ExtraTrusted @($me)
+    Test-Check 'real rule: a link above the folder is Unsafe, also for a folder that does not exist yet (68)' ($stL.Kind -eq 'Unsafe' -and $stL.Reason -like '*link*') $stL.Reason
+    # an intermediate folder (ProgramData\FSLogix) made by a user: Unsafe, nothing is created below it (68, CTO)
+    $fakePd2 = Join-Path $tmp 'fakeprogramdata2'; [void](New-Item -ItemType Directory -Path "$fakePd2\FSLogix" -Force)
+    $stI = Get-AVDTuneRedirectionsFolderState -Folder "$fakePd2\FSLogix\Redirections" -DataRoot $fakePd2
+    $madeI = Get-ThrownText { & $real.EnsureFolder "$fakePd2\FSLogix\Redirections" $fakePd2 @() }
+    Test-Check 'real rule: an intermediate folder owned by a user or writable for users is Unsafe, nothing is created below it (68)' ($stI.Kind -eq 'Unsafe' -and $stI.Reason -like "*$fakePd2\FSLogix*" -and $madeI -and -not (Test-Path -LiteralPath "$fakePd2\FSLogix\Redirections")) $stI.Reason
+    $fakePd3 = Join-Path $tmp 'fakeprogramdata3'; [void](New-Item -ItemType Directory -Path $fakePd3 -Force)
+    Test-Check 'real rule: with ProgramData itself the only existing folder, a missing intermediate and target are Missing (created protected in one step) (68)' ((Get-AVDTuneRedirectionsFolderState -Folder "$fakePd3\FSLogix\Redirections" -DataRoot $fakePd3).Kind -eq 'Missing') $null
+    $newDir = "$fakePd\FSLogix\Redirections"
+    $stM = Get-AVDTuneRedirectionsFolderState -Folder $newDir -DataRoot $fakePd -ExtraTrusted @($me)
+    $made = $null; try { & $real.EnsureFolder $newDir $fakePd @($me); $made = 'ok' } catch { $made = $_.Exception.Message }
+    if ($made -eq 'ok') {
+        $sd = Get-Acl -LiteralPath $newDir
+        $rl = @($sd.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]))
+        $uOk = @($rl | Where-Object { $_.IdentityReference.Value -eq 'S-1-5-32-545' -and $_.FileSystemRights -eq 'ReadAndExecute, Synchronize' }).Count -eq 1
+        $aOk = @($rl | Where-Object { $_.IdentityReference.Value -in 'S-1-5-32-544', 'S-1-5-18' -and $_.FileSystemRights -eq 'FullControl' }).Count -eq 2
+        Test-Check 'real adapter: the missing folder is created in one step, protected, Administrators and SYSTEM full control, Users read only, nobody else (68)' ($stM.Kind -eq 'Missing' -and $sd.AreAccessRulesProtected -and $uOk -and $aOk -and $rl.Count -eq 3 -and (Get-AVDTuneRedirectionsFolderState -Folder $newDir -DataRoot $fakePd -ExtraTrusted @($me)).Kind -eq 'Safe') (($rl | ForEach-Object { "$($_.IdentityReference.Value)=$($_.FileSystemRights)" }) -join ' ')
+    }
+    else { Test-Check 'real adapter: not elevated, the owner Administrators cannot be set: the folder is refused or removed, never left unsafe (68)' ($stM.Kind -eq 'Missing' -and (-not (Test-Path -LiteralPath $newDir) -or (Get-AVDTuneRedirectionsFolderState -Folder $newDir -DataRoot $fakePd).Kind -eq 'Unsafe')) $made }
     # M3: DOMAIN\user with the real parser
     $ln1 = Split-AVDTuneLogonName 'EXAMPLE\alice'; $ln2 = Split-AVDTuneLogonName 'alice@example.test'; $ln3 = Split-AVDTuneLogonName 'alice'
     Test-Check 'DOMAIN\user, user@domain and a plain name are split by the real parser (counter-test M3)' ($ln1.Domain -eq 'EXAMPLE' -and $ln1.Name -eq 'alice' -and $ln2.Domain -eq 'example.test' -and $ln2.Name -eq 'alice' -and $ln3.Domain -eq '' -and $ln3.Name -eq 'alice') "$($ln1.Domain)|$($ln1.Name)"

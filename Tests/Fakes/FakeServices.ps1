@@ -357,6 +357,7 @@ function New-AVDTuneFakeLdap {
         [BitConverter]::GetBytes([uint32]333333333).CopyTo($bytes, 20); [BitConverter]::GetBytes($Rid).CopyTo($bytes, 24)
         , $bytes
     }
+    $domSid = { $b = New-Object byte[] 24; $b[0] = 1; $b[1] = 4; $b[7] = 5; [BitConverter]::GetBytes([int]21).CopyTo($b, 8); [BitConverter]::GetBytes([uint32]1111111111).CopyTo($b, 12); [BitConverter]::GetBytes([uint32]2222222222).CopyTo($b, 16); [BitConverter]::GetBytes([uint32]333333333).CopyTo($b, 20); , $b }
     $cert = { param($n) @{ Sha256 = ('{0:X2}' -f $n) * 32; Thumbprint = ('{0:X2}' -f $n) * 20; Subject = 'CN=dc1.example.test'; Issuer = 'CN=Example Test CA'; NotBefore = '2026-01-01T00:00:00Z'; NotAfter = '2027-01-01T00:00:00Z'; ChainOk = $true; ChainStatus = 'trusted by this computer'; NameMatches = $false } }
     $dn = 'DC=example,DC=test'
     $cfg = "CN=Configuration,$dn"
@@ -367,6 +368,7 @@ function New-AVDTuneFakeLdap {
         Entries = @{
             root = (& $entry '' @{ defaultNamingContext = @($dn); rootDomainNamingContext = @($dn); configurationNamingContext = @($cfg); schemaNamingContext = @("CN=Schema,$cfg"); dnsHostName = @('dc1.example.test')
                     serverName = @("CN=DC1,CN=Servers,CN=Default-First-Site-Name,CN=Sites,$cfg"); domainFunctionality = @('7'); forestFunctionality = @('7'); domainControllerFunctionality = @('7') })
+            domain = (& $entry $dn @{ objectSid = @(, (& $domSid)) })
             netbios = (& $entry "CN=EXAMPLE,CN=Partitions,$cfg" @{ nETBIOSName = @('EXAMPLE') })
             ous = @(
                 (& $entry "OU=Corp,$dn" @{ name = @('Corp'); distinguishedName = @("OU=Corp,$dn") })
@@ -404,6 +406,7 @@ function New-AVDTuneFakeLdap {
         [void]$store.Log.Add("Search $Scope $BaseDn $Filter")
         if ($store.Entries.ContainsKey('Fail') -and $Filter -like "*$($store.Entries.Fail)*") { throw 'The server returned an error.' }
         if ($BaseDn -eq '' -and $Scope -eq 'Base') { return @($store.Entries.root) }
+        if ($BaseDn -eq $dn -and $Scope -eq 'Base') { if ($store.Entries.ContainsKey('DomainSidMissing')) { return @() }; return @($store.Entries.domain) }
         if ($Filter -like '*crossRef*') { return @($store.Entries.netbios) }
         if ($Filter -like '*organizationalUnit*') { return @($store.Entries.ous) }
         if ($Filter -like '*objectClass=group*') { return @($store.Entries.groups) }
