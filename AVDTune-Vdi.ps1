@@ -1,0 +1,203 @@
+# The VDI components page (dot-sourced by Start-AVDTune.ps1; issue 56; docs\vdi-components.md). Logic is in Modules\AVDTune.Vdi.psm1. The page is UI\Vdi.xaml, the card of every component
+# (pill, rows, buttons) is made here from the list of the module. Install, update, remove and undo run in a background runspace as a task on the task bar (download and setup take minutes) and
+# are polled by the window timer; the quick things (test, settings) run on the UI thread. Everything that changes the master is behind the write gate. Test mode: the fake machine and the
+# fake component adapter run inline; no download, no install. Helpers of the FSLogix page (pills, result rows, gate snapshot, user) are used; they are resolved when a button is pressed.
+
+$script:VdiFake = $null
+if ($script:TestMode) { . (Get-TestScript 'FakeVdi.ps1'); $script:VdiFake = New-AVDTuneFakeVdi -Machine $script:Machine }
+$script:VdiJob = $null
+$script:VdiLatest = @{}
+$script:VdiCards = @{}
+$script:VdiBuilt = $false
+
+$script:VdiXml = [xml](Get-Content (Join-Path $PSScriptRoot 'UI\Vdi.xaml') -Raw -Encoding UTF8)
+$script:VdiRoot = [Windows.Markup.XamlReader]::Load([System.Xml.XmlNodeReader]::new($script:VdiXml))
+foreach ($node in $script:VdiXml.SelectNodes("//*[@*[local-name()='Name']]")) {
+    $name = $node.Attributes | Where-Object LocalName -eq 'Name' | Select-Object -ExpandProperty Value
+    $ui[$name] = $script:VdiRoot.FindName($name)
+}
+$vdiParent = $ui.PageFSLogix.Parent
+if ($vdiParent -isnot [System.Windows.Controls.Panel]) { throw 'The VDI components page cannot be added: the pages have no panel as parent.' }
+[void]$vdiParent.Children.Add($script:VdiRoot)
+
+function Get-VdiAdapter { if ($script:TestMode) { $script:VdiFake } else { New-AVDTuneVdiAdapter } }
+
+function New-VdiButton([string]$Text, [string]$Key, [string]$Act, [string]$Tip, [bool]$Primary = $false) {
+    $b = New-Object System.Windows.Controls.Button; $b.Content = $Text; $b.Margin = '0,0,8,6'
+    if ($Primary) { Set-Brush $b ([System.Windows.Controls.Button]::StyleProperty) 'PrimaryButton' }
+    [System.Windows.Automation.AutomationProperties]::SetName($b, $Tip)
+    # the handler is looked up by sender (Add-Click); key and action come from the fixed catalog of the module
+    Add-Click $b ([scriptblock]::Create("Invoke-VdiAction '$Key' '$Act'"))
+    $b
+}
+
+function Build-VdiCards {
+    foreach ($c in Get-AVDTuneVdiComponents) {
+        $card = @{ Buttons = @{}; Checks = @{} }
+        $border = New-Object System.Windows.Controls.Border; Set-Brush $border ([System.Windows.Controls.Border]::StyleProperty) 'CardBox'; Set-Brush $border ([System.Windows.Controls.Border]::BackgroundProperty) 'Card'; $border.Margin = '0,16,0,0'; $border.Padding = '20,16'
+        $stack = New-Object System.Windows.Controls.StackPanel
+        $head = New-Object System.Windows.Controls.Grid
+        foreach ($w in '*', 'Auto') { $cd = New-Object System.Windows.Controls.ColumnDefinition; $cd.Width = $w; [void]$head.ColumnDefinitions.Add($cd) }
+        $title = New-Object System.Windows.Controls.TextBlock; $title.Text = $c.Title; Set-Brush $title ([System.Windows.Controls.TextBlock]::StyleProperty) 'CardTitle'
+        $card.Title = $title; [void]$head.Children.Add($title)
+        $pillHost = New-Object System.Windows.Controls.ContentControl; $pillHost.SetValue([System.Windows.Controls.Grid]::ColumnProperty, 1); $card.PillHost = $pillHost; [void]$head.Children.Add($pillHost)
+        [void]$stack.Children.Add($head)
+        $hint = New-Object System.Windows.Controls.TextBlock; $hint.Text = $c.Text; $hint.TextWrapping = 'Wrap'; $hint.Margin = '0,4,0,0'; Set-Brush $hint ([System.Windows.Controls.TextBlock]::StyleProperty) 'Hint'; [void]$stack.Children.Add($hint)
+        $rows = New-Object System.Windows.Controls.StackPanel; $rows.Margin = '0,8,0,0'; $card.Rows = $rows; [void]$stack.Children.Add($rows)
+        $opt = @(Get-AVDTuneVdiSettingDefs -Key $c.Key | Where-Object Optional)
+        foreach ($o in $opt) {
+            $cb = New-Object System.Windows.Controls.CheckBox; $cb.Content = "Also set: $($o.Title)"; $cb.Margin = '0,6,0,0'; $cb.ToolTip = $o.Why
+            [System.Windows.Automation.AutomationProperties]::SetName($cb, "Optional setting $($o.Title)"); $card.Checks[$o.Id] = $cb; [void]$stack.Children.Add($cb)
+        }
+        $bar = New-Object System.Windows.Controls.WrapPanel; $bar.Margin = '0,12,0,0'
+        $card.Buttons.Install = New-VdiButton $(if ($c.Kind -eq 'Winget') { 'Install or update per machine' } else { 'Install or update' }) $c.Key 'Install' "Download from Microsoft, check and install or update $($c.Title)" $true
+        $card.Buttons.Remove = New-VdiButton 'Remove' $c.Key 'Remove' "Remove $($c.Title) from this master"
+        $card.Buttons.Undo = New-VdiButton 'Undo the change' $c.Key 'Undo' "Go back to the state found before the first change of $($c.Title)"
+        if (@(Get-AVDTuneVdiSettingDefs -Key $c.Key).Count -gt 0) {
+            $card.Buttons.Settings = New-VdiButton 'Set recommended settings' $c.Key 'Settings' "Set the recommended registry values for $($c.Title)"
+            $card.Buttons.SettingsUndo = New-VdiButton 'Undo settings' $c.Key 'SettingsUndo' "Put the registry values of $($c.Title) back"
+        }
+        foreach ($b in $card.Buttons.Values) { [void]$bar.Children.Add($b) }
+        [void]$stack.Children.Add($bar)
+        $border.Child = $stack
+        [void]$ui.PanelVdiCards.Children.Add($border)
+        $script:VdiCards[$c.Key] = $card
+    }
+    $script:VdiBuilt = $true
+}
+
+function Update-VdiView {
+    if (-not $script:VdiBuilt) { Build-VdiCards }
+    $v = Get-VdiAdapter
+    foreach ($c in Get-AVDTuneVdiComponents) {
+        $card = $script:VdiCards[$c.Key]
+        $card.Rows.Children.Clear()
+        $rows = @(Get-AVDTuneVdiRows -Machine $script:Machine -V $v -Key $c.Key -Latest $script:VdiLatest[$c.Key])
+        foreach ($r in $rows) { [void]$card.Rows.Children.Add((New-FslResultRow $r)) }
+        $st = Get-AVDTuneVdiSummaryStatus $rows
+        $card.PillHost.Content = New-FslPillBlock $st $(switch ($st) { 'green' { 'Current' } 'yellow' { 'Update or setting open' } 'red' { 'Not installed' } default { 'Unknown' } })
+    }
+}
+function Set-VdiBusy([bool]$Busy) {
+    foreach ($card in $script:VdiCards.Values) { foreach ($b in $card.Buttons.Values) { $b.IsEnabled = -not $Busy } }
+    foreach ($b in $ui.BtnVdiTest, $ui.BtnVdiCheck) { $b.IsEnabled = -not $Busy }
+    $window.Cursor = $(if ($Busy -and $script:CurrentPage -eq 'VdiComponents') { [System.Windows.Input.Cursors]::AppStarting } else { $null })
+}
+
+$script:VdiWorkerText = @'
+param($Kind, $C)
+switch ($Kind) {
+    'Install' { Invoke-AVDTuneVdiRecorded -Machine $C.Machine -V $C.V -Key $C.Key -Root $C.Root -Mode Install -User $C.User -SnapshotId $C.SnapshotId -Progress $C.Progress }
+    'Remove' { Invoke-AVDTuneVdiRecorded -Machine $C.Machine -V $C.V -Key $C.Key -Root $C.Root -Mode Remove -User $C.User -SnapshotId $C.SnapshotId -Progress $C.Progress }
+    'Undo' { Invoke-AVDTuneVdiUndo -Machine $C.Machine -V $C.V -Key $C.Key -Root $C.Root -User $C.User -SnapshotId $C.SnapshotId -Progress $C.Progress }
+    'Latest' { $h = @{}; foreach ($k in 'webrtc', 'mmr') { $h[$k] = Get-AVDTuneVdiLatest -V $C.V -Key $k }; $h }
+}
+'@
+function Start-VdiJob([string]$Kind, [string]$Key) {
+    if ($script:VdiJob) { throw 'Another VDI operation is still running.' }
+    $gate = if ($Kind -eq 'Latest') { $null } else { Get-AVDTuneWriteGate }
+    $common = @{ Root = $script:StateRoot; User = (Get-FslUser); SnapshotId = (Get-FslGateSnapshot); Key = $Key }
+    $name = if ($Key) { (Get-AVDTuneVdiComponent $Key).Title } else { 'VDI components' }
+    $title = switch ($Kind) { 'Install' { "Installing or updating $name" } 'Remove' { "Removing $name" } 'Latest' { 'Looking up the newest versions at Microsoft' } default { "Undoing the change of $name" } }
+    $task = Start-AVDTuneUiTask -Kind "vdi-$($Kind.ToLower())" -Title $title -Step 'Starting'
+    if ($script:TestMode) {
+        $c = $common.Clone(); $c.Machine = $script:Machine; $c.V = $script:VdiFake; $c.Progress = $null
+        $res = $null; $err = ''
+        try { $res = & ([scriptblock]::Create($script:VdiWorkerText)) $Kind $c } catch { $err = $_.Exception.Message }
+        $script:VdiJob = @{ Inline = $true; Result = $res; Err = $err; Kind = $Kind; Key = $Key; Task = $task }
+    }
+    else {
+        $sync = [hashtable]::Synchronized(@{ Text = '' })
+        $ps = [powershell]::Create()
+        [void]$ps.AddScript({
+                param($AppRoot, $Kind, $Common, $Gate, $Sync, $WorkerText)
+                $ErrorActionPreference = 'Stop'
+                Import-Module (Join-Path $AppRoot 'Modules\AVDTune.psm1') -Force
+                foreach ($part in 'Updates', 'Office', 'Vdi') { Import-Module (Join-Path $AppRoot "Modules\AVDTune.$part.psm1") -Force }
+                $c = $Common.Clone(); $c.Machine = New-AVDTuneMachine; $c.V = New-AVDTuneVdiAdapter; $c.Progress = { param($t) $Sync.Text = $t }
+                if ($Gate) { Open-AVDTuneWriteGate -SnapshotId $Gate.SnapshotId -ConfirmedBy $Gate.ConfirmedBy }
+                & ([scriptblock]::Create($WorkerText)) $Kind $c
+            }).AddArgument($script:AppRoot).AddArgument($Kind).AddArgument($common).AddArgument($gate).AddArgument($sync).AddArgument($script:VdiWorkerText)
+        $script:VdiJob = @{ PS = $ps; Handle = $ps.BeginInvoke(); Kind = $Kind; Key = $Key; Sync = $sync; Task = $task }
+    }
+    Set-ShutdownBlock $true
+    Set-VdiBusy $true
+}
+function Complete-VdiJob {
+    $job = $script:VdiJob
+    if (-not $job) { return }
+    if (-not $job.Inline -and -not $job.Handle.IsCompleted) { if ($job.Sync.Text) { Update-AVDTuneUiTask $job.Task -Step ([string]$job.Sync.Text); if ($script:CurrentPage -eq 'VdiComponents') { $ui.TxtVdiState.Text = $job.Sync.Text } }; return }
+    $script:VdiJob = $null
+    Set-ShutdownBlock $false
+    $result = $null; $err = ''
+    if ($job.Inline) { $result = $job.Result; $err = [string]$job.Err }
+    else {
+        try { $out = @($job.PS.EndInvoke($job.Handle)); if ($job.PS.Streams.Error.Count -gt 0) { $err = $job.PS.Streams.Error[0].Exception.Message }; $result = $out | Select-Object -Last 1 }
+        catch { $err = $_.Exception.Message }
+        finally { $job.PS.Dispose() }
+    }
+    Set-VdiBusy $false
+    if ($err -or -not $result) { Complete-AVDTuneUiTask $job.Task -Failed -Summary "VDI components failed: $err"; $ui.TxtVdiState.Text = "VDI components failed: $err"; Show-Error $ui.TxtVdiState.Text; Update-VdiView; return }
+    if ($job.Kind -eq 'Latest') {
+        $script:VdiLatest = @{}; foreach ($k in 'webrtc', 'mmr') { $script:VdiLatest[$k] = $result[$k] }
+        $bad = @($script:VdiLatest.Values | Where-Object { -not $_.Ok })
+        $ui.TxtVdiState.Text = $(if ($bad.Count -gt 0) { "Looked up at Microsoft. Not readable: $((@($bad | ForEach-Object Error)) -join ' ')" } else { 'Looked up at Microsoft (nothing was downloaded or changed).' })
+        Complete-AVDTuneUiTask $job.Task -Summary $ui.TxtVdiState.Text
+        Update-VdiView; return
+    }
+    Register-StepResult $result.Result
+    $ui.TxtVdiState.Text = "$((Get-AVDTuneVdiComponent $job.Key).Title): $($result.Setup.Status). $($result.Setup.Message)$(if ($result.Result.Reboot) { ' Restart the master before you go on.' })"
+    Complete-AVDTuneUiTask $job.Task -Failed:([bool]($result.Setup.Status -eq 'Failed')) -Summary $ui.TxtVdiState.Text
+    Show-Toast $ui.TxtVdiState.Text
+    Start-OverviewRefresh
+    Update-VdiView
+}
+$script:Timer.Add_Tick({ try { Complete-VdiJob } catch { Show-Error $_.Exception.Message } })
+
+function Get-VdiOptional([string]$Key) { @($script:VdiCards[$Key].Checks.Keys | Where-Object { $script:VdiCards[$Key].Checks[$_].IsChecked }) }
+
+function Invoke-VdiAction([string]$Key, [string]$Act) {
+    $c = Get-AVDTuneVdiComponent $Key
+    Assert-FslWrite
+    switch ($Act) {
+        'Install' {
+            $text = switch ($c.Kind) {
+                'Exe' { "Download teamsbootstrapper.exe from Microsoft, check its signature and run it to install or update $($c.Title) for all users? This takes several minutes." }
+                'Winget' { 'Install or update OneDrive per machine with winget (machine scope) inside the package lock? This takes several minutes.' }
+                default { "Download the MSI of $($c.Title) from Microsoft, check its signature and install it (an installed older version is replaced)? $(if ($Key -eq 'mmr') { 'Edge and Chrome must be closed.' })" }
+            }
+            if (-not (Confirm-Action $text 'VDI components')) { return }
+            Start-VdiJob 'Install' $Key; $ui.TxtVdiState.Text = "Looking up $($c.Title) ..."
+        }
+        'Remove' {
+            $extra = if ($Key -eq 'teams') { ' teamsbootstrapper.exe -x removes Teams for all users and deletes the user profile data and cache of Teams.' } else { '' }
+            if (-not (Confirm-Action "Remove $($c.Title) from this master?$extra" 'VDI components')) { return }
+            Start-VdiJob 'Remove' $Key; $ui.TxtVdiState.Text = "Removing $($c.Title) ..."
+        }
+        'Undo' {
+            if (-not (Confirm-Action (Get-AVDTuneVdiUndoText -Root $script:StateRoot -Key $Key) 'VDI components')) { return }
+            Start-VdiJob 'Undo' $Key; $ui.TxtVdiState.Text = "Undoing the change of $($c.Title) ..."
+        }
+        'Settings' {
+            $v = Get-VdiAdapter; $opt = @(Get-VdiOptional $Key)
+            $dry = Invoke-AVDTuneVdiSettings -Machine $script:Machine -V $v -Key $Key -Mode Apply -Optional $opt -Root $script:StateRoot -WhatIf
+            $n = @($dry.Results | Where-Object { $_.Status -eq 'WhatIf' }).Count
+            if ($n -eq 0) { $ui.TxtVdiState.Text = "The recommended settings of $($c.Title) are already set."; return }
+            if (-not (Confirm-Action "Set $n registry value(s) for $($c.Title) on this master?" 'VDI components')) { return }
+            $run = Invoke-AVDTuneVdiSettings -Machine $script:Machine -V $v -Key $Key -Mode Apply -Optional $opt -Root $script:StateRoot -User (Get-FslUser) -SnapshotId (Get-FslGateSnapshot)
+            foreach ($r in @($run.Results)) { Register-StepResult $r }
+            $failed = @($run.Results | Where-Object Status -eq 'Failed')
+            $ui.TxtVdiState.Text = "$($c.Title) settings: $(@($run.Results | Where-Object Status -eq 'Changed').Count) changed$(if ($failed.Count) { ", $($failed.Count) failed: $($failed[0].Message)" })."; Show-Toast $ui.TxtVdiState.Text; Start-OverviewRefresh; Update-VdiView
+        }
+        'SettingsUndo' {
+            if (-not (Confirm-Action "Put back the registry values of $($c.Title) found before the change?" 'VDI components')) { return }
+            $run = Invoke-AVDTuneVdiSettings -Machine $script:Machine -V (Get-VdiAdapter) -Key $Key -Mode Undo -Root $script:StateRoot -User (Get-FslUser) -SnapshotId (Get-FslGateSnapshot)
+            foreach ($r in @($run.Results)) { Register-StepResult $r }
+            $ui.TxtVdiState.Text = "$($c.Title) settings: undone."; Show-Toast $ui.TxtVdiState.Text; Start-OverviewRefresh; Update-VdiView
+        }
+        default { throw "Unknown action $Act." }
+    }
+}
+
+Add-Click $ui.BtnVdiTest { Update-VdiView; $ui.TxtVdiState.Text = 'Tested: nothing was changed.' }
+Add-Click $ui.BtnVdiCheck { Start-VdiJob 'Latest' ''; $ui.TxtVdiState.Text = 'Looking up the newest versions at Microsoft ...' }

@@ -1,0 +1,22 @@
+<!-- The VDI components page (issue 56). Loaded by AVDTune-Vdi.ps1 and added next to the other pages, so UI\AVDTune.xaml stays untouched.
+     Brushes and styles are DynamicResource (the theme of the window); the card of every component is made in code from the list of the module. -->
+<Grid xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+      xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+      x:Name="PageVdiComponents" Visibility="Collapsed">
+    <ScrollViewer Style="{DynamicResource PageScroll}">
+        <StackPanel Margin="40,32,40,28" MaxWidth="1000" HorizontalAlignment="Left">
+            <Grid>
+                <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+                <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                <TextBlock Text="VDI components" Style="{DynamicResource PageTitle}"/>
+                <TextBlock x:Name="TxtVdiSubtitle" Grid.Row="1" Grid.ColumnSpan="2" Style="{DynamicResource Subtitle}" Text="Microsoft Teams (new), the WebRTC Redirector Service, multimedia redirection and OneDrive per machine for a Windows 11 multi-session master, after Microsoft Learn. Downloads come only from Microsoft, are checked and held until they start. Everything that changes the master is behind the snapshot gate and goes into the change log."/>
+                <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center" Margin="24,0,0,0">
+                    <Button x:Name="BtnVdiCheck" Content="Check for updates" Margin="0,0,8,0" AutomationProperties.Name="Look up the newest MSI versions at Microsoft without downloading them"/>
+                    <Button x:Name="BtnVdiTest" Style="{DynamicResource PrimaryButton}" Content="Test" AutomationProperties.Name="Test the state of the components"/>
+                </StackPanel>
+            </Grid>
+            <TextBlock x:Name="TxtVdiState" Style="{DynamicResource Hint}" Margin="0,12,0,0" TextWrapping="Wrap"/>
+            <StackPanel x:Name="PanelVdiCards"/>
+        </StackPanel>
+    </ScrollViewer>
+</Grid>

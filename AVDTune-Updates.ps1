@@ -46,6 +46,7 @@ function Start-UpdJob([string]$Kind, $Argument) {
             Import-Module (Join-Path $AppRoot 'Modules\AVDTune.psm1') -Force
             Import-Module (Join-Path $AppRoot 'Modules\AVDTune.UpdateBlock.psm1') -Force
             Import-Module (Join-Path $AppRoot 'Modules\AVDTune.Updates.psm1') -Force
+            Import-Module (Join-Path $AppRoot 'Modules\AVDTune.Vdi.psm1') -Force   # Teams bootstrapper download for the Teams update (issue 56)
             if ($Fake) {
                 . $Fake; . $FakeUpd
                 $m = $SharedMachine   # test mode: the one fake machine of the window, so the page sees what the job changed

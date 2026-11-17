@@ -132,7 +132,7 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         foreach ($page in $script:PageTable) {
             Show-Page $page.Key
             $window.UpdateLayout()
-            $placeholder = $page.Key -notin 'Overview', 'Protocol', 'Updates', 'UpdateBlock', 'UserExperience', 'Benchmark', 'FSLogix', 'Software', 'Office', 'AppMasking', 'Seal', 'Environment', 'Optimization'
+            $placeholder = $page.Key -notin 'Overview', 'Protocol', 'Updates', 'UpdateBlock', 'UserExperience', 'Benchmark', 'FSLogix', 'Software', 'Office', 'VdiComponents', 'AppMasking', 'Seal', 'Environment', 'Optimization'
             $ok =($script:CurrentPage -eq $page.Key -and $ui["Nav$($page.Key)"].IsChecked -and $ui.PagePlaceholder.Visibility -eq (ConvertTo-Vis $placeholder))
             if ($placeholder) { $ok = $ok -and $ui.TxtPhTitle.Text -eq $page.Title -and $ui.TxtPhPhase.Text -eq "Planned for phase $($page.Phase)" -and $ui.TxtPhText.Text.Length -gt 40 }
             Test-Smoke "page $($page.Key) shows" $ok $null
@@ -858,6 +858,51 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         # set the ACL after the diff
         $ui.BtnFslAclSet.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
         Test-Smoke 'set the recommended ACL: the confirmation names the diff, the share got it once with attributes preserved, the change log has it' ($script:ConfirmAsked -like '*recommended ACL*diff*' -and $script:FslFake.Files.Store.Puts.Count -eq 1 -and $script:FslFake.Files.Store.Puts[0].Attributes -eq 'preserve' -and @(Get-AVDTuneChangeLog -Root $script:StateRoot | Where-Object Component -eq 'Storage ACL').Count -eq 1) $ui.TxtFslState.Text
+        $true } }
+    @{ Name = 'vdi components'; Do = {
+        if ($script:OverviewJob -or $script:ReadyJob -or $script:ReadyQueued -or $script:FslJob -or $script:VdiJob) { return $false }
+        $click = { param($b) $b.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent))) }
+        if (-not $script:VdiStep) {
+            $script:VdiStep = 1
+            Show-Page 'VdiComponents'; $window.UpdateLayout()
+            Test-Smoke 'VDI components page: own page (no placeholder), nav item checked, one card per component with its title' ($ui.PageVdiComponents.Visibility -eq 'Visible' -and $ui.PagePlaceholder.Visibility -eq 'Collapsed' -and $ui.NavVdiComponents.IsChecked -and $ui.PanelVdiCards.Children.Count -eq 4 -and (Find-Text $ui.PanelVdiCards 'Microsoft Teams (new) for VDI') -and (Find-Text $ui.PanelVdiCards 'Remote Desktop WebRTC Redirector Service') -and (Find-Text $ui.PanelVdiCards 'Multimedia redirection') -and (Find-Text $ui.PanelVdiCards 'OneDrive per machine')) $ui.PanelVdiCards.Children.Count
+            Test-Smoke 'nothing installed: the Teams card is red "Not installed" (pill), the rows name the open settings' ((Find-Text $ui.PanelVdiCards 'Not installed') -and (Find-Text $ui.PanelVdiCards 'Teams IsWVDEnvironment = 1')) $null
+            Save-SmokeShot '60-vdi-components-light'
+            & $click $script:VdiCards['teams'].Buttons.Install
+            Test-Smoke 'Teams install asks first (download from Microsoft, signature, run), then runs in the background: buttons locked meanwhile' ($script:ConfirmAsked -like '*teamsbootstrapper.exe from Microsoft*signature*' -and $script:VdiJob -and -not $script:VdiCards['teams'].Buttons.Install.IsEnabled -and -not $ui.BtnVdiTest.IsEnabled) $script:ConfirmAsked
+            return $false
+        }
+        if ($script:VdiStep -eq 1) {
+            $script:VdiStep = 2
+            $window.UpdateLayout()
+            $log = @($script:VdiFake.Log)
+            Test-Smoke 'Teams installed through the fake: resolved by hand, downloaded, held, run -p, state line says Changed, the version shows on the card' ($ui.TxtVdiState.Text -like '*Microsoft Teams (new) for VDI: Changed*' -and @($log | Where-Object { $_ -like 'Run *teamsbootstrapper.exe -p' }).Count -eq 1 -and (Find-Text $ui.PanelVdiCards 'Version 26000.1.1.0. Install or update always fetches the latest client (-p); whether it is the newest is not told by Microsoft in a way AVDTune can read.')) $ui.TxtVdiState.Text
+            Test-Smoke 'the install is in the protocol and the change log (VDI) and the task ended on the bar' (@($script:Protocol.Actions | Where-Object { $_.Category -eq 'vdi' }).Count -ge 1 -and @(Get-AVDTuneChangeLog -Root $script:StateRoot | Where-Object { $_.Category -eq 'VDI' -and $_.ChangeType -eq 'Added' }).Count -ge 1 -and @($script:UiTasks | Where-Object { $_.Kind -eq 'vdi-install' -and $_.Status -eq 'succeeded' }).Count -eq 1) $null
+            & $click $script:VdiCards['teams'].Buttons.Settings
+            $window.UpdateLayout()
+            Test-Smoke 'recommended settings: asked first, IsWVDEnvironment written (DWORD 1), the row is green' ($script:ConfirmAsked -like 'Set 1 registry value(s) for Microsoft Teams*' -and (& $script:Machine.RegGet 'HKLM:\SOFTWARE\Microsoft\Teams' 'IsWVDEnvironment') -eq 1 -and (Find-Text $ui.PanelVdiCards 'Set as recommended.')) $script:ConfirmAsked
+            $script:VdiFake.Store.Running = @('msedge')
+            & $click $script:VdiCards['mmr'].Buttons.Install
+            return $false
+        }
+        if ($script:VdiStep -eq 2) {
+            $script:VdiStep = 3
+            Test-Smoke 'multimedia redirection with Edge running: stopped before anything is downloaded, the message names the browser' ($ui.TxtVdiState.Text -like '*Multimedia redirection: Failed*Edge or Google Chrome is running*' -and @($script:VdiFake.Log | Where-Object { $_ -like 'Download*mmr*' -or $_ -like 'Download*Mmr*' }).Count -eq 0) $ui.TxtVdiState.Text
+            $script:VdiFake.Store.Running = @()
+            & $click $ui.BtnVdiCheck
+            return $false
+        }
+        if ($script:VdiStep -eq 3) {
+            $script:VdiStep = 4
+            $window.UpdateLayout()
+            Test-Smoke 'Check for updates looked up the MSI addresses at the (fake) Microsoft without downloading anything' ($ui.TxtVdiState.Text -like 'Looked up at Microsoft*' -and @($script:VdiFake.Log | Where-Object { $_ -like 'Resolve https://aka.ms/*' }).Count -ge 2 -and $script:VdiLatest['webrtc'].Version -eq '1.54.2408.19001') $ui.TxtVdiState.Text
+            $script:VdiFake.Store.Redirects['https://aka.ms/avdmmr/msi'] = @{ Ok = $false; Url = ''; Error = 'HTTP 503' }
+            & $click $script:VdiCards['mmr'].Buttons.Install
+            return $false
+        }
+        $window.UpdateLayout()
+        Test-Smoke 'a redirect that cannot be followed is a failed install with the reason, nothing is installed' ($ui.TxtVdiState.Text -like '*Multimedia redirection: Failed*could not be followed*') $ui.TxtVdiState.Text
+        Save-SmokeShot '61-vdi-components-done-light'
         $true } }
     @{ Name = 'start: sign-out and dark'; Do = {
         Open-Stage 'SignIn'; $window.UpdateLayout()

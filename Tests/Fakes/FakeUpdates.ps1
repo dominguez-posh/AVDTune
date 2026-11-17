@@ -59,6 +59,7 @@ function New-AVDTuneFakeUpdates {
         $list[[Math]::Min($n, $list.Count - 1)]
     }.GetNewClosure()
     $u.GetFSLogix = { if ($s.ContainsKey('FSLogix')) { $s.FSLogix } else { $null } }.GetNewClosure()
+    $u.GetVdi = { if ($s.ContainsKey('Vdi')) { $s.Vdi } else { $null } }.GetNewClosure()
     $u.DefenderStatus = { $s.Defender }.GetNewClosure()
     $u.DefenderUpdate = { [void]$s.Log.Add('DefenderUpdate'); if ($s.DefenderFails) { @{ Ok = $false; Error = 'fake: offline' } } else { $s.Defender = @{ Version = '1.400.9.0'; LastUpdated = [datetime]'2026-11-15T12:00:00' }; @{ Ok = $true; Error = '' } } }.GetNewClosure()
     $u.LockEnter = { if ($s.LockError) { @{ Ok = $false; Error = $s.LockError } } else { $s.LockHeld = $true; [void]$s.Log.Add('LockEnter'); @{ Ok = $true; Error = '' } } }.GetNewClosure()
