@@ -67,6 +67,15 @@ try {
     Test-Check 'the loader reads a valid file (UTF-8, umlauts kept)' ($table.Count -eq 2 -and $table['a.b'] -ceq "Gr$([char]0x00FC)n {0}") $null
     Test-Check 'a text is never run: a text that looks like code stays a string' ((@('{"a.b":"$(Get-Date)"}') | ForEach-Object { [IO.File]::WriteAllText($good, $_, (New-Object Text.UTF8Encoding $false)); (Read-AVDTuneStringFile $good)['a.b'] }) -ceq '$(Get-Date)') $null
     Test-Check 'an invalid file is not used: Initialize keeps English alone and names the problem' ((Initialize-AVDTuneLanguage -Folder $work).Problems.Count -eq 2) $null
+    # the whole file is dropped, the start goes on: broken en and de files -> hard English text for the security messages, never the bare key
+    $longKey = '{"' + ('a' * 101) + '":"x"}'
+    foreach ($case in @(@('broken JSON', '{"a.b":"x"'), @('a non-string value', '{"shell.err.admin":5}'), @('a nested object', '{"shell.err.admin":{"x":"y"}}'), @('a key that is too long', $longKey), @('a value that is too long', ('{"shell.err.admin":"' + ('x' * 5000) + '"}')), @('a file that is too big', ('{"a.b":"' + ('x' * 600KB) + '"}')))) {
+        foreach ($l in 'en', 'de') { [IO.File]::WriteAllText((Join-Path $work "Strings.$l.json"), $case[1], (New-Object Text.UTF8Encoding $false)) }
+        $r = Initialize-AVDTuneLanguage -Folder $work
+        Set-AVDTuneLanguage 'de'
+        $admin = Get-AVDTuneText 'shell.err.admin'
+        Test-Check "both files with $($case[0]): discarded as a whole, start goes on, hard English message for administrator, aside and read-only" ($r.Problems.Count -eq 2 -and $r.Keys.en -eq 0 -and $r.Keys.de -eq 0 -and $admin -like 'AVDTune changes the Golden Master*' -and (T 'shell.aside' 'C:\s' 'p' 'q') -like 'The state folder C:\s had been prepared*' -and (T 'shell.readonly') -like 'Read only:*' -and (T 'nav.overview') -ceq 'nav.overview') ($r.Problems -join '; ')
+    }
     [void](Initialize-AVDTuneLanguage -Folder (Join-Path $repo 'UI'))
 
     # ---------------------------------------------------------------- the lookup

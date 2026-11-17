@@ -14,6 +14,18 @@ $script:LangTexts = @{ en = @{}; de = @{} }
 $script:LangCurrent = 'en'
 $script:LangLocalized = @()
 $script:LangDisplayName = @{ en = 'English'; de = 'Deutsch' }
+# Messages that must never fall back to a bare key: if both language files are missing or broken, these English texts still reach the administrator.
+$script:LangHard = @{
+    'shell.err.admin' = "AVDTune changes the Golden Master and must run as administrator.`nStart it again with 'Run as administrator'."
+    'shell.err.running' = 'AVDTune is already running on this computer (one instance at a time).'
+    'shell.readonly' = 'Read only: confirm a snapshot of today on the Overview first. Nothing on this page changes the master until then.'
+    'shell.aside' = 'The state folder {0} had been prepared by someone else ({1}). It was set aside unread as {2} and a new one was created: the first-run questions, the domain controller pin and the sign-in start again. Check who prepared it, then delete the set-aside folder.'
+    'shell.crash.finish' = 'The last finish did not end properly: Windows Update or BITS may still be stopped. Open Cleanup and finish and repair it.'
+    'shell.crash.maint' = 'The last maintenance mode did not end properly: the update block may be lifted. Open Update block and repair it.'
+    'shell.sessionend' = 'Log off or shut down was held back: an operation (update or benchmark) is still running. Try again when it is done.'
+    'rel.toast.bad' = 'The files of AVDTune do not match the release. AVDTune is read only until you repair it on the Overview.'
+    'rel.banner.block' = 'Read only: {0} (see the card Integrity and updates on the Overview)'
+}
 
 function Test-AVDTuneTextKey {
     param([AllowNull()][string]$Key)
@@ -65,6 +77,7 @@ function Get-AVDTuneText {
     param([Parameter(Mandatory, Position = 0)][string]$Key, [Parameter(Position = 1, ValueFromRemainingArguments)][object[]]$FormatArgs)
     $text = $script:LangTexts[$script:LangCurrent][$Key]
     if ($null -eq $text) { $text = $script:LangTexts.en[$Key] }
+    if ($null -eq $text) { $text = $script:LangHard[$Key] }   # both files missing or broken: a hard English text for the messages that matter
     if ($null -eq $text) { return $Key }
     if ($FormatArgs -and $FormatArgs.Count -gt 0) { try { return [string]::Format($text, [object[]]$FormatArgs) } catch [System.FormatException] { return $text } }
     $text
@@ -114,7 +127,7 @@ function Register-AVDTuneLocalized {
     $script:LangLocalized.Count
 }
 
-function Test-AVDTuneHasText([string]$Key) { $script:LangTexts[$script:LangCurrent].ContainsKey($Key) -or $script:LangTexts.en.ContainsKey($Key) }
+function Test-AVDTuneHasText([string]$Key) { $script:LangTexts[$script:LangCurrent].ContainsKey($Key) -or $script:LangTexts.en.ContainsKey($Key) -or $script:LangHard.ContainsKey($Key) }
 
 function Update-AVDTuneLocalized {
     foreach ($entry in $script:LangLocalized) {
