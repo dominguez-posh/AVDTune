@@ -278,8 +278,26 @@ try {
     $acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule((New-Object Security.Principal.SecurityIdentifier 'S-1-5-32-545'), 'ReadAndExecute', 'Allow')))
     $fi.SetAccessControl($acl)
     $pfile = Join-Path $wdir 'post.ps1'
-    $why = $null; try { Write-AVDTuneAccessFile -Path $pfile -Text 'v1' -Access AdminNew } catch { $why = $_.Exception.Message }
-    Test-Check 'real writer: the result is checked afterwards (without a trusted owner it is removed again and the call throws)' ($why -like '*unsafe ACL*owner is*' -and -not (Test-Path $pfile)) $why
+    if (-not (Test-AVDTuneElevated)) {
+        # not elevated: the new file belongs to the current user, a foreign owner for the check after the write
+        $why = $null; try { Write-AVDTuneAccessFile -Path $pfile -Text 'v1' -Access AdminNew } catch { $why = $_.Exception.Message }
+        Test-Check 'real writer: the result is checked afterwards (without a trusted owner it is removed again and the call throws)' ($why -like '*unsafe ACL*owner is*' -and -not (Test-Path $pfile)) $why
+    }
+    else {
+        # elevated (a CI runner): the new file belongs to Administrators, so the real result is safe; the check after the write is driven by a report with a foreign owner for this one file
+        $ofile = Join-Path $wdir 'owner.ps1'
+        Write-AVDTuneAccessFile -Path $ofile -Text 'v1' -Access AdminNew
+        Test-Check 'real writer (elevated): the new file is owned by Administrators' ((Read-AVDTuneAclReport $ofile).Owner -eq 'S-1-5-32-544') (Read-AVDTuneAclReport $ofile).Owner
+        $psmAVDTune = Get-Module AVDTune
+        $origReport = & $psmAVDTune { ${function:script:Read-AVDTuneAclReport} }
+        $why = $null
+        try {
+            & $psmAVDTune { param($Target, $Orig) Set-Item -Path function:script:Read-AVDTuneAclReport -Value ({ param([string]$Path) $r = & $Orig $Path; if ($Path -eq $Target -and $r.Exists) { $r.Owner = 'S-1-5-21-1-2-3-1001' }; $r }.GetNewClosure()) } $pfile $origReport
+            try { Write-AVDTuneAccessFile -Path $pfile -Text 'v1' -Access AdminNew } catch { $why = $_.Exception.Message }
+        }
+        finally { & $psmAVDTune { param($Orig) Set-Item -Path function:script:Read-AVDTuneAclReport -Value $Orig } $origReport }
+        Test-Check 'real writer: the result is checked afterwards (without a trusted owner it is removed again and the call throws)' ($why -like '*unsafe ACL*owner is*' -and -not (Test-Path $pfile)) $why
+    }
     $nfile = Join-Path $wdir 'launcher.vbs'
     Write-AVDTuneAccessFile -Path $nfile -Text 'x' -Access AdminNew -ExtraTrusted @($me)
     $why = $null; try { Write-AVDTuneAccessFile -Path $nfile -Text 'y' -Access AdminNew -ExtraTrusted @($me) } catch { $why = $_.Exception.Message }
