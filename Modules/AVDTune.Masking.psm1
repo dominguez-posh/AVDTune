@@ -1040,7 +1040,7 @@ function New-AVDTuneMaskingAdapter {
         $after = @(Get-AVDTuneAclProblems (Read-AVDTuneAclReport $Path)); if ($after.Count -gt 0) { try { [IO.File]::Delete($Path) } catch { }; throw "$Path got an unsafe ACL ($($after -join '; ')) and was removed again." }
     }
     $a.ShortcutFolderFindings = { param($Path) Get-AVDTunePublicDesktopFindings -Path $Path }
-    $a.DeleteShortcut = { param($Path) if (Test-Path -LiteralPath $Path) { $r = Read-AVDTuneAclReport $Path; if ($r.Link) { throw "$Path is a link." }; [IO.File]::Delete($Path) } }
+    $a.DeleteShortcut = { param($Path) if (Test-Path -LiteralPath $Path) { $r = Read-AVDTuneAclReport $Path; if ($r.Link) { throw "$Path is a link." }; if (-not (Remove-AVDTuneTreeSafe -Path $Path).Gone) { throw "$Path could not be deleted (in use)." } } }   # by handle (#48): a file swapped for a link after the check is removed as a link
     $a.LocalGroupExists = { param($Name) try { $g = [ADSI]"WinNT://./$Name,group"; [bool]$g.Path } catch { $false } }
     $a.LocalGroupCreate = { param($Name, $Description) $c = [ADSI]'WinNT://.,computer'; $g = $c.Create('group', $Name); $g.SetInfo(); $g.Description = $Description; $g.SetInfo() }
     $a.LocalGroupInfo = {

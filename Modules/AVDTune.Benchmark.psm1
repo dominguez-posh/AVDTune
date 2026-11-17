@@ -763,7 +763,7 @@ function Get-AVDTuneDiskspd {
         & $check $src
         Copy-Item -LiteralPath $src -Destination $exe -Force
     }
-    finally { if (Test-Path -LiteralPath $x) { Remove-Item -LiteralPath $x -Recurse -Force -ErrorAction SilentlyContinue } }
+    finally { try { Remove-AVDTuneFolderNoFollow $x } catch { } }   # through handles, links not followed (#48)
     $exe
 }
 
@@ -924,7 +924,7 @@ function Remove-AVDTuneDiskspdCache {
     # At Finish (plan 7a): the downloaded diskspd is not part of the image
     param([Parameter(Mandatory)][string]$Root)
     $dir = Join-Path $Root 'tools\diskspd'
-    if (Test-Path -LiteralPath $dir) { Remove-Item -LiteralPath $dir -Recurse -Force }
+    Remove-AVDTuneFolderNoFollow $dir   # through handles, links not followed (#48); nothing there: nothing to do
 }
 
 function Test-AVDTuneBenchmarkClean {

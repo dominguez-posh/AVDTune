@@ -132,10 +132,13 @@ try {
     Test-Check 'finish: Finished, seven steps in order, none failed' ($r.Status -eq 'Finished' -and (@($r.Results | ForEach-Object Id) -join ',') -eq 'finish.temp,finish.wer,finish.wu-cache,finish.diskspd,finish.block,finish.tokens,finish.version' -and @($r.Results | Where-Object Status -eq 'Failed').Count -eq 0) ((@($r.Results | ForEach-Object { "$($_.Id)=$($_.Status):$($_.Message)" })) -join '; ')
     Test-Check 'finish: every step ran through the step engine (Section Seal, Mode Apply)' (@($r.Results | Where-Object { $_.Section -ne 'Seal' -or $_.Mode -ne 'Apply' }).Count -eq 0) $null
     $temp = $f.Store.Items['C:\Windows\Temp']
-    Test-Check 'cleanup: temp is cleared top level only: files go (also a read-only one with one link); the file in use, the link, the sub folder and the read-only file with two links stay' ((@($temp | ForEach-Object Name | Sort-Object) -join ',') -eq 'inuse.dat,lnk,ro-hard,subdir') (@($temp | ForEach-Object Name) -join ',')
-    Test-Check 'cleanup: temp and the error report folders are asked top level only, the update cache is not' (($f.Log -contains 'ClearFolder C:\Windows\Temp top=True') -and ($f.Log -contains 'ClearFolder C:\ProgramData\Microsoft\Windows\WER\ReportQueue top=True') -and ($f.Log -contains 'ClearFolder C:\Windows\SoftwareDistribution\Download top=False')) ($f.Log -join '; ')
-    Test-Check 'cleanup: what was skipped is counted and named in the result and the change log (3 skipped, 1 in use)' ($r.Message -like '*3 item(s) skipped*1 in use*' -and (@(Get-AVDTuneChangeLog -Root $root | Where-Object { $_.Component -eq 'Finish' })[0].Text -like '*3 item(s) skipped*')) $r.Message
-    Test-Check 'cleanup: the link in the temp folder is NOT removed or entered, its target is untouched' ((-not ($f.Log -contains 'LinkRemoved lnk')) -and @($f.Store.LinkTargets['outside']).Count -eq 2) (@($f.Store.LinkTargets['outside']) -join ',')
+    Test-Check 'cleanup: temp is cleared in depth through handles (#48): files, the sub folder, the link and the read-only files go; only the file in use stays' ((@($temp | ForEach-Object Name | Sort-Object) -join ',') -eq 'inuse.dat') (@($temp | ForEach-Object Name) -join ',')
+    Test-Check 'cleanup: temp, the error report folders and the update cache are all cleared' (($f.Log -contains 'ClearFolder C:\Windows\Temp') -and ($f.Log -contains 'ClearFolder C:\ProgramData\Microsoft\Windows\WER\ReportQueue') -and ($f.Log -contains 'ClearFolder C:\Windows\SoftwareDistribution\Download')) ($f.Log -join '; ')
+    Test-Check 'cleanup: what was left is counted and named in the result and the change log (0 skipped, 1 in use)' ($r.Message -like '*0 item(s) skipped*1 in use*' -and (@(Get-AVDTuneChangeLog -Root $root | Where-Object { $_.Component -eq 'Finish' })[0].Text -like '*1 in use*')) $r.Message
+    Test-Check 'cleanup: the link in the temp folder is removed itself, its target is untouched' (($f.Log -contains 'LinkRemoved lnk') -and @($f.Store.LinkTargets['outside']).Count -eq 2) (@($f.Store.LinkTargets['outside']) -join ',')
+    $fNp = New-AVDTuneFakeFinish -Seed @{ NoPosixDelete = $true; Items = @{ 'temp' = @('a.log', @{ Name = 'ro-hard'; ReadOnly = $true; Links = 2 }, @{ Name = 'ro-single'; ReadOnly = $true; Links = 1 }) } }
+    $np = & $fNp.ClearFolder 'C:\Windows\Temp'
+    Test-Check 'cleanup without POSIX delete (fake switch NoPosixDelete): the read-only file with two links is skipped, the others go' ($np.Removed -eq 2 -and $np.Skipped -eq 1 -and (@($fNp.Store.Items['C:\Windows\Temp'] | ForEach-Object Name) -join ',') -eq 'ro-hard') "$($np.Removed)/$($np.Skipped)"
     Test-Check 'cleanup: error reports, update cache and the diskspd cache are gone' ($f.Store.Items['C:\ProgramData\Microsoft\Windows\WER\ReportQueue'].Count -eq 0 -and $f.Store.Items['C:\Windows\SoftwareDistribution\Download'].Count -eq 0 -and -not (& $f.PathExists (Join-Path (Join-Path $root 'tools') 'diskspd'))) $null
     $stop = $m.Log.IndexOf('ServiceStop wuauserv'); $start = $m.Log.IndexOf('ServiceStart wuauserv')
     Test-Check 'update cache: Windows Update and BITS were stopped for it and run again afterwards' ($stop -ge 0 -and $start -gt $stop -and $m.Log.IndexOf('ServiceStart bits') -gt $m.Log.IndexOf('ServiceStop bits') -and (& $m.ServiceGet 'wuauserv').Status -eq 'Running' -and (& $m.ServiceGet 'bits').Status -eq 'Running') ($m.Log -join '; ')
@@ -195,8 +198,8 @@ try {
     $hits = @(Find-AVDTuneTokenFiles -Root $scan | Sort-Object)
     Test-Check 'real token scan: finds a JWT and a refresh token by name, never shows content, does not follow a junction, no false hit on a clean file' (($hits -join ',') -eq 'config\jwt.json,refresh.log') ($hits -join ',')
 
-    # top level only on real folders (until the delete through handles exists, #48)
-    $top = Join-Path $real 'top'; $topTarget = Join-Path $real 'toptarget'
+    # in depth on real folders, through handles (#48)
+    $top =Join-Path $real 'top'; $topTarget = Join-Path $real 'toptarget'
     New-Item -ItemType Directory -Path $top, $topTarget, (Join-Path $top 'sub') | Out-Null
     Set-Content -LiteralPath (Join-Path $topTarget 'keep.txt') -Value 'keep'; Set-Content -LiteralPath (Join-Path $top 'sub\deep.txt') -Value 'deep'
     Set-Content -LiteralPath (Join-Path $top 'plain.txt') -Value 'p'
@@ -205,9 +208,9 @@ try {
     cmd.exe /c mklink /H "$(Join-Path $top 'hard.txt')" "$(Join-Path $topTarget 'shared.txt')" | Out-Null
     cmd.exe /c mklink /J "$(Join-Path $top 'lnk')" "$topTarget" | Out-Null
     Test-Check 'precondition: the hard link count is 2, a plain file has 1' ((Get-AVDTuneFileLinkCount -Path (Join-Path $top 'hard.txt')) -eq 2 -and (Get-AVDTuneFileLinkCount -Path (Join-Path $top 'plain.txt')) -eq 1) $null
-    $tc = Clear-AVDTuneFolderContents -Folder $top -TopLevelOnly
-    Test-Check 'real top level only: files and a read-only file with one link go; the sub folder, its content, the junction and the read-only hard link stay and are counted as skipped' ($tc.Removed -eq 2 -and $tc.Skipped -eq 3 -and (Test-Path -LiteralPath (Join-Path $top 'sub\deep.txt')) -and (Test-Path -LiteralPath (Join-Path $top 'lnk')) -and (Test-Path -LiteralPath (Join-Path $top 'hard.txt')) -and -not (Test-Path -LiteralPath (Join-Path $top 'plain.txt')) -and -not (Test-Path -LiteralPath (Join-Path $top 'ro.txt'))) "$($tc.Removed)/$($tc.Skipped)/$($tc.Left)"
-    Test-Check 'real top level only: the other name of the hard link keeps its read-only mark, the junction target is untouched' (((Get-Item -LiteralPath (Join-Path $topTarget 'shared.txt')).Attributes -band [IO.FileAttributes]::ReadOnly) -ne 0 -and (Test-Path -LiteralPath (Join-Path $topTarget 'keep.txt'))) $null
+    $tc = Clear-AVDTuneFolderContents -Folder $top
+    Test-Check 'real in depth: files, the read-only file, the sub folder with its content, the junction (as a link) and the read-only hard link go; the folder stays' ($tc.Removed -eq 5 -and $tc.Left -eq 0 -and $tc.Skipped -eq 0 -and (Test-Path -LiteralPath $top) -and @(Get-ChildItem -LiteralPath $top -Force).Count -eq 0) "$($tc.Removed)/$($tc.Skipped)/$($tc.Left)"
+    Test-Check 'real in depth: the other name of the hard link is still there and keeps its read-only mark, the junction target is untouched' ((Test-Path -LiteralPath (Join-Path $topTarget 'shared.txt')) -and ((Get-Item -LiteralPath (Join-Path $topTarget 'shared.txt')).Attributes -band [IO.FileAttributes]::ReadOnly) -ne 0 -and (Test-Path -LiteralPath (Join-Path $topTarget 'keep.txt'))) $null
 
     # the read-only mark is removed through the handle that proved the link count
     $roSingle = Join-Path $top 'h-single.txt'; $roHard = Join-Path $top 'h-hard.txt'; $roOther = Join-Path $topTarget 'h-other.txt'
@@ -288,6 +291,21 @@ try {
     Test-Check 'restore fails: the finish is failed, the record stays Active (restore-failed) and is found as a crash' ($r4.Status -eq 'Failed' -and $crash4 -and $crash4.Phase -eq 'restore-failed' -and (& $m4.ServiceGet 'wuauserv').Status -eq 'Stopped') ($r4.Message)
     $g4 = Test-AVDTuneFinishGate -Root $root4
     Test-Check 'a crashed finish blocks the next finish until it is repaired' (-not $g4.Allowed -and ($g4.Reasons -join ' ') -like '*earlier finish did not end properly*') ($g4.Reasons -join '|')
+    # a restart is waiting (file renames, fake registry): C:\Windows\Temp is not emptied and the result says why (review of #48)
+    foreach ($pend in @(
+            @{ N = 'PendingFileRenameOperations'; Seed = @{ Registry = @{ 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager|PendingFileRenameOperations' = @('\??\C:\Windows\Temp\setup\new.dll', '!\??\C:\Program Files\App\new.dll') } } }
+            @{ N = 'PendingFileRenameOperations2'; Seed = @{ Registry = @{ 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager|PendingFileRenameOperations2' = @('\??\C:\Windows\Temp\x', '') } } }
+            @{ N = 'servicing RebootPending'; Seed = @{ Keys = @('HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending') } })) {
+        $rootP = New-Root; [void](Save-Healthcheck -Root $rootP)
+        $seedP = $pend.Seed.Clone(); $seedP.Services = @(@{ Name = 'wuauserv'; StartType = 'Manual'; Status = 'Running' }, @{ Name = 'bits'; StartType = 'Manual'; Status = 'Running' })
+        $mP = New-AVDTuneFakeMachine -Seed $seedP
+        $fP = New-AVDTuneFakeFinish -Seed @{ Items = @{ 'temp' = @('setup.msi', 'new.dll'); 'wer-queue' = @('Report1') } }
+        $rP = Invoke-AVDTuneFinish -Machine $mP -Fin $fP -Root $rootP -User 'admin1'
+        $tP = @($rP.Results | Where-Object Id -eq 'finish.temp')[0]
+        Test-Check "restart waiting ($($pend.N)): the temp folder is not emptied (never asked), the error reports are, the result and its message say why" ($rP.Status -eq 'Finished' -and -not ($fP.Log -contains 'ClearFolder C:\Windows\Temp') -and $fP.Store.Items['C:\Windows\Temp'].Count -eq 2 -and $fP.Store.Items['C:\ProgramData\Microsoft\Windows\WER\ReportQueue'].Count -eq 0 -and $rP.Message -like '*Windows\Temp was not emptied: a restart is waiting*' -and ($tP | ConvertTo-Json -Compress -Depth 4) -like '*restart is waiting*') "$($rP.Status) / $($tP | ConvertTo-Json -Compress -Depth 4) / $($rP.Message)"
+    }
+    $mNo = New-AVDTuneFakeMachine -Seed @{ Registry = @{ 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager|PendingFileRenameOperations' = @('') } }
+    Test-Check 'restart waiting: an empty rename list is no restart (the temp folder is emptied as usual)' ((Get-AVDTuneFinishRebootWait -Machine $mNo) -eq '' -and (Get-AVDTuneFinishRebootWait -Machine (New-Master)) -eq '') $null
     $m4b = New-AVDTuneFakeMachine -Seed @{ Services = @(@{ Name = 'wuauserv'; StartType = 'Manual'; Status = 'Stopped' }, @{ Name = 'bits'; StartType = 'Manual'; Status = 'Stopped' }) }
     Close-AVDTuneWriteGate
     Test-Check 'repair needs the open write gate' ((Test-Throws { Repair-AVDTuneFinishCrash -Machine $m4b -Root $root4 -User 'admin1' }) -and $m4b.Log.Count -eq 0) $null
@@ -307,7 +325,7 @@ foreach ($mod in 'Session', 'Snapshot', 'UpdateBlock', 'Readiness', 'Finish') { 
 Open-AVDTuneWriteGate -SnapshotId 'snap-check' -ConfirmedBy 'Check Runner'
 $m = New-AVDTuneFakeMachine -Seed @{ Services = @(@{ Name = 'wuauserv'; StartType = 'Manual'; Status = 'Running' }, @{ Name = 'bits'; StartType = 'Manual'; Status = 'Running' }) }
 $f = New-AVDTuneFakeFinish -Seed @{ Items = @{ 'wu-download' = @('a.cab') } }
-$f.ClearFolder = { param($Path, $Top) if ($Path -like '*SoftwareDistribution*') { [Environment]::Exit(99) } else { [pscustomobject]@{ Removed = 0; Left = 0; Skipped = 0 } } }
+$f.ClearFolder = { param($Path) if ($Path -like '*SoftwareDistribution*') { [Environment]::Exit(99) } else { [pscustomobject]@{ Removed = 0; Left = 0; Skipped = 0 } } }
 Invoke-AVDTuneFinish -Machine $m -Fin $f -Root $Root -User 'admin1'
 exit 0
 '@
