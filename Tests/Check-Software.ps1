@@ -217,6 +217,21 @@ try {
     $xl = New-Env -UExtra @{ LockError = 'the lock Global\PackTune belongs to someone else (owner ''S-1-5-21-1'')' }
     $rl = Invoke-AVDTuneSoftwareRun -Machine $xl.M -U $xl.U -Root $tmp -Items @(New-AVDTuneSoftwareItem -Action Install -Source winget -Id 'a.b')
     Test-Check 'a foreign lock: the install is not started, the failure names the lock' ($rl.Results[0].Status -eq 'Failed' -and $rl.Results[0].Code -eq 'Lock' -and $rl.Results[0].Message -like '*belongs to someone else*' -and (Get-RunLog $xl.U).Count -eq 0) $rl.Results[0].Message
+    # the change marker (#81): set while winget/choco run, gone afterwards, and LastChange is stamped also when the run is cut short after a program ran
+    $p81 = @{ Seen = @(); At = $null; Abort = $false }
+    $x81 = New-Env
+    $orig81 = $x81.U.Run; $origNow81 = $x81.M.Now
+    $x81.U.Run = { param($File, [string[]]$Arguments, [int]$TimeoutSeconds = 600) $p81.Seen += (Test-AVDTuneChangeInProgress -Root $tmp); $p81.At = [datetime]::UtcNow; & $orig81 $File $Arguments $TimeoutSeconds }.GetNewClosure()
+    $x81.M.Now = { if ($p81.Abort -and $p81.At) { throw 'fake: the clock failed' }; & $origNow81 }.GetNewClosure()
+    $r81 = Invoke-AVDTuneSoftwareRun -Machine $x81.M -U $x81.U -Root $tmp -Items @(New-AVDTuneSoftwareItem -Action Install -Source winget -Id 'a.b')
+    Test-Check '81 run: the change marker is set while the installer runs and gone afterwards' ($r81.Results[0].Status -eq 'Changed' -and $p81.Seen.Count -ge 1 -and @($p81.Seen | Where-Object { -not $_ }).Count -eq 0 -and -not (Test-AVDTuneChangeInProgress -Root $tmp) -and $null -eq (Get-AVDTuneProp (Get-AVDTuneState $tmp) 'ChangeInProgress')) ($p81.Seen -join ',')
+    $p81.Seen = @(); $p81.At = $null; $p81.Abort = $true
+    $t81 = Get-ThrownText { Invoke-AVDTuneSoftwareRun -Machine $x81.M -U $x81.U -Root $tmp -Items @(New-AVDTuneSoftwareItem -Action Install -Source winget -Id 'a.b') }
+    $lc81 = ConvertTo-AVDTuneUtc (Get-AVDTuneState $tmp).LastChange
+    Test-Check '81 run aborted after the installer ran: the error comes through, the marker is gone, LastChange is after the installer' ($t81 -like '*clock failed*' -and $p81.Seen.Count -ge 1 -and $p81.Seen[0] -and -not (Test-AVDTuneChangeInProgress -Root $tmp) -and $lc81 -and $lc81 -ge $p81.At) "thrown=$t81; LastChange=$lc81"
+    $p81.Abort = $false
+    $d81 = Invoke-AVDTuneSoftwareRun -Machine $x81.M -U $x81.U -Root $tmp -Items @(New-AVDTuneSoftwareItem -Action Install -Source winget -Id 'a.b') -WhatIf
+    Test-Check '81 dry run: no marker' ($d81.WhatIf -and -not (Test-AVDTuneChangeInProgress -Root $tmp) -and $null -eq (Get-AVDTuneProp (Get-AVDTuneState $tmp) 'ChangeInProgress')) $null
     Close-AVDTuneWriteGate
 
     # ---------------------------------------------------------------- library: URL rules (pure)
@@ -401,6 +416,7 @@ try {
     $swSource = [IO.File]::ReadAllText((Join-Path $repo 'Modules\AVDTune.Software.psm1'))
     $runBody = $swSource.Substring($swSource.IndexOf('function Invoke-AVDTuneSoftwareRun'))
     Test-Check 'the work folders are cleaned inside a run after the write gate, and not by the page when it only scans' ($runBody.IndexOf('Test-AVDTuneWriteAllowed') -ge 0 -and $runBody.IndexOf('Test-AVDTuneWriteAllowed') -lt $runBody.IndexOf('Clear-AVDTuneSoftwareWork') -and ([IO.File]::ReadAllText((Join-Path $repo 'AVDTune-Software.ps1'))) -notmatch 'Clear-AVDTuneSoftwareWork') $null
+    Test-Check 'the cleanup of the work folders runs under the change marker (#81 F1: after Start-AVDTuneChange, inside its try)' ($runBody.IndexOf('Start-AVDTuneChange') -ge 0 -and $runBody.IndexOf('Start-AVDTuneChange') -lt $runBody.IndexOf('try {') -and $runBody.IndexOf('try {') -lt $runBody.IndexOf('Clear-AVDTuneSoftwareWork')) $null
     # the MSI is hashed after unpacking, held, and compared through the held handle before msiexec
     $xh = New-Env
     $heldInfo = @{}

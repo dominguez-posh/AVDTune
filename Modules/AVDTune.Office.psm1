@@ -478,6 +478,9 @@ function Invoke-AVDTuneOfficeRecorded {
     # the early analysis exits of the setup (nothing to remove, configuration not valid) change nothing: no LastChange, no undo record for them
     $analysisExit = ($Mode -eq 'Remove' -and -not $pre.Installed) -or ($Mode -eq 'Install' -and @(Test-AVDTuneOfficeConfig $Config).Count -gt 0)
     $createdUndo = $false
+    # marker while the master is written (snapshot gate, #27/#81): set before the first write, cleared in finally (Stop stamps LastChange, also after an abort)
+    $changeOwner = $false; if (-not $analysisExit) { $changeOwner = Start-AVDTuneChange -Root $Root }
+    try {
     if (-not $analysisExit) {
         [void](Set-AVDTuneState -Root $Root -Values @{ LastChange = $started.ToString('o') })
         if (-not (Test-Path -LiteralPath (Get-AVDTuneOfficeUndoPath $Root))) {
@@ -508,6 +511,8 @@ function Invoke-AVDTuneOfficeRecorded {
     # the ODT now decides the Office values: the undo records of the one-click fixes describe a state that is gone (an Undo would put back an outdated value)
     $discarded = @(); if ($r.Status -eq 'Changed' -and $Mode -eq 'Install') { $discarded = @(Remove-AVDTuneOfficeFixRecords -Root $Root -User $User -SnapshotId $SnapshotId -RunId ([string]$run.Id) -Why 'Office was installed or reconfigured afterwards, the earlier value is outdated.') }
     [pscustomobject]@{ Result = $res; Setup = $r; Run = $run; FixRecordsDiscarded = $discarded }
+    }
+    finally { Stop-AVDTuneChange -Root $Root -Owner $changeOwner }
 }
 
 function Get-AVDTuneOfficeRemoveText {

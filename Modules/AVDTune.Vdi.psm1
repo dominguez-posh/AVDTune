@@ -363,8 +363,13 @@ function Invoke-AVDTuneVdiSettings {
         foreach ($k in @($known.Keys)) { if (-not $prev.ContainsKey($k)) { $prev[$k] = $known[$k] } }
     }
     $steps = @(Get-AVDTuneVdiSteps -Defs $defs -Previous $prev -ForUndo:($Mode -eq 'Undo'))
+    $changeOwner = $false
     if (-not $WhatIf) {
         if (-not (Test-AVDTuneWriteAllowed)) { throw 'The snapshot gate is not confirmed: AVDTune is read only until a snapshot newer than its last change is confirmed on the Overview.' }
+        $changeOwner = Start-AVDTuneChange -Root $Root   # marker while the master is written (snapshot gate, #27/#81), cleared in finally
+    }
+    try {
+    if (-not $WhatIf) {
         [void](Set-AVDTuneState -Root $Root -Values @{ LastChange = (& $Machine.Now).ToString('o') })
         if ($Mode -eq 'Apply' -and $prev.Count -gt 0 -and (-not $rec -or @($defs | Where-Object { -not $rec.ContainsKey($_.Id) }).Count -gt 0)) {
             $out = [ordered]@{}; foreach ($k in $prev.Keys) { $out[$k] = [ordered]@{ Exists = $prev[$k].Exists; Value = $prev[$k].Value; Type = $prev[$k].Type } }
@@ -389,6 +394,8 @@ function Invoke-AVDTuneVdiSettings {
         if ($Mode -eq 'Undo' -and @($results | Where-Object { $_.Status -eq 'Failed' }).Count -eq 0) { Remove-Item -LiteralPath $undoPath -Force -ErrorAction SilentlyContinue }
     }
     $run
+    }
+    finally { Stop-AVDTuneChange -Root $Root -Owner $changeOwner }
 }
 
 #endregion
@@ -660,6 +667,9 @@ function Invoke-AVDTuneVdiRecorded {
     # the early exits of the install (nothing to remove, a browser is running) change nothing: no LastChange, no undo record for them
     $analysisExit = ($Mode -eq 'Remove' -and -not $pre.Installed) -or ($Key -eq 'mmr' -and $Mode -eq 'Install' -and @(& $V.RunningProcesses @('msedge', 'chrome')).Count -gt 0)
     $createdUndo = $false; $undoPath = Get-AVDTuneVdiUndoPath $Root $Key
+    # marker while the master is written (snapshot gate, #27/#81): set before the first write, cleared in finally (Stop stamps LastChange, also after an abort)
+    $changeOwner = $false; if (-not $analysisExit) { $changeOwner = Start-AVDTuneChange -Root $Root }
+    try {
     if (-not $analysisExit) {
         [void](Set-AVDTuneState -Root $Root -Values @{ LastChange = $started.ToString('o') })
         if (-not (Test-Path -LiteralPath $undoPath)) {
@@ -683,6 +693,8 @@ function Invoke-AVDTuneVdiRecorded {
         [void](Add-AVDTuneChangeLogEntry -Root $Root -Version $state.ImageVersion -Category 'VDI' -Component $c.Title -ChangeType $type -Text $text -User $User -SnapshotId $SnapshotId -RunId ([string]$run.Id) -Source Step)
     }
     [pscustomobject]@{ Result = $res; Setup = $r; Run = $run }
+    }
+    finally { Stop-AVDTuneChange -Root $Root -Owner $changeOwner }
 }
 
 function Get-AVDTuneVdiUndoText {
