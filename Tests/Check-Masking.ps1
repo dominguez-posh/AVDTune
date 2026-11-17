@@ -575,6 +575,9 @@ try {
     Test-Check 'review69 preselection: the group of the row is matched with the domain; the same sAMAccountName of another domain gets no SID' ((@(Get-AVDTuneMaskingList -M $dm.M -Directory $dirG)[0]).Groups[0].Sid -eq 'S-1-5-21-1-2-3-1201' -and (@(Get-AVDTuneMaskingList -M $dm.M -Directory $otherDom)[0]).Groups[0].Sid -eq '') $null
     $pg70 = [IO.File]::ReadAllText((Join-Path $repo 'AVDTune-AppMasking.ps1'))
     Test-Check 'page69 review: the row buttons are locked while the state is read and a click during the read is refused; Remove gets the hashes of the read' ($pg70.Contains('$busy = [bool]$script:MaskReadJob') -and $pg70.Contains('-and -not $busy') -and $pg70.Contains('The list is being read') -and $pg70.Contains('-ExpectedSha $sha') -and $pg70.Contains('-ExpectedSha $ch.ExpectedSha -WhatIf') -and $pg70.Contains('Update-MaskRowState $e }')) $null
+    # review 2 of #69: the drive letter of a rule path and the digits of a SID are ASCII only (Kelvin sign, Arabic-Indic digit)
+    $arSid = 'S-1-5-21-1-2-' + [string][char]0x663
+    Test-Check 'review69b ASCII: a rule folder with the Kelvin sign as drive letter is refused (C: is accepted); a SID with an Arabic-Indic digit is refused as group SID' ((Test-AVDTuneMaskingRulePath ($K + ':\Users\Public\Desktop') 'A.lnk') -ne '' -and (Test-AVDTuneMaskingRulePath 'C:\Users\Public\Desktop' 'A.lnk') -eq '' -and (Get-ThrownText { Get-AVDTuneShortcutChange -M $L.M -Row $l0[1] -Mode 'Only members of a group' -GroupSid $arSid -Directory $dirG }) -like 'Choose the group*') $null
 }
 finally {
     Close-AVDTuneWriteGate

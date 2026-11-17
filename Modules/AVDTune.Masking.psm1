@@ -69,7 +69,7 @@ function Get-AVDTuneAppGroupName {
 function Test-AVDTuneMaskingRulePath {
     <# Returns an error text, or '' when folder and file name are fine: no '..', no wildcards, no control characters, no stream or device names. #>
     param([string]$Folder, [string]$Name)
-    if ($Folder.Length -gt 260 -or $Folder -notmatch '\A(%SystemDriveFolder%|[A-Za-z]:)(\\[^\\/:*?"<>|\x00-\x1F]+)*\z') { return "The folder '$Folder' is not a valid local folder path (no wildcards, no control characters)." }
+    if ($Folder.Length -gt 260 -or $Folder -cnotmatch '\A(%SystemDriveFolder%|[A-Za-z]:)(\\[^\\/:*?"<>|\x00-\x1F]+)*\z') { return "The folder '$Folder' is not a valid local folder path (no wildcards, no control characters)." }
     if (@($Folder -split '\\') -contains '..' -or @($Folder -split '\\') -contains '.') { return "The folder '$Folder' contains '.' or '..'." }
     if (-not $Name -or $Name.Length -gt 200 -or $Name -notmatch '\A[^\\/:*?"<>|\x00-\x1F]+\z') { return "The file name '$Name' is not valid (no path, no wildcards, no control characters)." }
     if ($Name -in '.', '..' -or $Name -match '[. ]$') { return "The file name '$Name' is not valid." }
@@ -516,7 +516,7 @@ function Get-AVDTuneShortcutChange {
     $p = @{ Name = [string]$Row.RuleSet; Entries = @(@{ Folder = $script:DeskFolder; Name = [string]$Row.Name }) }
     if ($Mode -eq $script:ModeAdmins) { $p.Visibility = 'Hidden'; $res.New = $script:ModeAdmins }
     else {
-        if (-not $GroupSid -or $GroupSid -notmatch '\AS-1-\d+(-\d+)+\z') { throw 'Choose the group that may see this entry.' }
+        if (-not $GroupSid -or $GroupSid -cnotmatch '\AS-1-[0-9]+(-[0-9]+)+\z') { throw 'Choose the group that may see this entry.' }
         if (-not $Directory) { throw 'The domain is not read yet: connect to the domain controller in the start sequence first.' }
         $g = @(@($Directory.Groups) | Where-Object { [string]$_.Sid -eq $GroupSid })[0]
         if (-not $g) { throw 'The chosen group is not in the list read from the domain controller.' }
@@ -568,7 +568,7 @@ function Save-AVDTuneMaskingBackup {
     Write-AVDTuneFile (Join-Path $folder $name) ([ordered]@{ Path = $Path; Sha256 = (Get-AVDTuneBytesSha256 $Bytes); Bytes = [Convert]::ToBase64String($Bytes) } | ConvertTo-Json)
     # retention: only the newest $Keep backups stay (the name starts with a UTC time stamp). Plain files of this folder only, no recursion, no links followed.
     try {
-        $old = @([IO.Directory]::GetFiles($folder, '*.json') | Where-Object { (Split-Path $_ -Leaf) -match '\A\d{17}-[0-9a-f]{6}-' -and ((New-Object IO.FileInfo $_).Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0 } | Sort-Object { Split-Path $_ -Leaf } -Descending | Select-Object -Skip ([Math]::Max(1, $Keep)))
+        $old = @([IO.Directory]::GetFiles($folder, '*.json') | Where-Object { (Split-Path $_ -Leaf) -cmatch '\A[0-9]{17}-[0-9a-f]{6}-' -and ((New-Object IO.FileInfo $_).Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0 } | Sort-Object { Split-Path $_ -Leaf } -Descending | Select-Object -Skip ([Math]::Max(1, $Keep)))
         foreach ($f in $old) { [IO.File]::Delete($f) }
     }
     catch { }   # a failed clean-up never stops the undo that needs the backup
