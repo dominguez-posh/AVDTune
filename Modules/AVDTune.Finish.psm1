@@ -405,6 +405,24 @@ function Test-AVDTuneFinishBinding {
 
 #region steps
 
+function Get-AVDTuneFinishRebootWait {
+    <#
+        Why a restart is still waiting, as one text ('' = none), with the same signs as the healthcheck item hy.reboot (Readiness): servicing, Windows Update,
+        file renames (PendingFileRenameOperations and PendingFileRenameOperations2). While one waits, C:\Windows\Temp is NOT emptied (review of #48): the renames
+        of an installer often take their source from there at the restart, and deleting it would break that update.
+    #>
+    param([Parameter(Mandatory)]$Machine)
+    $sm = 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager'
+    $why = New-Object System.Collections.ArrayList
+    if (& $Machine.RegKeyExists 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending') { [void]$why.Add('servicing') }
+    if (& $Machine.RegKeyExists 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired') { [void]$why.Add('Windows Update') }
+    foreach ($n in 'PendingFileRenameOperations', 'PendingFileRenameOperations2') {
+        $v = & $Machine.RegGet $sm $n
+        if (@(@($v) | Where-Object { [string]$_ }).Count -gt 0) { [void]$why.Add('file renames'); break }
+    }
+    ($why -join ', ')
+}
+
 function Get-AVDTuneFinishSteps {
     <#
         The steps in order, as @{ Step; Lifts } entries. $Fin is the finish adapter, $Machine the machine adapter. Step ids are finish.<name>.
@@ -425,20 +443,27 @@ function Get-AVDTuneFinishSteps {
     $attempted = @{}
     $liftNames = @($script:LiftServices)
     $groups = @(
-        @{ Id = 'finish.temp'; Ids = @('temp'); Title = 'Windows temp folder emptied'; Why = 'Leftovers of the changes (installers, logs of setups) must not be in the image. Only the contents are removed; a file in use stays; a link is removed itself, never followed.' }
+        @{ Id = 'finish.temp'; Ids = @('temp'); Title = 'Windows temp folder emptied'; Why = 'Leftovers of the changes (installers, logs of setups) must not be in the image. Only the contents are removed; a file in use stays; a link is removed itself, never followed. Not while a restart is waiting (its file renames may need installer files from there).' }
         @{ Id = 'finish.wer'; Ids = @('wer-queue', 'wer-archive'); Title = 'Windows error reports removed'; Why = 'Crash reports of this master are of no use on the session hosts.' }
     )
     foreach ($g in $groups) {
         $tgts = @($targets | Where-Object { $_.Id -in $g.Ids })
         $paths = @($tgts | ForEach-Object { $_.Path })
         $key = $g.Id
+        $isTemp = ($key -eq 'finish.temp')
         $test = {
             param($m)
             $n = 0; foreach ($p in $paths) { $n += [int](& $Fin.CountItems $p) }
+            if ($isTemp -and $n -gt 0) {
+                # a restart still needs files from there (installer renames): not emptied, named in the result
+                $wait = Get-AVDTuneFinishRebootWait -Machine $m
+                if ($wait) { $Report.TempReboot = $wait; return @{ Compliant = $true; State = "$n item(s), not emptied: a restart is waiting ($wait)" } }
+            }
             @{ Compliant = ($n -eq 0 -or [bool]$attempted[$key]); State = "$n item(s)" }
         }.GetNewClosure()
         $apply = {
             param($m)
+            if ($isTemp) { $wait = Get-AVDTuneFinishRebootWait -Machine $m; if ($wait) { $Report.TempReboot = $wait; $attempted[$key] = $true; return } }   # checked again right before the delete
             foreach ($x in $tgts) { $r = & $Fin.ClearFolder $x.Path; $Report.Skipped += [int]$r.Skipped; $Report.Left += [int]$r.Left }
             $attempted[$key] = $true
         }.GetNewClosure()
@@ -548,7 +573,7 @@ function Invoke-AVDTuneFinish {
         [scriptblock]$Progress, [switch]$WhatIf
     )
     $say = { param($t, $p) if ($Progress) { & $Progress $t $p } }.GetNewClosure()
-    $report = @{ Skipped = 0; Left = 0 }
+    $report = @{ Skipped = 0; Left = 0; TempReboot = '' }
     $scanSay = { param($t) & $say $t 85 }.GetNewClosure()
     if ($WhatIf) {
         $entries = @(Get-AVDTuneFinishSteps -Machine $Machine -Fin $Fin -Root $Root -Session $Session -SessionProvider $SessionProvider -User $User -SnapshotId $SnapshotId -Report $report)
@@ -598,6 +623,7 @@ function Invoke-AVDTuneFinish {
     $failedStep = @($results | Where-Object { $_.Status -eq 'Failed' })[0]
     if ($failed -and -not $err -and $failedStep) { $err = "$($failedStep.Title): $($failedStep.Message)" }
     $skipNote = if ($report.Skipped -gt 0 -or $report.Left -gt 0) { " Not removed: $($report.Skipped) item(s) skipped (read-only files with more than one link, only on a file system without POSIX delete), $($report.Left) in use." } else { '' }
+    if ($report.ContainsKey('TempReboot') -and $report.TempReboot) { $skipNote += " C:\Windows\Temp was not emptied: a restart is waiting ($($report.TempReboot)) and may still need installer files from there. Restart the master and empty it before you create the image." }
     $message = if ($failed) { "The finish stopped: $err$skipNote" } else { "Image version $version is finished.$skipNote Now create the image in the imaging tool." }
     if ($notBackNow.Count -gt 0) { $record.Phase = 'restore-failed' }   # stays Active: the next start offers the repair
     else { $record.Active = $false; $record.Phase = $(if ($failed) { 'failed' } else { 'done' }) }
@@ -623,5 +649,5 @@ function Invoke-AVDTuneFinish {
 
 #endregion
 
-Export-ModuleMember -Function New-AVDTuneFinishAdapter, Clear-AVDTuneFolderContents, Get-AVDTuneFileLinkCount, Clear-AVDTuneReadOnlyMark, Find-AVDTuneTokenFiles, Test-AVDTuneNoLinkChain, Get-AVDTuneFinishRecord, Get-AVDTuneFinishCrash,
+Export-ModuleMember -Function New-AVDTuneFinishAdapter, Clear-AVDTuneFolderContents, Get-AVDTuneFinishRebootWait, Get-AVDTuneFileLinkCount, Clear-AVDTuneReadOnlyMark, Find-AVDTuneTokenFiles, Test-AVDTuneNoLinkChain, Get-AVDTuneFinishRecord, Get-AVDTuneFinishCrash,
     Start-AVDTuneFinishLift, Restore-AVDTuneFinishLift, Test-AVDTuneFinishBinding, Get-AVDTuneFinishConfirmText, Repair-AVDTuneFinishCrash, Test-AVDTuneFinishGate, Get-AVDTuneFinishSteps, Invoke-AVDTuneFinish

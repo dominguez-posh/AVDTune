@@ -291,6 +291,21 @@ try {
     Test-Check 'restore fails: the finish is failed, the record stays Active (restore-failed) and is found as a crash' ($r4.Status -eq 'Failed' -and $crash4 -and $crash4.Phase -eq 'restore-failed' -and (& $m4.ServiceGet 'wuauserv').Status -eq 'Stopped') ($r4.Message)
     $g4 = Test-AVDTuneFinishGate -Root $root4
     Test-Check 'a crashed finish blocks the next finish until it is repaired' (-not $g4.Allowed -and ($g4.Reasons -join ' ') -like '*earlier finish did not end properly*') ($g4.Reasons -join '|')
+    # a restart is waiting (file renames, fake registry): C:\Windows\Temp is not emptied and the result says why (review of #48)
+    foreach ($pend in @(
+            @{ N = 'PendingFileRenameOperations'; Seed = @{ Registry = @{ 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager|PendingFileRenameOperations' = @('\??\C:\Windows\Temp\setup\new.dll', '!\??\C:\Program Files\App\new.dll') } } }
+            @{ N = 'PendingFileRenameOperations2'; Seed = @{ Registry = @{ 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager|PendingFileRenameOperations2' = @('\??\C:\Windows\Temp\x', '') } } }
+            @{ N = 'servicing RebootPending'; Seed = @{ Keys = @('HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending') } })) {
+        $rootP = New-Root; [void](Save-Healthcheck -Root $rootP)
+        $seedP = $pend.Seed.Clone(); $seedP.Services = @(@{ Name = 'wuauserv'; StartType = 'Manual'; Status = 'Running' }, @{ Name = 'bits'; StartType = 'Manual'; Status = 'Running' })
+        $mP = New-AVDTuneFakeMachine -Seed $seedP
+        $fP = New-AVDTuneFakeFinish -Seed @{ Items = @{ 'temp' = @('setup.msi', 'new.dll'); 'wer-queue' = @('Report1') } }
+        $rP = Invoke-AVDTuneFinish -Machine $mP -Fin $fP -Root $rootP -User 'admin1'
+        $tP = @($rP.Results | Where-Object Id -eq 'finish.temp')[0]
+        Test-Check "restart waiting ($($pend.N)): the temp folder is not emptied (never asked), the error reports are, the result and its message say why" ($rP.Status -eq 'Finished' -and -not ($fP.Log -contains 'ClearFolder C:\Windows\Temp') -and $fP.Store.Items['C:\Windows\Temp'].Count -eq 2 -and $fP.Store.Items['C:\ProgramData\Microsoft\Windows\WER\ReportQueue'].Count -eq 0 -and $rP.Message -like '*Windows\Temp was not emptied: a restart is waiting*' -and ($tP | ConvertTo-Json -Compress -Depth 4) -like '*restart is waiting*') "$($rP.Status) / $($tP | ConvertTo-Json -Compress -Depth 4) / $($rP.Message)"
+    }
+    $mNo = New-AVDTuneFakeMachine -Seed @{ Registry = @{ 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager|PendingFileRenameOperations' = @('') } }
+    Test-Check 'restart waiting: an empty rename list is no restart (the temp folder is emptied as usual)' ((Get-AVDTuneFinishRebootWait -Machine $mNo) -eq '' -and (Get-AVDTuneFinishRebootWait -Machine (New-Master)) -eq '') $null
     $m4b = New-AVDTuneFakeMachine -Seed @{ Services = @(@{ Name = 'wuauserv'; StartType = 'Manual'; Status = 'Stopped' }, @{ Name = 'bits'; StartType = 'Manual'; Status = 'Stopped' }) }
     Close-AVDTuneWriteGate
     Test-Check 'repair needs the open write gate' ((Test-Throws { Repair-AVDTuneFinishCrash -Machine $m4b -Root $root4 -User 'admin1' }) -and $m4b.Log.Count -eq 0) $null

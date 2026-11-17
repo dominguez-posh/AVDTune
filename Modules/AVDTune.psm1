@@ -777,9 +777,12 @@ function Initialize-AVDTuneSafeTree {
             (GetFileInformationByHandleEx, FileFullDirectoryInfo);
           * the delete goes through the same handle (SetFileInformationByHandle FileDispositionInfoEx: POSIX semantics, read-only ignored, so no attribute
             of a hard-linked file elsewhere is changed); without POSIX delete (older Windows, other file systems) FileDispositionInfo, and a read-only mark
-            is removed only from a file with exactly one link (otherwise Skipped);
+            is removed only from a file with exactly one link (otherwise Skipped), through a second handle reopened from the first (FILE_WRITE_ATTRIBUTES
+            is asked for only there). Known gap of that fallback: the link count can grow after it was read; adding a link needs write access to that
+            file, so the cleared mark then reaches only a file its creator could change anyway (docs\safe-delete.md);
           * a link (junction, symlink, any reparse point) is deleted itself and never entered; a folder deeper than MaxDepth levels is left (no stack
-            exhaustion by a prepared tree); an entry in use or refused is left and counted.
+            exhaustion by a prepared tree), a folder with more than MaxEntries entries too (TooMany, no unbounded list); an oplock someone holds is not
+            waited for (FILE_COMPLETE_IF_OPLOCKED: that entry is left); an entry in use or refused is left and counted.
         Hook (tests only): called with ('listed', folder) after a folder was listed and before its entries are opened, and with ('opened', path) after an
         entry was opened and checked and before it is entered or deleted. A test swaps folders for junctions there.
     #>
@@ -793,17 +796,20 @@ using System.Runtime.InteropServices;
 using System.Text;
 using Microsoft.Win32.SafeHandles;
 namespace AVDTune.Native {
-    public sealed class SafeTreeResult { public int Removed; public int Left; public int Skipped; public bool Gone; }
+    public sealed class SafeTreeResult { public int Removed; public int Left; public int Skipped; public int TooMany; public bool Gone; }
     public static class SafeTree {
         public static Action<string, string> Hook;
         public static int MaxDepth = 256;
+        public static int MaxEntries = 200000;   // per folder; a folder with more is left (TooMany), no unbounded list in memory
+        public static bool TestNoPosixDelete;     // tests only: take the path for file systems without POSIX delete
 
         const uint DELETE = 0x00010000, SYNCHRONIZE = 0x00100000, READ_ATTRIBUTES = 0x80, WRITE_ATTRIBUTES = 0x100, LIST_DIRECTORY = 0x1;
         const uint SHARE_READ = 1, SHARE_WRITE = 2, SHARE_DELETE = 4;
         const uint ATTR_READONLY = 0x1, ATTR_DIRECTORY = 0x10, ATTR_REPARSE = 0x400;
-        const uint OPT_DIRECTORY = 0x1, OPT_SYNC = 0x20, OPT_NON_DIRECTORY = 0x40, OPT_OPEN_REPARSE = 0x00200000;
+        const uint OPT_DIRECTORY = 0x1, OPT_SYNC = 0x20, OPT_NON_DIRECTORY = 0x40, OPT_COMPLETE_IF_OPLOCKED = 0x100, OPT_OPEN_REPARSE = 0x00200000;
         const uint OBJ_CASE_INSENSITIVE = 0x40, FILE_OPEN = 1;
         const int ST_NOT_A_DIRECTORY = unchecked((int)0xC0000103), ST_FILE_IS_A_DIRECTORY = unchecked((int)0xC00000BA);
+        const int ST_OPLOCK_BREAK_IN_PROGRESS = 0x00000108;
         const int ST_NAME_NOT_FOUND = unchecked((int)0xC0000034), ST_PATH_NOT_FOUND = unchecked((int)0xC000003A), ST_DELETE_PENDING = unchecked((int)0xC0000056);
 
         [StructLayout(LayoutKind.Sequential)] struct UNICODE_STRING { public ushort Length; public ushort MaximumLength; public IntPtr Buffer; }
@@ -825,8 +831,25 @@ namespace AVDTune.Native {
 
         static void Fire(string stage, string path) { Action<string, string> h = Hook; if (h != null) h(stage, path); }
 
-        // One name, relative to an open folder (root == null: an absolute NT path, used for the root only)
+        // One name, relative to an open folder (root == null: an absolute NT path, used for the root only). An oplock someone holds is not waited for
+        // (FILE_COMPLETE_IF_OPLOCKED: no thread of ours stalls in a break an attacker controls); the entry then counts as left.
         static int Open(SafeFileHandle root, string name, bool dir, bool withDelete, out SafeFileHandle h) {
+            int st = OpenRaw(root, name, READ_ATTRIBUTES | SYNCHRONIZE | (withDelete ? DELETE : 0) | (dir ? LIST_DIRECTORY : 0),
+                // a folder we delete cannot be renamed or replaced while we hold it; a root that is only emptied (C:\Windows\Temp) and every file are shared
+                // fully (others may hold them with delete access; everything below is reached through our handle either way)
+                (dir && withDelete) ? (SHARE_READ | SHARE_WRITE) : (SHARE_READ | SHARE_WRITE | SHARE_DELETE),
+                OPT_SYNC | OPT_OPEN_REPARSE | OPT_COMPLETE_IF_OPLOCKED | (dir ? OPT_DIRECTORY : OPT_NON_DIRECTORY), out h);
+            if (st == ST_OPLOCK_BREAK_IN_PROGRESS) { h.Dispose(); h = new SafeFileHandle(IntPtr.Zero, true); }
+            return st;
+        }
+
+        // The same file once more, with FILE_WRITE_ATTRIBUTES (only for the read-only mark without POSIX delete): an empty name relative to the open handle
+        // reopens exactly that object, no path is parsed again
+        static int ReopenForAttributes(SafeFileHandle h, out SafeFileHandle w) {
+            return OpenRaw(h, "", READ_ATTRIBUTES | WRITE_ATTRIBUTES | SYNCHRONIZE, SHARE_READ | SHARE_WRITE | SHARE_DELETE, OPT_SYNC | OPT_OPEN_REPARSE | OPT_NON_DIRECTORY, out w);
+        }
+
+        static int OpenRaw(SafeFileHandle root, string name, uint access, uint share, uint options, out SafeFileHandle h) {
             IntPtr buf = Marshal.StringToHGlobalUni(name);
             IntPtr us = Marshal.AllocHGlobal(Marshal.SizeOf(typeof(UNICODE_STRING)));
             bool added = false;
@@ -837,11 +860,6 @@ namespace AVDTune.Native {
                 OBJECT_ATTRIBUTES oa = new OBJECT_ATTRIBUTES();
                 oa.Length = Marshal.SizeOf(typeof(OBJECT_ATTRIBUTES)); oa.RootDirectory = root == null ? IntPtr.Zero : root.DangerousGetHandle(); oa.ObjectName = us; oa.Attributes = OBJ_CASE_INSENSITIVE;
                 IO_STATUS_BLOCK io;
-                uint access = READ_ATTRIBUTES | WRITE_ATTRIBUTES | SYNCHRONIZE | (withDelete ? DELETE : 0) | (dir ? LIST_DIRECTORY : 0);
-                // a folder we delete cannot be renamed or replaced while we hold it; a root that is only emptied (C:\Windows\Temp) and every file are shared
-                // fully (others may hold them with delete access; everything below is reached through our handle either way)
-                uint share = (dir && withDelete) ? (SHARE_READ | SHARE_WRITE) : (SHARE_READ | SHARE_WRITE | SHARE_DELETE);
-                uint options = OPT_SYNC | OPT_OPEN_REPARSE | (dir ? OPT_DIRECTORY : OPT_NON_DIRECTORY);
                 return NtCreateFile(out h, access, ref oa, out io, IntPtr.Zero, 0, share, FILE_OPEN, options, IntPtr.Zero, 0);
             }
             finally { if (added) root.DangerousRelease(); Marshal.FreeHGlobal(us); Marshal.FreeHGlobal(buf); }
@@ -853,7 +871,8 @@ namespace AVDTune.Native {
             return st;
         }
 
-        static List<Entry> List(SafeFileHandle dir) {
+        static List<Entry> List(SafeFileHandle dir, out bool tooMany) {
+            tooMany = false;
             List<Entry> list = new List<Entry>();
             const int size = 64 * 1024;
             IntPtr buf = Marshal.AllocHGlobal(size);
@@ -873,7 +892,10 @@ namespace AVDTune.Native {
                         uint attr = (uint)Marshal.ReadInt32(p, 56);
                         int nameBytes = Marshal.ReadInt32(p, 60);
                         string name = Marshal.PtrToStringUni(new IntPtr(p.ToInt64() + 68), nameBytes / 2);
-                        if (name != "." && name != "..") { Entry en = new Entry(); en.Name = name; en.Attributes = attr; list.Add(en); }
+                        if (name != "." && name != "..") {
+                            if (list.Count >= MaxEntries) { tooMany = true; return list; }
+                            Entry en = new Entry(); en.Name = name; en.Attributes = attr; list.Add(en);
+                        }
                         if (next == 0) break;
                         off += next;
                     }
@@ -884,14 +906,24 @@ namespace AVDTune.Native {
         }
 
         static bool DeleteByHandle(SafeFileHandle h, BY_HANDLE_FILE_INFORMATION info, SafeTreeResult r) {
-            uint flags = 0x1 | 0x2 | 0x10;   // FILE_DISPOSITION_FLAG_DELETE | POSIX_SEMANTICS | IGNORE_READONLY_ATTRIBUTE
-            if (SetFileInformationByHandle(h, 21, ref flags, 4)) return true;
-            int e = Marshal.GetLastWin32Error();
-            if (e != 87 && e != 50 && e != 1 && e != 124) return false;   // a real refusal (in use, not empty, access denied): not tried another way
+            if (!TestNoPosixDelete) {
+                uint flags = 0x1 | 0x2 | 0x10;   // FILE_DISPOSITION_FLAG_DELETE | POSIX_SEMANTICS | IGNORE_READONLY_ATTRIBUTE
+                if (SetFileInformationByHandle(h, 21, ref flags, 4)) return true;
+                int e = Marshal.GetLastWin32Error();
+                if (e != 87 && e != 50 && e != 1 && e != 124) return false;   // a real refusal (in use, not empty, access denied): not tried another way
+            }
             if ((info.FileAttributes & ATTR_READONLY) != 0) {
-                if (info.NumberOfLinks != 1) { r.Skipped++; return false; }   // the mark belongs to every name of the file
-                FILE_BASIC_INFO b = new FILE_BASIC_INFO(); b.FileAttributes = info.FileAttributes & ~ATTR_READONLY; if (b.FileAttributes == 0) b.FileAttributes = 0x80;
-                if (!SetFileInformationByHandle(h, 0, ref b, (uint)Marshal.SizeOf(typeof(FILE_BASIC_INFO)))) return false;
+                // Without POSIX delete the read-only mark must go first, and the mark belongs to every name of the file: only with exactly one link.
+                // Known gap (review of #48): the count is read when the entry is opened; a hard link added after that needs write access to this very file,
+                // so the cleared mark then only reaches a file its creator could change anyway. With POSIX delete (Windows 10 1809 and later, NTFS) no
+                // attribute is changed at all.
+                if (info.NumberOfLinks != 1 || (info.FileAttributes & ATTR_DIRECTORY) != 0) { r.Skipped++; return false; }
+                SafeFileHandle w;
+                if (ReopenForAttributes(h, out w) != 0) { w.Dispose(); return false; }
+                using (w) {
+                    FILE_BASIC_INFO b = new FILE_BASIC_INFO(); b.FileAttributes = info.FileAttributes & ~ATTR_READONLY; if (b.FileAttributes == 0) b.FileAttributes = 0x80;
+                    if (!SetFileInformationByHandle(w, 0, ref b, (uint)Marshal.SizeOf(typeof(FILE_BASIC_INFO)))) return false;
+                }
             }
             byte d = 1;
             return SetFileInformationByHandle(h, 4, ref d, 1);
@@ -900,8 +932,9 @@ namespace AVDTune.Native {
         // Removes what is in an open folder; returns the number of entries still there. depth: level of the folder (0 = root).
         static int ClearDir(SafeFileHandle dir, string display, int depth, SafeTreeResult r) {
             for (int round = 0; round < 3; round++) {
-                List<Entry> entries;
-                try { entries = List(dir); } catch (Win32Exception) { if (depth == 0) r.Left++; return 1; }
+                List<Entry> entries; bool tooMany;
+                try { entries = List(dir, out tooMany); } catch (Win32Exception) { if (depth == 0) r.Left++; return 1; }
+                if (tooMany) r.TooMany++;
                 if (entries.Count == 0) return 0;
                 Fire("listed", display);
                 int left = 0;
@@ -911,8 +944,9 @@ namespace AVDTune.Native {
                     if (!gone) left++;
                 }
                 if (left > 0) return left;
+                if (tooMany) { if (depth == 0) r.Left++; return 1; }   // the rest beyond the limit stays (counted once)
             }
-            int rest; try { rest = List(dir).Count; } catch (Win32Exception) { rest = 1; }   // entries keep coming: leave them
+            bool more; int rest; try { rest = List(dir, out more).Count; } catch (Win32Exception) { rest = 1; }   // entries keep coming: leave them
             if (depth == 0) r.Left += rest;
             return rest;
         }
@@ -977,6 +1011,7 @@ namespace AVDTune.Native {
             }
             using (h) {
                 if (st == ST_NAME_NOT_FOUND || st == ST_PATH_NOT_FOUND) { r.Gone = !contentsOnly; return r; }
+                if (st == ST_OPLOCK_BREAK_IN_PROGRESS) throw new IOException("Cannot open " + path + ": someone holds an oplock on it. Nothing was deleted; try again later.");
                 if (st != 0) throw new Win32Exception(RtlNtStatusToDosError(st), "Cannot open " + path + ": " + new Win32Exception(RtlNtStatusToDosError(st)).Message);
                 string final = FinalPath(h), expected = LongPath(full);
                 if (!String.Equals(final, expected, StringComparison.OrdinalIgnoreCase)) throw new IOException("The path " + path + " has a link in it (it leads to " + final + "): nothing is deleted.");
@@ -1000,14 +1035,15 @@ function Remove-AVDTuneTreeSafe {
     <#
         Deletes a folder tree, a file or a link through handles (Initialize-AVDTuneSafeTree, #48): a link is removed itself and never followed, nothing below
         the root is opened by path, a link further up the path refuses the call (throws). -ContentsOnly keeps the folder itself (and throws for a link).
-        Returns Removed and Left (direct entries of the root), Skipped (read-only files with more than one link, only without POSIX delete) and Gone (the
+        Returns Removed and Left (direct entries of the root), Skipped (read-only files with more than one link, only without POSIX delete), TooMany
+        (folders over the entry limit, left) and Gone (the
         root is not there any more). An entry in use stays and counts as Left; it does not throw. The one way to delete in a tree that is not admin-only.
     #>
     param([Parameter(Mandatory)][string]$Path, [switch]$ContentsOnly)
     Initialize-AVDTuneSafeTree
     try { $r = [AVDTune.Native.SafeTree]::Remove($Path, [bool]$ContentsOnly) }
     catch [Management.Automation.MethodInvocationException] { throw $_.Exception.InnerException }   # the message of the delete itself, not the wrapper of the call
-    [pscustomobject]@{ Removed = $r.Removed; Left = $r.Left; Skipped = $r.Skipped; Gone = $r.Gone }
+    [pscustomobject]@{ Removed = $r.Removed; Left = $r.Left; Skipped = $r.Skipped; TooMany = $r.TooMany; Gone = $r.Gone }
 }
 
 function Remove-AVDTuneTreeNoFollow {

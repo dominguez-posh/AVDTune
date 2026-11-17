@@ -179,6 +179,71 @@ try {
     try { $r = Remove-AVDTuneTreeSafe -Path $c.Tree } finally { [AVDTune.Native.SafeTree]::MaxDepth = 256 }
     Test-Check 'deeper than the limit: no error, the deep part is left (no stack exhaustion by a prepared tree), the rest goes' (-not $r.Gone -and (Test-Path -LiteralPath (Join-Path $c.Tree 'sub\deeper\d.txt')) -and -not (Test-Path -LiteralPath (Join-Path $c.Tree 'f.txt'))) "$($r.Removed)/$($r.Left)"
 
+    # ---------------------------------------------------------------- too many entries in one folder
+    $c = New-Case
+    $wide = Join-Path $c.Tree 'wide'; New-Item -ItemType Directory -Path $wide | Out-Null
+    1..8 | ForEach-Object { [IO.File]::WriteAllText((Join-Path $wide "w$_.txt"), 'w') }
+    [AVDTune.Native.SafeTree]::MaxEntries = 5
+    try { $r = Remove-AVDTuneTreeSafe -Path $c.Tree } finally { [AVDTune.Native.SafeTree]::MaxEntries = 200000 }
+    Test-Check 'more entries than the limit in a folder: no error, the folder is left (TooMany), what was listed goes, the rest of the tree goes' (-not $r.Gone -and $r.TooMany -ge 1 -and @(Get-ChildItem -LiteralPath $wide).Count -eq 3 -and -not (Test-Path -LiteralPath (Join-Path $c.Tree 'sub'))) "$($r.TooMany)/$($r.Left) left in wide: $(@(Get-ChildItem -LiteralPath $wide).Count)"
+    $r = Remove-AVDTuneTreeSafe -Path $c.Tree
+    Test-Check 'with the normal limit the same tree goes' ($r.Gone -and $r.TooMany -eq 0) $null
+
+    # ---------------------------------------------------------------- without POSIX delete (the fallback, forced by the test switch)
+    $c = New-Case
+    Set-Content -LiteralPath (Join-Path $c.Tree 'ro-single.txt') -Value 'r'; (Get-Item -LiteralPath (Join-Path $c.Tree 'ro-single.txt')).Attributes = 'ReadOnly'
+    Set-Content -LiteralPath (Join-Path $c.Out 'ro-shared.txt') -Value 's'; (Get-Item -LiteralPath (Join-Path $c.Out 'ro-shared.txt')).Attributes = 'ReadOnly'
+    [void](New-Item -ItemType HardLink -Path (Join-Path $c.Tree 'sub\ro-hard.txt') -Value (Join-Path $c.Out 'ro-shared.txt'))
+    New-Junction (Join-Path $c.Tree 'jout') $c.Out
+    [AVDTune.Native.SafeTree]::TestNoPosixDelete = $true
+    try { $r = Remove-AVDTuneTreeSafe -Path $c.Tree } finally { [AVDTune.Native.SafeTree]::TestNoPosixDelete = $false }
+    $sharedAttr = (Get-Item -LiteralPath (Join-Path $c.Out 'ro-shared.txt')).Attributes
+    Test-Check 'fallback: the read-only file with one link goes (mark cleared through a reopened handle), plain files and the junction go, the target is untouched' (-not (Test-Path -LiteralPath (Join-Path $c.Tree 'ro-single.txt')) -and -not (Test-Path -LiteralPath (Join-Path $c.Tree 'f.txt')) -and -not (Test-Path -LiteralPath (Join-Path $c.Tree 'jout')) -and (Test-Path -LiteralPath $c.Victim)) "$($r.Removed)/$($r.Left)/$($r.Skipped)"
+    Test-Check 'fallback: the read-only hard link is skipped (counted), its other name keeps the mark, so its folder stays' ($r.Skipped -eq 1 -and -not $r.Gone -and (Test-Path -LiteralPath (Join-Path $c.Tree 'sub\ro-hard.txt')) -and ($sharedAttr -band [IO.FileAttributes]::ReadOnly) -ne 0) "$($r.Skipped) $sharedAttr"
+    $r = Remove-AVDTuneTreeSafe -Path $c.Tree
+    Test-Check 'with POSIX delete the hard link goes without touching the mark' ($r.Gone -and ((Get-Item -LiteralPath (Join-Path $c.Out 'ro-shared.txt')).Attributes -band [IO.FileAttributes]::ReadOnly) -ne 0) $null
+
+    # ---------------------------------------------------------------- an oplock someone holds is not waited for
+    if (-not ('AVDTuneTest.Oplock' -as [type])) {
+        Add-Type -TypeDefinition @'
+using System; using System.Runtime.InteropServices; using Microsoft.Win32.SafeHandles; using System.Threading;
+namespace AVDTuneTest {
+    public sealed class Oplock : IDisposable {
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] static extern SafeFileHandle CreateFileW(string name, uint access, uint share, IntPtr sec, uint disp, uint flags, IntPtr tmpl);
+        [DllImport("kernel32.dll", SetLastError = true)] static extern bool DeviceIoControl(SafeFileHandle h, uint code, IntPtr inBuf, uint inSize, IntPtr outBuf, uint outSize, out uint ret, IntPtr overlapped);
+        SafeFileHandle h; IntPtr ov; ManualResetEvent ev;
+        public bool Granted;
+        // A level 1 oplock (FSCTL_REQUEST_OPLOCK_LEVEL_1) that is never acknowledged: an open that breaks it would wait until the holder lets go
+        public Oplock(string path) {
+            h = CreateFileW(path, 0x80000000, 7, IntPtr.Zero, 3, 0x40000000, IntPtr.Zero);
+            if (h.IsInvalid) throw new System.ComponentModel.Win32Exception();
+            ev = new ManualResetEvent(false);
+            ov = Marshal.AllocHGlobal(IntPtr.Size * 3 + 8);
+            for (int i = 0; i < IntPtr.Size * 3 + 8; i++) Marshal.WriteByte(ov, i, 0);
+            Marshal.WriteIntPtr(ov, IntPtr.Size * 2 + 8, ev.SafeWaitHandle.DangerousGetHandle());
+            uint ret;
+            Granted = !DeviceIoControl(h, 0x00090000, IntPtr.Zero, 0, IntPtr.Zero, 0, out ret, ov) && Marshal.GetLastWin32Error() == 997;
+        }
+        public void Dispose() { h.Dispose(); ev.WaitOne(2000); Marshal.FreeHGlobal(ov); ev.Dispose(); }
+    }
+}
+'@
+    }
+    $c = New-Case
+    $held = Join-Path $c.Tree 'held.txt'; Set-Content -LiteralPath $held -Value 'h'
+    $op = New-Object AVDTuneTest.Oplock $held
+    try {
+        $ps = [powershell]::Create()
+        [void]$ps.AddScript({ param($m, $p) Import-Module $m -Force; Remove-AVDTuneTreeSafe -Path $p }).AddArgument((Join-Path $repo 'Modules\AVDTune.psm1')).AddArgument($c.Tree)
+        $ar = $ps.BeginInvoke()
+        $done = $ar.AsyncWaitHandle.WaitOne(30000)
+        $or = if ($done) { @($ps.EndInvoke($ar))[0] } else { $null }
+    }
+    finally { $op.Dispose(); if ($done) { $ps.Dispose() } else { [void]$ps.EndInvoke($ar); $ps.Dispose() } }
+    Test-Check 'an entry under an oplock: the delete does not wait for the holder, the entry counts as left, the rest goes' ($op.Granted -and $done -and $or -and -not $or.Gone -and $or.Left -eq 1 -and (Test-Path -LiteralPath $held) -and -not (Test-Path -LiteralPath (Join-Path $c.Tree 'sub'))) "granted=$($op.Granted) done=$done left=$($or.Left)"
+    $r = Remove-AVDTuneTreeSafe -Path $c.Tree
+    Test-Check 'an entry under an oplock: after the holder let go the tree goes' ($r.Gone) $null
+
     # ---------------------------------------------------------------- the callers in the core module
     $c = New-Case
     New-Junction (Join-Path $c.Tree 'jout') $c.Out
@@ -186,11 +251,19 @@ try {
 
     # ---------------------------------------------------------------- the code itself
     $src = [IO.File]::ReadAllText((Join-Path $repo 'Modules\AVDTune.psm1'))
-    Test-Check 'code: entries are opened relative to the folder handle with FILE_OPEN_REPARSE_POINT and deleted by handle (POSIX semantics, read-only ignored)' ($src -match 'oa\.RootDirectory = root == null \? IntPtr\.Zero : root\.DangerousGetHandle\(\)' -and $src -match 'OPT_OPEN_REPARSE = 0x00200000' -and $src -match 'uint options = OPT_SYNC \| OPT_OPEN_REPARSE' -and $src -match 'uint flags = 0x1 \| 0x2 \| 0x10;' -and $src -match 'SetFileInformationByHandle\(h, 21, ref flags, 4\)') $null
-    Test-Check 'code: a folder that is deleted is held without FILE_SHARE_DELETE' ($src -match 'uint share = \(dir && withDelete\) \? \(SHARE_READ \| SHARE_WRITE\) :') $null
-    $mods = @(Get-ChildItem -LiteralPath (Join-Path $repo 'Modules') -Filter '*.psm1') + @(Get-ChildItem -LiteralPath $repo -Filter 'AVDTune-*.ps1')
+    Test-Check 'code: entries are opened relative to the folder handle with FILE_OPEN_REPARSE_POINT and deleted by handle (POSIX semantics, read-only ignored)' ($src -match 'oa\.RootDirectory = root == null \? IntPtr\.Zero : root\.DangerousGetHandle\(\)' -and $src -match 'OPT_OPEN_REPARSE = 0x00200000' -and $src -match 'OPT_SYNC \| OPT_OPEN_REPARSE \| OPT_COMPLETE_IF_OPLOCKED \| \(dir \?' -and $src -match 'uint flags = 0x1 \| 0x2 \| 0x10;' -and $src -match 'SetFileInformationByHandle\(h, 21, ref flags, 4\)') $null
+    Test-Check 'code: a folder that is deleted is held without FILE_SHARE_DELETE' ($src -match '\(dir && withDelete\) \? \(SHARE_READ \| SHARE_WRITE\) :') $null
+    Test-Check 'code: the first open asks for no FILE_WRITE_ATTRIBUTES; only the reopen of the read-only fallback does' ($src -match 'int st = OpenRaw\(root, name, READ_ATTRIBUTES \| SYNCHRONIZE \| \(withDelete' -and ([regex]::Matches($src, 'WRITE_ATTRIBUTES \| SYNCHRONIZE')).Count -eq 1 -and $src -match 'ReopenForAttributes\(SafeFileHandle h, out SafeFileHandle w\) \{\s+return OpenRaw\(h, "", READ_ATTRIBUTES \| WRITE_ATTRIBUTES') $null
+    # every script of the product (modules, pages, the start script, the watermark scripts, the shared copies); Tools and Bench are developer scripts
+    $mods = @(Get-ChildItem -LiteralPath (Join-Path $repo 'Modules') -Filter '*.psm1') + @(Get-ChildItem -LiteralPath $repo -Filter '*.ps1') + @(Get-ChildItem -LiteralPath (Join-Path $repo 'Watermark') -Filter '*.ps1') + @(Get-ChildItem -LiteralPath (Join-Path $repo 'Shared') -Recurse -File -Include '*.ps1', '*.psm1')
+    Test-Check 'code: the scan sees Start-AVDTune.ps1, every page, the watermark scripts and the shared copies' ((@($mods | Where-Object Name -eq 'Start-AVDTune.ps1').Count -eq 1) -and @($mods | Where-Object Name -like 'AVDTune-*.ps1').Count -ge 20 -and @($mods | Where-Object Name -eq 'Show-AVDTuneWatermark.ps1').Count -eq 1) ($mods.Count)
     $recurse = @(foreach ($mf in $mods) { $i = 0; foreach ($line in [IO.File]::ReadAllLines($mf.FullName)) { $i++; if ($line -match 'Remove-Item\b[^#]*-Recurse' -and $line -notmatch '^\s*#') { "$($mf.Name):$i" } } })
-    Test-Check 'code: no Remove-Item -Recurse in the modules and pages (it follows links; use Remove-AVDTuneTreeSafe)' ($recurse.Count -eq 0) ($recurse -join ', ')
+    # Known, outside AVDTune's hands: the shared PackTune copy (Send-PackTuneProtocolToStore, its own temp folder; AVDTune never calls it). Shared code is
+    # changed in PackTune first and synced; exactly this one line is allowed, any other or a second one fails.
+    $known = @($recurse | Where-Object { $_ -like 'PackTune-Protocol.ps1:*' })
+    $sharedLine = @([IO.File]::ReadAllLines((Join-Path $repo 'Shared\PackTune-Protocol.ps1')) | Where-Object { $_ -match 'Remove-Item\b[^#]*-Recurse' })
+    $calls = @(foreach ($mf in $mods) { if ($mf.Name -ne 'PackTune-Protocol.ps1' -and ([IO.File]::ReadAllText($mf.FullName) -match 'Send-PackTuneProtocolToStore')) { $mf.Name } })
+    Test-Check 'code: no Remove-Item -Recurse in the product scripts (it follows links; use Remove-AVDTuneTreeSafe), apart from the one known line of the shared PackTune copy that AVDTune never calls' ($recurse.Count -eq $known.Count -and $known.Count -le 1 -and ($known.Count -eq 0 -or ($sharedLine.Count -eq 1 -and $sharedLine[0] -match 'Remove-Item -LiteralPath \$Temp -Recurse')) -and $calls.Count -eq 0) "$($recurse -join ', ') / callers: $($calls -join ', ')"
 }
 finally {
     [AVDTune.Native.SafeTree]::Hook = $null
