@@ -708,27 +708,15 @@ function Test-AVDTuneAdminOnlyPath {
 
 function Remove-AVDTuneStageDir {
     <#
-        Removes one staging folder: its plain files, then the folder. Links are removed as links, never followed; a file that is still in use
-        (the tool has just ended) is tried again for a few seconds. Returns $true when the folder is gone.
+        Removes one staging folder with what is in it, through handles (Remove-AVDTuneTreeSafe, #48): links are removed as links, never followed;
+        a file that is still in use (the tool has just ended) is tried again for a few seconds. Returns $true when the folder is gone.
     #>
     param([Parameter(Mandatory)][string]$Dir, [int]$Tries = 15)
-    $d = New-Object IO.DirectoryInfo $Dir
     for ($i = 0; $i -lt $Tries; $i++) {
-        $d.Refresh()
-        if (-not $d.Exists) { return $true }
-        try {
-            if (($d.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { $d.Delete(); return $true }   # the link only
-            foreach ($f in $d.GetFileSystemInfos()) {
-                if ($f -is [IO.DirectoryInfo]) { if (($f.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { $f.Delete() } }   # a link inside: the link only
-                else { $f.Attributes = [IO.FileAttributes]::Normal; $f.Delete() }
-            }
-            $d.Delete($false)
-            return $true
-        }
-        catch { Start-Sleep -Milliseconds 200 }
+        try { if ((Remove-AVDTuneTreeSafe -Path $Dir).Gone) { return $true } } catch { }
+        Start-Sleep -Milliseconds 200
     }
-    $d.Refresh()
-    -not $d.Exists
+    -not (Test-Path -LiteralPath $Dir)
 }
 
 function Clear-AVDTuneStageFolder {

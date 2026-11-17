@@ -32,15 +32,11 @@ function Get-AVDTuneFolderProblems {
 }
 
 function Remove-AVDTuneFolderNoFollow([string]$Folder) {
-    # Deletes a folder; a link (junction, symlink) is removed itself, never what it points to
-    $dir = New-Object IO.DirectoryInfo $Folder
-    if (-not $dir.Exists) { return }
-    if (($dir.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { $dir.Delete(); return }
-    foreach ($item in $dir.GetFileSystemInfos()) {
-        if ($item -is [IO.DirectoryInfo]) { Remove-AVDTuneFolderNoFollow $item.FullName }
-        else { $item.Attributes = [IO.FileAttributes]::Normal; $item.Delete() }
-    }
-    $dir.Delete()
+    # Deletes a folder (or a file); a link (junction, symlink) is removed itself, never what it points to. Through handles (Remove-AVDTuneTreeSafe, #48):
+    # nothing below the folder is opened by path, so a folder swapped for a junction during the delete cannot redirect it. Throws when something is left
+    # (in use, refused) or a link is further up the path.
+    $r = Remove-AVDTuneTreeSafe -Path $Folder
+    if (-not $r.Gone) { throw "$Folder could not be removed completely ($($r.Left) item(s) left: in use or refused)." }
 }
 
 function Assert-AVDTuneWebView2Cache {

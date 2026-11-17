@@ -520,7 +520,7 @@ function New-AVDTuneMachine {
     }
     $m.FileText = { param($Path) if (Test-Path -LiteralPath $Path -PathType Leaf) { [IO.File]::ReadAllText($Path).TrimStart([char]0xFEFF) } else { $null } }
     $m.FileWrite = { param($Path, $Text, $Access = 'Admin') Write-AVDTuneAccessFile -Path $Path -Text $Text -Access $Access }
-    $m.FileRemove = { param($Path) if (Test-Path -LiteralPath $Path -PathType Leaf) { Remove-Item -LiteralPath $Path -Force } }
+    $m.FileRemove = { param($Path) if ((Test-Path -LiteralPath $Path -PathType Leaf) -and -not (Remove-AVDTuneTreeSafe -Path $Path).Gone) { throw "$Path could not be deleted (in use)." } }   # by handle (#48): a name swapped for a link is removed as a link (the legacy file sits in the ProgramData root, where users create files)
     $m.DirRemoveEmpty = { param($Path) if ((Test-Path -LiteralPath $Path -PathType Container) -and @(Get-ChildItem -LiteralPath $Path -Force).Count -eq 0) { Remove-Item -LiteralPath $Path -Force } }
     $m.AclReport = { param($Path) Read-AVDTuneAclReport -Path $Path }
     $m.TaskDetail = {
@@ -761,22 +761,262 @@ function Initialize-AVDTuneToolTemp {
     $dir
 }
 
-function Remove-AVDTuneTreeNoFollow {
-    # Deletes a folder tree; a link (junction, symlink) is removed as a link, never followed. Returns $true when it is gone.
-    param([Parameter(Mandatory)][string]$Path)
-    try {
-        $item = New-Object IO.DirectoryInfo $Path
-        if (-not $item.Exists) { return $true }
-        if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { $item.Delete(); return $true }
-        foreach ($c in $item.GetFileSystemInfos()) {
-            if ($c -is [IO.DirectoryInfo]) { [void](Remove-AVDTuneTreeNoFollow -Path $c.FullName) }
-            else { $c.Attributes = [IO.FileAttributes]::Normal; $c.Delete() }
+#region delete through handles (#48)
+
+function Initialize-AVDTuneSafeTree {
+    <#
+        AVDTune.Native.SafeTree: deletes a tree through handles, never through paths below the root. Why: a path-based delete checks "no link" and then
+        deletes by name; in a tree that users can write to (C:\Windows\Temp, WER\ReportQueue, the admin's %TEMP%, folders a tool left with rules for users)
+        a user can swap a checked folder for a junction (oplock + \RPC Control symlink) between the check and the delete and turn the elevated delete onto
+        any file. Here:
+          * the root is opened once (FILE_OPEN_REPARSE_POINT: a link is opened itself) and GetFinalPathNameByHandle must give the same long path: a link
+            further up the path refuses the whole call;
+          * each entry is opened RELATIVE to the handle of its folder (NtCreateFile with RootDirectory, one name, FILE_OPEN_REPARSE_POINT), so no path is
+            parsed again below the root; a folder is held without FILE_SHARE_DELETE (nobody can rename or replace it while it is open);
+          * kind, link and link count come from the opened handle (GetFileInformationByHandle), the children are listed through the handle
+            (GetFileInformationByHandleEx, FileFullDirectoryInfo);
+          * the delete goes through the same handle (SetFileInformationByHandle FileDispositionInfoEx: POSIX semantics, read-only ignored, so no attribute
+            of a hard-linked file elsewhere is changed); without POSIX delete (older Windows, other file systems) FileDispositionInfo, and a read-only mark
+            is removed only from a file with exactly one link (otherwise Skipped);
+          * a link (junction, symlink, any reparse point) is deleted itself and never entered; a folder deeper than MaxDepth levels is left (no stack
+            exhaustion by a prepared tree); an entry in use or refused is left and counted.
+        Hook (tests only): called with ('listed', folder) after a folder was listed and before its entries are opened, and with ('opened', path) after an
+        entry was opened and checked and before it is entered or deleted. A test swaps folders for junctions there.
+    #>
+    if ('AVDTune.Native.SafeTree' -as [type]) { return }
+    Add-Type -TypeDefinition @'
+using System;
+using System.Collections.Generic;
+using System.ComponentModel;
+using System.IO;
+using System.Runtime.InteropServices;
+using System.Text;
+using Microsoft.Win32.SafeHandles;
+namespace AVDTune.Native {
+    public sealed class SafeTreeResult { public int Removed; public int Left; public int Skipped; public bool Gone; }
+    public static class SafeTree {
+        public static Action<string, string> Hook;
+        public static int MaxDepth = 256;
+
+        const uint DELETE = 0x00010000, SYNCHRONIZE = 0x00100000, READ_ATTRIBUTES = 0x80, WRITE_ATTRIBUTES = 0x100, LIST_DIRECTORY = 0x1;
+        const uint SHARE_READ = 1, SHARE_WRITE = 2, SHARE_DELETE = 4;
+        const uint ATTR_READONLY = 0x1, ATTR_DIRECTORY = 0x10, ATTR_REPARSE = 0x400;
+        const uint OPT_DIRECTORY = 0x1, OPT_SYNC = 0x20, OPT_NON_DIRECTORY = 0x40, OPT_OPEN_REPARSE = 0x00200000;
+        const uint OBJ_CASE_INSENSITIVE = 0x40, FILE_OPEN = 1;
+        const int ST_NOT_A_DIRECTORY = unchecked((int)0xC0000103), ST_FILE_IS_A_DIRECTORY = unchecked((int)0xC00000BA);
+        const int ST_NAME_NOT_FOUND = unchecked((int)0xC0000034), ST_PATH_NOT_FOUND = unchecked((int)0xC000003A), ST_DELETE_PENDING = unchecked((int)0xC0000056);
+
+        [StructLayout(LayoutKind.Sequential)] struct UNICODE_STRING { public ushort Length; public ushort MaximumLength; public IntPtr Buffer; }
+        [StructLayout(LayoutKind.Sequential)] struct OBJECT_ATTRIBUTES { public int Length; public IntPtr RootDirectory; public IntPtr ObjectName; public uint Attributes; public IntPtr SecurityDescriptor; public IntPtr SecurityQualityOfService; }
+        [StructLayout(LayoutKind.Sequential)] struct IO_STATUS_BLOCK { public IntPtr Status; public IntPtr Information; }
+        [StructLayout(LayoutKind.Sequential)] struct BY_HANDLE_FILE_INFORMATION { public uint FileAttributes; public System.Runtime.InteropServices.ComTypes.FILETIME CreationTime, LastAccessTime, LastWriteTime; public uint VolumeSerialNumber, FileSizeHigh, FileSizeLow, NumberOfLinks, FileIndexHigh, FileIndexLow; }
+        [StructLayout(LayoutKind.Sequential)] struct FILE_BASIC_INFO { public long CreationTime, LastAccessTime, LastWriteTime, ChangeTime; public uint FileAttributes, Padding; }
+        struct Entry { public string Name; public uint Attributes; }
+
+        [DllImport("ntdll.dll")] static extern int NtCreateFile(out SafeFileHandle handle, uint access, ref OBJECT_ATTRIBUTES oa, out IO_STATUS_BLOCK iosb, IntPtr allocationSize, uint fileAttributes, uint share, uint disposition, uint options, IntPtr eaBuffer, uint eaLength);
+        [DllImport("ntdll.dll")] static extern int RtlNtStatusToDosError(int status);
+        [DllImport("kernel32.dll", SetLastError = true)] static extern bool GetFileInformationByHandle(SafeFileHandle h, out BY_HANDLE_FILE_INFORMATION info);
+        [DllImport("kernel32.dll", SetLastError = true)] static extern bool GetFileInformationByHandleEx(SafeFileHandle h, int infoClass, IntPtr buffer, uint size);
+        [DllImport("kernel32.dll", SetLastError = true)] static extern bool SetFileInformationByHandle(SafeFileHandle h, int infoClass, ref uint flags, uint size);
+        [DllImport("kernel32.dll", SetLastError = true)] static extern bool SetFileInformationByHandle(SafeFileHandle h, int infoClass, ref byte delete, uint size);
+        [DllImport("kernel32.dll", SetLastError = true)] static extern bool SetFileInformationByHandle(SafeFileHandle h, int infoClass, ref FILE_BASIC_INFO info, uint size);
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] static extern uint GetFinalPathNameByHandleW(SafeFileHandle h, StringBuilder path, uint size, uint flags);
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] static extern uint GetLongPathNameW(string shortPath, StringBuilder longPath, uint size);
+
+        static void Fire(string stage, string path) { Action<string, string> h = Hook; if (h != null) h(stage, path); }
+
+        // One name, relative to an open folder (root == null: an absolute NT path, used for the root only)
+        static int Open(SafeFileHandle root, string name, bool dir, bool withDelete, out SafeFileHandle h) {
+            IntPtr buf = Marshal.StringToHGlobalUni(name);
+            IntPtr us = Marshal.AllocHGlobal(Marshal.SizeOf(typeof(UNICODE_STRING)));
+            bool added = false;
+            try {
+                UNICODE_STRING u = new UNICODE_STRING(); u.Length = (ushort)(name.Length * 2); u.MaximumLength = (ushort)(name.Length * 2 + 2); u.Buffer = buf;
+                Marshal.StructureToPtr(u, us, false);
+                if (root != null) root.DangerousAddRef(ref added);
+                OBJECT_ATTRIBUTES oa = new OBJECT_ATTRIBUTES();
+                oa.Length = Marshal.SizeOf(typeof(OBJECT_ATTRIBUTES)); oa.RootDirectory = root == null ? IntPtr.Zero : root.DangerousGetHandle(); oa.ObjectName = us; oa.Attributes = OBJ_CASE_INSENSITIVE;
+                IO_STATUS_BLOCK io;
+                uint access = READ_ATTRIBUTES | WRITE_ATTRIBUTES | SYNCHRONIZE | (withDelete ? DELETE : 0) | (dir ? LIST_DIRECTORY : 0);
+                // a folder we delete cannot be renamed or replaced while we hold it; a root that is only emptied (C:\Windows\Temp) and every file are shared
+                // fully (others may hold them with delete access; everything below is reached through our handle either way)
+                uint share = (dir && withDelete) ? (SHARE_READ | SHARE_WRITE) : (SHARE_READ | SHARE_WRITE | SHARE_DELETE);
+                uint options = OPT_SYNC | OPT_OPEN_REPARSE | (dir ? OPT_DIRECTORY : OPT_NON_DIRECTORY);
+                return NtCreateFile(out h, access, ref oa, out io, IntPtr.Zero, 0, share, FILE_OPEN, options, IntPtr.Zero, 0);
+            }
+            finally { if (added) root.DangerousRelease(); Marshal.FreeHGlobal(us); Marshal.FreeHGlobal(buf); }
         }
-        $item.Delete()
-        $true
+
+        static int OpenEntry(SafeFileHandle root, string name, bool asDir, bool withDelete, out SafeFileHandle h) {
+            int st = Open(root, name, asDir, withDelete, out h);
+            if (st == ST_NOT_A_DIRECTORY || st == ST_FILE_IS_A_DIRECTORY) { h.Dispose(); st = Open(root, name, !asDir, withDelete, out h); }
+            return st;
+        }
+
+        static List<Entry> List(SafeFileHandle dir) {
+            List<Entry> list = new List<Entry>();
+            const int size = 64 * 1024;
+            IntPtr buf = Marshal.AllocHGlobal(size);
+            try {
+                int infoClass = 15;   // FileFullDirectoryRestartInfo, then FileFullDirectoryInfo
+                while (true) {
+                    if (!GetFileInformationByHandleEx(dir, infoClass, buf, size)) {
+                        int e = Marshal.GetLastWin32Error();
+                        if (e == 18) break;   // ERROR_NO_MORE_FILES
+                        throw new Win32Exception(e);
+                    }
+                    infoClass = 14;
+                    long off = 0;
+                    while (true) {
+                        IntPtr p = new IntPtr(buf.ToInt64() + off);
+                        int next = Marshal.ReadInt32(p, 0);
+                        uint attr = (uint)Marshal.ReadInt32(p, 56);
+                        int nameBytes = Marshal.ReadInt32(p, 60);
+                        string name = Marshal.PtrToStringUni(new IntPtr(p.ToInt64() + 68), nameBytes / 2);
+                        if (name != "." && name != "..") { Entry en = new Entry(); en.Name = name; en.Attributes = attr; list.Add(en); }
+                        if (next == 0) break;
+                        off += next;
+                    }
+                }
+            }
+            finally { Marshal.FreeHGlobal(buf); }
+            return list;
+        }
+
+        static bool DeleteByHandle(SafeFileHandle h, BY_HANDLE_FILE_INFORMATION info, SafeTreeResult r) {
+            uint flags = 0x1 | 0x2 | 0x10;   // FILE_DISPOSITION_FLAG_DELETE | POSIX_SEMANTICS | IGNORE_READONLY_ATTRIBUTE
+            if (SetFileInformationByHandle(h, 21, ref flags, 4)) return true;
+            int e = Marshal.GetLastWin32Error();
+            if (e != 87 && e != 50 && e != 1 && e != 124) return false;   // a real refusal (in use, not empty, access denied): not tried another way
+            if ((info.FileAttributes & ATTR_READONLY) != 0) {
+                if (info.NumberOfLinks != 1) { r.Skipped++; return false; }   // the mark belongs to every name of the file
+                FILE_BASIC_INFO b = new FILE_BASIC_INFO(); b.FileAttributes = info.FileAttributes & ~ATTR_READONLY; if (b.FileAttributes == 0) b.FileAttributes = 0x80;
+                if (!SetFileInformationByHandle(h, 0, ref b, (uint)Marshal.SizeOf(typeof(FILE_BASIC_INFO)))) return false;
+            }
+            byte d = 1;
+            return SetFileInformationByHandle(h, 4, ref d, 1);
+        }
+
+        // Removes what is in an open folder; returns the number of entries still there. depth: level of the folder (0 = root).
+        static int ClearDir(SafeFileHandle dir, string display, int depth, SafeTreeResult r) {
+            for (int round = 0; round < 3; round++) {
+                List<Entry> entries;
+                try { entries = List(dir); } catch (Win32Exception) { if (depth == 0) r.Left++; return 1; }
+                if (entries.Count == 0) return 0;
+                Fire("listed", display);
+                int left = 0;
+                foreach (Entry e in entries) {
+                    bool gone = RemoveEntry(dir, e, display + "\\" + e.Name, depth + 1, r);
+                    if (depth == 0) { if (gone) r.Removed++; else r.Left++; }
+                    if (!gone) left++;
+                }
+                if (left > 0) return left;
+            }
+            int rest; try { rest = List(dir).Count; } catch (Win32Exception) { rest = 1; }   // entries keep coming: leave them
+            if (depth == 0) r.Left += rest;
+            return rest;
+        }
+
+        static bool RemoveEntry(SafeFileHandle parent, Entry e, string display, int depth, SafeTreeResult r) {
+            if (depth > MaxDepth) return false;
+            SafeFileHandle h;
+            int st = OpenEntry(parent, e.Name, (e.Attributes & ATTR_DIRECTORY) != 0, true, out h);
+            using (h) {
+                if (st == ST_NAME_NOT_FOUND || st == ST_PATH_NOT_FOUND || st == ST_DELETE_PENDING) return true;
+                if (st != 0) return false;
+                return RemoveOpened(h, display, depth, r);
+            }
+        }
+
+        static bool RemoveOpened(SafeFileHandle h, string display, int depth, SafeTreeResult r) {
+            BY_HANDLE_FILE_INFORMATION info;
+            if (!GetFileInformationByHandle(h, out info)) return false;
+            bool link = (info.FileAttributes & ATTR_REPARSE) != 0, dir = (info.FileAttributes & ATTR_DIRECTORY) != 0;
+            Fire("opened", display);
+            if (dir && !link && ClearDir(h, display, depth, r) > 0) return false;
+            return DeleteByHandle(h, info, r);
+        }
+
+        static string StripPrefix(string s) {
+            if (s.StartsWith(@"\\?\UNC\", StringComparison.OrdinalIgnoreCase)) return @"\\" + s.Substring(8);
+            if (s.StartsWith(@"\\?\")) return s.Substring(4);
+            return s;
+        }
+
+        static string FinalPath(SafeFileHandle h) {
+            StringBuilder sb = new StringBuilder(1024);
+            uint n = GetFinalPathNameByHandleW(h, sb, (uint)sb.Capacity, 0);
+            if (n >= sb.Capacity) { sb = new StringBuilder((int)n + 1); n = GetFinalPathNameByHandleW(h, sb, (uint)sb.Capacity, 0); }
+            if (n == 0) throw new Win32Exception();
+            return StripPrefix(sb.ToString());
+        }
+
+        static string LongPath(string full) {
+            string ext = full.StartsWith(@"\\") ? @"\\?\UNC\" + full.Substring(2) : @"\\?\" + full;
+            StringBuilder sb = new StringBuilder(1024);
+            uint n = GetLongPathNameW(ext, sb, (uint)sb.Capacity);
+            if (n >= sb.Capacity) { sb = new StringBuilder((int)n + 1); n = GetLongPathNameW(ext, sb, (uint)sb.Capacity); }
+            return n == 0 ? full : StripPrefix(sb.ToString());
+        }
+
+        // contentsOnly: what is IN the folder goes, the folder stays (Removed/Left count its direct entries). Otherwise the folder, file or link itself goes too (Gone).
+        public static SafeTreeResult Remove(string path, bool contentsOnly) {
+            if (String.IsNullOrEmpty(path)) throw new ArgumentException("No path given.");
+            if (path.StartsWith(@"\\?\") || path.StartsWith(@"\\.\") || path.StartsWith(@"\??\")) throw new ArgumentException("Device paths are not accepted: " + path);
+            string full = Path.GetFullPath(path).TrimEnd('\\');
+            string driveRoot = (Path.GetPathRoot(full) ?? "").TrimEnd('\\');
+            if (full.Length <= 3 || String.Equals(full, driveRoot, StringComparison.OrdinalIgnoreCase)) throw new IOException("A drive root is never deleted or cleared: " + path);
+            string nt = full.StartsWith(@"\\") ? @"\??\UNC\" + full.Substring(2) : @"\??\" + full;
+            SafeTreeResult r = new SafeTreeResult();
+            SafeFileHandle h;
+            int st = Open(null, nt, true, !contentsOnly, out h);
+            if (st == ST_NOT_A_DIRECTORY) {
+                h.Dispose();
+                if (contentsOnly) throw new IOException(path + " is not a folder.");
+                st = Open(null, nt, false, true, out h);
+            }
+            using (h) {
+                if (st == ST_NAME_NOT_FOUND || st == ST_PATH_NOT_FOUND) { r.Gone = !contentsOnly; return r; }
+                if (st != 0) throw new Win32Exception(RtlNtStatusToDosError(st), "Cannot open " + path + ": " + new Win32Exception(RtlNtStatusToDosError(st)).Message);
+                string final = FinalPath(h), expected = LongPath(full);
+                if (!String.Equals(final, expected, StringComparison.OrdinalIgnoreCase)) throw new IOException("The path " + path + " has a link in it (it leads to " + final + "): nothing is deleted.");
+                BY_HANDLE_FILE_INFORMATION info;
+                if (!GetFileInformationByHandle(h, out info)) throw new Win32Exception();
+                if (contentsOnly) {
+                    if ((info.FileAttributes & ATTR_REPARSE) != 0) throw new IOException("The folder " + path + " is a link: nothing is deleted.");
+                    ClearDir(h, full, 0, r);
+                    return r;
+                }
+                r.Gone = RemoveOpened(h, full, 0, r);
+                return r;
+            }
+        }
     }
-    catch { $false }
 }
+'@
+}
+
+function Remove-AVDTuneTreeSafe {
+    <#
+        Deletes a folder tree, a file or a link through handles (Initialize-AVDTuneSafeTree, #48): a link is removed itself and never followed, nothing below
+        the root is opened by path, a link further up the path refuses the call (throws). -ContentsOnly keeps the folder itself (and throws for a link).
+        Returns Removed and Left (direct entries of the root), Skipped (read-only files with more than one link, only without POSIX delete) and Gone (the
+        root is not there any more). An entry in use stays and counts as Left; it does not throw. The one way to delete in a tree that is not admin-only.
+    #>
+    param([Parameter(Mandatory)][string]$Path, [switch]$ContentsOnly)
+    Initialize-AVDTuneSafeTree
+    try { $r = [AVDTune.Native.SafeTree]::Remove($Path, [bool]$ContentsOnly) }
+    catch [Management.Automation.MethodInvocationException] { throw $_.Exception.InnerException }   # the message of the delete itself, not the wrapper of the call
+    [pscustomobject]@{ Removed = $r.Removed; Left = $r.Left; Skipped = $r.Skipped; Gone = $r.Gone }
+}
+
+function Remove-AVDTuneTreeNoFollow {
+    # Deletes a folder tree (Remove-AVDTuneTreeSafe: through handles, a link removed as a link, never followed). Returns $true when it is gone.
+    param([Parameter(Mandatory)][string]$Path)
+    try { (Remove-AVDTuneTreeSafe -Path $Path).Gone } catch { $false }
+}
+
+#endregion
 
 function Remove-AVDTuneChildTempLeftovers {
     # Bounded clean-up in <state>\temp: set-aside folders <tool>.untrusted-* beyond the newest two, and (by name, not followed) entries of the tool's own folder
@@ -793,7 +1033,7 @@ function Remove-AVDTuneChildTempLeftovers {
             foreach ($c in $own.GetFileSystemInfos()) {
                 if (++$n -gt 500) { break }
                 if ($c.LastWriteTime -ge $limit) { continue }
-                if ($c -is [IO.DirectoryInfo]) { [void](Remove-AVDTuneTreeNoFollow -Path $c.FullName) } else { try { $c.Attributes = [IO.FileAttributes]::Normal; $c.Delete() } catch { } }
+                [void](Remove-AVDTuneTreeNoFollow -Path $c.FullName)   # files too: through a handle, no attribute change by name (a hard link would carry it elsewhere)
             }
         }
     }
@@ -1817,7 +2057,7 @@ function Get-AVDTuneOverview {
 
 #endregion
 
-Export-ModuleMember -Function Get-AVDTuneDcFromNtDomain, Get-AVDTuneSystemFolder, Get-AVDTuneChocolateyRoot, Get-AVDTuneChildTool, Initialize-AVDTuneToolTemp, Get-AVDTuneChildEnvironment, Get-AVDTuneProfilePath, Get-AVDTuneHklmValue, New-AVDTuneChildStartInfo, Get-AVDTuneProp, Get-AVDTuneWebResponse, Test-AVDTuneElevated, Get-AVDTuneRoot, Test-AVDTuneDefaultRoot, Test-AVDTuneTestMode, Resolve-AVDTuneTestScript, Get-AVDTuneLongPath, Get-AVDTuneTestModeRefusal, Confirm-AVDTuneAction, ConvertTo-AVDTuneArgument, New-AVDTuneMachine, Invoke-AVDTuneMachine,
+Export-ModuleMember -Function Get-AVDTuneDcFromNtDomain, Get-AVDTuneSystemFolder, Get-AVDTuneChocolateyRoot, Get-AVDTuneChildTool, Initialize-AVDTuneToolTemp, Remove-AVDTuneTreeSafe, Get-AVDTuneChildEnvironment, Get-AVDTuneProfilePath, Get-AVDTuneHklmValue, New-AVDTuneChildStartInfo, Get-AVDTuneProp, Get-AVDTuneWebResponse, Test-AVDTuneElevated, Get-AVDTuneRoot, Test-AVDTuneDefaultRoot, Test-AVDTuneTestMode, Resolve-AVDTuneTestScript, Get-AVDTuneLongPath, Get-AVDTuneTestModeRefusal, Confirm-AVDTuneAction, ConvertTo-AVDTuneArgument, New-AVDTuneMachine, Invoke-AVDTuneMachine,
     New-AVDTuneStateSecurity, Initialize-AVDTuneState, Read-AVDTuneAclInfo, Get-AVDTuneStateSecurityProblems, Move-AVDTuneStateToQuarantine, New-AVDTuneProtectedFolder, Assert-AVDTuneStateSecurity, Get-AVDTuneStateSecurityReport, Get-AVDTuneState, Set-AVDTuneState, Test-AVDTuneImageVersion, Get-AVDTuneNextImageVersion, Start-AVDTuneImageVersion,
     Add-AVDTuneRun, Get-AVDTuneRun, Get-AVDTuneLastChange, Get-AVDTuneChangeTimes, Get-AVDTuneChangeMarker, Invoke-AVDTuneStateLock, Get-AVDTuneChangeStopError, Test-AVDTuneChangeInProgress, Resolve-AVDTuneStaleChange, Start-AVDTuneChange, Stop-AVDTuneChange, Get-AVDTuneSnapshotClockBufferMinutes, ConvertTo-AVDTuneUtc, Get-AVDTuneSnapshotWindow, Test-AVDTuneSnapshotInWindow,New-AVDTuneStep, Invoke-AVDTuneStep, New-AVDTuneStepFromData, Get-AVDTuneStepCatalog, Invoke-AVDTune,
     Add-AVDTuneChangeLogEntry, Get-AVDTuneChangeLog, Get-AVDTuneChangeLogVersions, ConvertTo-AVDTuneChangeLogDocument, Export-AVDTuneChangeLog,

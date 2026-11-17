@@ -113,35 +113,19 @@ function Clear-AVDTuneReadOnlyMark {
 
 function Clear-AVDTuneFolderContents {
     <#
-        Removes what is IN the folder (the folder stays). Until the delete through handles exists (#48) the folders that users can write to are
-        cleared with -TopLevelOnly: only FILES directly in the folder are deleted; sub folders and links are not entered and not removed, they are
-        counted as Skipped. A read-only mark is removed only from a file with exactly one link (a hard link elsewhere would change that file too);
-        a read-only file with more links, or one whose links cannot be read, is Skipped. A file in use is counted as Left.
-        Without -TopLevelOnly (folders of Windows itself, admin-only) sub folders are removed with Remove-AVDTuneFolderNoFollow, links removed themselves.
+        Removes what is IN the folder (the folder stays), the whole tree, through handles (Remove-AVDTuneTreeSafe -ContentsOnly, #48): the folders
+        users can write to (C:\Windows\Temp, WER) are safe to clear in depth, a folder swapped for a junction during the delete is removed as a link and
+        never followed. A link is removed itself. A read-only file is deleted without changing its mark (POSIX delete ignores it, so a hard link elsewhere
+        keeps it); only without POSIX delete is the mark removed, from a file with exactly one link, and a read-only file with more links is Skipped.
+        An entry in use is counted as Left. Removed/Left count the entries directly in the folder.
     #>
-    param([Parameter(Mandatory)][string]$Folder, [switch]$TopLevelOnly)
+    param([Parameter(Mandatory)][string]$Folder)
     $dir = New-Object IO.DirectoryInfo $Folder
     if (-not $dir.Exists) { return [pscustomobject]@{ Removed = 0; Left = 0; Skipped = 0 } }
     if ($dir.FullName.TrimEnd([char]92).Length -le 3) { throw 'A drive root is never cleared.' }
     if (-not (Test-AVDTuneNoLinkChain -Folder $dir.FullName)) { throw "The path $Folder contains a link: nothing is deleted." }
-    $removed = 0; $left = 0; $skipped = 0
-    foreach ($item in $dir.GetFileSystemInfos()) {
-        try {
-            $isLink = (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)
-            if ($item -is [IO.DirectoryInfo] -or ($isLink -and $TopLevelOnly)) {
-                if ($TopLevelOnly) { $skipped++; continue }
-                if ($isLink) { $item.Delete() } else { Remove-AVDTuneFolderNoFollow $item.FullName }
-                $removed++; continue
-            }
-            if (($item.Attributes -band [IO.FileAttributes]::ReadOnly) -ne 0) {
-                if ((Clear-AVDTuneReadOnlyMark -Path $item.FullName) -ne 'Cleared') { $skipped++; continue }
-            }
-            $item.Delete()
-            $removed++
-        }
-        catch { $left++ }
-    }
-    [pscustomobject]@{ Removed = $removed; Left = $left; Skipped = $skipped }
+    $r = Remove-AVDTuneTreeSafe -Path $dir.FullName -ContentsOnly   # checks the path again on the open handle (a link swapped in after the check above)
+    [pscustomobject]@{ Removed = $r.Removed; Left = $r.Left; Skipped = $r.Skipped }
 }
 function Find-AVDTuneTokenFiles {
     <#
@@ -207,10 +191,10 @@ function New-AVDTuneFinishAdapter {
         $win = [Environment]::GetFolderPath('Windows')
         $data = [Environment]::GetFolderPath('CommonApplicationData')
         @(
-            [pscustomobject]@{ Id = 'temp'; Path = (Join-Path $win 'Temp'); TopLevelOnly = $true }
-            [pscustomobject]@{ Id = 'wer-queue'; Path = (Join-Path $data 'Microsoft\Windows\WER\ReportQueue'); TopLevelOnly = $true }
-            [pscustomobject]@{ Id = 'wer-archive'; Path = (Join-Path $data 'Microsoft\Windows\WER\ReportArchive'); TopLevelOnly = $true }
-            [pscustomobject]@{ Id = 'wu-download'; Path = (Join-Path $win 'SoftwareDistribution\Download'); TopLevelOnly = $false }
+            [pscustomobject]@{ Id = 'temp'; Path = (Join-Path $win 'Temp') }
+            [pscustomobject]@{ Id = 'wer-queue'; Path = (Join-Path $data 'Microsoft\Windows\WER\ReportQueue') }
+            [pscustomobject]@{ Id = 'wer-archive'; Path = (Join-Path $data 'Microsoft\Windows\WER\ReportArchive') }
+            [pscustomobject]@{ Id = 'wu-download'; Path = (Join-Path $win 'SoftwareDistribution\Download') }
         )
     }
     $a.CountItems = {
@@ -218,7 +202,7 @@ function New-AVDTuneFinishAdapter {
         if (-not (Test-Path -LiteralPath $Path -PathType Container)) { return 0 }
         @((New-Object IO.DirectoryInfo $Path).GetFileSystemInfos()).Count
     }
-    $a.ClearFolder = { param($Path, [bool]$TopLevelOnly = $false) Clear-AVDTuneFolderContents -Folder $Path -TopLevelOnly:$TopLevelOnly }
+    $a.ClearFolder = { param($Path) Clear-AVDTuneFolderContents -Folder $Path }
     $a.RunningDependents = {
         # Names of the running services that depend on this one (stopping it would stop them too)
         param($Name)
@@ -455,7 +439,7 @@ function Get-AVDTuneFinishSteps {
         }.GetNewClosure()
         $apply = {
             param($m)
-            foreach ($x in $tgts) { $r = & $Fin.ClearFolder $x.Path ([bool]$x.TopLevelOnly); $Report.Skipped += [int]$r.Skipped; $Report.Left += [int]$r.Left }
+            foreach ($x in $tgts) { $r = & $Fin.ClearFolder $x.Path; $Report.Skipped += [int]$r.Skipped; $Report.Left += [int]$r.Left }
             $attempted[$key] = $true
         }.GetNewClosure()
         [void]$steps.Add([pscustomobject]@{ Step = (New-AVDTuneStep -Id $g.Id -Section Seal -Title $g.Title -Why $g.Why -Test $test -Apply $apply); Lifts = $false })
@@ -468,7 +452,7 @@ function Get-AVDTuneFinishSteps {
         $stopped = @()
         try {
             $stopped = @(Start-AVDTuneFinishLift -Machine $m -Root $Root -Names $liftNames -Fin $Fin)
-            $r = & $Fin.ClearFolder $wuPath $false; $Report.Skipped += [int]$r.Skipped; $Report.Left += [int]$r.Left
+            $r = & $Fin.ClearFolder $wuPath; $Report.Skipped += [int]$r.Skipped; $Report.Left += [int]$r.Left
             $attempted['wu'] = $true
         }
         finally {
@@ -613,7 +597,7 @@ function Invoke-AVDTuneFinish {
     $notBackNow = @(@($record.Lifted) | Where-Object { $_ -and -not $_.Restored })
     $failedStep = @($results | Where-Object { $_.Status -eq 'Failed' })[0]
     if ($failed -and -not $err -and $failedStep) { $err = "$($failedStep.Title): $($failedStep.Message)" }
-    $skipNote = if ($report.Skipped -gt 0 -or $report.Left -gt 0) { " Not removed: $($report.Skipped) item(s) skipped (sub folders, links and read-only files with more than one link are not touched), $($report.Left) in use." } else { '' }
+    $skipNote = if ($report.Skipped -gt 0 -or $report.Left -gt 0) { " Not removed: $($report.Skipped) item(s) skipped (read-only files with more than one link, only on a file system without POSIX delete), $($report.Left) in use." } else { '' }
     $message = if ($failed) { "The finish stopped: $err$skipNote" } else { "Image version $version is finished.$skipNote Now create the image in the imaging tool." }
     if ($notBackNow.Count -gt 0) { $record.Phase = 'restore-failed' }   # stays Active: the next start offers the repair
     else { $record.Active = $false; $record.Phase = $(if ($failed) { 'failed' } else { 'done' }) }
