@@ -795,8 +795,9 @@ function Undo-AVDTuneOfficeFix {
     $applied = Get-AVDTuneOfficeAppliedPath $Root; $at = ConvertTo-AVDTuneUtc (Get-AVDTuneProp $u 'At')
     if (-not $at) { throw "The undo record of the Office fix $Name has no readable time (At). Nothing was changed." }
     if ((Test-Path -LiteralPath $applied -PathType Leaf) -and (Get-Item -LiteralPath $applied -Force).LastWriteTimeUtc -gt $at) { throw "The undo record of the Office fix $Name is older than the last Office install or reconfigure: its earlier value is outdated. Nothing was changed." }
+    if ($at -gt (& $Machine.Now).ToUniversalTime().AddMinutes(5)) { throw "The undo record of the Office fix $Name has a time in the future (At). Nothing was changed." }
     # any Office run (install, reconfigure, remove, whatever its status) after the record also makes it outdated
-    $later = @(Get-AVDTuneRun -Root $Root | Where-Object { $_.Plan -cin 'Office install', 'Office remove' -and (ConvertTo-AVDTuneUtc $_.Started) -gt $at })
+    $later = @(Get-AVDTuneRun -Root $Root | Where-Object { $_.Plan -cin 'Office install', 'Office remove' -and (-not (ConvertTo-AVDTuneUtc $_.Started) -or (ConvertTo-AVDTuneUtc $_.Started) -gt $at) })   # an unreadable start counts as later (fail closed)
     if ($later.Count -gt 0) { throw "The undo record of the Office fix $Name is older than a later Office run ($($later[0].Plan)): its earlier value is outdated. Nothing was changed." }
     if (-not $WhatIf) {
         if (-not (Test-AVDTuneWriteAllowed)) { throw 'The snapshot gate is not confirmed: AVDTune is read only until a snapshot newer than its last change is confirmed on the Overview.' }

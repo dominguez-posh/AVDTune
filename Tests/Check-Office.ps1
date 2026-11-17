@@ -29,6 +29,7 @@ function New-Master([switch]$NoOffice) {
 }
 function Get-Row($Rows, [string]$Id) { @($Rows | Where-Object Id -eq $Id)[0] }
 function Reset-OfficeFiles { foreach ($f in 'office-undo.json', 'office-applied.json', 'office-policies-undo.json', 'office-fix-shared-undo.json', 'office-fix-updates-undo.json') { Remove-Item -LiteralPath (Join-Path $tmp "config\$f") -Force -ErrorAction SilentlyContinue } }
+function Write-FixRec($Path, [string]$Json) { Write-AVDTuneFile $Path ($Json.Replace('@@NOW@@', [datetime]::UtcNow.ToString('o'))) }   # At just before now: not in the future, later than every earlier run of the check
 function Get-RunLog($O, [string]$Pattern) { @($O.Log | Where-Object { $_ -like $Pattern }) }
 
 $tmp = Join-Path ([IO.Path]::GetTempPath()) ('avdtune-office-' + [guid]::NewGuid().ToString('N'))
@@ -540,7 +541,7 @@ try {
     Remove-Item $fixS -Force -ErrorAction SilentlyContinue
     # LastChange before the attempt and also on a failure; the record stays
     $m = New-Master; & $m.RegSet $ctr 'SharedComputerLicensing' '1' 'String'
-    Write-AVDTuneFile $fixS '{"At":"2999-01-01T10:00:00.0000000Z","Previous":{"Value":"0","Type":"String"}}'
+    Write-FixRec $fixS '{"At":"@@NOW@@","Previous":{"Value":"0","Type":"String"}}'
     [void](Set-AVDTuneState -Root $tmp -Values @{ LastChange = $mark }); $m.Store.FailWrites = @('SharedComputerLicensing')
     $ufF = Undo-AVDTuneOfficeFix -Machine $m -Name shared -Root $tmp -User 'admin1' -SnapshotId 'snap-check'
     Test-Check '61 fix undo: a failing step still sets LastChange and keeps the record' (@($ufF.Results | Where-Object Status -eq 'Failed').Count -eq 1 -and (Get-AVDTuneState $tmp).LastChange -ne $mark -and (Test-Path $fixS)) (($ufF.Results | ForEach-Object Status) -join ',')
@@ -604,7 +605,7 @@ try {
     Write-AVDTuneFile $fixS '{"At":"2000-01-01T00:00:00.0000000Z","Previous":{"Value":"0","Type":"String"}}'
     Write-AVDTuneFile (Join-Path $tmp 'config\office-applied.json') ($d | ConvertTo-Json -Depth 4)
     Test-Check '61 undo: a record older than office-applied.json is refused, nothing written, the record stays' ((Get-ThrownText { Undo-AVDTuneOfficeFix -Machine $m -Name shared -Root $tmp }) -like '*older than the last Office install*' -and @($m.Log | Where-Object { $_ -like 'Reg*' }).Count -eq 0 -and (Test-Path $fixS)) $null
-    Write-AVDTuneFile $fixS '{"At":"2999-01-01T00:00:00.0000000Z","Previous":{"Value":"0","Type":"String"}}'
+    Write-FixRec $fixS '{"At":"@@NOW@@","Previous":{"Value":"0","Type":"String"}}'
     Test-Check '61 undo: a record newer than office-applied.json is accepted' ((Undo-AVDTuneOfficeFix -Machine $m -Name shared -Root $tmp).Results[0].Status -ceq 'Reverted') $null
     Reset-OfficeFiles
 
@@ -626,15 +627,26 @@ try {
     Write-AVDTuneFile $fixS '{"At":"2026-11-10T10:00:00.0000000Z","Previous":{"Value":"0","Type":"String"}}'
     [void](Add-AVDTuneRun -Root $tmp -Run ([pscustomobject][ordered]@{ Id = $null; Plan = 'Office install'; Started = '2026-11-12T10:00:00.0000000Z'; Ended = '2026-11-12T10:05:00.0000000Z'; User = 'admin1'; SnapshotId = 'snap-check'; WhatIf = $false; ImageVersion = $null; Reboot = $false; Results = @([pscustomobject]@{ Id = 'office.install'; Status = 'Failed' }) }))
     Test-Check '61 undo: an Office run (even a failed one) after the record makes it outdated: refused, nothing written' ((Get-ThrownText { Undo-AVDTuneOfficeFix -Machine $m -Name shared -Root $tmp }) -like '*later Office run*' -and @($m.Log | Where-Object { $_ -like 'Reg*' }).Count -eq 0 -and (Test-Path $fixS)) $null
-    Write-AVDTuneFile $fixS '{"At":"2999-01-02T10:00:00.0000000Z","Previous":{"Value":"0","Type":"String"}}'
+    Write-FixRec $fixS '{"At":"@@NOW@@","Previous":{"Value":"0","Type":"String"}}'
     Test-Check '61 undo: a record newer than every Office run is accepted' ((Undo-AVDTuneOfficeFix -Machine $m -Name shared -Root $tmp).Results[0].Status -ceq 'Reverted') $null
+    Reset-OfficeFiles
+    # follow-ups: an Office run record with an unreadable Started counts as later; a record from the future is refused
+    $m = New-Master; & $m.RegSet $ctr 'SharedComputerLicensing' '1' 'String'; $m.Log.Clear()
+    Write-FixRec $fixS '{"At":"@@NOW@@","Previous":{"Value":"0","Type":"String"}}'
+    $badRun = Add-AVDTuneRun -Root $tmp -Run ([pscustomobject][ordered]@{ Id = $null; Plan = 'Office remove'; Started = 'garbage'; Ended = 'garbage'; User = 'admin1'; SnapshotId = 'snap-check'; WhatIf = $false; ImageVersion = $null; Reboot = $false; Results = @([pscustomobject]@{ Id = 'office.remove'; Status = 'Failed' }) })
+    Test-Check '61 undo: an Office run record with an unreadable Started makes the record outdated (fail closed), nothing written' ((Get-ThrownText { Undo-AVDTuneOfficeFix -Machine $m -Name shared -Root $tmp }) -like '*later Office run*' -and @($m.Log | Where-Object { $_ -like 'Reg*' }).Count -eq 0 -and (Test-Path $fixS)) $null
+    Get-ChildItem -LiteralPath (Join-Path $tmp 'runs') -Filter '*.json' | Where-Object { (Get-Content -LiteralPath $_.FullName -Raw) -like '*"garbage"*' } | Remove-Item -Force
+    $fut = [datetime]::UtcNow.AddHours(1).ToString('o'); Write-AVDTuneFile $fixS ('{"At":"' + $fut + '","Previous":{"Value":"0","Type":"String"}}'); $m.Log.Clear()
+    Test-Check '61 undo: a record with an At in the future is refused, nothing written' ((Get-ThrownText { Undo-AVDTuneOfficeFix -Machine $m -Name shared -Root $tmp }) -like '*in the future*' -and @($m.Log | Where-Object { $_ -like 'Reg*' }).Count -eq 0 -and (Test-Path $fixS)) $null
+    Write-FixRec $fixS '{"At":"@@NOW@@","Previous":{"Value":"0","Type":"String"}}'
+    Test-Check '61 undo: a record from just now is accepted' ((Undo-AVDTuneOfficeFix -Machine $m -Name shared -Root $tmp).Results[0].Status -ceq 'Reverted') $null
     Reset-OfficeFiles
     # 3: the change marker is set while Undo writes (fix and policies) and cleared afterwards, also when the step fails
     $probe = @{ Seen = @() }
     $m = New-Master; & $m.RegSet $ctr 'SharedComputerLicensing' '1' 'String'
     $origSet = $m.RegSet
     $m.RegSet = { param($k, $n, $v, $t) $probe.Seen += [bool](Get-AVDTuneProp (Get-AVDTuneState $tmp) 'ChangeInProgress'); & $origSet $k $n $v $t }.GetNewClosure()
-    Write-AVDTuneFile $fixS '{"At":"2999-01-01T00:00:00.0000000Z","Previous":{"Value":"0","Type":"String"}}'
+    Write-FixRec $fixS '{"At":"@@NOW@@","Previous":{"Value":"0","Type":"String"}}'
     [void](Undo-AVDTuneOfficeFix -Machine $m -Name shared -Root $tmp -User 'admin1' -SnapshotId 'snap-check')
     Test-Check '61 undo fix: ChangeInProgress is set while the value is written and cleared after' ($probe.Seen.Count -eq 1 -and $probe.Seen[0] -and $null -eq (Get-AVDTuneProp (Get-AVDTuneState $tmp) 'ChangeInProgress')) ($probe.Seen -join ',')
     Reset-OfficeFiles; $probe.Seen = @()
@@ -646,7 +658,7 @@ try {
     Test-Check '61 undo policies: ChangeInProgress is set while values are written and cleared after' ($probe.Seen.Count -ge 1 -and @($probe.Seen | Where-Object { -not $_ }).Count -eq 0 -and $null -eq (Get-AVDTuneProp (Get-AVDTuneState $tmp) 'ChangeInProgress')) ($probe.Seen -join ',')
     Reset-OfficeFiles
     $m = New-Master; & $m.RegSet $ctr 'SharedComputerLicensing' '1' 'String'; $m.Store.FailWrites = @('SharedComputerLicensing')
-    Write-AVDTuneFile $fixS '{"At":"2999-01-01T00:00:00.0000000Z","Previous":{"Value":"0","Type":"String"}}'
+    Write-FixRec $fixS '{"At":"@@NOW@@","Previous":{"Value":"0","Type":"String"}}'
     [void](Undo-AVDTuneOfficeFix -Machine $m -Name shared -Root $tmp -User 'admin1' -SnapshotId 'snap-check')
     Test-Check '61 undo fix: the marker is cleared also when the step failed' ($null -eq (Get-AVDTuneProp (Get-AVDTuneState $tmp) 'ChangeInProgress')) $null
     Reset-OfficeFiles
@@ -680,7 +692,7 @@ try {
     }
     Reset-OfficeFiles
     $m = New-Master; & $m.RegSet $ctr 'SharedComputerLicensing' '1' 'String'; $m.Log.Clear()
-    Write-AVDTuneFile $fixS '{"At":"2999-01-01T00:00:00.0000000Z","Key":"HKLM:/Evil","Name":"Run","Previous":{"Value":"0","Type":"String","Key":"HKLM:/X","Name":"Y"}}'
+    Write-FixRec $fixS '{"At":"@@NOW@@","Key":"HKLM:/Evil","Name":"Run","Previous":{"Value":"0","Type":"String","Key":"HKLM:/X","Name":"Y"}}'
     [void](Undo-AVDTuneOfficeFix -Machine $m -Name shared -Root $tmp -User 'admin1' -SnapshotId 'snap-check')
     $w = @($m.Log | Where-Object { $_ -like 'Reg*' })
     Test-Check '61 fix undo record: foreign Key and Name fields are ignored, only the registry value of the fix is written' ($w.Count -eq 1 -and $w[0] -like '*SharedComputerLicensing=0 (String)' -and @($w | Where-Object { $_ -like '*Evil*' -or $_ -like '*|Run=*' -or $_ -like '*HKLM:/X*' }).Count -eq 0) ($w -join ' | ')
