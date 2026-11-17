@@ -40,6 +40,24 @@ function Find-Text($Parent, [string]$Text) {
     $false
 }
 
+# ---- idle wait (issues #80, #57): the fake machine's closures are not safe to call from two runspaces at once (the module state of a closure
+# is not thread-safe: a second runspace calling the same closure at the same time sees $store as $null -> "method on a null-valued expression").
+# A page job reads the shared fake machine in its own runspace, so no step may touch the machine (or run product code that does) while one is running.
+# Wait-SmokeIdle waits on the handles of all background jobs (it does not need the dispatcher; the Complete-* handlers still run on the timer).
+function Wait-SmokeIdle([int]$TimeoutSeconds = 30) {
+    $until = (Get-Date).AddSeconds($TimeoutSeconds)
+    foreach ($name in @('OverviewJob') + @($script:WriterJobVariables)) {
+        $job = Get-Variable -Scope Script -Name $name -ValueOnly -ErrorAction SilentlyContinue
+        if ($job -is [System.Collections.IDictionary] -and $job.Contains('Handle') -and $job['Handle']) {
+            $left = [int][Math]::Max(0, ($until - (Get-Date)).TotalMilliseconds)
+            try { [void]$job['Handle'].AsyncWaitHandle.WaitOne($left) } catch { }
+        }
+    }
+}
+# Show-Page starts the page's read job: wait for it, so the step that follows does not use the machine while the job does
+$script:SmokeShowPageOriginal = ${function:Show-Page}
+function Show-Page { & $script:SmokeShowPageOriginal @args; Wait-SmokeIdle }
+
 # ---- task bar (issue #22): one scene per theme with the states running, several, failed result and the opened list
 $script:SmokeRetryCalls = 0
 function Start-SmokeRetry { $script:SmokeRetryCalls++ }
@@ -186,6 +204,16 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         Test-Smoke 'the chip shows the version' ($ui.TxtChipVersion.Text -eq $expected) $ui.TxtChipVersion.Text
         $log = @(Get-AVDTuneChangeLog -Root $script:StateRoot -Version $expected)
         Test-Smoke 'a change log entry and a protocol action were written' ($log.Count -eq 1 -and $log[0].Category -eq 'Setup' -and $script:Protocol.Actions.Count -eq 1 -and (Get-ChildItem (Join-Path $script:StateRoot 'Protocols') -Filter '*.md').Count -eq 1) $log.Count
+        # #57 (#27, #66): while a writer runs, 'Start new version' is locked and a click is refused with the busy text; nothing changes in the state
+        $script:OptRun = @{ Kind = 'Run' }
+        try {
+            Update-Chip
+            $verBusy = (Get-AVDTuneState $script:StateRoot).ImageVersion; $script:ConfirmAsked = ''
+            Start-NewVersion
+            Test-Smoke 'Start new version is locked while a writer runs (button disabled with a tooltip, a click asks nothing and changes no version)' (-not $ui.BtnNewVersion.IsEnabled -and $ui.BtnNewVersion.ToolTip -and -not $script:ConfirmAsked -and (Get-AVDTuneState $script:StateRoot).ImageVersion -eq $verBusy) "enabled=$($ui.BtnNewVersion.IsEnabled) asked='$script:ConfirmAsked'"
+        }
+        finally { $script:OptRun = $null; Update-Chip }
+        Test-Smoke 'Start new version is unlocked again when the writer is gone' ($ui.BtnNewVersion.IsEnabled) $null
         $true } }
     @{ Name = 'protocol'; Do = {
         Show-Page 'Protocol'
@@ -1210,8 +1238,10 @@ $script:SmokeTimer.Add_Tick({
         }
         $step = $script:SmokeSteps[0]
         try { Set-Content (Join-Path $script:SmokeOut 'current-step.txt') ([string]$step.Name) } catch { }
+        Wait-SmokeIdle
         try { $done = & $step.Do $step }
         catch { Test-Smoke "step '$($step.Name)'" $false "$($_.Exception.Message) @ $($_.InvocationInfo.ScriptLineNumber) $($_.ScriptStackTrace -replace "s+", " ")"; $done = $true }
+        Wait-SmokeIdle   # a failed step leaves no running read behind for the next one
         if ($done) { $script:SmokeSteps.RemoveAt(0); try { $script:SmokeResults | Set-Content (Join-Path $script:SmokeOut 'results-partial.txt') } catch { } }
     }
     catch {

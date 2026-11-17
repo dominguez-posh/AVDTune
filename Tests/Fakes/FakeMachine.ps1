@@ -49,14 +49,16 @@ function New-AVDTuneFakeMachine {
     $m.Now = { if ($store.Now) { [datetime]$store.Now } else { Get-Date } }.GetNewClosure()
     $m.RegKeyExists = {
         param($Path)
+        if ($null -eq $store -or $null -eq $store.Registry) { throw 'fake machine: the store is not reachable (the closure was called from a second runspace at the same time, or the machine was reset). Wait for background jobs to finish before using the fake machine (Tests\GuiSmokeDriver.ps1: Wait-SmokeIdle).' }; 
         $p = ([string]$Path).ToLowerInvariant()
         if ($store.Keys.ContainsKey($p)) { return $true }
         foreach ($k in $store.Registry.Keys) { if ($k.StartsWith($p + '|')) { return $true } }
         $false
     }.GetNewClosure()
-    $m.RegGet = { param($Path, $Name) $k = (([string]$Path) + '|' + ([string]$Name)).ToLowerInvariant(); if ($store.Registry.ContainsKey($k)) { $store.Registry[$k] } else { $null } }.GetNewClosure()
+    $m.RegGet = { param($Path, $Name) if ($null -eq $store -or $null -eq $store.Registry) { throw 'fake machine: the store is not reachable (the closure was called from a second runspace at the same time, or the machine was reset). Wait for background jobs to finish before using the fake machine (Tests\GuiSmokeDriver.ps1: Wait-SmokeIdle).' }; $k = (([string]$Path) + '|' + ([string]$Name)).ToLowerInvariant(); if ($store.Registry.ContainsKey($k)) { $store.Registry[$k] } else { $null } }.GetNewClosure()
     $m.RegGetRaw = {
         param($Path, $Name)
+        if ($null -eq $store -or $null -eq $store.Registry) { throw 'fake machine: the store is not reachable (the closure was called from a second runspace at the same time, or the machine was reset). Wait for background jobs to finish before using the fake machine (Tests\GuiSmokeDriver.ps1: Wait-SmokeIdle).' }; 
         $k = (([string]$Path) + '|' + ([string]$Name)).ToLowerInvariant()
         if (-not $store.Registry.ContainsKey($k)) { return $null }
         $v = $store.Registry[$k]
@@ -65,12 +67,14 @@ function New-AVDTuneFakeMachine {
     }.GetNewClosure()
     $m.RegSet = {
         param($Path, $Name, $Value, $Type)
+        if ($null -eq $store -or $null -eq $store.Registry) { throw 'fake machine: the store is not reachable (the closure was called from a second runspace at the same time, or the machine was reset). Wait for background jobs to finish before using the fake machine (Tests\GuiSmokeDriver.ps1: Wait-SmokeIdle).' }; 
         $k = (([string]$Path) + '|' + ([string]$Name)).ToLowerInvariant()
         foreach ($bad in @($store.FailWrites)) { if ($bad -and $k -like "*$($bad.ToLowerInvariant())*") { throw "fake: write refused for $Path|$Name" } }
         $store.Registry[$k] = $Value; if ($Type) { $store.Kinds[$k] = [string]$Type }; [void]$store.Log.Add("RegSet $Path|$Name=$Value ($Type)")
     }.GetNewClosure()
     $m.RegRemove = {
         param($Path, $Name)
+        if ($null -eq $store -or $null -eq $store.Registry) { throw 'fake machine: the store is not reachable (the closure was called from a second runspace at the same time, or the machine was reset). Wait for background jobs to finish before using the fake machine (Tests\GuiSmokeDriver.ps1: Wait-SmokeIdle).' }; 
         $k = (([string]$Path) + '|' + ([string]$Name)).ToLowerInvariant()
         $store.Registry.Remove($k); [void]$store.Log.Add("RegRemove $Path|$Name")
     }.GetNewClosure()
