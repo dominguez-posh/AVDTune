@@ -1008,7 +1008,43 @@ try {
     $joinCode = $dirCode.Substring($dirCode.IndexOf('#region join state'), $dirCode.IndexOf('#region real adapter') - $dirCode.IndexOf('#region join state'))
     Test-Check 'join detection code: the full system path of dsregcmd, no process start of its own, no write, no Start-Process' ($joinCode -match "Join-Path \(Get-AVDTuneSystemFolder System\) 'dsregcmd\.exe'" -and $joinCode -notmatch '(?i)Start-Process|Process\]::Start|ProcessStartInfo|Set-Item|New-Item|Out-File|Set-Content|WriteAllText|Write-AVDTuneFile|RegSet|RegRemove') $null
     $realMachine = New-AVDTuneMachine
-    $locText = $realMachine.DcLocate.ToString()
+    $locText = $realMachine.DcLocate.ToString() + [string](Get-Command Get-AVDTuneDcFromNtDomain).ScriptBlock
+    $bs2 = [string][char]92 * 2
+    $ntRows = @(
+        [pscustomobject]@{ DomainControllerName = ''; DomainControllerAddress = ''; DcSiteName = ''; ClientSiteName = ''; DnsForestName = 'example.test'; DomainName = 'EXAMPLE' }
+        [pscustomobject]@{ DomainControllerName = "${bs2}dc.example.test"; DomainControllerAddress = "${bs2}10.0.0.4"; DcSiteName = 'Default-First-Site-Name'; ClientSiteName = 'Client-Site'; DnsForestName = 'example.test'; DomainName = 'EXAMPLE' }
+    )
+    $ntDc = Get-AVDTuneDcFromNtDomain -Rows $ntRows -Domain 'example.test'
+    Test-Check 'issue #64 finding 7: WMI gives \\host and \\ip; the locator cuts the two backslashes (name, address, site), a row of another domain gives nothing' ($ntDc.Name -eq 'dc.example.test' -and $ntDc.Address -eq '10.0.0.4' -and $ntDc.Site -eq 'Default-First-Site-Name' -and $null -eq (Get-AVDTuneDcFromNtDomain -Rows $ntRows -Domain 'other.test')) ($ntDc | ConvertTo-Json -Compress)
+    Test-Check 'the validation would refuse the uncut WMI form (why the backslashes must go)' (-not (Test-AVDTuneDcServer "${bs2}dc.example.test") -and (Test-AVDTuneDcServer $ntDc.Name) -and (Test-AVDTuneDcServer $ntDc.Address))  $null
+    $viaFake = & (New-AVDTuneFakeMachine -Seed @{ DcLocate = [pscustomobject]@{ Name = 'dc1.example.test'; Address = '10.0.0.10'; Site = 'Default-First-Site-Name' } }).DcLocate 'example.test'
+    Test-Check 'the fake DC locator answers like WMI (names with two backslashes, same mapping) and the join state still gets the DC' ($viaFake.Name -eq 'dc1.example.test' -and $viaFake.Address -eq '10.0.0.10') ($viaFake | ConvertTo-Json -Compress)
+    # issue #64 (8): the join state is read in the background runspace of the page; a fresh runspace with exactly the imports of that block must find every command it uses (#55, #67)
+    $startSrc = [IO.File]::ReadAllText((Join-Path $repo 'AVDTune-Start.ps1'))
+    $joinBlock = $startSrc.Substring($startSrc.IndexOf('function Read-JoinState'), $startSrc.IndexOf('function Complete-JoinJob') - $startSrc.IndexOf('function Read-JoinState'))
+    $joinImports = @([regex]::Matches($joinBlock, "Import-Module \(Join-Path \`$AppRoot '([^']+)'\)") | ForEach-Object { $_.Groups[1].Value } | Select-Object -Unique)
+    $runJoinRs = {
+        param($Imports)
+        $rs = [powershell]::Create()
+        $keepFake = $env:AVDTUNE_FAKE; $keepRoot = $env:AVDTUNE_ROOT
+        try {
+            $env:AVDTUNE_FAKE = $null; $env:AVDTUNE_ROOT = $null   # the REAL machine adapter in the runspace, as the page does
+            [void]$rs.AddScript({
+                    param($Repo, $Imports)
+                    $ErrorActionPreference = 'Stop'
+                    foreach ($i in $Imports) { Import-Module (Join-Path $Repo $i) -Force }
+                    Get-AVDTuneJoinState -Machine (New-AVDTuneMachine)
+                }).AddArgument($repo).AddArgument($Imports)
+            $out = $null; $thrown = ''
+            try { $out = $rs.Invoke() | Select-Object -Last 1 } catch { $thrown = $_.Exception.Message }
+            [pscustomobject]@{ Result = $out; Err = ((@($rs.Streams.Error | ForEach-Object { $_.ToString() }) + $thrown) -join '; ').Trim('; ') }
+        }
+        finally { $rs.Dispose(); $env:AVDTUNE_FAKE = $keepFake; $env:AVDTUNE_ROOT = $keepRoot }
+    }
+    $joinOk = & $runJoinRs $joinImports
+    Test-Check 'join state page (#64): the real read works in a runspace with exactly the page''s imports (a Kind comes back, no unknown command)' ($joinImports.Count -ge 2 -and $joinOk.Result -and $joinOk.Result.Kind -and -not $joinOk.Err -and $startSrc -match 'function Read-JoinState[\s\S]*?\[powershell\]::Create\(\)') "imports=$($joinImports -join ','); kind=$($joinOk.Result.Kind); err=$($joinOk.Err)"
+    $joinMissing = & $runJoinRs @($joinImports | Select-Object -First ($joinImports.Count - 1))   # counter-test: without the last import the runspace must fail
+    Test-Check 'join state page (#64) counter-test: without the Directory import the same runspace fails with an unknown command' ($joinMissing.Err -match 'is not recognized|nicht erkannt|not recognized' -or -not $joinMissing.Result) "err=$($joinMissing.Err)"
     Test-Check 'issue #64 finding 1: the DcLocate member binds to nothing: no DomainController FindOne, no DirectoryEntry, no DirectoryContext, no DirectoryServices, no ADSI' ($locText -match 'Win32_NTDomain' -and $locText -notmatch '(?i)DomainController\]::FindOne|DirectoryEntry|DirectoryContext|DirectoryServices|\.SiteName|\.IPAddress|\[adsi|LDAP:') $locText
     Test-Check 'the real machine has the two read members of the join detection, the fake has them too' ($realMachine.PSObject.Properties['ComputerSystem'] -and $realMachine.PSObject.Properties['DcLocate'] -and $mj.PSObject.Properties['ComputerSystem'] -and $mj.PSObject.Properties['DcLocate']) $null
 
@@ -1125,7 +1161,7 @@ try {
     Test-Check 'issue #64 finding 3: a save without -Sources marks the changed answer as typed by the administrator, the others keep their source' ($afterNoSrc.Answers.Network.VNet -eq 'vnet-typed-later' -and $afterNoSrc.Sources.VNet -eq 'Typed by the administrator' -and $afterNoSrc.Sources.Join -like 'Confirmed: *' -and $afterNoSrc.Sources.Profiles -like 'Typed by the administrator (suggested*') ($afterNoSrc.Sources | ConvertTo-Json -Compress)
     $startPs = [IO.File]::ReadAllText((Join-Path $repo 'AVDTune-Start.ps1'))
     Test-Check 'issue #64 finding 5: Azure data is matched with a length limit and a timeout (facts, suggestions, site of the RootDSE)' (([IO.File]::ReadAllText((Join-Path $repo 'Modules\AVDTune.Snapshot.psm1')) -notmatch '(?m)(-match|-notmatch) \$script:Facts') -and ([IO.File]::ReadAllText((Join-Path $repo 'Modules\AVDTune.Start.psm1')) -match 'Length -le 1024 -and \[regex\]::IsMatch') -and $dirCode -notmatch "-match '\(\?i\),CN=Servers") $null
-    Test-Check 'issue #64 finding 6: the join detection runs through Invoke-Busy (task of the task bar) and dsregcmd has a 30 s timeout' ($startPs -match "function Read-JoinState[\s\S]{0,400}Invoke-Busy[^\r\n]*-TaskTitle" -and $joinCode -match "'/status'\) 30 ") $null
+    Test-Check 'issue #64 finding 6/8: the join detection runs in a background runspace with a task on the task bar (inline only in test mode) and dsregcmd has a 30 s timeout' ($startPs -match 'function Read-JoinState[\s\S]*?Start-AVDTuneUiTask[\s\S]*?\[powershell\]::Create\(\)[\s\S]*?BeginInvoke' -and $startPs -match 'function Complete-JoinJob' -and $startPs -match 'Timer.Add_Tick\(\{[^\r\n]*Complete-JoinJob' -and $joinCode -match "'/status'\) 30 ") $null
     Test-Check 'a client ID typed together with -Setup is refused before any sign-in' ($null -ne ($e4 = Get-ThrownText { Invoke-AVDTuneStartSignIn -Root $tmp -Session (New-AVDTuneSession -TempRoot $tmp -Auth (New-AVDTuneFakeAuth)) -User 'admin1' -Setup -ClientId '66666666-7777-8888-9999-000000000000' }) -and $e4 -like '*exclude each other*') $e4
     Test-Check 'a later DC pin keeps answers, sources and the sign-in' ($afterPin.Answers.Profiles -eq 'OtherSmb' -and $afterPin.Sources.Profiles -like 'Typed by the administrator (suggested*' -and $afterPin.SignIn.TenantId -eq $tenant -and $afterPin.Dc.Pins.'dc2.example.test') $null
 

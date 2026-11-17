@@ -106,7 +106,15 @@ function New-AVDTuneFakeMachine {
     }.GetNewClosure()
     $m.Imds = { $store.Imds }.GetNewClosure()
     $m.ComputerSystem = { $store.ComputerSystem }.GetNewClosure()
-    $m.DcLocate = { param($Domain) [void]$store.Log.Add("DcLocate $Domain"); $store.DcLocate }.GetNewClosure()
+    $m.DcLocate = {
+        # like the real member: a Win32_NTDomain row as WMI gives it (names with two leading backslashes), through the same mapping
+        param($Domain)
+        [void]$store.Log.Add("DcLocate $Domain")
+        if (-not $store.DcLocate) { return $null }
+        $bs = [string][char]92 * 2; $d = $store.DcLocate
+        $row = [pscustomobject]@{ DomainControllerName = $(if ($d.Name) { $bs + $d.Name } else { '' }); DomainControllerAddress = $(if ($d.Address) { $bs + $d.Address } else { '' }); DcSiteName = [string]$d.Site; ClientSiteName = ''; DnsForestName = [string]$Domain; DomainName = '' }
+        Get-AVDTuneDcFromNtDomain -Rows @($row) -Domain ([string]$Domain)
+    }.GetNewClosure()
     $m.RegSubKeys = {
         param($Path)
         $prefix = (([string]$Path).ToLowerInvariant().TrimEnd('\') + '\')

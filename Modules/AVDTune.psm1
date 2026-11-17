@@ -329,6 +329,18 @@ function Get-AVDTuneTaskInfoFromXml {
     }
 }
 
+function Get-AVDTuneDcFromNtDomain {
+    # Win32_NTDomain rows (the answer of the DC locator as WMI gives it) -> @{ Name; Address; Site } for a domain, or $null. WMI gives the names with two leading
+    # backslashes (\\dc.example.test, \\10.0.0.4): they are cut here, the rest is data (length limited) that Get-AVDTuneJoinState validates.
+    param($Rows, [string]$Domain)
+    $first = $Domain.Split('.')[0]
+    $row = @(@($Rows) | Where-Object { $_ -and ($_.DomainControllerName -or $_.DomainControllerAddress) } | Where-Object { [string]$_.DnsForestName -ieq $Domain -or [string]$_.DomainName -ieq $first }) | Select-Object -First 1
+    if (-not $row) { return $null }
+    $cut = { param($v) $t = ([string]$v).Trim().TrimStart([char]92); if ($t.Length -gt 255) { $t = $t.Substring(0, 255) }; $t }
+    $site = [string]$row.DcSiteName; if (-not $site) { $site = [string]$row.ClientSiteName }
+    [pscustomobject]@{ Name = (& $cut $row.DomainControllerName); Address = (& $cut $row.DomainControllerAddress); Site = (& $cut $site) }
+}
+
 function New-AVDTuneMachine {
     <#
         The real machine. Registry paths use the PowerShell form (HKLM:\SOFTWARE\...). Reads work everywhere; the writing members change
@@ -427,13 +439,7 @@ function New-AVDTuneMachine {
         # @{ Name; Address; Site } or $null. Values are data: length limited, shaped by Get-AVDTuneJoinState before use.
         param($Domain)
         try {
-            $first = ([string]$Domain).Split('.')[0]
-            $rows = @(Get-CimInstance -ClassName Win32_NTDomain -ErrorAction Stop | Where-Object { $_.DomainControllerName })
-            $row = @($rows | Where-Object { [string]$_.DnsForestName -ieq [string]$Domain -or [string]$_.DomainName -ieq $first }) | Select-Object -First 1
-            if (-not $row) { return $null }
-            $cut = { param($v) $t = ([string]$v).Trim().TrimStart(''); if ($t.Length -gt 255) { $t = $t.Substring(0, 255) }; $t }
-            $site = [string]$row.DcSiteName; if (-not $site) { $site = [string]$row.ClientSiteName }
-            [pscustomobject]@{ Name = (& $cut $row.DomainControllerName); Address = (& $cut $row.DomainControllerAddress); Site = (& $cut $site) }
+            Get-AVDTuneDcFromNtDomain -Rows @(Get-CimInstance -ClassName Win32_NTDomain -ErrorAction Stop) -Domain $Domain
         }
         catch { $null }
     }
@@ -1741,7 +1747,7 @@ function Get-AVDTuneOverview {
 
 #endregion
 
-Export-ModuleMember -Function Get-AVDTuneSystemFolder, Get-AVDTuneChocolateyRoot, Get-AVDTuneChildTool, Initialize-AVDTuneToolTemp, Get-AVDTuneChildEnvironment, Get-AVDTuneProfilePath, Get-AVDTuneHklmValue, New-AVDTuneChildStartInfo, Get-AVDTuneProp, Get-AVDTuneWebResponse, Test-AVDTuneElevated, Get-AVDTuneRoot, Test-AVDTuneDefaultRoot, Test-AVDTuneTestMode, Resolve-AVDTuneTestScript, Get-AVDTuneLongPath, Get-AVDTuneTestModeRefusal, Confirm-AVDTuneAction, ConvertTo-AVDTuneArgument, New-AVDTuneMachine, Invoke-AVDTuneMachine,
+Export-ModuleMember -Function Get-AVDTuneDcFromNtDomain, Get-AVDTuneSystemFolder, Get-AVDTuneChocolateyRoot, Get-AVDTuneChildTool, Initialize-AVDTuneToolTemp, Get-AVDTuneChildEnvironment, Get-AVDTuneProfilePath, Get-AVDTuneHklmValue, New-AVDTuneChildStartInfo, Get-AVDTuneProp, Get-AVDTuneWebResponse, Test-AVDTuneElevated, Get-AVDTuneRoot, Test-AVDTuneDefaultRoot, Test-AVDTuneTestMode, Resolve-AVDTuneTestScript, Get-AVDTuneLongPath, Get-AVDTuneTestModeRefusal, Confirm-AVDTuneAction, ConvertTo-AVDTuneArgument, New-AVDTuneMachine, Invoke-AVDTuneMachine,
     New-AVDTuneStateSecurity, Initialize-AVDTuneState, Read-AVDTuneAclInfo, Get-AVDTuneStateSecurityProblems, Move-AVDTuneStateToQuarantine, New-AVDTuneProtectedFolder, Assert-AVDTuneStateSecurity, Get-AVDTuneStateSecurityReport, Get-AVDTuneState, Set-AVDTuneState, Test-AVDTuneImageVersion, Get-AVDTuneNextImageVersion, Start-AVDTuneImageVersion,
     Add-AVDTuneRun, Get-AVDTuneRun, Get-AVDTuneLastChange, Get-AVDTuneChangeTimes, Get-AVDTuneChangeMarker, Test-AVDTuneChangeInProgress, Resolve-AVDTuneStaleChange, Start-AVDTuneChange, Stop-AVDTuneChange, Get-AVDTuneSnapshotClockBufferMinutes, ConvertTo-AVDTuneUtc, Get-AVDTuneSnapshotWindow, Test-AVDTuneSnapshotInWindow,New-AVDTuneStep, Invoke-AVDTuneStep, New-AVDTuneStepFromData, Get-AVDTuneStepCatalog, Invoke-AVDTune,
     Add-AVDTuneChangeLogEntry, Get-AVDTuneChangeLog, Get-AVDTuneChangeLogVersions, ConvertTo-AVDTuneChangeLogDocument, Export-AVDTuneChangeLog,

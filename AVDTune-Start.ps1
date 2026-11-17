@@ -166,7 +166,7 @@ function Open-Stage([string]$Id) {
     switch ($Id) {
         'Environment' { Build-EnvironmentForm }
         'SignIn' { Build-SignInForm }
-        'Domain' { if (-not $script:StartContext.Detection) { Read-JoinState }; Build-DomainForm }
+        'Domain' { if (-not $script:StartContext.Detection) { Read-JoinState }; if ($script:JoinJob) { Close-Stage; Show-Toast 'Still reading how this master is joined; the step can be opened when that is done.'; return }; Build-DomainForm }
         'Snapshot' { Build-SnapshotForm }
     }
     $ui.BoxStage.BringIntoView()
@@ -188,6 +188,7 @@ function Build-EnvironmentForm {
     $f.Suggestions = $null
     if (-not $existing) {
         if (-not $script:StartContext.Detection) { Read-JoinState }
+        if ($script:JoinJob) { Close-Stage; Show-Toast 'Still reading how this master is joined; the questions can be opened when that is done.'; return }
         try {
             $sg = Invoke-Busy 'Reading what Azure says about this VM (read only) ...' { Update-AVDTuneStartSuggestions -Context $script:StartContext -Machine $script:Machine -Arm (Get-StartArm) } -TaskTitle 'Reading the VM from Azure' -Done 'Read'
             $f.Suggestions = $sg
@@ -410,14 +411,57 @@ function Invoke-SignIn([switch]$Setup) {
     Update-StartView
     Start-ReadyJob 'Start' ''   # the Azure checks of the readiness analysis can read now
 }
-function Read-JoinState {
-    try {
-        # dsregcmd and the DC locator can take a while: message, wait cursor and a task of the task bar (the process has its own 30 s timeout)
-        $det = Invoke-Busy 'Reading how this master is joined (read only) ...' { Update-AVDTuneStartDetection -Context $script:StartContext -Machine $script:Machine } -TaskTitle 'Reading the join state of this master' -Done 'Read'
-        Add-StartProtocol 'Join state of this master read' ($det.Reason + $(if (@($det.Facts).Count -gt 0) { ' (' + (@($det.Facts) -join '; ') + ')' }) + $(if (@($det.Problems).Count -gt 0) { ' Not read: ' + (@($det.Problems) -join '; ') }))
-    }
-    catch { Add-StartProtocol 'Join state of this master read' $_.Exception.Message 'failed' }
+function Set-JoinStateResult($Detection) {
+    # on the window thread: keep what the master said about its join and write it to the protocol
+    $script:StartContext.Detection = $Detection; $script:StartContext.Suggestions = $null
+    $det = $Detection
+    Add-StartProtocol 'Join state of this master read' ($det.Reason + $(if (@($det.Facts).Count -gt 0) { ' (' + (@($det.Facts) -join '; ') + ')' }) + $(if (@($det.Problems).Count -gt 0) { ' Not read: ' + (@($det.Problems) -join '; ') }))
 }
+function Read-JoinState {
+    # dsregcmd (30 s timeout) and the DC locator can take a while: the real read runs in a background runspace with a task on the task bar, the window stays usable.
+    # Test mode runs inline (the fake machine is a closure of this runspace). Whatever needs the result waits for Complete-JoinJob (it refreshes the view).
+    if ($script:JoinJob) { return }
+    if ($script:TestMode) {
+        try {
+            $det = Invoke-Busy 'Reading how this master is joined (read only) ...' { Get-AVDTuneJoinState -Machine $script:Machine } -TaskTitle 'Reading the join state of this master' -Done 'Read'
+            Set-JoinStateResult $det
+        }
+        catch { Add-StartProtocol 'Join state of this master read' $_.Exception.Message 'failed' }
+        return
+    }
+    $task = Start-AVDTuneUiTask -Kind 'join-state' -Title 'Reading the join state of this master' -Step 'Win32_ComputerSystem, dsregcmd /status, DC locator (read only)' -Retry @{ Command = 'Read-JoinState'; Arguments = @() }
+    $ps = [powershell]::Create()
+    [void]$ps.AddScript({
+            param($AppRoot)
+            $ErrorActionPreference = 'Stop'
+            Import-Module (Join-Path $AppRoot 'Modules\AVDTune.psm1') -Force
+            Import-Module (Join-Path $AppRoot 'Modules\AVDTune.Directory.psm1') -Force
+            Get-AVDTuneJoinState -Machine (New-AVDTuneMachine)
+        }).AddArgument($script:AppRoot)
+    $script:JoinJob = @{ PS = $ps; Handle = $ps.BeginInvoke(); Task = $task }
+    Set-StageMessage 'Reading how this master is joined (read only) ...' 'info'
+}
+function Complete-JoinJob {
+    $job = $script:JoinJob
+    if (-not $job -or -not $job.Handle.IsCompleted) { return }
+    $script:JoinJob = $null
+    $det = $null; $err = ''
+    try {
+        $out = @($job.PS.EndInvoke($job.Handle))
+        if ($job.PS.Streams.Error.Count -gt 0) { $err = $job.PS.Streams.Error[0].Exception.Message }
+        $det = $out | Select-Object -Last 1
+    }
+    catch { $err = $_.Exception.Message }
+    finally { $job.PS.Dispose() }
+    if ($err -or -not $det) {
+        Complete-AVDTuneUiTask $job.Task -Failed -Summary "The join state could not be read: $err"
+        Add-StartProtocol 'Join state of this master read' $err 'failed'
+    }
+    else { Complete-AVDTuneUiTask $job.Task -Summary 'Read'; Set-JoinStateResult $det }
+    Update-StartView
+}
+$script:JoinJob = $null
+$script:Timer.Add_Tick({ try { Complete-JoinJob } catch { Show-Error $_.Exception.Message } })
 function Invoke-SignOut {
     if ($script:StartContext.Session) { Disconnect-AVDTuneSession $script:StartContext.Session }
     $left = @(Get-AVDTuneSignInLeftovers -TempRoot (Get-StartTempRoot))
