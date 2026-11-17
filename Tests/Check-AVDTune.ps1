@@ -720,7 +720,7 @@ try {
     # (this check turns red ON PURPOSE on a computer where a third-party module in Program Files\WindowsPowerShell\Modules is writable for others: AVDTune would not start there either)
     if ($env:GITHUB_ACTIONS -eq 'true' -and $realModProblems.Count -gt 0) { "SKIP module path (#73): the real module folders are checked on a real computer only; the GitHub runner image has a third-party module writable for others (the product logic is tested with temp trees below)  -> $($realModProblems -join ' | ')" }
     else {
-    Test-Check 'module path (#73): the real module folders,    Test-Check 'module path (#73): the real module folders, the folders above them and the modules in them are admin-only on this computer, and the path is stable (red on purpose where a third-party module is writable for others)' ($realModProblems.Count -eq 0) ($realModProblems -join ' | ')
+    Test-Check 'module path (#73): the real module folders, the folders above them and the modules in them are admin-only on this computer, and the path is stable (red on purpose where a third-party module is writable for others)' ($realModProblems.Count -eq 0) ($realModProblems -join ' | ')
     }
     $noList = { param($Path) @() }; $stableYes = { $true }
     $readPaths = New-Object System.Collections.ArrayList
