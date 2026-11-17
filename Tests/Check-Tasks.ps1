@@ -147,7 +147,7 @@ Test-Check 'the bar XAML uses DynamicResource only (follows the light/dark switc
 $writerStarts = @(
     @('AVDTune-Optimization.ps1', 'Start-OptChange'), @('AVDTune-FSLogix.ps1', 'Start-FslJob'), @('AVDTune-FSLogix.ps1', 'Assert-FslWrite'), @('AVDTune-Office.ps1', 'Start-OffJob'),
     @('AVDTune-Readiness.ps1', 'Start-ReadyJob'), @('AVDTune-Readiness.ps1', 'Start-ReadyFix'), @('AVDTune-UserExperience.ps1', 'Start-WatermarkChange'), @('AVDTune-AppMasking.ps1', 'Assert-MaskWrite'),
-    @('AVDTune-Updates.ps1', 'Start-UpdateRun'), @('AVDTune-Updates.ps1', 'Start-BlockChange'), @('AVDTune-Software.ps1', 'Start-SwRun'), @('AVDTune-Seal.ps1', 'Start-SealJob'), @('AVDTune-Benchmark.ps1', 'Start-BenchJob'), @('AVDTune-Benchmark.ps1', 'Start-BenchRepair'), @('AVDTune-Language.ps1', 'Start-LangJob'), @('AVDTune-Vdi.ps1', 'Start-VdiJob'), @('AVDTune-Custom.ps1', 'Start-CustJob'))
+    @('AVDTune-Updates.ps1', 'Start-UpdateRun'), @('AVDTune-Updates.ps1', 'Start-BlockChange'), @('AVDTune-Software.ps1', 'Start-SwRun'), @('AVDTune-Seal.ps1', 'Start-SealJob'), @('AVDTune-Benchmark.ps1', 'Start-BenchJob'), @('AVDTune-Benchmark.ps1', 'Start-BenchRepair'), @('AVDTune-Language.ps1', 'Start-LangJob'), @('AVDTune-Vdi.ps1', 'Start-VdiJob'), @('AVDTune-Release.ps1', 'Start-RelJob'), @('AVDTune-Custom.ps1', 'Start-CustJob'))
 $missingGuard = @()
 foreach ($w in $writerStarts) {
     $ast = [Management.Automation.Language.Parser]::ParseFile((Join-Path $repo $w[0]), [ref]$null, [ref]$null)
@@ -183,6 +183,12 @@ Set-ShutdownBlock $false; $keptWhileScan = ($script:DestroyCount -eq 0)
 $script:UpdJob = $null
 Set-ShutdownBlock $false
 Test-Check 'shutdown block (#66): switching it off does nothing while any job still runs (an ending search must not release the block of a run) and releases it when none is left' ($keptWhileRun -and $keptWhileScan -and $script:DestroyCount -eq 1) "kept=$keptWhileRun/$keptWhileScan destroy=$($script:DestroyCount)"
+
+# #49: the release job (check at every start, also install) does not hold the shutdown block of the window: the end of the last other job releases it
+$script:CreateCount = 0; Set-ShutdownBlock $true; $d0 = $script:DestroyCount
+$script:RelJob = @{ Kind = 'Install' }; Set-ShutdownBlock $false; $relKept = ($script:DestroyCount -eq $d0)
+$script:RelJob = @{ Kind = 'Start' }; Set-ShutdownBlock $false; $relReleased = ($script:DestroyCount -eq $d0 + 1); $script:RelJob = $null
+Test-Check 'shutdown block (#49): a running release check does not keep the block of an ended run' ($relKept -and $relReleased -and 'RelJob' -in $script:WriterJobVariables) "released=$relReleased"
 
 if ($script:failed -gt 0) { throw "$script:failed check(s) failed." }
 'Check-Tasks: all checks passed.'

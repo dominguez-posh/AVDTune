@@ -446,6 +446,8 @@
   "stage.signin.setup": "Set up again (authorize this administrator)",
   "stage.signin.signedin": "Signed in as {0}{1}. Tokens: {2}.",
   "stage.signin.signedout": "The tokens are removed from memory.",
+  "stage.signin.running": "A sign-in is still running: wait until it is done.",
+  "stage.signin.sealbusy": "The finish is running and uses this sign-in: sign in or out again when it is done.",
   "stage.signin.signout": "Sign out (remove the tokens)",
   "stage.signin.task": "Signing in to Microsoft 365 and Azure",
   "stage.signin.tenant": "Tenant",

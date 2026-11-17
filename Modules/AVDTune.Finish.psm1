@@ -314,6 +314,7 @@ function Repair-AVDTuneFinishCrash {
     [CmdletBinding()]
     param([Parameter(Mandatory)]$Machine, [string]$Root = (Get-AVDTuneRoot), [string]$User)
     if (-not (Test-AVDTuneWriteAllowed)) { throw 'The snapshot gate is not confirmed: AVDTune is read only until a snapshot of today is confirmed on the Overview.' }
+    Assert-AVDTuneNoForeignChange -Root $Root   # a finish of another AVDTune process still runs: no crash (#49)
     $record = Get-AVDTuneFinishCrash -Root $Root
     if (-not $record) { return [pscustomobject]@{ Repaired = $false; Failed = @(); Message = 'No interrupted finish.' } }
     $changeOwner = Start-AVDTuneChange -Root $Root   # marker and LastChange through the central helpers (#27)

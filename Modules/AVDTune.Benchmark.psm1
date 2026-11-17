@@ -911,6 +911,7 @@ function Get-AVDTuneBenchmarkCrash {
 
 function Repair-AVDTuneBenchmarkCrash {
     param([Parameter(Mandatory)]$Machine, [Parameter(Mandatory)]$Bench, [Parameter(Mandatory)][string]$Root, [string]$User)
+    Assert-AVDTuneNoForeignChange -Root $Root   # a benchmark of another AVDTune process still runs: no crash (#49)
     $crash = Get-AVDTuneBenchmarkCrash -Root $Root
     if (-not $crash) { return [pscustomobject]@{ Repaired = $false; Message = 'Nothing to repair.' } }
     $r = Stop-AVDTuneBenchmarkQuiet -Machine $Machine -Bench $Bench -Root $Root

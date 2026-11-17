@@ -426,5 +426,43 @@ finally {
     foreach ($j in @(Get-ChildItem -LiteralPath $tmp -Recurse -Directory -Force -ErrorAction SilentlyContinue | Where-Object { $_.Attributes -band [IO.FileAttributes]::ReparsePoint })) { try { [IO.Directory]::Delete($j.FullName) } catch { } }
     if (Test-Path $tmp) { Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue }
 }
+# #49: the release job is a writer like the jobs of the pages. Install, repair and back ask the central Assert-NoOtherWriter, other writers see a running install,
+# the checks only read; Test-RelRunActive is the central check (a language or VDI run was not seen before). Functions from the page files by AST, the rest stubbed.
+& {
+    $tasksText = [IO.File]::ReadAllText((Join-Path $repo 'AVDTune-Tasks.ps1')); Invoke-Expression $tasksText.Substring($tasksText.IndexOf('$script:WriterJobVariables'))
+    $relAst = [Management.Automation.Language.Parser]::ParseFile((Join-Path $repo 'AVDTune-Release.ps1'), [ref]$null, [ref]$null)
+    foreach ($fnName in 'Test-RelRunActive', 'Start-RelJob') { Invoke-Expression ($relAst.Find({ param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $fnName }, $true).Extent.Text) }
+    function T([string]$Key) { $Key }
+    function Set-RelBusy($Busy) { }
+    function Get-RelTaskTitle($Kind, $Argument) { $Kind }
+    function Get-RelHttp { $null }
+    function Get-AVDTuneReleaseSettings($Root) { [pscustomobject]@{ EarlyAccess = $false } }
+    function Start-AVDTuneUiTask { 'task' }
+    $blockLog = New-Object System.Collections.ArrayList
+    function Set-ShutdownBlock([bool]$On) { [void]$blockLog.Add($On) }
+    $script:TestMode = $true; $script:Rel = @{ Info = $null }; $script:ToolVersion = '0.9.0'; $script:StateRoot = 'x'; $script:AppRoot = 'x'; $script:RelInstallRoot = 'x'
+    $script:RelWork = { param($C) [pscustomobject]@{ Kind = $C.Kind; RunActive = $C.RunActive } }
+    $tryStart = { param($Kind) $script:RelJob = $null; try { Start-RelJob $Kind 'x'; $true } catch { $false } }
+    $script:LangJob = @{ Kind = 'Install' }
+    $activeLang = Test-RelRunActive
+    $installBlocked = -not (& $tryStart 'Install'); $repairBlocked = -not (& $tryStart 'Repair'); $backBlocked = -not (& $tryStart 'Back')
+    $checkFree = & $tryStart 'Check'; $checkRunActive = [bool]$script:RelJob.Result.RunActive
+    $script:LangJob = $null
+    $blockLog.Clear(); [void](& $tryStart 'Check'); $checkNoBlock = ($blockLog.Count -eq 0)
+    $blockLog.Clear(); $freeInstall = & $tryStart 'Install'; $installBlock = ($blockLog.Count -eq 1 -and $blockLog[0] -eq $true)
+    foreach ($fnName in 'Complete-RelResult') { Invoke-Expression ($relAst.Find({ param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $fnName }, $true).Extent.Text) }
+    function Complete-AVDTuneUiTask { }
+    function Show-Error { }
+    function Add-RelProtocol { }
+    function Update-ReleaseView { }
+    $blockLog.Clear(); Complete-RelResult @{ Kind = 'Install'; Task = 'task' } $null 'fake: failed'; $installOff = ($blockLog.Count -eq 1 -and $blockLog[0] -eq $false -and -not $script:RelJob)
+    $blockLog.Clear(); Complete-RelResult @{ Kind = 'Check'; Task = 'task' } $null 'fake: failed'; $checkNoOff = ($blockLog.Count -eq 0)
+    Test-Check 'release (#49): install, repair and back hold the shutdown block until their end (also a failed end), the checks do not touch it' ($checkNoBlock -and $installBlock -and $installOff -and $checkNoOff) "check=$checkNoBlock install=$installBlock off=$installOff checkEnd=$checkNoOff"
+    Test-Check 'release (#49): install, repair and back are refused while another writer runs (a language run too), the check still starts and sees the run' ($activeLang -and $installBlocked -and $repairBlocked -and $backBlocked -and $checkFree -and $checkRunActive -and $freeInstall) "lang=$activeLang install=$installBlocked repair=$repairBlocked back=$backBlocked check=$checkFree/$checkRunActive free=$freeInstall"
+    $script:RelJob = @{ Kind = 'Install' }; $byInstall = Get-AVDTuneRunningWriter; $blocksOthers = $(try { Assert-NoOtherWriter; $false } catch { $true })
+    $script:RelJob = @{ Kind = 'Check' }; $checkLeavesFree = $(try { Assert-NoOtherWriter; $true } catch { $false }) -and -not (Get-AVDTuneRunningWriter)
+    $script:RelJob = $null
+    Test-Check 'release (#49): a running install is a writer for every other start (RelJob in WriterJobVariables), a running check is not' ($byInstall -eq 'RelJob' -and $blocksOthers -and $checkLeavesFree) "writer=$byInstall blocks=$blocksOthers checkFree=$checkLeavesFree"
+}
 if ($script:failed -gt 0) { throw "$script:failed check(s) failed." }
 'Check-Release: all checks passed.'

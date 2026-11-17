@@ -446,6 +446,8 @@
   "stage.signin.setup": "Erneut einrichten (diesen Administrator berechtigen)",
   "stage.signin.signedin": "Angemeldet als {0}{1}. Token: {2}.",
   "stage.signin.signedout": "Die Token wurden aus dem Arbeitsspeicher entfernt.",
+  "stage.signin.running": "Eine Anmeldung läuft noch: warte, bis sie fertig ist.",
+  "stage.signin.sealbusy": "Der Abschluss läuft und nutzt diese Anmeldung: melde dich an oder ab, wenn er fertig ist.",
   "stage.signin.signout": "Abmelden (Token entfernen)",
   "stage.signin.task": "Anmeldung bei Microsoft 365 und Azure",
   "stage.signin.tenant": "Tenant",

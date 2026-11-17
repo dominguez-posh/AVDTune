@@ -587,7 +587,7 @@ function Get-ShutdownReasonText { T 'shell.shutdownreason' }
 function Get-WindowHandle { (New-Object System.Windows.Interop.WindowInteropHelper $window).Handle }
 function Set-ShutdownBlock([bool]$On) {
     # Off only when no job is left: an ending search must not take the block away from a run that still goes (#66)
-    if (-not $On) { foreach ($jobName in $script:WriterJobVariables) { if ($jobName -ne 'ReadyJob' -and (Get-Variable -Scope Script -Name $jobName -ValueOnly -ErrorAction SilentlyContinue)) { return } } }
+    if (-not $On) { foreach ($jobName in $script:WriterJobVariables) { $j = $(if ($jobName -ne 'ReadyJob') { Get-Variable -Scope Script -Name $jobName -ValueOnly -ErrorAction SilentlyContinue }); if ($j -and -not ($jobName -eq 'RelJob' -and [string]$j.Kind -in $script:WriterReadOnlyKinds.RelJob)) { return } } }   # a release check (Start, Check) does not hold the block, an install does (#49)
     try {
         $h = Get-WindowHandle
         if ($h -eq [IntPtr]::Zero) { return }
