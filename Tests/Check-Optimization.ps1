@@ -646,7 +646,7 @@ try {
     }
     catch { $res = $null; $rsErr = $_.Exception.Message }
     finally { $rs.Dispose() }
-    Test-Check 'page runspaces (#66): with exactly the imports of the page the real machine reads a registry entry and the commands of the run are known (no unknown command, no error)' ($res -and $pageImports.Count -ge 2 -and $res.Status.DataValid -and @($res.Status.Rows).Count -eq 1 -and -not $res.Status.Rows[0].Failed -and @($res.Missing).Count -eq 0 -and $rsErr -notmatch 'is not recognized|nicht erkannt' -and -not $rsErr) "imports=$($pageImports -join ","); missing=$(@($res.Missing) -join ","); err=$rsErr; valid=$($res.Status.DataValid) rows=$(@($res.Status.Rows).Count) failed=$($res.Status.Rows[0].Failed) msg=$($res.Status.Rows[0].Message) errs=$($res.Status.DataErrors -join ";")"
+    Test-Check 'page runspaces (#66): with exactly the imports of the page the real machine reads a registry entry and the commands of the run are known (no unknown command, no error)' ($res -and $pageImports.Count -ge 2 -and $res.Status.DataValid -and @($res.Status.Rows).Count -eq 1 -and -not $res.Status.Rows[0].Failed -and @($res.Missing).Count -eq 0 -and $rsErr -notmatch 'is not recognized|nicht erkannt' -and -not $rsErr) "imports=$($pageImports -join ","); missing=$(@($res.Missing) -join ","); err=$rsErr; valid=$($res.Status.DataValid) rows=$(@($res.Status.Rows).Count) failed=$(@($res.Status.Rows)[0].Failed) msg=$(@($res.Status.Rows)[0].Message) errs=$($res.Status.DataErrors -join ";")"
 
     # ---------------------------------------------------------------- the page (built in code, off-screen; the window is never shown; stubs for the helpers of Start-AVDTune.ps1)
     Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase
