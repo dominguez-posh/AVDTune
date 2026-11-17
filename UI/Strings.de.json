@@ -248,6 +248,7 @@
   "shell.crash.maint": "Der letzte Wartungsmodus wurde nicht sauber beendet: Die Update-Sperre ist eventuell aufgehoben. Öffne „Update-Sperre“ und repariere sie.",
   "shell.err.admin": "AVDTune ändert den Golden Master und muss als Administrator laufen.\nStarte es erneut mit „Als Administrator ausführen“.",
   "shell.err.running": "AVDTune läuft bereits auf diesem Computer (nur eine Instanz gleichzeitig).",
+  "shell.err.modulepath": "AVDTune startet nicht: Ein Ordner, aus dem Windows PowerShell Module lädt, kann ohne Administratorrechte geändert werden.\n{0}\nStelle die Berechtigungen des Ordners wieder her (Besitzer und Schreibrecht nur Administratoren, SYSTEM oder TrustedInstaller) und starte AVDTune erneut.",
   "shell.phase": "Geplant für Phase {0}",
   "shell.readonly": "Nur lesen: Bestätige zuerst auf der Übersicht einen Snapshot von heute. Bis dahin ändert nichts auf dieser Seite den Master.",
   "shell.readonlygo": "Zur Übersicht",

@@ -199,7 +199,7 @@ function Start-LangJob([string]$Kind, $Config) {
         $script:LangJob = @{ Inline = $true; Result = $res; Err = $err; Kind = $Kind; Task = $task }
     }
     else {
-        $ps = [powershell]::Create()
+        $ps = New-AVDTunePowerShell
         [void]$ps.AddScript({
                 param($AppRoot, $Kind, $Common, $Gate, $WorkerText)
                 $ErrorActionPreference = 'Stop'

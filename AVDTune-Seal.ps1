@@ -42,7 +42,7 @@ function Start-SealJob {
     $wg = Get-AVDTuneWriteGate
     $task = Start-AVDTuneUiTask -Kind 'finish' -Title 'Cleanup and finish' -Step 'Starting'
     $sync = [hashtable]::Synchronized(@{ Text = ''; Percent = 0 })
-    $ps = [powershell]::Create()
+    $ps = New-AVDTunePowerShell
     [void]$ps.AddScript({
             param($AppRoot, $Root, $Gate, $User, $Ctx, $Sync, $Block, $FakeMachineScript, $FakeFinishScript, $FakeSeed, $SharedMachine)
             $ErrorActionPreference = 'Stop'

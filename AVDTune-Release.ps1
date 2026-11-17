@@ -81,7 +81,7 @@ function Start-RelJob([string]$Kind, [string]$Argument = '') {
         $script:Rel.Job = @{ Inline = $true; Result = $res; Err = $err; Kind = $Kind; Task = $task }
         return
     }
-    $ps = [powershell]::Create()
+    $ps = New-AVDTunePowerShell
     [void]$ps.AddScript($script:RelWork.ToString()).AddArgument($ctx)
     $script:Rel.Job = @{ PS = $ps; Handle = $ps.BeginInvoke(); Kind = $Kind; Task = $task }
 }

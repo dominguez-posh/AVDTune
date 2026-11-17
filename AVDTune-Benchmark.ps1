@@ -20,7 +20,7 @@ function Start-BenchJob([string]$Mode, [string]$Kind) {
     if ($script:OptRun) { throw 'An optimization run is going. Wait until it is done.' }
     Assert-NoOtherWriter
     $sync = [hashtable]::Synchronized(@{ Text = ''; Percent = 0 })
-    $ps = [powershell]::Create()
+    $ps = New-AVDTunePowerShell
     [void]$ps.AddScript({
             param($AppRoot, $Fake, $FakeBench, $Root, $Mode, $Kind, $Sync, $User, $Seed, $SharedMachine)
             $ErrorActionPreference = 'Stop'

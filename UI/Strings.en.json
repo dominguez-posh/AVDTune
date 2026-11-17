@@ -248,6 +248,7 @@
   "shell.crash.maint": "The last maintenance mode did not end properly: the update block may be lifted. Open Update block and repair it.",
   "shell.err.admin": "AVDTune changes the Golden Master and must run as administrator.\nStart it again with 'Run as administrator'.",
   "shell.err.running": "AVDTune is already running on this computer (one instance at a time).",
+  "shell.err.modulepath": "AVDTune does not start: a folder that Windows PowerShell loads modules from can be changed without administrator rights.\n{0}\nRestore the permissions of the folder (owner and write access only Administrators, SYSTEM or TrustedInstaller), then start AVDTune again.",
   "shell.phase": "Planned for phase {0}",
   "shell.readonly": "Read only: confirm a snapshot of today on the Overview first. Nothing on this page changes the master until then.",
   "shell.readonlygo": "Go to the Overview",

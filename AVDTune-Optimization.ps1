@@ -97,7 +97,7 @@ function Start-OptRead {
         $script:OptJob = @{ Inline = $true; Task = $task }
     }
     else {
-        $ps = [powershell]::Create()
+        $ps = New-AVDTunePowerShell
         [void]$ps.AddScript({
                 param($AppRoot, $Root)
                 $ErrorActionPreference = 'Stop'
@@ -305,7 +305,7 @@ function Start-OptRun([string]$Mode, [string[]]$Ids, [bool]$ConfirmIrr, [string]
     $task = Start-AVDTuneUiTask -Kind 'optimization' -Title $label -Step "$($Ids.Count) entries"   # no Retry: it changes the master and starts only after its confirmation
     if ($script:TestMode) { $script:OptRun = @{ Inline = $true; Task = $task; Mode = $Mode; Ids = $Ids; ConfirmIrr = $ConfirmIrr; User = $User; Gate = $Gate } }
     else {
-        $ps = [powershell]::Create()
+        $ps = New-AVDTunePowerShell
         [void]$ps.AddScript({
                 param($AppRoot, $Root, $Ids, $Mode, $ConfirmIrr, $User, $Gate)
                 $ErrorActionPreference = 'Stop'

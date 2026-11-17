@@ -22,11 +22,14 @@ $ErrorActionPreference = 'Stop'
 if ($PSVersionTable.PSEdition -ne 'Desktop') {
     throw "This WPF tool requires Windows PowerShell 5.1: powershell.exe -ExecutionPolicy Bypass -File `"$PSCommandPath`""
 }
+# Before any other module is loaded or autoloaded (#73): modules only from the system folders, never from the admin's Documents or HKCU\Environment.
+# AVDTune.psm1 itself uses only built-in cmdlets while it loads; every worker gets the same path through New-AVDTunePowerShell / New-AVDTuneRunspacePool.
+Import-Module ([IO.Path]::Combine($PSScriptRoot, 'Modules', 'AVDTune.psm1')) -Force
+[void](Set-AVDTuneSafeModulePath)
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, System.Windows.Forms
 
 $script:AppRoot = $PSScriptRoot
 $script:ToolVersion = (Get-Content -LiteralPath (Join-Path $PSScriptRoot 'VERSION') -Raw -Encoding UTF8).Trim()   # the file VERSION is also the version of the release
-Import-Module (Join-Path $PSScriptRoot 'Modules\AVDTune.psm1') -Force
 foreach ($part in 'Trust', 'Session', 'Snapshot', 'Directory', 'Start', 'UpdateBlock', 'Updates', 'Readiness', 'Watermark', 'Benchmark', 'Shortcut', 'FSLogix', 'Storage', 'Software', 'Office', 'Vdi', 'Masking', 'Finish', 'Environment', 'Optimization', 'Language') { Import-Module (Join-Path $PSScriptRoot "Modules\AVDTune.$part.psm1") -Force }
 Import-Module (Join-Path $PSScriptRoot 'Modules\AVDTune.Release.psm1') -Force
 . (Join-Path $PSScriptRoot 'AVDTune-Theme.ps1')
@@ -57,6 +60,9 @@ function Stop-WithMessage([string]$Text) {
 if (-not $script:TestMode -and -not (Test-AVDTuneElevated)) {
     Stop-WithMessage (T 'shell.err.admin')
 }
+# Windows PowerShell always adds Program Files\WindowsPowerShell\Modules to the module path (#73): if someone without admin rights can write there, AVDTune does not start
+$modulePathProblems = @(Get-AVDTuneModulePathProblems)
+if ($modulePathProblems.Count -gt 0) { Stop-WithMessage (T 'shell.err.modulepath' ($modulePathProblems -join '; ')) }
 # Test runs of several checkouts can run at the same time: one test mutex per test state folder
 $mutexName = if ($script:TestMode) {
     $sha = [System.Security.Cryptography.SHA256]::Create()
@@ -327,7 +333,7 @@ function Update-OverviewView {
 function Start-OverviewRefresh {
     if ($script:OverviewJob) { return }
     $ui.TxtOverviewState.Text = T 'ov.reading'
-    $ps = [powershell]::Create()
+    $ps = New-AVDTunePowerShell
     [void]$ps.AddScript({
             param($Module, $FakeScript, $Root, $SharedMachine)
             $ErrorActionPreference = 'Stop'

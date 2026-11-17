@@ -68,7 +68,7 @@ function Start-FslLatestLookup {
     $r = $script:FslLatestResult
     if ($r -and ((Get-Date) - $r.At).TotalMinutes -lt $(if ($r.Result.Ok) { 60 } else { 5 })) { return }
     if ($script:TestMode) { $script:FslLatestResult = @{ Result = (Get-AVDTuneFSLogixLatest -F $script:FslFake.F); At = (Get-Date) }; return }
-    $ps = [powershell]::Create()
+    $ps = New-AVDTunePowerShell
     [void]$ps.AddScript({
             param($AppRoot)
             $ErrorActionPreference = 'Stop'
@@ -486,7 +486,7 @@ function Start-FslJob([string]$Kind, [hashtable]$Arg = @{}) {
     }
     else {
         $sync = [hashtable]::Synchronized(@{ Text = '' })
-        $ps = [powershell]::Create()
+        $ps = New-AVDTunePowerShell
         [void]$ps.AddScript({
                 param($AppRoot, $Kind, $Common, $Gate, $Sync, $WorkerText)
                 $ErrorActionPreference = 'Stop'

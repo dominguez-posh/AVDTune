@@ -118,7 +118,7 @@ function Start-OffJob([string]$Kind, $Config) {
     }
     else {
         $sync = [hashtable]::Synchronized(@{ Text = '' })
-        $ps = [powershell]::Create()
+        $ps = New-AVDTunePowerShell
         [void]$ps.AddScript({
                 param($AppRoot, $Kind, $Common, $Gate, $Sync, $WorkerText)
                 $ErrorActionPreference = 'Stop'

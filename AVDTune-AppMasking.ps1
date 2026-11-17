@@ -146,7 +146,7 @@ function Start-MaskReadJob {
         Complete-MaskReadJob
         return
     }
-    $ps = [powershell]::Create()
+    $ps = New-AVDTunePowerShell
     [void]$ps.AddScript({
             param($AppRoot, $Dir)
             $ErrorActionPreference = 'Stop'
