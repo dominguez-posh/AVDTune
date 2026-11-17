@@ -64,7 +64,7 @@ jobs:
           .\Bench\build.ps1 -Output Bench\out
           if (-not (Test-Path -LiteralPath Bench\out\AVDTune.Bench.exe)) { throw 'AVDTune.Bench.exe was not built.' }
 
-      - name: Build ZIP and manifest.json (the exe goes into the ZIP and its SHA256 into the manifest: Files and Bench; without it no release)
+      - name: Build ZIP and manifest.json (the exe goes into the ZIP and its SHA256 into the manifest, Files and Bench; without it no release)
         shell: powershell
         run: |
           .\Tools\New-AVDTuneRelease.ps1 -OutDir dist -ExpectTag $env:TAG -BenchExe Bench\out\AVDTune.Bench.exe -RequireBench
