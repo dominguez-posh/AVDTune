@@ -1,7 +1,7 @@
 {
     "SchemaVersion":  1,
     "Title":  "AVDTune optimization list",
-    "Updated":  "2026-11-15",
+    "Updated":  "2026-11-17",
     "Sources":  [
                     {
                         "Id":  "wdot",
@@ -2392,6 +2392,74 @@
                         "Irreversible":  false,
                         "Parameter":  "SevereThreatDefaultAction",
                         "Value":  2
+                    },
+                    {
+                        "Id":  "optimization.user-classic-context-menu",
+                        "Category":  "UserHive",
+                        "Kind":  "UserHive",
+                        "Title":  "New users: classic context menu (Windows 11)",
+                        "Why":  "Every new user gets the full right-click menu at once instead of the short Windows 11 menu with 'Show more options'. Written to the default user profile (an empty (Default) value of InprocServer32 below this CLSID). Not a documented Microsoft setting: the way is described in a Microsoft Q&A article and may stop working with a later Windows build. Undo removes the CLSID key, but only when AVDTune created it. Takes effect at the next sign-in of a new user.",
+                        "Source":  "https://learn.microsoft.com/en-us/answers/questions/2287432/article-restore-old-right-click-context-menu-in-wi",
+                        "Origin":  "own",
+                        "Risk":  "Low",
+                        "Default":  true,
+                        "Reboot":  false,
+                        "Irreversible":  false,
+                        "Path":  "Software\\Classes\\CLSID\\{86ca1aa0-34aa-4e8b-a509-50c905bae2a2}\\InprocServer32",
+                        "Name":  "",
+                        "Type":  "String",
+                        "Value":  ""
+                    },
+                    {
+                        "Id":  "optimization.user-search-box-suggestions",
+                        "Category":  "UserHive",
+                        "Kind":  "UserHive",
+                        "Title":  "New users: no web suggestions in the search box",
+                        "Why":  "User policy DisableSearchBoxSuggestions (Windows Explorer ADMX): the search box shows no suggestion pop-ups and no web results, and typed entries are not kept. On a multi-session host that is less traffic and clutter for every user. Written to the default user profile, so every new user gets it; WDOT lists the same value in its default user settings.",
+                        "Source":  "https://learn.microsoft.com/en-us/windows/client-management/mdm/policy-csp-admx-windowsexplorer#disablesearchboxsuggestions",
+                        "Origin":  "wdot",
+                        "Risk":  "Low",
+                        "Default":  true,
+                        "Reboot":  false,
+                        "Irreversible":  false,
+                        "Path":  "Software\\Policies\\Microsoft\\Windows\\Explorer",
+                        "Name":  "DisableSearchBoxSuggestions",
+                        "Type":  "DWord",
+                        "Value":  1
+                    },
+                    {
+                        "Id":  "optimization.user-menu-show-delay",
+                        "Category":  "UserHive",
+                        "Kind":  "UserHive",
+                        "Title":  "New users: menus open faster (MenuShowDelay 100 ms)",
+                        "Why":  "MenuShowDelay (REG_SZ, milliseconds) is the wait before a submenu opens; the Windows default is 400. 100 makes menus feel faster in a remote session without opening them on every mouse move. The value 100 is our choice: Microsoft documents the setting and its default, but gives no recommended value for virtual desktops, and WDOT does not set it. Written to the default user profile.",
+                        "Source":  "https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-2000-server/cc978617(v=technet.10)",
+                        "Origin":  "own",
+                        "Risk":  "Low",
+                        "Default":  true,
+                        "Reboot":  false,
+                        "Irreversible":  false,
+                        "Path":  "Control Panel\\Desktop",
+                        "Name":  "MenuShowDelay",
+                        "Type":  "String",
+                        "Value":  "100"
+                    },
+                    {
+                        "Id":  "optimization.user-taskbar-animations",
+                        "Category":  "UserHive",
+                        "Kind":  "UserHive",
+                        "Title":  "New users: no taskbar animations",
+                        "Why":  "Taskbar animations cost frames and bandwidth in a remote session. WDOT turns them off for the default user (TaskbarAnimations 0, its optional visual effects group). Off by default here: some users notice the missing animation; turn it on for hosts where every frame counts.",
+                        "Source":  "https://github.com/The-Virtual-Desktop-Team/Windows-Desktop-Optimization-Tool/blob/main/Configurations/Templates/DefaultUserSettings.json",
+                        "Origin":  "wdot",
+                        "Risk":  "Low",
+                        "Default":  false,
+                        "Reboot":  false,
+                        "Irreversible":  false,
+                        "Path":  "Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Advanced",
+                        "Name":  "TaskbarAnimations",
+                        "Type":  "DWord",
+                        "Value":  0
                     }
                 ]
 }

@@ -515,7 +515,8 @@ try {
     # ---------------------------------------------------------------- every write of the master runs under the change marker (#81)
     # A write is: Set-AVDTuneState with LastChange (also through $v.LastChange / a hashtable in $v), Invoke-AVDTuneStep (not -WhatIf, not -Mode Test), an installer
     # or setup run (Invoke-AVDTuneOfficeSetup, Invoke-AVDTuneVdiPackage, Invoke-AVDTuneVdiWinget, Invoke-AVDTuneLibraryItem, Invoke-AVDTuneCatalogItem, Start-Process) and
-    # an adapter call & $x.<Member> for RegSet, RegRemove, ServiceSetStartup, TaskSetEnabled, ServiceStop, ServiceStart, Run, WuaInstall, DefenderUpdate, ClearFolder.
+    # an adapter call & $x.<Member> for RegSet, RegRemove, ServiceSetStartup, TaskSetEnabled, ServiceStop, ServiceStart, Run, WuaInstall, DefenderUpdate, ClearFolder,
+    # HiveSet, HiveRemove, HiveKeyRemoveEmpty (default user profile, #40).
     # The function that makes it must hold the marker for it: a Start-AVDTuneChange before it whose if-conditions the write shares (a Start under "-not $WhatIf"
     # covers a step with -WhatIf:$WhatIf), and the write inside the try block whose finally calls Stop-AVDTuneChange. A function that writes without holding the
     # marker is a helper: every call of it counts as a write of its caller (transitively). A helper is allowed only when no call of it is left unmarked; a helper
@@ -528,7 +529,7 @@ try {
         param([object[]]$Files, [hashtable]$Exempt = @{})   # Files: @{ Name; Ast }
         $L = 'System.Management.Automation.Language'
         $writeNames = @('Invoke-AVDTuneOfficeSetup', 'Invoke-AVDTuneVdiPackage', 'Invoke-AVDTuneVdiWinget', 'Invoke-AVDTuneLibraryItem', 'Invoke-AVDTuneCatalogItem', 'Start-Process')
-        $writeMembers = @('RegSet', 'RegRemove', 'ServiceSetStartup', 'TaskSetEnabled', 'ServiceStop', 'ServiceStart', 'Run', 'WuaInstall', 'DefenderUpdate', 'ClearFolder')
+        $writeMembers = @('RegSet', 'RegRemove', 'ServiceSetStartup', 'TaskSetEnabled', 'ServiceStop', 'ServiceStart', 'Run', 'WuaInstall', 'DefenderUpdate', 'ClearFolder', 'HiveSet', 'HiveRemove', 'HiveKeyRemoveEmpty')
         $marker = @('Stop-AVDTuneChange', 'Resolve-AVDTuneStaleChange')
         $nameOf = {
             param($c)

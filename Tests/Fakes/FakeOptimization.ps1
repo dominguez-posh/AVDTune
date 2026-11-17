@@ -11,6 +11,64 @@ function Add-AVDTuneOptimizationFakeMembers {
     $store.Appx = @{}; foreach ($a in $Appx) { $store.Appx[$a.ToLowerInvariant()] = [pscustomobject]@{ Installed = $true; Provisioned = $true } }
     $store.Mp = @{}; foreach ($k in $Defender.Keys) { $store.Mp[[string]$k] = $Defender[$k] }
     $store.MpUnreported = @(); $store.RegKinds = @{}
+    # Default user profile (#40): loading is simulated through the real Mount-/Dismount-AVDTuneDefaultHive with fake operations. $m.Store.Hive holds Loaded, Registry
+    # ('path|name' lower case -> value), Kinds, Keys, Loads, Unloads; Stale = a hive left loaded by a crash (set Loaded = $true before the first use), FailLoad = reg load
+    # fails, StuckUnloads = n unload attempts fail (an open handle), PathError = the profile path check throws this text. The members refuse when the hive is not loaded.
+    $hive = @{ Loaded = $false; Registry = @{}; Kinds = @{}; Keys = @{}; Loads = 0; Unloads = 0; FailLoad = $false; StuckUnloads = 0; PathError = $null; Mounted = $false }
+    $store.Hive = $hive
+    $hops = @{
+        Loaded = { [bool]$hive.Loaded }.GetNewClosure()
+        Reg = {
+            param($Arguments)
+            [void]$store.Log.Add("reg $($Arguments -join ' ')")
+            if ($Arguments[0] -eq 'load') { if ($hive.FailLoad) { return [pscustomobject]@{ ExitCode = 1; Output = 'fake: access denied' } }; $hive.Loaded = $true; $hive.Loads++; return [pscustomobject]@{ ExitCode = 0; Output = '' } }
+            if ($hive.StuckUnloads -gt 0) { $hive.StuckUnloads--; return [pscustomobject]@{ ExitCode = 1; Output = 'fake: in use' } }
+            $hive.Loaded = $false; $hive.Unloads++; [pscustomobject]@{ ExitCode = 0; Output = '' }
+        }.GetNewClosure()
+        HivePath = { if ($hive.PathError) { throw [string]$hive.PathError }; 'C:\Users\Default\NTUSER.DAT' }.GetNewClosure()
+        Sleep = { param($ms) }
+    }
+    $hensure = { if (-not $hive.Mounted) { Mount-AVDTuneDefaultHive -Ops $hops; $hive.Mounted = $true }; if (-not $hive.Loaded) { throw 'fake: HKU\AVDTune_DefaultUser is not loaded' } }.GetNewClosure()
+    $hkeyExists = { param($p) $p = ([string]$p).ToLowerInvariant(); if ($hive.Keys.ContainsKey($p)) { return $true }; foreach ($k in @($hive.Keys.Keys) + @($hive.Registry.Keys)) { if ($k.StartsWith($p + '\') -or $k.StartsWith($p + '|')) { return $true } }; $false }.GetNewClosure()
+    $Machine | Add-Member -NotePropertyName HiveInfo -NotePropertyValue ({
+            param($Path, $Name)
+            Assert-OptHiveAccess -Path $Path -Name ([string]$Name); & $hensure
+            $k = (([string]$Path) + '|' + ([string]$Name)).ToLowerInvariant()
+            if (-not $hive.Registry.ContainsKey($k)) { return [pscustomobject]@{ KeyExists = (& $hkeyExists $Path); Exists = $false; Kind = $null; Value = $null } }
+            [pscustomobject]@{ KeyExists = $true; Exists = $true; Kind = $hive.Kinds[$k]; Value = $hive.Registry[$k] }
+        }.GetNewClosure())
+    $Machine | Add-Member -NotePropertyName HiveKeyExists -NotePropertyValue ({ param($Path) & $hensure; & $hkeyExists $Path }.GetNewClosure())
+    $Machine | Add-Member -NotePropertyName HiveSet -NotePropertyValue ({
+            param($Path, $Name, $Value, $Type)
+            Assert-OptHiveAccess -Path $Path -Name ([string]$Name)
+            if (-not (Test-AVDTuneWriteAllowed)) { throw 'The write gate is closed: the default user profile is not changed.' }
+            & $hensure
+            $k = (([string]$Path) + '|' + ([string]$Name)).ToLowerInvariant()
+            foreach ($bad in @($store.FailWrites)) { if ($bad -and $k -like "*$($bad.ToLowerInvariant())*") { throw "fake: hive write refused for $Path|$Name" } }
+            $hive.Registry[$k] = $Value; $hive.Kinds[$k] = [string]$Type; [void]$store.Log.Add("HiveSet $Path|$Name=$Value ($Type)")
+        }.GetNewClosure())
+    $Machine | Add-Member -NotePropertyName HiveRemove -NotePropertyValue ({
+            param($Path, $Name)
+            Assert-OptHiveAccess -Path $Path -Name ([string]$Name)
+            if (-not (Test-AVDTuneWriteAllowed)) { throw 'The write gate is closed: the default user profile is not changed.' }
+            & $hensure
+            $k = (([string]$Path) + '|' + ([string]$Name)).ToLowerInvariant()
+            $hive.Registry.Remove($k); $hive.Kinds.Remove($k); [void]$store.Log.Add("HiveRemove $Path|$Name")
+        }.GetNewClosure())
+    $Machine | Add-Member -NotePropertyName HiveKeyRemoveEmpty -NotePropertyValue ({
+            param($Path)
+            Assert-OptHiveAccess -Path $Path -Name $null
+            if (-not (Test-AVDTuneWriteAllowed)) { throw 'The write gate is closed: the default user profile is not changed.' }
+            & $hensure
+            $p = ([string]$Path).ToLowerInvariant()
+            foreach ($k in @($hive.Keys.Keys) + @($hive.Registry.Keys)) { if ($k.StartsWith($p + '\') -or $k.StartsWith($p + '|')) { [void]$store.Log.Add("HiveKeyKept $Path"); return } }
+            $hive.Keys.Remove($p); [void]$store.Log.Add("HiveKeyRemoveEmpty $Path")
+        }.GetNewClosure())
+    $Machine | Add-Member -NotePropertyName HiveUnmount -NotePropertyValue ({
+            if (-not $hive.Mounted) { return }
+            if (-not (Dismount-AVDTuneDefaultHive -Ops $hops)) { throw 'HKU\AVDTune_DefaultUser could not be unloaded (a handle is still open); it is unloaded before the next use.' }
+            $hive.Mounted = $false
+        }.GetNewClosure())
     $m = $Machine
     $Machine | Add-Member -NotePropertyName AppxState -NotePropertyValue ({
             param($Name)

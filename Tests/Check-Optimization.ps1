@@ -623,7 +623,113 @@ try {
     $m = New-TestMachine
     $st = Get-AVDTuneOptimizationStatus -Machine $m -Root $state
     Test-Check 'shipped data: the status reads all entries from the fake machine without error' ($st.DataValid -and $st.Rows.Count -eq $entries.Count -and @($st.Rows | Where-Object Failed).Count -eq 0) (@($st.Rows | Where-Object Failed | Select-Object -First 2 | ForEach-Object { "$($_.Id): $($_.Message)" }) -join '; ')
+    Test-Check 'default profile (#40): the status loads the hive once, reads the UserHive rows from it and unloads it again' ($m.Store.Hive.Loads -eq 1 -and $m.Store.Hive.Unloads -eq 1 -and -not $m.Store.Hive.Loaded -and @($st.Rows | Where-Object { $_.Kind -eq 'UserHive' -and $_.State -eq 'not set' }).Count -eq 4) (@($m.Log) -join ' | ')
     Close-AVDTuneWriteGate
+
+    # ---------------------------------------------------------------- default user profile (#40): UserHive entries in NTUSER.DAT of the default profile
+    function Invoke-Hive($Machine, [string[]]$Ids, [string]$Mode = 'Apply') { Open-AVDTuneWriteGate -SnapshotId 'snap-1' -ConfirmedBy 'admin1'; Invoke-AVDTuneOptimization -Machine $Machine -Root $state -Ids $Ids -Mode $Mode -User 'admin1' -SnapshotId 'snap-1' }
+    $ctx = 'optimization.user-classic-context-menu'; $sbx = 'optimization.user-search-box-suggestions'; $msd = 'optimization.user-menu-show-delay'
+    $clsid = 'Software\Classes\CLSID\{86ca1aa0-34aa-4e8b-a509-50c905bae2a2}'
+    $byId = @{}; foreach ($e in $entries) { $byId[$e.Id] = $e }
+    Test-Check 'default profile: the three wanted entries are shipped with path, name, type and value, in Recommended (default on, risk Low)' (
+        $byId[$ctx] -and $byId[$ctx].Path -eq "$clsid\InprocServer32" -and $byId[$ctx].Name -eq '' -and $byId[$ctx].Type -eq 'String' -and $byId[$ctx].Value -eq '' -and
+        $byId[$sbx] -and $byId[$sbx].Path -eq 'Software\Policies\Microsoft\Windows\Explorer' -and $byId[$sbx].Type -eq 'DWord' -and $byId[$sbx].Value -eq 1 -and
+        $byId[$msd] -and $byId[$msd].Path -eq 'Control Panel\Desktop' -and $byId[$msd].Name -eq 'MenuShowDelay' -and $byId[$msd].Type -eq 'String' -and $byId[$msd].Value -eq '100' -and
+        @($ctx, $sbx, $msd | Where-Object { $_ -notin $rec -or $byId[$_].Risk -ne 'Low' -or $byId[$_].Category -ne 'UserHive' }).Count -eq 0) $null
+    $hiveListed = & $opt { @($script:HiveAllow.Keys).Count }
+    Test-Check 'default profile: the allow list holds exactly the shipped UserHive values' ($hiveListed -eq @($entries | Where-Object Kind -eq 'UserHive').Count) "$hiveListed"
+    $hb = [ordered]@{ Id = 'optimization.t-hive'; Category = 'UserHive'; Kind = 'UserHive'; Title = 'Test hive'; Why = 'A reason that is long enough.'; Source = 'https://learn.microsoft.com/en-us/x'; Origin = 'own'; Risk = 'Low'; Default = $true; Reboot = $false; Irreversible = $false; Path = 'Control Panel\Desktop'; Name = 'MenuShowDelay'; Type = 'String'; Value = '100' }
+    $r = Read-Doc @($hb); Test-Check 'types: a correct UserHive entry is accepted' ($r.Valid -and $r.Entries.Count -eq 1) ($r.Errors -join '; ')
+    foreach ($bad in @(
+            @{ N = 'an HKCU: path'; C = { param($e) $e.Path = 'HKCU:\Control Panel\Desktop' }; P = 'Path must be' }
+            @{ N = 'a .. segment'; C = { param($e) $e.Path = 'Software\..\Control Panel\Desktop' }; P = 'Path must be|not valid' }
+            @{ N = 'a key outside Software and Control Panel'; C = { param($e) $e.Path = 'Environment' }; P = 'Path must be' }
+            @{ N = 'a value not on the allow list'; C = { param($e) $e.Name = 'Wallpaper' }; P = 'allow list' }
+            @{ N = 'the type DWord for a REG_SZ value'; C = { param($e) $e.Type = 'DWord'; $e.Value = 100 }; P = 'type of this value must be String' }
+            @{ N = 'a String value as a number'; C = { param($e) $e.Value = 100 }; P = 'String Value must be text' }
+            @{ N = 'Name PSPath'; C = { param($e) $e.Name = 'PSPath' }; P = 'Name is not a valid' }
+            @{ N = 'Category Registry with Kind UserHive'; C = { param($e) $e.Category = 'Registry' }; P = 'does not match Kind' }
+        )) {
+        $e = [ordered]@{}; foreach ($k in $hb.Keys) { $e[$k] = $hb[$k] }; & $bad.C $e
+        $r = Read-Doc @($e)
+        Test-Check "types: a UserHive entry with $($bad.N) is refused" ((-not $r.Valid) -and $r.Entries.Count -eq 0 -and (($r.Errors -join ' ') -match $bad.P)) ($r.Errors -join '; ')
+    }
+    Test-Check 'default profile: the real members refuse keys and values outside the list (also a parent key at the top level)' ((Test-Throws { Assert-OptHiveAccess -Path 'Software\Microsoft\Windows\CurrentVersion\Run' -Name 'x' }) -and (Test-Throws { Assert-OptHiveAccess -Path 'Software\Classes' -Name $null }) -and (Test-Throws { Assert-OptHiveAccess -Path 'Control Panel\Desktop' -Name $null }) -and -not (Test-Throws { Assert-OptHiveAccess -Path $clsid -Name $null })) $null
+
+    # Apply writes into the loaded default profile, never into HKCU or HKLM of the machine; the hive is unloaded afterwards
+    $m = New-TestMachine
+    Close-AVDTuneWriteGate
+    $refused = Test-Throws { Invoke-AVDTuneOptimization -Machine $m -Root $state -Ids @($sbx) }
+    Test-Check 'default profile: without the open write gate nothing is written (and the fake member refuses on its own)' ($refused -and $m.Store.Hive.Registry.Count -eq 0 -and (Test-Throws { & $m.HiveSet 'Control Panel\Desktop' 'MenuShowDelay' '100' 'String' })) $null
+    $m = New-TestMachine
+    $sum = Invoke-Hive $m @($ctx, $sbx, $msd)
+    $hv = $m.Store.Hive
+    Test-Check 'default profile: Apply writes the three values into the loaded hive (the (Default) of InprocServer32 as an empty REG_SZ, MenuShowDelay as REG_SZ)' (
+        $sum.Changed -eq 3 -and $sum.Failed -eq 0 -and $hv.Registry[("$clsid\InprocServer32|").ToLowerInvariant()] -eq '' -and $hv.Kinds[("$clsid\InprocServer32|").ToLowerInvariant()] -eq 'String' -and
+        $hv.Registry['software\policies\microsoft\windows\explorer|disablesearchboxsuggestions'] -eq 1 -and $hv.Registry['control panel\desktop|menushowdelay'] -eq '100' -and $hv.Kinds['control panel\desktop|menushowdelay'] -eq 'String') (@($m.Log) -join ' | ')
+    Test-Check 'default profile: nothing lands in HKCU or HKLM of the machine, the hive is loaded once and unloaded at the end' ((@($m.Store.Registry.Keys | Where-Object { $_ -like '*menushowdelay*' -or $_ -like '*86ca1aa0*' -or $_ -like '*disablesearchboxsuggestions*' }).Count -eq 0) -and $hv.Loads -eq 1 -and $hv.Unloads -eq 1 -and -not $hv.Loaded -and -not $sum.HiveError) (@($m.Log) -join ' | ')
+    $b = Get-AVDTuneOptimizationBackup -Root $state -Id $ctx
+    Test-Check 'default profile: the undo record is typed (Kind UserHive, key, name, no earlier value, the CLSID keys AVDTune created)' ($b.Kind -ceq 'UserHive' -and $b.Path -eq "$clsid\InprocServer32" -and $b.Name -eq '' -and $b.Exists -eq $false -and @($b.KeyCreated) -contains $clsid -and @($b.KeyCreated) -contains "$clsid\InprocServer32") ($b | ConvertTo-Json -Compress)
+    $st = Get-AVDTuneOptimizationStatus -Machine $m -Root $state
+    Test-Check 'default profile: the status reads the values back from the hive (compliant, Undo offered)' (@($st.Rows | Where-Object { $_.Id -in $ctx, $sbx, $msd -and $_.Compliant -and $_.HasBackup }).Count -eq 3) $null
+    # a second Apply after a change by hand keeps the first record
+    $hv.Registry['control panel\desktop|menushowdelay'] = '50'
+    [void](Invoke-Hive $m @($msd))
+    Test-Check 'default profile: a second Apply never overwrites the first undo record' ((Get-AVDTuneOptimizationBackup -Root $state -Id $msd).Exists -eq $false) $null
+    $u = Invoke-Hive $m @($ctx, $sbx, $msd) -Mode Undo
+    Test-Check 'default profile: Undo removes the values and the CLSID key AVDTune created' ($u.Changed -eq 3 -and $hv.Registry.Count -eq 0 -and @($m.Log | Where-Object { $_ -eq "HiveKeyRemoveEmpty $clsid" }).Count -eq 1 -and -not $hv.Loaded) (@($m.Log) -join ' | ')
+    # an earlier value is restored with its kind; a CLSID key that was there before stays
+    $m = New-TestMachine
+    $m.Store.Hive.Registry['control panel\desktop|menushowdelay'] = '400'; $m.Store.Hive.Kinds['control panel\desktop|menushowdelay'] = 'String'
+    $m.Store.Hive.Keys[$clsid.ToLowerInvariant()] = $true
+    [void](Invoke-Hive $m @($ctx, $msd)); $u = Invoke-Opt $m @($ctx, $msd) -Mode Undo
+    Test-Check 'default profile: Undo restores the earlier MenuShowDelay 400 as REG_SZ and keeps a CLSID key that existed before' ($u.Changed -eq 2 -and $m.Store.Hive.Registry['control panel\desktop|menushowdelay'] -eq '400' -and $m.Store.Hive.Kinds['control panel\desktop|menushowdelay'] -eq 'String' -and @($m.Log | Where-Object { $_ -eq "HiveKeyRemoveEmpty $clsid" }).Count -eq 0) (@($m.Log) -join ' | ')
+    Clear-Backups
+    # crash protection: a hive left loaded is unloaded first; a failing load changes nothing; an unload that needs a second try
+    $m = New-TestMachine; $m.Store.Hive.Loaded = $true
+    $sum = Invoke-Hive $m @($sbx)
+    $regLog = @($m.Log | Where-Object { $_ -like 'reg *' })
+    Test-Check 'default profile: a hive left loaded by a crash is unloaded before it is loaded again' ($sum.Changed -eq 1 -and $regLog.Count -ge 3 -and $regLog[0] -eq 'reg unload HKU\AVDTune_DefaultUser' -and $regLog[1] -like 'reg load HKU\AVDTune_DefaultUser *' -and -not $m.Store.Hive.Loaded) ($regLog -join ' | ')
+    Clear-Backups
+    $m = New-TestMachine; $m.Store.Hive.FailLoad = $true
+    $sum = Invoke-Hive $m @($sbx, $msd)
+    Test-Check 'default profile: when the hive cannot be loaded the entries fail and nothing is written or saved' ($sum.Failed -eq 2 -and $sum.Changed -eq 0 -and $m.Store.Hive.Registry.Count -eq 0 -and $null -eq (Get-AVDTuneOptimizationBackup -Root $state -Id $sbx)) (@($sum.Results | ForEach-Object { $_.Message }) -join ' | ')
+    $m = New-TestMachine; $m.Store.Hive.PathError = 'C:\Users\Default is a link'
+    $sum = Invoke-Hive $m @($sbx)
+    Test-Check 'default profile: a refused profile path (link, ACL) loads nothing' ($sum.Failed -eq 1 -and $m.Store.Hive.Loads -eq 0) $null
+    $m = New-TestMachine; $m.Store.Hive.StuckUnloads = 2
+    $sum = Invoke-Hive $m @($sbx)
+    Test-Check 'default profile: the unload is tried again (open handles released) and succeeds' ($sum.Changed -eq 1 -and -not $m.Store.Hive.Loaded -and -not $sum.HiveError) $null
+    Clear-Backups
+    $m = New-TestMachine; $m.Store.Hive.StuckUnloads = 99
+    $sum = Invoke-Hive $m @($sbx)
+    Test-Check 'default profile: an unload that keeps failing is reported with the run (HiveError) and LastChange is still set' ($sum.Changed -eq 1 -and $sum.HiveError -like '*could not be unloaded*' -and $m.Store.Hive.Loaded) $sum.HiveError
+    Clear-Backups
+    Close-AVDTuneWriteGate
+
+    # the profile path: only %SystemDrive%, no links, admin-only folder and file
+    $okRep = { param($p) [pscustomobject]@{ Exists = $true; Link = $false; Owner = 'S-1-5-18'; Protected = $false; Rules = @([pscustomobject]@{ Sid = 'S-1-5-32-545'; Write = $false; Inherited = $true; InheritOnly = $false }) } }
+    Test-Check 'profile path: %SystemDrive%\Users\Default gives the NTUSER.DAT of that folder' ((Get-AVDTuneDefaultHivePath -Raw '%SystemDrive%\Users\Default' -SystemDrive 'C:' -ReadAcl $okRep) -eq 'C:\Users\Default\NTUSER.DAT') $null
+    $linkAt = { param($p) $r = & $okRep $p; if ($p -eq 'C:\Users') { $r.Link = $true }; $r }.GetNewClosure()
+    $userWrite = { param($p) $r = & $okRep $p; if ($p -eq 'C:\Users\Default\NTUSER.DAT') { $r.Rules = @([pscustomobject]@{ Sid = 'S-1-5-32-545'; Write = $true; Inherited = $true; InheritOnly = $false }) }; $r }.GetNewClosure()
+    $foreignOwner = { param($p) $r = & $okRep $p; if ($p -eq 'C:\Users\Default') { $r.Owner = 'S-1-5-21-1-2-3-1001' }; $r }.GetNewClosure()
+    $missing = { param($p) $r = & $okRep $p; if ($p -like '*NTUSER.DAT') { $r.Exists = $false }; $r }.GetNewClosure()
+    foreach ($c in @(
+            @{ N = 'a link in a parent folder'; Raw = '%SystemDrive%\Users\Default'; A = $linkAt; P = 'is a link' }
+            @{ N = 'NTUSER.DAT writable by Users'; Raw = '%SystemDrive%\Users\Default'; A = $userWrite; P = 'not admin-only' }
+            @{ N = 'a profile folder owned by a user'; Raw = '%SystemDrive%\Users\Default'; A = $foreignOwner; P = 'not admin-only' }
+            @{ N = 'a missing NTUSER.DAT'; Raw = '%SystemDrive%\Users\Default'; A = $missing; P = 'does not exist' }
+            @{ N = 'another environment variable'; Raw = '%USERPROFILE%\..\Default'; A = $okRep; P = 'not a plain local path' }
+            @{ N = 'a .. segment'; Raw = 'C:\Users\x\..\Default'; A = $okRep; P = '\.\. segment' }
+            @{ N = 'a UNC path'; Raw = '\\server\share\Default'; A = $okRep; P = 'not a plain local path' }
+        )) {
+        $msg = ''; try { [void](Get-AVDTuneDefaultHivePath -Raw $c.Raw -SystemDrive 'C:' -ReadAcl $c.A); $msg = 'accepted' } catch { $msg = $_.Exception.Message }
+        Test-Check "profile path: $($c.N) is refused" ($msg -match $c.P) $msg
+    }
+    # the real machine members: the right set is added, reg.exe by full path through the adapter (Run), loading only through the module functions
+    $optSrc = Get-Content -Raw (Join-Path $repo 'Modules\AVDTune.Optimization.psm1')
+    Test-Check 'default profile: reg.exe is started by its full path from the system folder through the adapter, the hive name is fixed' ($optSrc -match "Join-Path \(Get-AVDTuneSystemFolder System\) 'reg\.exe'" -and $optSrc -match '& \$Machine\.Run \$regExe' -and $optSrc -match "HiveName = 'AVDTune_DefaultUser'") $null
+    Test-Check 'default profile: a real machine gets all Hive members' (@('HiveInfo', 'HiveKeyExists', 'HiveSet', 'HiveRemove', 'HiveKeyRemoveEmpty', 'HiveUnmount' | Where-Object { $optSrc -notmatch "'$_'" }).Count -eq 0) $null
 
     # ---------------------------------------------------------------- the runspaces of the page (#66, like #67): exactly the imports of the page, the REAL machine, read only
     $pageSrc = Get-Content -Raw (Join-Path $repo 'AVDTune-Optimization.ps1')

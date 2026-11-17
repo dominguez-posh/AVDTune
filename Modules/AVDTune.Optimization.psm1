@@ -11,6 +11,9 @@
       TaskDisabled    scheduled task disabled. Undo enables it again.
       AppxRemove      AppX package removed for all users and from the provisioning list. CANNOT be undone; needs -ConfirmIrreversible.
       DefenderPref    Microsoft Defender preference (Set-MpPreference, names on a fixed list). Undo restores the earlier value.
+      UserHive        value in the default user profile (NTUSER.DAT of the folder in HKLM ProfileList\Default), so every new user gets it (#40). The hive is
+                      loaded as HKU\AVDTune_DefaultUser only while a read or a run needs it and unloaded in finally; a hive left loaded by a crash is unloaded
+                      first. Undo restores the earlier value (or removes it and the keys AVDTune created, as far as they are empty).
 
     Every change goes through Invoke-AVDTuneStep (write gate, Test before and after). The value found before Apply is saved in config\optimization-backup.json of the
     state folder (only when there is no backup for the entry yet, an older backup is never overwritten) and used by Undo; without a backup there is no undo, so nothing
@@ -24,15 +27,15 @@ Import-Module (Join-Path $PSScriptRoot 'AVDTune.psm1')
 $script:DataFile = Join-Path (Split-Path $PSScriptRoot -Parent) 'data\optimization.json'
 $script:MaxDataBytes = 2MB
 $script:MaxEntries = 1000
-$script:CategoryKind = @{ Service = 'ServiceStartup'; Task = 'TaskDisabled'; Appx = 'AppxRemove'; Registry = 'Registry'; Autologger = 'Registry'; Defender = 'DefenderPref' }
-$script:CategoryOrder = @('Defender', 'Registry', 'Autologger', 'Service', 'Task', 'Appx')
-$script:CategoryLabel = @{ Defender = 'Defender for VDI'; Registry = 'Registry policies'; Autologger = 'Autologgers'; Service = 'Services'; Task = 'Scheduled tasks'; Appx = 'AppX removal (cannot be undone)' }
+$script:CategoryKind = @{ Service = 'ServiceStartup'; Task = 'TaskDisabled'; Appx = 'AppxRemove'; Registry = 'Registry'; Autologger = 'Registry'; Defender = 'DefenderPref'; UserHive = 'UserHive' }
+$script:CategoryOrder = @('Defender', 'Registry', 'UserHive', 'Autologger', 'Service', 'Task', 'Appx')
+$script:CategoryLabel = @{ Defender = 'Defender for VDI'; Registry = 'Registry policies'; UserHive = 'Default user profile (every new user)'; Autologger = 'Autologgers'; Service = 'Services'; Task = 'Scheduled tasks'; Appx = 'AppX removal (cannot be undone)' }
 $script:Risks = @('Low', 'Medium', 'High')
 $script:SourceHosts = @('learn.microsoft.com', 'github.com', 'chromeenterprise.google')
 $script:CommonProps = @('Id', 'Category', 'Kind', 'Title', 'Why', 'Source', 'Origin', 'Risk', 'Default', 'Reboot', 'Irreversible')
 $script:KindProps = @{
     Registry = @('Path', 'Name', 'Type', 'Value', 'OnlyIfKeyExists'); ServiceStartup = @('Name', 'Startup'); TaskDisabled = @('TaskPath', 'TaskName')
-    AppxRemove = @('PackageName'); DefenderPref = @('Parameter', 'Value')
+    AppxRemove = @('PackageName'); DefenderPref = @('Parameter', 'Value'); UserHive = @('Path', 'Name', 'Type', 'Value')
 }
 # Set-MpPreference parameters an entry may use. Only protecting values are allowed (Allowed / Only / Min..Max); the name is data, so only this list goes to the cmdlet.
 # Undo may restore any earlier value of the right type and range (RestoreMax: 0..n, RestoreAllowed: the values of the enum), so it checks the type and that range, not the protecting values.
@@ -117,6 +120,14 @@ foreach ($x in @(
     'HKLM:\SYSTEM\CurrentControlSet\Control\WMI\Autologger\ReFSLog|Start',
     'HKLM:\SYSTEM\CurrentControlSet\Control\WMI\Autologger\Mellanox-Kernel|Start'
 )) { $script:RegAllow[$x] = 'DWord' }
+# Default user profile (#40): 'key below the root of the hive|value name' -> the registry type; '' is the (Default) value of the key. Nothing else is written there.
+$script:HiveName = 'AVDTune_DefaultUser'
+$script:HiveAllow = @{
+    'Software\Classes\CLSID\{86ca1aa0-34aa-4e8b-a509-50c905bae2a2}\InprocServer32|' = 'String'
+    'Software\Policies\Microsoft\Windows\Explorer|DisableSearchBoxSuggestions' = 'DWord'
+    'Control Panel\Desktop|MenuShowDelay' = 'String'
+    'Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced|TaskbarAnimations' = 'DWord'
+}
 $script:TaskAllow = @{}
 foreach ($x in @(
     '\Microsoft\Windows\Application Experience\|Microsoft Compatibility Appraiser',
@@ -260,6 +271,44 @@ function Get-OptRestoreProblem {
     if ($Kind -ceq 'String') { if (Test-OptText $Value 0 4096) { return $null }; return 'not text of up to 4096 characters.' }
     'the registry type cannot be restored (only DWord and String).'
 }
+function Test-OptHivePathSyntax($Path) {
+    # a key below the root of the user hive (no HKCU:, no drive): Software\... or Control Panel\..., plain key names, no '.' or '..' segment, no empty segment
+    if (-not ((Test-OptText $Path 3 260) -and (Test-OptPattern $Path '\A(Software|Control Panel)(\\[A-Za-z0-9 _.{}()\-]+)+\z'))) { return $false }
+    $segs = @(([string]$Path).Split('\'))
+    -not ($segs -contains '..' -or $segs -contains '.')
+}
+function Test-OptHiveNameSyntax($Name) { (Test-OptText $Name 0 100) -and ($Name -eq '' -or (Test-OptRegNameSyntax $Name)) }   # '' is the (Default) value
+function Get-OptHiveProblem {
+    # Why a value of the default user profile may not be touched, or $null
+    param([string]$Path, $Name)
+    if (-not (Test-OptHivePathSyntax $Path)) { return 'the key is not valid (a key below Software\ or Control Panel\ of the user hive, no . or .. segment).' }
+    if (-not (Test-OptHiveNameSyntax $Name)) { return 'the value name is not valid.' }
+    if (-not $script:HiveAllow.ContainsKey("$Path|$Name")) { return 'this value of the default user profile is not one of the values this list ships (allow list).' }
+    $null
+}
+function Get-OptHiveKeyProblem {
+    # A key that Undo may remove again: a shipped key or a parent of one, at least three levels deep (never Software\Classes, Control Panel\Desktop and above)
+    param([string]$Path)
+    if (-not (Test-OptHivePathSyntax $Path)) { return 'the key is not valid.' }
+    if ($Path.Split('\').Count -lt 3) { return 'a top-level key of the profile is never removed.' }
+    $cmp = [StringComparison]::OrdinalIgnoreCase
+    foreach ($k in $script:HiveAllow.Keys) { $kp = $k.Substring(0, $k.LastIndexOf('|')); if ($kp.Equals($Path, $cmp) -or $kp.StartsWith($Path + '\', $cmp)) { return $null } }
+    'the key is not one of the keys this list may change.'
+}
+function Get-OptHiveValueProblem {
+    param([string]$Path, $Name, $Type, $Value)
+    $want = $script:HiveAllow["$Path|$Name"]
+    if ($Type -cne $want) { return "the type of this value must be $want." }
+    if ($Type -ceq 'DWord') { if (-not ((Test-OptInt $Value) -and [int64]$Value -ge 0 -and [int64]$Value -le 2147483647)) { return 'a DWord value must be a whole number from 0 to 2147483647.' } }
+    elseif (-not (Test-OptText $Value 0 260)) { return 'a String value must be text of up to 260 characters.' }
+    $null
+}
+function Assert-OptHiveAccess {
+    # The check of the real members of the default user profile (a module function on purpose, like Assert-OptRegistryAccess). Name $null: a key.
+    param([string]$Path, $Name)
+    $problem = if ($null -eq $Name) { Get-OptHiveKeyProblem -Path $Path } else { Get-OptHiveProblem -Path $Path -Name ([string]$Name) }
+    if ($problem) { throw "Refused: $problem" }
+}
 function ConvertTo-OptDWordRead($Value) {
     # DWord as the registry returns it is a signed Int32; AVDTune treats it as unsigned (bit 31 set = a big number, not a negative one)
     if ($Value -is [int] -and $Value -lt 0) { return [int64][BitConverter]::ToUInt32([BitConverter]::GetBytes([int]$Value), 0) }
@@ -339,6 +388,10 @@ function Get-OptEntryProblem {
         'TaskDisabled' { Get-OptTaskProblem ([string]$Entry.TaskPath) ([string]$Entry.TaskName) }
         'AppxRemove' { Get-OptAppxProblem ([string]$Entry.PackageName) }
         'DefenderPref' { Get-OptDefenderProblem -Parameter ([string]$Entry.Parameter) -Value $Entry.Value }
+        'UserHive' {
+            $p = Get-OptHiveProblem -Path ([string]$Entry.Path) -Name $Entry.Name
+            if ($p) { $p } else { Get-OptHiveValueProblem -Path ([string]$Entry.Path) -Name ([string]$Entry.Name) -Type (Get-AVDTuneProp $Entry 'Type') -Value (Get-AVDTuneProp $Entry 'Value') }
+        }
         default { "unknown kind '$($Entry.Kind)'." }
     }
 }
@@ -403,6 +456,15 @@ function ConvertTo-OptEntry {
             $pk = Get-AVDTuneProp $Raw 'PackageName'
             if (-not (Test-OptAppxNameSyntax $pk)) { [void]$errors.Add("${label}: PackageName is not a valid package name (no wildcards).") }
             $e.PackageName = [string]$pk
+        }
+        'UserHive' {
+            $path = Get-AVDTuneProp $Raw 'Path'; $name = Get-AVDTuneProp $Raw 'Name'; $type = Get-AVDTuneProp $Raw 'Type'; $value = Get-AVDTuneProp $Raw 'Value'
+            if (-not (Test-OptHivePathSyntax $path)) { [void]$errors.Add("${label}: Path must be a key below Software\ or Control Panel\ of the user hive (no HKCU:, letters, digits, space and _ . { } ( ) - only).") }
+            if (-not (Test-OptHiveNameSyntax $name)) { [void]$errors.Add("${label}: Name is not a valid value name ('' is the (Default) value).") }
+            if (-not ((Test-OptText $type 3 10) -and ([string]$type -cin @('DWord', 'String')))) { [void]$errors.Add("${label}: Type must be DWord or String.") }
+            elseif ([string]$type -eq 'DWord' -and -not ((Test-OptInt $value) -and [int64]$value -ge 0 -and [int64]$value -le 2147483647)) { [void]$errors.Add("${label}: a DWord Value must be a whole number from 0 to 2147483647 (a number, not text).") }
+            elseif ([string]$type -eq 'String' -and -not (Test-OptText $value 0 260)) { [void]$errors.Add("${label}: a String Value must be text of up to 260 characters (not a number).") }
+            $e.Path = [string]$path; $e.Name = [string]$name; $e.Type = [string]$type; $e.Value = $(if ([string]$type -eq 'DWord' -and (Test-OptInt $value)) { [int64]$value } else { [string]$value })
         }
         'DefenderPref' {
             $param = Get-AVDTuneProp $Raw 'Parameter'; $value = Get-AVDTuneProp $Raw 'Value'
@@ -552,6 +614,78 @@ function ConvertTo-OptCompare($Value) {
 
 #endregion
 
+#region default user profile (#40)
+
+function Get-AVDTuneDefaultHiveName { $script:HiveName }
+
+function Get-AVDTuneDefaultHivePath {
+    <#
+        NTUSER.DAT of the default profile. Raw is the value Default of HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList as stored (not expanded):
+        only %SystemDrive% is replaced (by the drive of the system folder, never from the environment); any other variable, a relative path or a . / .. segment is
+        refused. Every part of the path must exist and must not be a link (reparse point); the profile folder and the file must be admin-only for writing
+        (owner Administrators/SYSTEM/TrustedInstaller, no write for others). ReadAcl: path -> report like Read-AVDTuneAclReport (checks pass a fake).
+    #>
+    param([string]$Raw, [Parameter(Mandatory)][string]$SystemDrive, [scriptblock]$ReadAcl = { param($p) Read-AVDTuneAclReport -Path $p })
+    if (-not (Test-OptPattern $SystemDrive '\A[A-Za-z]:\z')) { throw 'The system drive is not a drive letter.' }
+    if (-not (Test-OptText $Raw 4 200)) { throw 'The default profile folder in ProfileList is missing or not valid.' }
+    $path = $Raw
+    if ($path.StartsWith('%SystemDrive%\', [StringComparison]::OrdinalIgnoreCase)) { $path = $SystemDrive + $path.Substring(13) }
+    if (-not (Test-OptPattern $path '\A[A-Za-z]:(\\[A-Za-z0-9 _.\-]+)+\z')) { throw "The default profile folder '$Raw' is not a plain local path (only %SystemDrive% may be used)." }
+    $segs = @($path.Split('\'))
+    if ($segs -contains '..' -or $segs -contains '.') { throw "The default profile folder '$Raw' has a . or .. segment." }
+    $file = $path + '\NTUSER.DAT'
+    $cur = $segs[0]
+    foreach ($s in @($segs | Select-Object -Skip 1) + @('NTUSER.DAT')) {
+        $cur = $cur + '\' + $s
+        $r = & $ReadAcl $cur
+        if (-not $r -or -not $r.Exists) { throw "$cur does not exist." }
+        if ($r.Link) { throw "$cur is a link (reparse point): the default profile is not loaded." }
+        if ($cur -eq $path -or $cur -eq $file) {
+            $problems = @(Get-AVDTuneAclProblems -Report $r)
+            if ($problems.Count -gt 0) { throw "$cur is not admin-only ($($problems -join '; ')): the default profile is not loaded." }
+        }
+    }
+    $file
+}
+
+function Mount-AVDTuneDefaultHive {
+    <#
+        Loads the default profile as HKU\<name>. Ops (the real ones in Add-AVDTuneOptimizationMachineMembers, fakes in the checks): Loaded {} -> is HKU\<name> there,
+        Reg { param($Arguments) } -> @{ ExitCode; Output } (reg.exe by full path), HivePath {} -> NTUSER.DAT (Get-AVDTuneDefaultHivePath), Sleep { param($ms) }.
+        A hive of the same name that is already there was left by a crash: it is unloaded first; if that fails nothing is loaded.
+    #>
+    param([Parameter(Mandatory)][hashtable]$Ops, [string]$Name = $script:HiveName)
+    if (& $Ops.Loaded) {
+        if (-not (Dismount-AVDTuneDefaultHive -Ops $Ops -Name $Name)) { throw "HKU\$Name from an earlier run is still loaded and cannot be unloaded; nothing was changed. Restart the computer and try again." }
+    }
+    $file = & $Ops.HivePath
+    $r = & $Ops.Reg @('load', "HKU\$Name", $file)
+    if ($r.ExitCode -ne 0 -or -not (& $Ops.Loaded)) { throw "The default user profile could not be loaded (reg load, exit code $($r.ExitCode)); nothing was changed." }
+}
+
+function Dismount-AVDTuneDefaultHive {
+    # Unloads HKU\<name>: open handles are released first (garbage collection), up to five tries. $true when it is gone (or was not there).
+    param([Parameter(Mandatory)][hashtable]$Ops, [string]$Name = $script:HiveName)
+    for ($i = 0; $i -lt 5; $i++) {
+        if (-not (& $Ops.Loaded)) { return $true }
+        [GC]::Collect(); [GC]::WaitForPendingFinalizers()
+        [void](& $Ops.Reg @('unload', "HKU\$Name"))
+        if (-not (& $Ops.Loaded)) { return $true }
+        & $Ops.Sleep 500
+    }
+    $false
+}
+
+function Get-OptHiveCreatedKeys {
+    # The keys of a path in the default profile that do not exist yet (outermost first), from the third level on (Software\Classes and above are never removed)
+    param($Machine, [string]$Path)
+    $parts = $Path.Split('\'); $cur = $parts[0]; $created = @(); $depth = 1
+    foreach ($part in @($parts | Select-Object -Skip 1)) { $cur = "$cur\$part"; $depth++; if ($depth -ge 3 -and -not (& $Machine.HiveKeyExists $cur)) { $created += $cur } }
+    @($created)
+}
+
+#endregion
+
 #region machine members and steps
 
 function Add-AVDTuneOptimizationMachineMembers {
@@ -563,7 +697,83 @@ function Add-AVDTuneOptimizationMachineMembers {
     param([Parameter(Mandatory)]$Machine)
     $defenderNames = @($script:DefenderParams.Keys)
     $appx = @{ At = [datetime]::MinValue; Prov = @(); Inst = @() }
+    # Default user profile (#40): loaded on first use by a Hive member, unloaded by HiveUnmount (finally of the status read and of the run)
+    $hiveName = $script:HiveName; $hv = @{ Mounted = $false }; $ops = @{}
+    if ($Machine.Kind -eq 'Real') {
+        $regExe = Join-Path (Get-AVDTuneSystemFolder System) 'reg.exe'   # full path, never through PATH
+        $ops.Loaded = { $k = [Microsoft.Win32.Registry]::Users.OpenSubKey($hiveName); if ($k) { $k.Close(); $true } else { $false } }.GetNewClosure()
+        $ops.Reg = { param($Arguments) & $Machine.Run $regExe $Arguments 60 }.GetNewClosure()
+        $ops.Sleep = { param($ms) Start-Sleep -Milliseconds $ms }
+        $ops.HivePath = {
+            $pl = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey('SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList')
+            if (-not $pl) { throw 'HKLM ProfileList cannot be read.' }
+            try { $raw = [string]$pl.GetValue('Default', $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames) } finally { $pl.Close() }
+            Get-AVDTuneDefaultHivePath -Raw $raw -SystemDrive ([IO.Path]::GetPathRoot((Get-AVDTuneSystemFolder System)).TrimEnd('\'))
+        }.GetNewClosure()
+    }
+    $ensure = { if (-not $hv.Mounted) { Mount-AVDTuneDefaultHive -Ops $ops -Name $hiveName; $hv.Mounted = $true } }.GetNewClosure()
     $real = @{
+        HiveInfo = {
+            param($Path, $Name)
+            Assert-OptHiveAccess -Path $Path -Name ([string]$Name)
+            & $ensure
+            $key = [Microsoft.Win32.Registry]::Users.OpenSubKey("$hiveName\$Path")
+            if (-not $key) { return [pscustomobject]@{ KeyExists = $false; Exists = $false; Kind = $null; Value = $null } }
+            try {
+                if (@($key.GetValueNames() | Where-Object { $_ -eq [string]$Name }).Count -eq 0) { return [pscustomobject]@{ KeyExists = $true; Exists = $false; Kind = $null; Value = $null } }
+                $kind = [string]$key.GetValueKind([string]$Name); $val = $key.GetValue([string]$Name, $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+                if ($kind -eq 'DWord') { $val = ConvertTo-OptDWordRead $val }
+                [pscustomobject]@{ KeyExists = $true; Exists = $true; Kind = $kind; Value = $val }
+            }
+            finally { $key.Close() }
+        }.GetNewClosure()
+        HiveKeyExists = {
+            param($Path)
+            if (-not (Test-OptHivePathSyntax $Path)) { throw 'Invalid key of the default profile.' }
+            & $ensure
+            $key = [Microsoft.Win32.Registry]::Users.OpenSubKey("$hiveName\$Path")
+            if ($key) { $key.Close(); $true } else { $false }
+        }.GetNewClosure()
+        HiveSet = {
+            param($Path, $Name, $Value, $Type)
+            Assert-OptHiveAccess -Path $Path -Name ([string]$Name)
+            if (-not (Test-AVDTuneWriteAllowed)) { throw 'The write gate is closed: the default user profile is not changed.' }
+            if ([string]$Type -cnotin 'DWord', 'String') { throw 'Only DWord and String values are written.' }
+            & $ensure
+            $key = [Microsoft.Win32.Registry]::Users.CreateSubKey("$hiveName\$Path")
+            try { $key.SetValue([string]$Name, $Value, [Microsoft.Win32.RegistryValueKind]$Type) } finally { $key.Close() }
+        }.GetNewClosure()
+        HiveRemove = {
+            param($Path, $Name)
+            Assert-OptHiveAccess -Path $Path -Name ([string]$Name)
+            if (-not (Test-AVDTuneWriteAllowed)) { throw 'The write gate is closed: the default user profile is not changed.' }
+            & $ensure
+            $key = [Microsoft.Win32.Registry]::Users.OpenSubKey("$hiveName\$Path", $true)
+            if (-not $key) { return }
+            try { $key.DeleteValue([string]$Name, $false) } finally { $key.Close() }
+        }.GetNewClosure()
+        HiveKeyRemoveEmpty = {
+            # Removes a key this tool created, but only when it holds no values and no sub keys
+            param($Path)
+            Assert-OptHiveAccess -Path $Path -Name $null
+            if (-not (Test-AVDTuneWriteAllowed)) { throw 'The write gate is closed: the default user profile is not changed.' }
+            & $ensure
+            $i = $Path.LastIndexOf('\'); $parent = $Path.Substring(0, $i); $leaf = $Path.Substring($i + 1)
+            $pk = [Microsoft.Win32.Registry]::Users.OpenSubKey("$hiveName\$parent", $true)
+            if (-not $pk) { return }
+            try {
+                $k = $pk.OpenSubKey($leaf)
+                if (-not $k) { return }
+                $empty = ($k.ValueCount -eq 0 -and $k.SubKeyCount -eq 0); $k.Close()
+                if ($empty) { $pk.DeleteSubKey($leaf, $false) }
+            }
+            finally { $pk.Close() }
+        }.GetNewClosure()
+        HiveUnmount = {
+            if (-not $hv.Mounted) { return }
+            if (-not (Dismount-AVDTuneDefaultHive -Ops $ops -Name $hiveName)) { throw "HKU\$hiveName could not be unloaded (a handle is still open); it is unloaded before the next use." }
+            $hv.Mounted = $false
+        }.GetNewClosure()
         AppxState = {
             # The two package lists are read once and kept for 10 seconds (the status asks about dozens of packages; each call of the cmdlets takes seconds)
             param($Name)
@@ -630,7 +840,7 @@ function Add-AVDTuneOptimizationMachineMembers {
             finally { $pk.Close() }
         }.GetNewClosure()
     }
-    foreach ($name in 'AppxState', 'AppxRemove', 'MpGet', 'MpSet', 'RegInfo', 'RegKeyRemoveEmpty') {
+    foreach ($name in 'AppxState', 'AppxRemove', 'MpGet', 'MpSet', 'RegInfo', 'RegKeyRemoveEmpty', 'HiveInfo', 'HiveKeyExists', 'HiveSet', 'HiveRemove', 'HiveKeyRemoveEmpty', 'HiveUnmount') {
         if ($null -ne $Machine.PSObject.Properties[$name]) { continue }
         if ($Machine.Kind -ne 'Real') { throw "The machine adapter has no member '$name'." }
         $Machine | Add-Member -NotePropertyName $name -NotePropertyValue $real[$name]
@@ -692,6 +902,43 @@ function New-AVDTuneOptimizationStep {
                     foreach ($k in @($made | Sort-Object { $_.Length } -Descending)) {
                         # only keys of the same path, only as far as they are empty
                         if (([string]$k).Length -le $path.Length -and $path.StartsWith([string]$k, [StringComparison]::OrdinalIgnoreCase)) { & $m.RegKeyRemoveEmpty ([string]$k) }
+                    }
+                }
+            }.GetNewClosure()
+        }
+        'UserHive' {
+            # the same as Registry, in the default user profile (HKU\AVDTune_DefaultUser through the Hive members); the kind of the value counts too (MenuShowDelay is REG_SZ)
+            $path = $Entry.Path; $name = [string]$Entry.Name; $type = $Entry.Type; $want = $Entry.Value
+            $present = { param($m) $true }
+            $test = { param($m) $i = & $m.HiveInfo $path $name; @{ Compliant = ([bool]$i.Exists -and [string]$i.Kind -eq $type -and [string]$i.Value -eq [string]$want); State = $(if (-not $i.Exists) { 'not set' } elseif ([string]$i.Kind -ne $type) { "$($i.Kind) $($i.Value)" } else { [string]$i.Value }) } }.GetNewClosure()
+            $apply = {
+                param($m)
+                $info = & $m.HiveInfo $path $name
+                if ($info.Exists -and [string]$info.Kind -notin 'DWord', 'String') { throw "The value exists with the type $($info.Kind), which this tool cannot save and restore. Nothing was changed." }
+                $oldValue = ConvertTo-OptScalar $info.Value
+                if ($info.Exists) { $rp = Get-OptRestoreProblem -Kind ([string]$info.Kind) -Value $oldValue; if ($rp) { throw "The value that is there cannot be saved and restored ($rp) Nothing was changed." } }
+                $created = @(Get-OptHiveCreatedKeys -Machine $m -Path $path)
+                [void](Save-AVDTuneOptimizationBackup -Root $Root -Id $id -Record @{ Kind = 'UserHive'; Path = $path; Name = $name; Exists = [bool]$info.Exists; ValueKind = $(if ($info.Exists) { [string]$info.Kind } else { $null }); Value = $oldValue; KeyCreated = $created; At = (& $m.Now).ToString('o') })
+                & $m.HiveSet $path $name $want $type
+            }.GetNewClosure()
+            $undo = {
+                param($m)
+                $b = Get-AVDTuneOptimizationBackup -Root $Root -Id $id
+                if ($null -eq $b) { throw 'There is no saved earlier value for this entry (AVDTune did not set it), so there is nothing to undo.' }
+                if ((Get-AVDTuneProp $b 'Kind') -cne 'UserHive' -or [string](Get-AVDTuneProp $b 'Path') -ne $path -or [string](Get-AVDTuneProp $b 'Name') -ne $name) { throw 'The saved earlier value does not belong to this entry (kind, key or name differ).' }
+                if ((Get-AVDTuneProp $b 'Exists') -isnot [bool]) { throw 'The saved earlier value is damaged.' }
+                if ($b.Exists) {
+                    $old = Get-AVDTuneProp $b 'Value'; $kind = [string](Get-AVDTuneProp $b 'ValueKind')
+                    $rp = Get-OptRestoreProblem -Kind $kind -Value $old
+                    if ($rp) { throw "The saved earlier value is damaged: $rp" }
+                    & $m.HiveSet $path $name $(if ($kind -ceq 'DWord') { ConvertTo-OptDWordWrite $old } else { $old }) $kind
+                }
+                else {
+                    & $m.HiveRemove $path $name
+                    $made = @(Get-AVDTuneProp $b 'KeyCreated' | Where-Object { $_ })
+                    foreach ($k in @($made | Sort-Object { $_.Length } -Descending)) {
+                        # only keys of the same path (the CLSID key of the context menu goes only when AVDTune created it), only as far as they are empty
+                        if (([string]$k).Length -le $path.Length -and ($path -eq [string]$k -or $path.StartsWith([string]$k + '\', [StringComparison]::OrdinalIgnoreCase))) { & $m.HiveKeyRemoveEmpty ([string]$k) }
                     }
                 }
             }.GetNewClosure()
@@ -821,6 +1068,7 @@ function Get-AVDTuneOptimizationStatus {
     $backups = @{}
     try { $backups = Read-OptBackupFile $Root } catch { $out.BackupError = "The file of saved earlier values cannot be read: $($_.Exception.Message) Undo is not offered." }
     $rows = New-Object System.Collections.ArrayList
+    try {
     foreach ($e in $data.Entries) {
         $s = New-AVDTuneOptimizationStep -Entry $e -Root $Root
         $present = $true; $compliant = $false; $state = ''; $failed = $false; $msg = ''
@@ -833,6 +1081,11 @@ function Get-AVDTuneOptimizationStatus {
                 Id = $e.Id; Category = $e.Category; Kind = $e.Kind; Title = $e.Title; Why = $e.Why; Source = $e.Source; Origin = $e.Origin; Risk = $e.Risk; Default = $e.Default; Reboot = $e.Reboot
                 Irreversible = $e.Irreversible; Present = $present; Compliant = $compliant; State = $state; HasBackup = ($backups.ContainsKey($e.Id) -and -not $e.Irreversible); Failed = $failed; Message = $msg
             })
+    }
+    }
+    finally {
+        # the default user profile is loaded only while it is read (#40)
+        try { & $Machine.HiveUnmount } catch { $out | Add-Member -NotePropertyName HiveError -NotePropertyValue $_.Exception.Message -Force }
     }
     $out.Rows = @($rows)
     $out
@@ -907,6 +1160,9 @@ function Invoke-AVDTuneOptimization {
         }
     }
     finally {
+        # the default user profile is unloaded before the run ends (#40); a failure is reported with the run, the next use unloads the hive first
+        $hiveError = $null
+        try { & $Machine.HiveUnmount } catch { $hiveError = $_.Exception.Message }
         $anyChange = @($results | Where-Object { $_.Status -in 'Changed', 'Reverted', 'Failed' -and -not $noMachineChange.ContainsKey($_.Id) }).Count -gt 0
         if (-not $WhatIf -and ($touched -or $anyChange)) {
             if (-not $touched) { $changeOwner = Start-AVDTuneChange -Root $Root }
@@ -917,7 +1173,7 @@ function Invoke-AVDTuneOptimization {
     $failed = @($results | Where-Object { $_.Status -eq 'Failed' })
     $summary = [pscustomobject]@{
         Mode = $Mode; Changed = $changed.Count; Failed = $failed.Count; Skipped = @($results | Where-Object { $_.Status -eq 'Skipped' }).Count; NoUndo = @($results | Where-Object { $_.Status -eq 'NoUndo' }).Count
-        Unchanged = @($results | Where-Object { $_.Status -eq 'Unchanged' }).Count; Reboot = [bool](@($results | Where-Object { $_.Reboot }).Count); Results = @($results); WhatIf = [bool]$WhatIf; RunId = $null
+        Unchanged = @($results | Where-Object { $_.Status -eq 'Unchanged' }).Count; Reboot = [bool](@($results | Where-Object { $_.Reboot }).Count); Results = @($results); WhatIf = [bool]$WhatIf; RunId = $null; HiveError = $hiveError
     }
     if ($WhatIf) { return $summary }
     $state = Get-AVDTuneState $Root
@@ -947,4 +1203,5 @@ function Invoke-AVDTuneOptimization {
 
 Export-ModuleMember -Function Get-AVDTuneOptimizationDataPath, Read-AVDTuneOptimizationData, Get-AVDTuneOptimizationPresetIds, Get-AVDTuneOptimizationCategoryLabel, Get-AVDTuneOptimizationCategoryOrder,
     Add-AVDTuneOptimizationMachineMembers, New-AVDTuneOptimizationStep, Get-AVDTuneOptimizationStatus, Test-OptDefenderAbsent, ConvertTo-OptInt32, Invoke-AVDTuneOptimization,
-    Get-AVDTuneOptimizationBackup, Save-AVDTuneOptimizationBackup, Remove-AVDTuneOptimizationBackup, ConvertTo-OptScalar, ConvertTo-OptCompare, Test-OptInt, Test-OptText, Test-OptPattern, Get-OptRegistryProblem, Get-OptServiceProblem, Get-OptTaskProblem, Get-OptAppxProblem, Get-OptDefenderProblem, Get-OptEntryProblem, Get-OptCreatedKeys, Assert-OptRegistryAccess, Get-OptRegistryKeyProblem, Get-OptRegistryValueProblem, Get-OptRestoreProblem, Test-OptDefenderUnset, ConvertTo-OptDWordRead, ConvertTo-OptDWordWrite, Test-OptRegPathSyntax, Test-OptRegNameSyntax
+    Get-AVDTuneOptimizationBackup, Save-AVDTuneOptimizationBackup, Remove-AVDTuneOptimizationBackup, ConvertTo-OptScalar, ConvertTo-OptCompare, Test-OptInt, Test-OptText, Test-OptPattern, Get-OptRegistryProblem, Get-OptServiceProblem, Get-OptTaskProblem, Get-OptAppxProblem, Get-OptDefenderProblem, Get-OptEntryProblem, Get-OptCreatedKeys, Assert-OptRegistryAccess, Get-OptRegistryKeyProblem, Get-OptRegistryValueProblem, Get-OptRestoreProblem, Test-OptDefenderUnset, ConvertTo-OptDWordRead, ConvertTo-OptDWordWrite, Test-OptRegPathSyntax, Test-OptRegNameSyntax,
+    Get-AVDTuneDefaultHiveName, Get-AVDTuneDefaultHivePath, Mount-AVDTuneDefaultHive, Dismount-AVDTuneDefaultHive, Get-OptHiveCreatedKeys, Assert-OptHiveAccess, Test-OptHivePathSyntax, Test-OptHiveNameSyntax, Get-OptHiveProblem, Get-OptHiveKeyProblem, Get-OptHiveValueProblem
