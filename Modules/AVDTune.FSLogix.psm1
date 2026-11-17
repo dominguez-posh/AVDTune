@@ -992,13 +992,14 @@ function ConvertFrom-AVDTuneSddl {
             [pscustomobject]@{ Sid = $(if ($known) { $a.SecurityIdentifier.Value } else { '' }); Type = $(if ($known) { [string]$a.AceType } else { 'Unknown' }); Mask = $(if ($known) { [int]$a.AccessMask } else { 0 })
                 ObjectInherit = [bool]($fl -band 1); ContainerInherit = [bool]($fl -band 2); NoPropagate = [bool]($fl -band 4); InheritOnly = [bool]($fl -band 8); Inherited = [bool]($fl -band 16) }
         })
-    [pscustomobject]@{ Owner = $owner; Aces = $aces; DomainGuessed = [bool]$guessed }
+    [pscustomobject]@{ Owner = $owner; Aces = $aces; DomainGuessed = [bool]$guessed; NullDacl = ($null -eq $sd.DiscretionaryAcl) }
 }
 
-$script:AclBroadSids = @('S-1-1-0', 'S-1-5-11', 'S-1-5-32-545')
+# Everyone, Anonymous, Network, Interactive, Remote Interactive, Authenticated Users, BUILTIN\Users, Guests, Remote Desktop Users (#83)
+$script:AclBroadSids = @('S-1-1-0', 'S-1-5-7', 'S-1-5-2', 'S-1-5-4', 'S-1-5-14', 'S-1-5-11', 'S-1-5-32-545', 'S-1-5-32-546', 'S-1-5-32-555')
 function Test-AVDTuneBroadSid([string]$Sid, [string[]]$UsersSids = @()) {
-    <# Everyone, Authenticated Users, BUILTIN\Users, Domain Users (-513), Domain Computers (-515) of any domain, or one of the users groups (#83) #>
-    ($Sid -in $script:AclBroadSids) -or ($Sid -in @($UsersSids)) -or ($Sid -match '\AS-1-5-21-[0-9]{1,10}-[0-9]{1,10}-[0-9]{1,10}-51[35]\z')
+    <# A SID of $script:AclBroadSids, Domain Users (-513), Domain Guests (-514), Domain Computers (-515) of any domain, or one of the users groups (#83) #>
+    ($Sid -in $script:AclBroadSids) -or ($Sid -in @($UsersSids)) -or ($Sid -match '\AS-1-5-21-[0-9]{1,10}-[0-9]{1,10}-[0-9]{1,10}-51[345]\z')
 }
 
 function Test-AVDTuneAllowAce($Ace) {
@@ -1044,11 +1045,26 @@ function Compare-AVDTuneFSLogixAcl {
     if ($UsersSids.Count -gt 0) {
         $us = @($allow | Where-Object { $_.Sid -in $UsersSids -and (& $hasMask $_ $script:AclModify) -and -not $_.ObjectInherit -and -not $_.ContainerInherit })
         if ($us.Count -eq 0) { [void]$findings.Add([pscustomobject]@{ Id = 'users'; Status = 'red'; Text = 'The users group needs Modify on this folder only (so users can create their folder, not browse others).' }) }
+        # at most Modify: WRITE_DAC, WRITE_OWNER, generic or full rights let a user change the rights of the root (#83)
+        foreach ($a in @($grants | Where-Object { $_.Sid -in $UsersSids -and ($_.Mask -band (-bnot $script:AclModify)) -ne 0 })) {
+            [void]$findings.Add([pscustomobject]@{ Id = "users-rights-$($a.Sid)"; Status = 'red'; Text = "The users group has more than Modify ($(Format-AVDTuneAce $a)): with rights like WRITE_DAC or WRITE_OWNER a user can change the rights of the root." })
+        }
     }
     else { [void]$findings.Add([pscustomobject]@{ Id = 'users'; Status = 'yellow'; Text = 'The users group is not known (no domain information): check by hand that it has Modify on this folder only.' }) }
     foreach ($a in @($grants | Where-Object { (Test-AVDTuneBroadSid $_.Sid $UsersSids) -and ($_.ObjectInherit -or $_.ContainerInherit) })) {
         [void]$findings.Add([pscustomobject]@{ Id = "broad-$($a.Sid)"; Status = 'red'; Text = "$($a.Sid) reaches the subfolders and files ($(Format-AVDTuneAce $a)): users could see the containers of others." })
     }
+    # a broad group on this folder only with write rights: it can create and change the folders of the root itself (#83); without the users group the users finding asks already
+    $writeBits = 0x50000000   # GENERIC_ALL, GENERIC_WRITE
+    foreach ($a in @($grants | Where-Object { $UsersSids.Count -gt 0 -and $_.Sid -notin @($UsersSids) -and (Test-AVDTuneBroadSid $_.Sid $UsersSids) -and -not ($_.ObjectInherit -or $_.ContainerInherit) -and ((& $hasMask $_ $script:AclModify) -or ($_.Mask -band $writeBits) -ne 0) })) {
+        [void]$findings.Add([pscustomobject]@{ Id = "broad-root-$($a.Sid)"; Status = 'yellow'; Text = "$($a.Sid) has write rights on the root ($(Format-AVDTuneAce $a)): only the users group needs Modify there, check it by hand." })
+    }
+    # a deny entry on a required group can take away what the recommendation needs (#83)
+    $required = @('S-1-5-18', 'S-1-3-0') + @($AdminsSids) + @($UsersSids)
+    foreach ($a in @($p.Aces | Where-Object { $_.Type -like 'AccessDenied*' -and $_.Sid -in $required })) {
+        [void]$findings.Add([pscustomobject]@{ Id = "deny-$($a.Sid)"; Status = 'yellow'; Text = "A deny entry for a required group ($(Format-AVDTuneAce $a)) can take away the rights of the recommendation: check it by hand." })
+    }
+    if ($p.NullDacl) { [void]$findings.Add([pscustomobject]@{ Id = 'null-dacl'; Status = 'red'; Text = 'The root has no access list at all (NULL DACL = Everyone Full): everyone can open and change everything.' }) }
     foreach ($a in @($grants | Where-Object { $_.Type -ne 'AccessAllowed' -and -not ((Test-AVDTuneBroadSid $_.Sid $UsersSids) -and ($_.ObjectInherit -or $_.ContainerInherit)) })) {
         [void]$findings.Add([pscustomobject]@{ Id = "conditional-$($a.Sid)"; Status = 'yellow'; Text = "An entry with a condition or of another kind ($(Format-AVDTuneAce $a)) may grant access: AVDTune cannot evaluate it, check it by hand." })
     }
@@ -1057,6 +1073,7 @@ function Compare-AVDTuneFSLogixAcl {
         $ownerBroad = Test-AVDTuneBroadSid $p.Owner $UsersSids
         [void]$findings.Add([pscustomobject]@{ Id = 'owner'; Status = $(if ($ownerBroad) { 'red' } else { 'yellow' }); Text = "The owner of the root is $($p.Owner): the owner can always change the rights$(if ($ownerBroad) { ', and this group includes the users' }). Make Administrators (BA) the owner." })
     }
+    if (-not $p.Owner) { [void]$findings.Add([pscustomobject]@{ Id = 'owner'; Status = 'yellow'; Text = 'The SDDL names no owner of the root: check by hand that Administrators (BA) own it.' }) }
     if ($p.DomainGuessed) {
         [void]$findings.Add([pscustomobject]@{ Id = 'domain-guessed'; Status = 'yellow'; Text = 'The SDDL has domain aliases (DU, DA, ...) that this master cannot resolve: the domain was guessed from the group SIDs, check the entries by hand.' })
     }

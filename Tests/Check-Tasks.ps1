@@ -185,8 +185,9 @@ Test-Check 'shutdown block (#66): switching it off does nothing while any job st
 
 # #49: the release job (check at every start, also install) does not hold the shutdown block of the window: the end of the last other job releases it
 $script:CreateCount = 0; Set-ShutdownBlock $true; $d0 = $script:DestroyCount
+$script:RelJob = @{ Kind = 'Install' }; Set-ShutdownBlock $false; $relKept = ($script:DestroyCount -eq $d0)
 $script:RelJob = @{ Kind = 'Start' }; Set-ShutdownBlock $false; $relReleased = ($script:DestroyCount -eq $d0 + 1); $script:RelJob = $null
-Test-Check 'shutdown block (#49): a running release check does not keep the block of an ended run' ($relReleased -and 'RelJob' -in $script:WriterJobVariables) "released=$relReleased"
+Test-Check 'shutdown block (#49): a running release check does not keep the block of an ended run' ($relKept -and $relReleased -and 'RelJob' -in $script:WriterJobVariables) "released=$relReleased"
 
 if ($script:failed -gt 0) { throw "$script:failed check(s) failed." }
 'Check-Tasks: all checks passed.'

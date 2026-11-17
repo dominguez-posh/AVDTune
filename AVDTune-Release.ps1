@@ -74,6 +74,7 @@ function Start-RelJob([string]$Kind, [string]$Argument = '') {
         RunActive = (Test-RelRunActive); Http = (Get-RelHttp); Import = (-not $script:TestMode); AllowDev = [bool]$script:TestMode
     }
     Set-RelBusy $true
+    if ($Kind -notin 'Start', 'Check') { Set-ShutdownBlock $true }   # install, repair and back change AVDTune: log off and shut down wait (#49)
     # the checks are read only and can be started again from the list; install, back and repair change the tool and are started on the card
     $task = Start-AVDTuneUiTask -Kind "release-$($Kind.ToLower())" -Title (Get-RelTaskTitle $Kind $Argument) -Step $(if ($Kind -in 'Start', 'Check') { T 'rel.task.step.check' } else { T 'rel.task.step.install' }) -Retry $(if ($Kind -in 'Start', 'Check') { @{ Command = 'Start-RelJob'; Arguments = @($Kind) } })
     if ($script:TestMode) {
@@ -148,6 +149,7 @@ function Complete-RelResult($Job, $Res, [string]$Err) {
     $script:RelJob = $null
     Set-RelBusy $false
     $kind = $Job.Kind
+    if ($kind -notin 'Start', 'Check') { Set-ShutdownBlock $false }
     if ($Err) {
         Complete-AVDTuneUiTask $Job.Task -Failed -Summary $Err
         if ($kind -eq 'Start') { Set-AVDTuneWriteBlock "the integrity check could not run ($Err)."; $script:Rel.Status = [pscustomobject]@{ Status = 'failed'; Message = (T 'rel.err.check' $Err); Warnings = @(); Changed = @(); Missing = @(); Extra = @() } }

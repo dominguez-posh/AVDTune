@@ -477,14 +477,17 @@ function Invoke-AVDTuneStorageCheck {
             }
             if ($StorageToken -and $Files -and -not $ctx.KeyUsed -and $UsersSids.Count -gt 0) {
                 $broadFolders = New-Object System.Collections.ArrayList
+                $unreadFolders = New-Object System.Collections.ArrayList
                 foreach ($fo in (Get-AVDTuneStorageProfileFolders -Files $Files -Account $share.Account -Share $share.Share -Token $StorageToken)) {
                     $fr = Get-AVDTuneStorageShareAcl -Files $Files -Account $share.Account -Share $share.Share -Path $fo -Token $StorageToken
                     if (-not $fr.Ok) { continue }
-                    $acl = ConvertFrom-AVDTuneSddl $fr.Sddl -DomainSid (Get-AVDTuneDomainSidOf (@($AdminsSids) + @($UsersSids)))
+                    # one folder that cannot be read does not end the check of the others: it is named as not checkable (#83)
+                    try { $acl = ConvertFrom-AVDTuneSddl $fr.Sddl -DomainSid (Get-AVDTuneDomainSidOf (@($AdminsSids) + @($UsersSids))) } catch { [void]$unreadFolders.Add($fo); continue }
                     $bad = @($acl.Aces | Where-Object { (Test-AVDTuneAllowAce $_) -and (Test-AVDTuneBroadSid $_.Sid $UsersSids) })   # also Domain Users/Computers and callback entries (#83)
-                    if ($bad.Count -gt 0) { [void]$broadFolders.Add($fo) }
+                    if ($bad.Count -gt 0 -or $acl.NullDacl) { [void]$broadFolders.Add($(if ($acl.NullDacl) { "$fo (NULL DACL = Everyone Full)" } else { $fo })) }
                 }
-                if ($broadFolders.Count -gt 0) { Add (New-AVDTuneStRow 'st.acl.folders' 5 'NTFS rights of the profile folders' 'red' "Users or Everyone have access to the profile folder(s) $($broadFolders -join ', '): other users could open them." 'Remove the broad entries from the folders; each folder belongs to its owner (CREATOR OWNER) and the administrators only.' -Source $aclSource -Verified $false -Note 'A sample of at most 5 folders is read.') }
+                if ($broadFolders.Count -eq 0 -and $unreadFolders.Count -gt 0) { Add (New-AVDTuneStRow 'st.acl.folders' 5 'NTFS rights of the profile folders' 'unknown' "Not checkable: the rights of the profile folder(s) $($unreadFolders -join ', ') could not be read." 'Check the rights of these folders by hand.' -Source $aclSource -Verified $false -Note 'A sample of at most 5 folders is read.') }
+                elseif ($broadFolders.Count -gt 0) { Add (New-AVDTuneStRow 'st.acl.folders' 5 'NTFS rights of the profile folders' 'red' "Users or Everyone have access to the profile folder(s) $($broadFolders -join ', '): other users could open them." 'Remove the broad entries from the folders; each folder belongs to its owner (CREATOR OWNER) and the administrators only.' -Source $aclSource -Verified $false -Note 'A sample of at most 5 folders is read.') }
                 else { Add (New-AVDTuneStRow 'st.acl.folders' 5 'NTFS rights of the profile folders' 'green' 'A sample of the profile folders has no access for the users group or Everyone.' -Source $aclSource -Verified $false -Note 'A sample of at most 5 folders is read.') }
             }
         }

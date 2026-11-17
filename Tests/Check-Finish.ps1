@@ -473,6 +473,9 @@ exit 0
     $script:SealJob = $null
     Invoke-SignIn
     Test-Check 'sign-in (#49): sign-in and sign-out are refused while the finish runs (its session stays), without a finish the sign-in runs and counts as running until it ends' ($refused -and $sign.Core -eq 1 -and $sign.BusyInCore -and -not $script:SignInBusy) "refused=$refused core=$($sign.Core) busy=$($sign.BusyInCore)/$($script:SignInBusy)"
+    $sign.Msg = ''; $sign.Core = 0; $sign.Out = 0; $script:StartContext = @{ Session = 'session' }
+    $script:SignInBusy = $true; Invoke-SignIn; $reMsg = $sign.Msg; $sign.Msg = ''; Invoke-SignOut; $script:SignInBusy = $false
+    Test-Check 'sign-in (#49): a second sign-in and a sign-out are refused while a sign-in runs' ($sign.Core -eq 0 -and $sign.Out -eq 0 -and $reMsg -eq 'stage.signin.running' -and $sign.Msg -eq 'stage.signin.running') "core=$($sign.Core) out=$($sign.Out) msg=$reMsg/$($sign.Msg)"
     $script:StartContext = @{ Session = $null }
     $rootJ = New-Root; [void](Save-Healthcheck -Root $rootJ)
     $script:StateRoot = $rootJ; $script:AppRoot = $repo; $script:TestMode = $true

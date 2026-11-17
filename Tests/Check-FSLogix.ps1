@@ -463,6 +463,22 @@ try {
     $guess = & $cmp83 "O:BAG:SYD:PAI$base83(A;;0x1200a9;;;DA)"
     $guessOk = if ($machineInDomain) { -not $guess.Findings.Where({ $_.Id -eq 'domain-guessed' }) } else { -not $guess.Compliant -and @($guess.Findings | Where-Object { $_.Id -eq 'domain-guessed' -and $_.Status -eq 'yellow' }).Count -eq 1 }
     Test-Check 'ACL (#83): an alias as owner or trustee read with a guessed domain is a yellow finding (never green); only the group alias needs no guess' ($inUse[0] -and $inUse[1] -and -not $inUse[2] -and $guessOk) "inUse=$($inUse -join ',') inDomain=$machineInDomain $(($guess.Findings | ForEach-Object Id) -join ',')"
+    $hasF = { param($c, $Id, $Status) @($c.Findings | Where-Object { $_.Id -like $Id -and $_.Status -eq $Status }).Count -ge 1 }
+    $usersFull = & $cmp83 "O:BAG:SYD:PAI(A;OICIIO;0x1301bf;;;CO)(A;OICI;FA;;;$sddlAdmins)(A;;FA;;;$avdUsers)(A;OICI;FA;;;SY)"
+    $usersDac = & $cmp83 "O:BAG:SYD:PAI(A;OICIIO;0x1301bf;;;CO)(A;OICI;FA;;;$sddlAdmins)(A;;0x1701bf;;;$avdUsers)(A;OICI;FA;;;SY)"
+    Test-Check 'ACL (#83): the users group with more than Modify (Full, WRITE_DAC) on the root: red' ((& $hasF $usersFull 'users-rights-*' 'red') -and (& $hasF $usersDac 'users-rights-*' 'red') -and -not (& $hasF $clean83 'users-rights-*' 'red')) $null
+    $denyAdm = & $cmp83 "O:BAG:SYD:PAI(D;;0x40000;;;$sddlAdmins)$base83"
+    $denySy = & $cmp83 "O:BAG:SYD:PAI(D;OICI;0x10000;;;SY)$base83"
+    $denyOther = & $cmp83 "O:BAG:SYD:PAI(D;OICI;FA;;;S-1-5-21-1-2-3-1300)$base83"
+    Test-Check 'ACL (#83): a deny entry on a required group (admins, SYSTEM) is yellow, a deny for another account is no finding' ((& $hasF $denyAdm 'deny-*' 'yellow') -and (& $hasF $denySy 'deny-*' 'yellow') -and $denyOther.Compliant) $null
+    $moreBroad = @(foreach ($sid in 'S-1-5-4', 'S-1-5-2', 'S-1-5-14', 'S-1-5-32-555', 'S-1-5-32-546', 'S-1-5-21-4-5-6-514', 'S-1-5-7') { if (-not (& $redBroad (& $cmp83 "O:BAG:SYD:PAI$base83(A;OICI;0x1200a9;;;$sid)"))) { $sid } })
+    Test-Check 'ACL (#83): Interactive, Network, Remote Interactive, Remote Desktop Users, Guests, Domain Guests and Anonymous down the tree are broad: red' ($moreBroad.Count -eq 0) ($moreBroad -join ',')
+    $rootWrite = & $cmp83 "O:BAG:SYD:PAI$base83(A;;0x1301bf;;;AU)"
+    $rootRead = & $cmp83 "O:BAG:SYD:PAI$base83(A;;0x1200a9;;;AU)"
+    Test-Check 'ACL (#83): a broad group with Modify on the root only (no inheritance) is yellow, read only there is no finding' ((& $hasF $rootWrite 'broad-root-*' 'yellow') -and -not (& $hasF $rootWrite 'broad-S*' 'red') -and $rootRead.Compliant) "$(($rootWrite.Findings | ForEach-Object Id) -join ',') | $(($rootRead.Findings | ForEach-Object Id) -join ',')"
+    $noOwner = & $cmp83 "G:SYD:PAI$base83"
+    $nullDacl = & $cmp83 'O:BAG:SYD:NO_ACCESS_CONTROL'
+    Test-Check 'ACL (#83): no owner in the SDDL is yellow; a NULL DACL is red with "NULL DACL = Everyone Full"' ((& $hasF $noOwner 'owner' 'yellow') -and @($nullDacl.Findings | Where-Object { $_.Id -eq 'null-dacl' -and $_.Status -eq 'red' -and $_.Text -like '*NULL DACL = Everyone Full*' }).Count -eq 1) "$(($noOwner.Findings | ForEach-Object Id) -join ',') | $(($nullDacl.Findings | ForEach-Object Id) -join ',')"
     Test-Check 'ACL (#83): ConvertTo-AVDTuneSddlWithoutDomainAliases is not exported (for reading only)' ($null -eq (Get-Command ConvertTo-AVDTuneSddlWithoutDomainAliases -ErrorAction SilentlyContinue) -and $null -ne (Get-Command Test-AVDTuneBroadSid -ErrorAction SilentlyContinue)) $null
 
     # ---------------------------------------------------------------- function test

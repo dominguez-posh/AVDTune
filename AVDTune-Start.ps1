@@ -374,6 +374,7 @@ function Build-SignInForm {
 function Invoke-SignIn([switch]$Setup) {
     # Sign-in and the finish exclude each other (#49): the finish uses the session of the sign-in, a new sign-in would replace it (and sign the old one out) in the middle
     if ($script:SealJob) { Set-StageMessage (T 'stage.signin.sealbusy') 'error'; return }
+    if ($script:SignInBusy) { Set-StageMessage (T 'stage.signin.running') 'error'; return }   # a second click while the browser window is open (#49)
     $script:SignInBusy = $true
     try { Invoke-SignInCore -Setup:$Setup } finally { $script:SignInBusy = $false }
 }
@@ -470,6 +471,7 @@ $script:SignInBusy = $false   # a sign-in is running on the window thread (its b
 $script:Timer.Add_Tick({ try { Complete-JoinJob } catch { Show-Error $_.Exception.Message } })
 function Invoke-SignOut {
     if ($script:SealJob) { Set-StageMessage (T 'stage.signin.sealbusy') 'error'; return }   # the finish still uses the session (#49)
+    if ($script:SignInBusy) { Set-StageMessage (T 'stage.signin.running') 'error'; return }   # a sign-in still runs: its session would come back after the sign-out (#49)
     if ($script:StartContext.Session) { Disconnect-AVDTuneSession $script:StartContext.Session }
     $left = @(Get-AVDTuneSignInLeftovers -TempRoot (Get-StartTempRoot))
     Add-StartProtocol 'Tokens removed' ('Sign-in tokens removed from memory' + $(if ($left.Count -gt 0) { "; $($left.Count) profile folder(s) of the sign-in window could not be deleted yet" } else { '; profiles of the sign-in window deleted' })) $(if ($left.Count -gt 0) { 'failed' } else { 'ok' })

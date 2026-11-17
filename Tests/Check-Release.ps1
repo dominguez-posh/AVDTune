@@ -438,6 +438,8 @@ finally {
     function Get-RelHttp { $null }
     function Get-AVDTuneReleaseSettings($Root) { [pscustomobject]@{ EarlyAccess = $false } }
     function Start-AVDTuneUiTask { 'task' }
+    $blockLog = New-Object System.Collections.ArrayList
+    function Set-ShutdownBlock([bool]$On) { [void]$blockLog.Add($On) }
     $script:TestMode = $true; $script:Rel = @{ Info = $null }; $script:ToolVersion = '0.9.0'; $script:StateRoot = 'x'; $script:AppRoot = 'x'; $script:RelInstallRoot = 'x'
     $script:RelWork = { param($C) [pscustomobject]@{ Kind = $C.Kind; RunActive = $C.RunActive } }
     $tryStart = { param($Kind) $script:RelJob = $null; try { Start-RelJob $Kind 'x'; $true } catch { $false } }
@@ -446,7 +448,16 @@ finally {
     $installBlocked = -not (& $tryStart 'Install'); $repairBlocked = -not (& $tryStart 'Repair'); $backBlocked = -not (& $tryStart 'Back')
     $checkFree = & $tryStart 'Check'; $checkRunActive = [bool]$script:RelJob.Result.RunActive
     $script:LangJob = $null
-    $freeInstall = & $tryStart 'Install'
+    $blockLog.Clear(); [void](& $tryStart 'Check'); $checkNoBlock = ($blockLog.Count -eq 0)
+    $blockLog.Clear(); $freeInstall = & $tryStart 'Install'; $installBlock = ($blockLog.Count -eq 1 -and $blockLog[0] -eq $true)
+    foreach ($fnName in 'Complete-RelResult') { Invoke-Expression ($relAst.Find({ param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $fnName }, $true).Extent.Text) }
+    function Complete-AVDTuneUiTask { }
+    function Show-Error { }
+    function Add-RelProtocol { }
+    function Update-ReleaseView { }
+    $blockLog.Clear(); Complete-RelResult @{ Kind = 'Install'; Task = 'task' } $null 'fake: failed'; $installOff = ($blockLog.Count -eq 1 -and $blockLog[0] -eq $false -and -not $script:RelJob)
+    $blockLog.Clear(); Complete-RelResult @{ Kind = 'Check'; Task = 'task' } $null 'fake: failed'; $checkNoOff = ($blockLog.Count -eq 0)
+    Test-Check 'release (#49): install, repair and back hold the shutdown block until their end (also a failed end), the checks do not touch it' ($checkNoBlock -and $installBlock -and $installOff -and $checkNoOff) "check=$checkNoBlock install=$installBlock off=$installOff checkEnd=$checkNoOff"
     Test-Check 'release (#49): install, repair and back are refused while another writer runs (a language run too), the check still starts and sees the run' ($activeLang -and $installBlocked -and $repairBlocked -and $backBlocked -and $checkFree -and $checkRunActive -and $freeInstall) "lang=$activeLang install=$installBlocked repair=$repairBlocked back=$backBlocked check=$checkFree/$checkRunActive free=$freeInstall"
     $script:RelJob = @{ Kind = 'Install' }; $byInstall = Get-AVDTuneRunningWriter; $blocksOthers = $(try { Assert-NoOtherWriter; $false } catch { $true })
     $script:RelJob = @{ Kind = 'Check' }; $checkLeavesFree = $(try { Assert-NoOtherWriter; $true } catch { $false }) -and -not (Get-AVDTuneRunningWriter)
