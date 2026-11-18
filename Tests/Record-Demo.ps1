@@ -21,12 +21,11 @@ $ErrorActionPreference = 'Stop'
 $repo = Split-Path $PSScriptRoot -Parent
 Import-Module (Join-Path $repo 'Modules\AVDTune.psm1') -Force   # Remove-AVDTuneTreeSafe for the temporary frames (no link followed)
 if (-not $OutDir) { $OutDir = Join-Path $repo 'docs\screenshots' }
-# The tour: screenshot of the smoke test (shot-<name>.png) and the name it gets in docs\screenshots. Only pictures that show demo data, no paths of this computer.
+# The tour: screenshot of the smoke test (no shot with a toast or text that shows a path of this computer, e.g. 35b-benchmark-compare, 50-protocol-export-snapshots) (shot-<name>.png) and the name it gets in docs\screenshots. Only pictures that show demo data, no paths of this computer.
 $Tour = @(
     @('01-overview-light', 'overview.png'),
     @('20-start-snapshot-ready', 'snapshot-gate.png'),
     @('30-updates-list', 'updates.png'),
-    @('35b-benchmark-compare', 'benchmark.png'),
     @('32-vdi-host-cards', 'vdi.png'),
     @('03-overview-dark', 'overview-dark.png')
 )
@@ -65,7 +64,10 @@ try {
     if (-not $tool) { "Screenshots copied to $OutDir. img2webp was not found (winget install Google.Libwebp): demo.webp was not made."; return }
     $out = Join-Path $OutDir 'demo.webp'
     $wargs = @('-loop', '0', '-lossy', '-q', [string]$Quality, '-d', [string]$FrameMs) + $list + @('-o', $out)
+    # img2webp writes its summary to stderr: not an error here, the exit code decides
+    $ErrorActionPreference = 'Continue'
     & $tool @wargs 2>&1 | Out-Null
+    $ErrorActionPreference = 'Stop'
     if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $out)) { throw "img2webp failed (exit code $LASTEXITCODE)." }
     "Tour: $($list.Count) frames of $($size.Width)x$($size.Height), $([Math]::Round($list.Count * $FrameMs / 1000, 1)) s -> $out ($([Math]::Round((Get-Item $out).Length / 1KB)) KB)"
 }
