@@ -69,6 +69,7 @@ if ($script:ModulePathProblems.Count -gt 0) {
 }
 foreach ($part in 'Trust', 'Session', 'Snapshot', 'Directory', 'Start', 'UpdateBlock', 'Updates', 'Readiness', 'Watermark', 'Benchmark', 'Shortcut', 'FSLogix', 'Storage', 'Software', 'Office', 'Vdi', 'Masking', 'Finish', 'Environment', 'Optimization', 'Language') { Import-Module (Join-Path $PSScriptRoot "Modules\AVDTune.$part.psm1") -Force }
 Import-Module (Join-Path $PSScriptRoot 'Modules\AVDTune.Custom.psm1') -Force   # customizations (#85): after Software and Masking, which it uses
+Import-Module (Join-Path $PSScriptRoot 'Modules\AVDTune.Printers.psm1') -Force   # printer drivers from a print server (#86): after Custom, whose registry adapter it uses
 Import-Module (Join-Path $PSScriptRoot 'Modules\AVDTune.Release.psm1') -Force
 # Test runs of several checkouts can run at the same time: one test mutex per test state folder
 $mutexName = if ($script:TestMode) {
@@ -191,6 +192,7 @@ $script:PageTable = @(
     @{ Key = 'VdiComponents'; Title = 'VDI components'; Glyph = 0xE7F4; Phase = 6; Text = 'New Teams for VDI, the WebRTC Redirector Service, multimedia redirection and OneDrive per machine: detection, install, update, remove, undo and the recommended settings. Defender onboarding, RDP Shortpath and time zone redirection follow later.' }
     @{ Key = 'UserExperience'; Title = 'User experience'; Glyph = 0xE771; Phase = 6; Text = 'Wallpaper, watermark, Start and taskbar layout and default apps for new profiles, public desktop shortcuts and web apps with App Masking rules per group.' }
     @{ Key = 'Customizations'; Title = 'Customizations'; Glyph = 0xE70F; Phase = 4 }
+    @{ Key = 'Printers'; Title = 'Printers'; Glyph = 0xE749; Phase = 4 }
     @{ Key = 'UpdateBlock'; Title = 'Update block'; Glyph = 0xE72E; Phase = 2 }
     @{ Key = 'Benchmark'; Title = 'Benchmark'; Glyph = 0xE9D2; Phase = 5; Text = 'Measures CPU, memory, disk, remote display and network and compares with the baseline.' }
     @{ Key = 'Seal'; Title = 'Cleanup and finish'; Glyph = 0xE74D; Phase = 7; Text = 'The last button of a version, Finish: the health check must be green or acknowledged and the benchmark done; cleanup that keeps the master usable; tokens, sign-in caches and local step images removed; a pending restart first; the change log of the version closed and sent to SharePoint; then log off or shut down. The master is never sysprepped: the image is made by your imaging tool afterwards (sysprep only as an expert option without one).' }
@@ -229,7 +231,7 @@ foreach ($page in $script:PageTable) {
 
 function Show-Page([string]$Key) {
     $script:CurrentPage = $Key
-    $isPlaceholder = $Key -notin 'Overview', 'Protocol', 'Updates', 'UpdateBlock', 'UserExperience', 'Benchmark', 'FSLogix', 'Software', 'Office', 'VdiComponents', 'AppMasking', 'Seal', 'Environment', 'Optimization', 'Language', 'Customizations'
+    $isPlaceholder = $Key -notin 'Overview', 'Protocol', 'Updates', 'UpdateBlock', 'UserExperience', 'Benchmark', 'FSLogix', 'Software', 'Office', 'VdiComponents', 'AppMasking', 'Seal', 'Environment', 'Optimization', 'Language', 'Customizations', 'Printers'
     $ui.PageOverview.Visibility = ConvertTo-Vis ($Key -eq 'Overview')
     $ui.PageProtocol.Visibility = ConvertTo-Vis ($Key -eq 'Protocol')
     $ui.PageUpdates.Visibility = ConvertTo-Vis ($Key -eq 'Updates')
@@ -247,6 +249,8 @@ function Show-Page([string]$Key) {
     if ($ui.ContainsKey('PageOptimization')) { $ui.PageOptimization.Visibility = ConvertTo-Vis ($Key -eq 'Optimization') }
     if ($Key -eq 'Customizations') { Build-CustPage }
     if ($ui.ContainsKey('PageCustomizations')) { $ui.PageCustomizations.Visibility = ConvertTo-Vis ($Key -eq 'Customizations') }
+    if ($Key -eq 'Printers') { Build-PrnPage }
+    if ($ui.ContainsKey('PagePrinters')) { $ui.PagePrinters.Visibility = ConvertTo-Vis ($Key -eq 'Printers') }
     $ui.PagePlaceholder.Visibility = ConvertTo-Vis $isPlaceholder
     $ui["Nav$Key"].IsChecked = $true
     Update-ReadOnlyBanner
@@ -272,6 +276,7 @@ function Show-Page([string]$Key) {
     elseif ($Key -eq 'Optimization') { Update-OptView }
     elseif ($Key -eq 'Language') { Update-LangView }
     elseif ($Key -eq 'Customizations') { Update-CustPage }
+    elseif ($Key -eq 'Printers') { Update-PrnPage }
 }
 
 # ---------------------------------------------------------------- Overview
@@ -505,6 +510,7 @@ $script:ReadyFakeArm = $(if ($script:TestMode) { $script:Services.Arm } else { $
 . (Join-Path $PSScriptRoot 'AVDTune-Vdi.ps1')   # the VDI components page (issue 56): its own XAML and module
 . (Join-Path $PSScriptRoot 'AVDTune-AppMasking.ps1')
 . (Join-Path $PSScriptRoot 'AVDTune-Custom.ps1')   # the Customizations page (#85): shortcuts, fonts, own steps; uses the Software and App Masking pages
+. (Join-Path $PSScriptRoot 'AVDTune-Printers.ps1')   # the Printers page (#86): printer drivers from a print server; uses the App Masking and Software helpers
 . (Join-Path $PSScriptRoot 'AVDTune-Seal.ps1')
 . (Join-Path $PSScriptRoot 'AVDTune-Environment.ps1')
 . (Join-Path $PSScriptRoot 'AVDTune-Optimization.ps1')

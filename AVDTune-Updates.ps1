@@ -188,7 +188,8 @@ function Update-UpdatesView {
         if ($item.Group -ne $last) { [void]$ui.PanelUpdItems.Children.Add((New-UpdGroupHead $item.Group)); $last = $item.Group }
         [void]$ui.PanelUpdItems.Children.Add((New-UpdRow $item))
     }
-    $ui.TxtUpdNotes.Text = (@($script:UpdNotes) -join "`r`n")
+    $prnNotes = @(); try { $prnNotes = @(Get-PrnUpdateNotes) } catch { }   # printer drivers of the print server against the installed ones (#86, skeleton)
+    $ui.TxtUpdNotes.Text = (@(@($script:UpdNotes) + $prnNotes) -join "`r`n")
     $failedRepair = $script:UpdLastRun -and @($script:UpdLastRun.Results | Where-Object { $_.Status -eq 'Failed' -and $_.Repair }).Count -gt 0
     $ui.BoxUpdRepair.Visibility = ConvertTo-Vis ([bool]$failedRepair)
     # history
