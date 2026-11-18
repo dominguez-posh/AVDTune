@@ -384,7 +384,41 @@ try {
     $upI = Get-AVDTuneEnvUndoPlan -Arm $arm -Token $tok -Root $root
     Test-Check 'interrupted (#45): the undo plan can take the found resource back' (@($upI.Steps | Where-Object { $_.Id -eq $made.Id -and $_.Action -eq 'Delete' }).Count -eq 1) (($upI.Steps | ForEach-Object { "$($_.Id)=$($_.Action)" }) -join ', ')
     $envPage = [IO.File]::ReadAllText((Join-Path $repo 'AVDTune-Environment.ps1'))
-    Test-Check 'interrupted (#45): the plan and the undo plan of the page close an interrupted run first' (([regex]::Matches($envPage, 'Resolve-EnvInterrupted \$tok\.Token')).Count -eq 2) $null
+    $envWorker = [regex]::Match($envPage, "(?s)\`$script:EnvWorkerText = @'\r?\n(.*?)\r?\n'@").Groups[1].Value
+    Test-Check 'interrupted (#45): the plan and the undo plan of the page close an interrupted run first (in the worker, #44)' ($envWorker -match "if \(\`$Kind -in 'Plan', 'UndoPlan' -and @\(Get-AVDTuneEnvInterrupted -Root \`$Root\)\.Count -gt 0\) \{ \`$Sync\.Text = 'interrupted'; \`$closed = @\(Resolve-AVDTuneEnvInterrupted -Arm \`$arm" -and $envPage -match "T 'env\.interrupted\.closed'") $null
+
+    # ---------------------------------------------------------------- #44: plan, create, undo plan and undo of the page run in a background runspace
+    $outside = $envPage.Replace($envWorker, '')
+    $onUi = @([regex]::Matches($outside, '(Get-AVDTuneEnvPlan|Invoke-AVDTuneEnvApply|Get-AVDTuneEnvUndoPlan|Invoke-AVDTuneEnvUndo|Resolve-AVDTuneEnvInterrupted|New-AVDTuneArmAdapter) ') | ForEach-Object { $_.Groups[1].Value })
+    $startEnv = [regex]::Match($envPage, '(?s)function Start-EnvJob.*?\r?\n\}').Value
+    $tasksText = [IO.File]::ReadAllText((Join-Path $repo 'AVDTune-Tasks.ps1'))
+    Test-Check 'runspace (#44): no Azure call of the page runs on the window thread; Start-EnvJob uses New-AVDTunePowerShell, a task, the shutdown block, the write gate and Assert-NoOtherWriter for Apply and Undo; EnvJob is a writer (Plan, UndoPlan read only)' ($envWorker -and $onUi.Count -eq 0 -and $startEnv -match 'New-AVDTunePowerShell' -and $startEnv -match 'Start-AVDTuneUiTask' -and $startEnv -match 'Set-ShutdownBlock \$true' -and $startEnv -match 'Assert-NoOtherWriter' -and $startEnv -match 'Test-AVDTuneWriteAllowed' -and $startEnv -match 'Get-AVDTuneWriteGate' -and $tasksText -match "'PrnJob', 'EnvJob'\)" -and $tasksText -match "EnvJob = @\('Plan', 'UndoPlan'\)" -and $envPage -match 'finally \{ \$job\.PS\.Dispose\(\); \$job\.A\.Token = \$null \}') ($onUi -join ', ')
+    # the worker text in a fresh runspace with exactly its own imports (no "is not recognized"), against one fake ARM, all four kinds after each other
+    $rsRoot = New-Root; $roots += $rsRoot
+    $rsArm = New-AVDTuneFakeEnvArm -Seed @{ Polls = 0 }
+    $gateNow = Get-AVDTuneWriteGate
+    $runWorker = {
+        param([string]$Kind, [hashtable]$A, $Gate)
+        $ps = New-AVDTunePowerShell
+        try {
+            $sync = [hashtable]::Synchronized(@{ Text = '' })
+            [void]$ps.AddScript($envWorker).AddArgument($repo).AddArgument($rsRoot).AddArgument($Kind).AddArgument($A).AddArgument($Gate).AddArgument($sync).AddArgument($rsArm).AddArgument(([IO.Path]::Combine($PSScriptRoot, 'Fakes', 'FakeEnvArm.ps1')))
+            $o = $null; $thrown = ''
+            try { $o = @($ps.Invoke()) | Select-Object -Last 1 } catch { $thrown = $_.Exception.Message }
+            [pscustomobject]@{ Out = $o; Err = ((@($ps.Streams.Error | ForEach-Object { $_.Exception.Message }) + $thrown) -join ' ').Trim(); Step = [string]$sync.Text }
+        }
+        finally { $ps.Dispose() }
+    }
+    $wPlan = & $runWorker 'Plan' @{ Token = $tok; Spec = $good; Identity = 'EntraKerberos'; Identities = 'CloudOnly'; User = 'Test User'; ImageVersion = '2026.11.001' } $null
+    $wApply = $null; $wUndoPlan = $null; $wUndo = $null
+    if ($wPlan.Out.Result.Hash) {
+        $wApply = & $runWorker 'Apply' @{ Token = $tok; Spec = $good; Identity = 'EntraKerberos'; Identities = 'CloudOnly'; Hash = $wPlan.Out.Result.Hash; User = 'Test User'; SnapshotId = 'snap1' } $gateNow
+        $wUndoPlan = & $runWorker 'UndoPlan' @{ Token = $tok; User = 'Test User' } $null
+        if ($wUndoPlan.Out.Result.Hash) { $wUndo = & $runWorker 'Undo' @{ Token = $tok; Hash = $wUndoPlan.Out.Result.Hash; User = 'Test User'; SnapshotId = 'snap1' } $gateNow }
+    }
+    Test-Check 'runspace (#44): the worker runs Plan, Apply, UndoPlan and Undo in a fresh runspace with its own imports and the write gate handed over: no error, the plan has 10 changes, apply Changed, undo takes back' (-not $wPlan.Err -and $wPlan.Out.Result.Changes -eq 10 -and $wApply -and -not $wApply.Err -and $wApply.Out.Result.Status -eq 'Changed' -and $wUndoPlan -and -not $wUndoPlan.Err -and $wUndoPlan.Out.Result.Count -gt 0 -and $wUndo -and -not $wUndo.Err -and $wUndo.Out.Result.Status -notin 'Failed', 'Refused' -and $wPlan.Step -eq 'azure') "plan=$($wPlan.Err)$($wPlan.Out.Result.Changes) apply=$($wApply.Err)$($wApply.Out.Result.Status) undoplan=$($wUndoPlan.Err)$($wUndoPlan.Out.Result.Count) undo=$($wUndo.Err)$($wUndo.Out.Result.Status) $($wUndo.Out.Result.Message)"
+    $wNoGate = & $runWorker 'Apply' @{ Token = $tok; Spec = $good; Identity = 'EntraKerberos'; Identities = 'CloudOnly'; Hash = 'x'; User = 'Test User'; SnapshotId = 'snap1' } $null
+    Test-Check 'runspace (#44): without the gate handed over the worker''s apply is refused (the runspace has its own module state, counter-test)' (($wNoGate.Err -like '*gate*') -or ($wNoGate.Out.Result.Status -in 'Refused', 'Failed')) "$($wNoGate.Err) $($wNoGate.Out.Result.Status)"
     # #45 review: the run is closed under the state lock and not while another AVDTune process changes the master or a wizard run of this process is carried out
     $root = New-Root; $roots += $root
     $arm = New-AVDTuneFakeEnvArm
@@ -747,7 +781,7 @@ try {
     Test-Check 'the page XAML loads and every control the script uses is in it' ($pageRoot -is [System.Windows.Controls.Grid] -and $pageRoot.Visibility -eq 'Collapsed' -and @($used | Where-Object { $_ -notin $names }).Count -eq 0) ((@($used | Where-Object { $_ -notin $names })) -join ',')
     $main = [IO.File]::ReadAllText((Join-Path $repo 'Start-AVDTune.ps1'))
     Test-Check 'the hooks in Start-AVDTune.ps1: module, navigation entry, page switch, view and the page file' ($main -match "'Environment'(, '\w+')*\) \{ Import" -and $main -match "Key = 'Environment'" -and $main -match "Update-EnvView" -and $main -match "AVDTune-Environment\.ps1") $null
-    Test-Check 'the page changes nothing without the plan hash: apply and undo pass the hash of the plan that was shown' ($pageScript -match 'ConfirmedHash \$p\.Hash' -and ([regex]::Matches($pageScript, 'ConfirmedHash')).Count -eq 2 -and $pageScript -match "Confirm-Action") $null
+    Test-Check 'the page changes nothing without the plan hash: apply and undo pass the hash of the plan that was shown' ($pageScript -match 'ConfirmedHash \$A\.Hash' -and ([regex]::Matches($pageScript, 'Hash = \$p\.Hash')).Count -eq 2 -and ([regex]::Matches($pageScript, 'ConfirmedHash')).Count -eq 2 -and $pageScript -match "Confirm-Action") $null
     $masterPart = $pageScript.Substring($pageScript.IndexOf('function Get-EnvPlanned'))
     Test-Check 'the master part takes the plan that was shown (Spec and Identity), not the form, and names VHDLocations in the confirmation' ($masterPart -notmatch 'Get-EnvSpec' -and ([regex]::Matches($masterPart, '-Spec \$pl\.Spec -Identity \$pl\.Identity')).Count -eq 2 -and $masterPart -match 'VHDLocations = \$\(Get-AVDTuneEnvVhdLocation \$pl\.Spec\)' -and $masterPart -match 'Make the plan first') $null
 }

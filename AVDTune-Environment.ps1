@@ -1,7 +1,7 @@
 # The Environment page (dot-sourced by Start-AVDTune.ps1; plan section 1b, docs\environment-wizard.md). Logic is in Modules\AVDTune.Environment.psm1; this file loads the page
-# from UI\AVDTune.Environment.xaml, builds the form from the first-run answers and shows the plan. Reading (the plan) and every change (create, undo) run on the window
-# thread behind a task in the bar at the bottom, like the changes of the FSLogix page: the window waits while Azure works (an asynchronous operation takes seconds to a few
-# minutes). Every change shows the plan first and asks for the confirmation of exactly that plan; the module refuses a different plan.
+# from UI\AVDTune.Environment.xaml, builds the form from the first-run answers and shows the plan. Reading (the plan) and every change (create, undo) run in a background
+# runspace behind a task in the bar at the bottom (#44, EnvJob): the window stays responsive while Azure works (an asynchronous operation takes seconds to a few minutes).
+# Every change shows the plan first and asks for the confirmation of exactly that plan; the module refuses a different plan.
 # Test mode: the fake ARM (Tests\Fakes\FakeEnvArm.ps1) and no token of a real sign-in; nothing leaves this computer.
 
 $script:EnvFake = $null
@@ -9,7 +9,6 @@ if ($script:TestMode) { . (Get-TestScript 'FakeEnvArm.ps1'); $script:EnvFake = N
 $script:EnvFields = @{}
 $script:EnvPlan = $null
 $script:EnvUndoPlan = $null
-$script:EnvRealArm = $null
 
 [xml]$envXaml = Get-Content (Join-Path $PSScriptRoot 'UI\AVDTune.Environment.xaml') -Raw -Encoding UTF8
 $envPage = [Windows.Markup.XamlReader]::Load([System.Xml.XmlNodeReader]::new($envXaml))
@@ -20,7 +19,6 @@ foreach ($node in $envXaml.SelectNodes("//*[@*[local-name()='Name']]")) {
 $ui.PageEnvironment = $envPage
 [void]$ui.PagePlaceholder.Parent.Children.Add($envPage)
 
-function Get-EnvArm { if ($script:TestMode) { $script:EnvFake } else { if (-not $script:EnvRealArm) { $script:EnvRealArm = New-AVDTuneArmAdapter }; $script:EnvRealArm } }
 function Get-EnvToken { if ($script:TestMode) { return @{ Token = 'fake-arm-token'; Reason = '' } }; Get-ReadyToken }
 function Get-EnvAnswers { $e = $null; try { $e = Get-AVDTuneEnvironment $script:StateRoot } catch { }; if ($e) { Get-AVDTuneEnvironmentAnswers $e } else { $null } }
 function Get-EnvUser { [string]$env:USERNAME }
@@ -112,24 +110,12 @@ function Show-EnvPlan($Plan, [string]$Title) {
     foreach ($s in @($Plan.Steps)) { [void]$ui.PanelEnvPlan.Children.Add((New-EnvRow $s)) }
 }
 
-function Invoke-EnvTask([string]$Kind, [string]$Title, [string]$Step, [scriptblock]$Block) {
-    # The task shows in the bar first, then the call blocks the window thread (like Invoke-FslChange)
-    $task = Start-AVDTuneUiTask -Kind $Kind -Title $Title -Step $Step
-    try { Update-TaskBar; $window.Dispatcher.Invoke([Action] {}, [System.Windows.Threading.DispatcherPriority]::Render) } catch { }
-    $out = $null
-    try { $out = & $Block }
-    catch { Complete-AVDTuneUiTask $task -Failed -Summary $_.Exception.Message; throw }
-    if ($out -and $out.PSObject.Properties['Status'] -and $out.Status -in 'Failed', 'Refused') { Complete-AVDTuneUiTask $task -Failed -Summary ([string]$out.Message) }
-    else { Complete-AVDTuneUiTask $task -Summary $(if ($out -and $out.PSObject.Properties['Message']) { [string]$out.Message } else { 'done' }) }
-    $out
-}
-
 function Update-EnvView {
     Initialize-EnvFields
     $a = Get-EnvAnswers
     if (-not $a) { $ui.TxtEnvState.Text = 'Answer the first-run questions on the Overview first: the identity model decides what is planned here.'; foreach ($b in $ui.BtnEnvPlan, $ui.BtnEnvUndoPlan, $ui.BtnEnvMasterTest, $ui.BtnEnvMasterApply) { $b.IsEnabled = $false }; return }
     $applies = ([string]$a.Profiles -eq 'AzureFiles')
-    foreach ($b in $ui.BtnEnvPlan, $ui.BtnEnvUndoPlan, $ui.BtnEnvMasterTest, $ui.BtnEnvMasterApply) { $b.IsEnabled = $applies }
+    foreach ($b in $ui.BtnEnvPlan, $ui.BtnEnvUndoPlan, $ui.BtnEnvMasterTest, $ui.BtnEnvMasterApply) { $b.IsEnabled = ($applies -and -not $script:EnvJob) }   # a running job (#44) keeps them locked until it ends
     if (-not $applies) { $ui.TxtEnvState.Text = 'Profiles are not on Azure Files (first-run questions): there is nothing to create here.'; return }
     $identity = Get-EnvIdentity
     $model = Get-AVDTuneEnvIdentityModel -Identity $identity -Identities ([string]$a.Identities)
@@ -141,23 +127,119 @@ function Update-EnvView {
     $ui.TxtEnvState.Text = $(if (Test-AVDTuneWriteAllowed) { 'The snapshot is confirmed: the plan can be carried out.' } else { 'Read only: you can make the plan; creating needs the confirmed snapshot of the Overview.' })
 }
 
-# #45: a run that stopped in the middle (journal step still Started) is closed first, from the real state of its resources (GET only), and named in the protocol
-function Resolve-EnvInterrupted([string]$Token) {
-    if (@(Get-AVDTuneEnvInterrupted -Root $script:StateRoot).Count -eq 0) { return }
-    $found = @(Resolve-AVDTuneEnvInterrupted -Arm (Get-EnvArm) -Token $Token -Root $script:StateRoot -User (Get-EnvUser))
-    $text = T 'env.interrupted.closed' ((@($found | ForEach-Object { "$($_.Id): $($_.Status) ($($_.Message))" }) -join '; '))
-    [void](Add-AVDTuneProtocolNote -Protocol $script:Protocol -Group 'other' -Subject $text); Save-Protocol
-    Show-Toast $text
+# #44: plan, create, undo plan and undo run in a background runspace (New-AVDTunePowerShell), like the writer jobs of the other pages (#66/#72): the window stays
+# responsive while Azure works, the task bar shows the step, the window timer polls the result. Apply and Undo are writer jobs (EnvJob in WriterJobVariables; Plan and
+# UndoPlan only read Azure): write gate and Assert-NoOtherWriter first, the gate goes into the runspace, the shutdown block holds while they run. The token is taken on
+# the window thread (sign-in), handed over in memory and removed from the job table when it ends. #45: a run that stopped in the middle (journal step still Started)
+# is closed first by the plan and the undo plan, from the real state of its resources (GET only), and named in the protocol.
+$script:EnvJob = $null
+$script:EnvReadKinds = @('Plan', 'UndoPlan')   # the kinds of EnvJob that do not change anything (also in WriterReadOnlyKinds)
+$script:EnvWorkerText = @'
+param($AppRoot, $Root, $Kind, $A, $Gate, $Sync, $SharedArm, $FakeScript)
+$ErrorActionPreference = 'Stop'
+foreach ($n in 'AVDTune', 'AVDTune.Snapshot', 'AVDTune.Environment') { Import-Module (Join-Path $AppRoot "Modules\$n.psm1") -Force }
+# test mode: the fake ARM of the window (its store is shared, so the page sees what was made) with the helpers of its script in this runspace
+if ($FakeScript) { . $FakeScript; $arm = $SharedArm } else { $arm = New-AVDTuneArmAdapter }
+if ($Gate) { Open-AVDTuneWriteGate -SnapshotId $Gate.SnapshotId -ConfirmedBy $Gate.ConfirmedBy }
+$closed = @()
+if ($Kind -in 'Plan', 'UndoPlan' -and @(Get-AVDTuneEnvInterrupted -Root $Root).Count -gt 0) { $Sync.Text = 'interrupted'; $closed = @(Resolve-AVDTuneEnvInterrupted -Arm $arm -Token $A.Token -Root $Root -User $A.User) }
+$Sync.Text = 'azure'
+$out = $null
+switch ($Kind) {
+    'Plan' { $out = Get-AVDTuneEnvPlan -Arm $arm -Token $A.Token -Spec $A.Spec -Identity $A.Identity -Identities $A.Identities -User $A.User -ImageVersion $A.ImageVersion }
+    'Apply' { $out = Invoke-AVDTuneEnvApply -Arm $arm -Token $A.Token -Spec $A.Spec -Identity $A.Identity -Identities $A.Identities -ConfirmedHash $A.Hash -Root $Root -User $A.User -SnapshotId $A.SnapshotId }
+    'UndoPlan' { $out = Get-AVDTuneEnvUndoPlan -Arm $arm -Token $A.Token -Root $Root }
+    'Undo' { $out = Invoke-AVDTuneEnvUndo -Arm $arm -Token $A.Token -ConfirmedHash $A.Hash -Root $Root -User $A.User -SnapshotId $A.SnapshotId }
+    default { throw "Unknown environment job '$Kind'." }
 }
+[pscustomobject]@{ Result = $out; Closed = $closed }
+'@
+$script:EnvJobText = @{
+    Plan = @('Plan the FSLogix storage', 'Reading Azure (nothing is changed)'); Apply = @('Create the FSLogix storage', 'Creating the resources one by one')
+    UndoPlan = @('Plan the undo', 'Reading Azure (nothing is changed)'); Undo = @('Take back the FSLogix storage', 'Deleting what AVDTune created')
+}
+function Set-EnvBusy([bool]$Busy) {
+    $a = Get-EnvAnswers; $applies = ($a -and [string]$a.Profiles -eq 'AzureFiles')
+    foreach ($b in $ui.BtnEnvPlan, $ui.BtnEnvUndoPlan, $ui.BtnEnvMasterTest, $ui.BtnEnvMasterApply) { $b.IsEnabled = ($applies -and -not $Busy) }
+    if ($Busy) { $ui.BtnEnvApply.IsEnabled = $false; $ui.BtnEnvUndo.IsEnabled = $false }
+}
+function Start-EnvJob([string]$Kind, [hashtable]$A) {
+    if ($script:EnvJob) { throw 'An environment task is still running. Wait until it is done.' }
+    $writes = $Kind -notin $script:EnvReadKinds
+    if ($writes) {
+        if (-not (Test-AVDTuneWriteAllowed)) { throw 'Read only: confirm a snapshot of today on the Overview first.' }
+        Assert-NoOtherWriter
+    }
+    $sync = [hashtable]::Synchronized(@{ Text = '' })
+    $ps = New-AVDTunePowerShell
+    [void]$ps.AddScript($script:EnvWorkerText).AddArgument($script:AppRoot).AddArgument($script:StateRoot).AddArgument($Kind).AddArgument($A).AddArgument($(if ($writes) { Get-AVDTuneWriteGate } else { $null })).AddArgument($sync).AddArgument($(if ($script:TestMode) { $script:EnvFake } else { $null })).AddArgument($(if ($script:TestMode) { Get-TestScript 'FakeEnvArm.ps1' } else { $null }))
+    $task = Start-AVDTuneUiTask -Kind "environment-$($Kind.ToLower())" -Title $script:EnvJobText[$Kind][0] -Step $script:EnvJobText[$Kind][1]
+    $script:EnvJob = @{ PS = $ps; Handle = $ps.BeginInvoke(); Kind = $Kind; Sync = $sync; Task = $task; A = $A }
+    if ($writes) { Set-ShutdownBlock $true }
+    Set-EnvBusy $true
+}
+function Complete-EnvJob {
+    $job = $script:EnvJob
+    if (-not $job) { return }
+    if (-not $job.Handle.IsCompleted) { if ([string]$job.Sync.Text -eq 'interrupted') { Update-AVDTuneUiTask $job.Task -Step 'Closing a run that stopped in the middle (GET only)' }; return }
+    $script:EnvJob = $null
+    if ($job.Kind -notin $script:EnvReadKinds) { Set-ShutdownBlock $false }
+    $res = $null; $err = ''
+    try {
+        $out = @($job.PS.EndInvoke($job.Handle))
+        if ($job.PS.Streams.Error.Count -gt 0) { $err = $job.PS.Streams.Error[0].Exception.Message }
+        $res = $out | Select-Object -Last 1
+    }
+    catch { $err = $_.Exception.Message }
+    finally { $job.PS.Dispose(); $job.A.Token = $null }   # the token lives only as long as the job
+    Set-EnvBusy $false
+    if ($res -and @($res.Closed).Count -gt 0) {
+        $text = T 'env.interrupted.closed' ((@($res.Closed | ForEach-Object { "$($_.Id): $($_.Status) ($($_.Message))" }) -join '; '))
+        [void](Add-AVDTuneProtocolNote -Protocol $script:Protocol -Group 'other' -Subject $text); Save-Protocol
+        Show-Toast $text
+    }
+    $r = if ($res) { $res.Result } else { $null }
+    if ($err -or -not $r) {
+        if (-not $err) { $err = 'The job ended without a result.' }
+        $ui.TxtEnvResult.Text = $err
+        Complete-AVDTuneUiTask $job.Task -Failed -Summary $err
+        if ($job.Kind -notin $script:EnvReadKinds) { Start-OverviewRefresh }
+        return
+    }
+    switch ($job.Kind) {
+        'Plan' {
+            $script:EnvPlan = $r
+            Show-EnvPlan $r "Plan (hash $($r.Hash))"
+            $ui.BtnEnvApply.IsEnabled = ($r.Changes -gt 0 -and $r.Blocked.Count -eq 0)
+            $ui.TxtEnvResult.Text = "$($r.Changes) resource(s) to create or change; nothing was written."
+        }
+        'Apply' {
+            foreach ($x in @($r.Results)) { Register-StepResult ([pscustomobject]@{ Id = $x.Id; Section = 'FSLogix'; Title = $x.Title; Mode = 'Apply'; Status = $x.Status; Message = $x.Message; At = (Get-Date).ToString('o') }) }
+            $ui.TxtEnvResult.Text = [string]$r.Message
+            Show-Toast ([string]$r.Message)
+            Start-OverviewRefresh
+        }
+        'UndoPlan' {
+            $script:EnvUndoPlan = $r
+            Show-EnvPlan ([pscustomobject]@{ Steps = @($r.Steps) }) 'What AVDTune may take back'
+            $ui.BtnEnvUndo.IsEnabled = ($r.Count -gt 0)
+            $ui.TxtEnvResult.Text = "$($r.Count) step(s) can be taken back. A share with profile data and an account whose share is not verified empty always stay."
+        }
+        'Undo' {
+            $ui.TxtEnvResult.Text = [string]$r.Message
+            Show-Toast ([string]$r.Message)
+            Start-OverviewRefresh
+        }
+    }
+    $bad = ($r.PSObject.Properties['Status'] -and $r.Status -in 'Failed', 'Refused')
+    Complete-AVDTuneUiTask $job.Task -Failed:$bad -Summary $(if ($r.PSObject.Properties['Message'] -and $r.Message) { [string]$r.Message } else { 'done' })
+}
+$script:Timer.Add_Tick({ try { Complete-EnvJob } catch { Show-Error $_.Exception.Message } })
+
+function Get-EnvJobToken { $tok = Get-EnvToken; if (-not $tok.Token) { throw $tok.Reason }; [string]$tok.Token }
 Add-Click $ui.BtnEnvPlan {
-    $tok = Get-EnvToken
-    if (-not $tok.Token) { throw $tok.Reason }
-    Resolve-EnvInterrupted $tok.Token
-    $spec = Get-EnvSpec; $identity = Get-EnvIdentity; $a = Get-EnvAnswers
-    $script:EnvPlan = Invoke-EnvTask 'Environment' 'Plan the FSLogix storage' 'Reading Azure (nothing is changed)' { Get-AVDTuneEnvPlan -Arm (Get-EnvArm) -Token $tok.Token -Spec $spec -Identity $identity -Identities ([string]$a.Identities) -User (Get-EnvUser) -ImageVersion ([string](Get-AVDTuneState $script:StateRoot).ImageVersion) }
-    Show-EnvPlan $script:EnvPlan "Plan (hash $($script:EnvPlan.Hash))"
-    $ui.BtnEnvApply.IsEnabled = ($script:EnvPlan.Changes -gt 0 -and $script:EnvPlan.Blocked.Count -eq 0)
-    $ui.TxtEnvResult.Text = "$($script:EnvPlan.Changes) resource(s) to create or change; nothing was written."
+    $a = Get-EnvAnswers
+    Start-EnvJob 'Plan' @{ Token = (Get-EnvJobToken); Spec = (Get-EnvSpec); Identity = (Get-EnvIdentity); Identities = [string]$a.Identities; User = (Get-EnvUser); ImageVersion = [string](Get-AVDTuneState $script:StateRoot).ImageVersion }
 }
 Add-Click $ui.BtnEnvApply {
     if (-not $script:EnvPlan) { throw 'Make the plan first.' }
@@ -165,24 +247,11 @@ Add-Click $ui.BtnEnvApply {
     $p = $script:EnvPlan
     $lines = @($p.Steps | Where-Object { $_.Action -in 'Create', 'Update' } | ForEach-Object { "$($_.Action): $($_.Title)" }) -join "`n"
     if (-not (Confirm-Action "Create or change exactly these Azure resources?`n`n$lines`n`nPlan $($p.Hash)" 'Environment')) { return }
-    $tok = Get-EnvToken
-    if (-not $tok.Token) { throw $tok.Reason }
     $a = Get-EnvAnswers
-    $r = Invoke-EnvTask 'Environment' 'Create the FSLogix storage' 'Creating the resources one by one' { Invoke-AVDTuneEnvApply -Arm (Get-EnvArm) -Token $tok.Token -Spec $p.Spec -Identity $p.Identity -Identities ([string]$a.Identities) -ConfirmedHash $p.Hash -Root $script:StateRoot -User (Get-EnvUser) -SnapshotId (Get-EnvGateSnapshot) }
-    foreach ($x in @($r.Results)) { Register-StepResult ([pscustomobject]@{ Id = $x.Id; Section = 'FSLogix'; Title = $x.Title; Mode = 'Apply'; Status = $x.Status; Message = $x.Message; At = (Get-Date).ToString('o') }) }
-    $ui.TxtEnvResult.Text = [string]$r.Message
-    Show-Toast ([string]$r.Message)
-    $ui.BtnEnvApply.IsEnabled = $false
-    Start-OverviewRefresh
+    Start-EnvJob 'Apply' @{ Token = (Get-EnvJobToken); Spec = $p.Spec; Identity = $p.Identity; Identities = [string]$a.Identities; Hash = $p.Hash; User = (Get-EnvUser); SnapshotId = (Get-EnvGateSnapshot) }
 }
 Add-Click $ui.BtnEnvUndoPlan {
-    $tok = Get-EnvToken
-    if (-not $tok.Token) { throw $tok.Reason }
-    Resolve-EnvInterrupted $tok.Token
-    $script:EnvUndoPlan = Invoke-EnvTask 'Environment' 'Plan the undo' 'Reading Azure (nothing is changed)' { Get-AVDTuneEnvUndoPlan -Arm (Get-EnvArm) -Token $tok.Token -Root $script:StateRoot }
-    Show-EnvPlan ([pscustomobject]@{ Steps = @($script:EnvUndoPlan.Steps) }) 'What AVDTune may take back'
-    $ui.BtnEnvUndo.IsEnabled = ($script:EnvUndoPlan.Count -gt 0)
-    $ui.TxtEnvResult.Text = "$($script:EnvUndoPlan.Count) step(s) can be taken back. A share with profile data and an account whose share is not verified empty always stay."
+    Start-EnvJob 'UndoPlan' @{ Token = (Get-EnvJobToken); User = (Get-EnvUser) }
 }
 Add-Click $ui.BtnEnvUndo {
     if (-not $script:EnvUndoPlan) { throw 'Show what can be taken back first.' }
@@ -190,13 +259,7 @@ Add-Click $ui.BtnEnvUndo {
     $p = $script:EnvUndoPlan
     $lines = @($p.Steps | Where-Object { $_.Action -in 'Delete', 'Restore' } | ForEach-Object { "$($_.Action): $($_.Id)" }) -join "`n"
     if (-not (Confirm-Action "Take back exactly this?`n`n$lines`n`nPlan $($p.Hash)" 'Environment')) { return }
-    $tok = Get-EnvToken
-    if (-not $tok.Token) { throw $tok.Reason }
-    $r = Invoke-EnvTask 'Environment' 'Take back the FSLogix storage' 'Deleting what AVDTune created' { Invoke-AVDTuneEnvUndo -Arm (Get-EnvArm) -Token $tok.Token -ConfirmedHash $p.Hash -Root $script:StateRoot -User (Get-EnvUser) -SnapshotId (Get-EnvGateSnapshot) }
-    $ui.TxtEnvResult.Text = [string]$r.Message
-    Show-Toast ([string]$r.Message)
-    $ui.BtnEnvUndo.IsEnabled = $false
-    Start-OverviewRefresh
+    Start-EnvJob 'Undo' @{ Token = (Get-EnvJobToken); Hash = $p.Hash; User = (Get-EnvUser); SnapshotId = (Get-EnvGateSnapshot) }
 }
 function Get-EnvPlanned {
     # The master part works from the plan that was made and shown, not from the form (which may have been edited since)

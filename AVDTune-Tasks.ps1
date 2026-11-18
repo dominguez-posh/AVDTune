@@ -137,9 +137,9 @@ function Get-AVDTuneUiTaskLabel([string]$Status) { switch ($Status) { 'running' 
 # Who may change the master at the same time: nobody. The operations that change it run in the background (their jobs, one script variable each) or inline on the window
 # thread, and state.json, the snapshot gate marker and the machine itself are not made for two writers at once (#66). Every start of such an operation (and every inline writer)
 # calls Assert-NoOtherWriter first. A new job adds the name of its script variable to the list; a job that is read only in some of its kinds names them.
-# RelJob is the release job (install, repair, back change AVDTune itself; the checks only read, #49). CustJob: customizations (#85), Status only reads. PrnJob: printers (#86), Servers and Read only read.
-$script:WriterJobVariables = @('OptRun', 'UpdJob', 'BenchJob', 'SealJob', 'SwJob', 'FslJob', 'OffJob', 'LangJob', 'VdiJob', 'ReadyJob', 'RelJob', 'CustJob', 'PrnJob')
-$script:WriterReadOnlyKinds = @{ UpdJob = @('Scan'); SwJob = @('Scan'); VdiJob = @('Latest'); ReadyJob = @('Start', 'Erstanalyse', 'Healthcheck', 'Manual'); RelJob = @('Start', 'Check'); CustJob = @('Status', 'Reach', 'Preview'); PrnJob = @('Servers', 'Read') }
+# RelJob is the release job (install, repair, back change AVDTune itself; the checks only read, #49). CustJob: customizations (#85), Status only reads. PrnJob: printers (#86), Servers and Read only read. EnvJob: environment page (#44), Plan and UndoPlan only read Azure.
+$script:WriterJobVariables = @('OptRun', 'UpdJob', 'BenchJob', 'SealJob', 'SwJob', 'FslJob', 'OffJob', 'LangJob', 'VdiJob', 'ReadyJob', 'RelJob', 'CustJob', 'PrnJob', 'EnvJob')
+$script:WriterReadOnlyKinds = @{ UpdJob = @('Scan'); SwJob = @('Scan'); VdiJob = @('Latest'); ReadyJob = @('Start', 'Erstanalyse', 'Healthcheck', 'Manual'); RelJob = @('Start', 'Check'); CustJob = @('Status', 'Reach', 'Preview'); PrnJob = @('Servers', 'Read'); EnvJob = @('Plan', 'UndoPlan') }
 # #49 (3): the central lock. An operation that is not one of the jobs above (inline on the window thread: watermark, benchmark repair, finish repair, new version)
 # takes it with Enter-AVDTuneWriter (kind and title; the check of Assert-NoOtherWriter first) and gives it back with Exit-AVDTuneWriter in its finally.
 # Get-AVDTuneRunningWriter reads the held entries first (their title), then the job variables; the write buttons follow both.
