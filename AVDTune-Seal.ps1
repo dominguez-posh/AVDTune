@@ -107,6 +107,8 @@ Add-Click $ui.BtnSealRun {
     $gate = Test-AVDTuneFinishGate -Root $script:StateRoot -Machine $script:Machine
     if (-not $gate.Allowed) { Update-SealView; throw "The finish is not allowed: $(@($gate.Reasons) -join ' ')" }
     if (-not (Confirm-Action (Get-AVDTuneFinishConfirmText -Root $script:StateRoot) 'Finish')) { return }
+    # #89: with the option on, the change log goes to SharePoint first, while the sign-in is still there (the finish removes the tokens); then the finish
+    if (Test-SpUploadAtFinish) { Start-SpJob 'ChangeLog' { Start-SealJob }; return }
     Start-SealJob
 }
 Add-Click $ui.BtnSealRepair {
