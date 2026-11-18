@@ -1268,38 +1268,45 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
                 if (-not (Test-AVDTuneWriteAllowed)) { Open-AVDTuneWriteGate -SnapshotId 'snap-smoke' -ConfirmedBy 'Alex Example'; $script:SmokePrnGate = $true }
                 Show-Page 'Printers'; $window.UpdateLayout()
                 Test-Smoke 'Printers: with a domain controller in the answers the page shows the server form, not the Universal Print hint' ($ui.PagePrinters.Visibility -eq 'Visible' -and $ui.PanelPrnMain.Visibility -eq 'Visible' -and $ui.TxtPrnEntra.Visibility -eq 'Collapsed' -and [string]$ui.PanelPrnPrinters.Children[0].Text -eq (T 'prn.notread')) $null
+                $ui.TxtPrnUser.Text = 'admin1@example.test'; $ui.PwdPrn.Password = 'smoke-only'
                 & $click $ui.BtnPrnFind
                 $script:SmokePrnStep = 1; return $false
             }
             1 {
-                Test-Smoke 'Printers: Search AD lists the print servers of the printQueue objects as a task (a name that is not a host name is left out)' ((@($ui.CmbPrnServer.ItemsSource) -join ',') -eq 'print1.example.test,print2.example.test' -and @(Get-AVDTuneUiTasks | Where-Object { $_.Kind -eq 'printers-servers' -and $_.Status -eq 'succeeded' }).Count -ge 1 -and $ui.TxtPrnState.Text -like '*\\bad\share*') $ui.TxtPrnState.Text
+                Test-Smoke 'Printers: Search AD lists the print servers (FQDN) of the printQueue objects as a task (a name that is not an FQDN is left out)' ((@($ui.CmbPrnServer.ItemsSource) -join ',') -eq 'print1.example.test,print2.example.test' -and @(Get-AVDTuneUiTasks | Where-Object { $_.Kind -eq 'printers-servers' -and $_.Status -eq 'succeeded' }).Count -ge 1 -and $ui.TxtPrnState.Text -like '*\\bad\share*') $ui.TxtPrnState.Text
                 $ui.CmbPrnServer.Text = '\\print1.example.test'
                 $refused = $null; try { Start-PrnJob 'Read' } catch { $refused = $_.Exception.Message }
                 Test-Smoke 'Printers: a UNC path as server is refused before anything is read' ($refused -eq (T 'prn.err.server') -and -not $script:PrnJob) $refused
-                $ui.CmbPrnServer.Text = 'print1.example.test'; $ui.PwdPrn.Password = 'smoke-only'
+                $ui.CmbPrnServer.Text = 'other.example.test'; $ui.PwdPrn.Password = 'smoke-only'
                 & $click $ui.BtnPrnRead
                 Test-Smoke 'Printers: the password is cleared as soon as the read starts' ($ui.PwdPrn.SecurePassword.Length -eq 0 -and $script:PrnJob.Kind -eq 'Read') $null
                 $script:SmokePrnStep = 2; return $false
             }
             2 {
-                $boxes = @($ui.PanelPrnPrinters.Children | Where-Object { $_ -is [System.Windows.Controls.CheckBox] })
-                Test-Smoke 'Printers: the shared printers are listed, all selectable ones selected; the printer without x64 driver cannot be selected' ($boxes.Count -eq 4 -and @($boxes | Where-Object { $_.IsChecked -and $_.IsEnabled }).Count -eq 3 -and @($boxes | Where-Object { -not $_.IsEnabled -and [string]$_.Tag -eq 'Old Plotter' }).Count -eq 1 -and $ui.PanelPrnDrivers.Children.Count -eq 2 -and @($fake.Credentials | Where-Object { $_ -eq $ui.TxtPrnUser.Text }).Count -ge 1) "boxes=$($boxes.Count) drivers=$($ui.PanelPrnDrivers.Children.Count) creds=$($fake.Credentials -join ',') user=$($ui.TxtPrnUser.Text)"
-                Save-SmokeShot '58-page-printers'
-                $ui.PwdPrn.Password = 'smoke-only'
-                & $click $ui.BtnPrnApply
-                Test-Smoke 'Printers: Install asks first (drivers, policies, WinRM) and runs as a writer job' ($script:ConfirmAsked -like '*Example Label Driver*' -and $script:ConfirmAsked -like '*TrustedHosts*' -and $script:PrnJob -and $script:PrnJob.Kind -eq 'Apply' -and (Get-AVDTuneRunningWriter) -eq 'PrnJob') $script:ConfirmAsked
+                Test-Smoke 'Printers (H1): a typed server that AD does not publish is not read (no session opened)' ($ui.TxtPrnState.Text -like '*not a print server published in AD*' -and $fake.Credentials.Count -eq 0) $ui.TxtPrnState.Text
+                $ui.CmbPrnServer.Text = 'print1.example.test'; $ui.PwdPrn.Password = 'smoke-only'
+                & $click $ui.BtnPrnRead
                 $script:SmokePrnStep = 3; return $false
             }
             3 {
-                Test-Smoke 'Printers: both drivers installed with the server version, TrustedHosts as before, Point and Print policies set, every driver listed as installed' ($fake.Local['Example Universal PCL6'] -eq '7.1.0.2500' -and $fake.Local['Example Label Driver'] -eq '2.4.0.300' -and $fake.TrustedHosts -ceq 'admin1.example.test' -and $fake.Registry["$pol\pointandprint|restrictdriverinstallationtoadministrators"].Value -eq 1 -and $fake.Registry.ContainsKey("$pol\packagepointandprint\listofservers|print1.example.test") -and @($script:PrnCheck | Where-Object { -not $_.Ok }).Count -eq 0 -and @($fake.LocalFolders.Keys).Count -eq 0) $ui.TxtPrnState.Text
-                Test-Smoke 'Printers: the change log has the drivers with version, server and printers and the policies (category Printers)' (@(Get-AVDTuneChangeLog -Root $script:StateRoot | Where-Object { $_.Category -eq 'Printers' -and $_.Text -like 'Printer driver Example Label Driver 2.4.0.300 from print1.example.test (printers: Label Printer)' }).Count -eq 1 -and @(Get-AVDTuneChangeLog -Root $script:StateRoot | Where-Object { $_.Category -eq 'Printers' }).Count -ge 4) $null
+                $boxes = @($ui.PanelPrnPrinters.Children | Where-Object { $_ -is [System.Windows.Controls.CheckBox] })
+                Test-Smoke 'Printers: the shared printers are listed through a Kerberos session; the unsigned driver and the one without x64 driver cannot be selected' ($boxes.Count -eq 5 -and @($boxes | Where-Object { $_.IsChecked -and $_.IsEnabled }).Count -eq 3 -and @($boxes | Where-Object { -not $_.IsEnabled -and [string]$_.Tag -in 'Old Plotter', 'Front Desk' }).Count -eq 2 -and $ui.PanelPrnDrivers.Children.Count -eq 2 -and @($fake.Auth | Where-Object { $_ -ne 'Kerberos' }).Count -eq 0 -and @($fake.Credentials | Where-Object { $_ -eq 'admin1@example.test' }).Count -ge 1 -and $fake.LocalFolders.Count -eq 0) "boxes=$($boxes.Count) drivers=$($ui.PanelPrnDrivers.Children.Count) creds=$($fake.Credentials -join ',') state=$($ui.TxtPrnState.Text)"
+                Save-SmokeShot '58-page-printers'
+                $ui.PwdPrn.Password = 'smoke-only'
+                & $click $ui.BtnPrnApply
+                Test-Smoke 'Printers (H2): the vendor signer is allowed in its own confirmation (saved in config), then Install asks with the signers and runs as a writer job' ($script:ConfirmAsked -like '*Example Label Driver 2.4.0.300, *Example Labels Inc*' -and @(Get-AVDTunePrinterSigners -Root $script:StateRoot | Where-Object { $_.Thumbprint -eq ('B2' * 20) }).Count -eq 1 -and $script:PrnJob -and $script:PrnJob.Kind -eq 'Apply' -and (Get-AVDTuneRunningWriter) -eq 'PrnJob') $script:ConfirmAsked
+                $script:SmokePrnStep = 4; return $false
+            }
+            4 {
+                Test-Smoke 'Printers: both drivers installed by export with the server version, no TrustedHosts change, Point and Print policies set, every driver checked' ($fake.Local['Example Universal PCL6'] -eq '7.1.0.2500' -and $fake.Local['Example Label Driver'] -eq '2.4.0.300' -and $fake.TrustedHistory.Count -eq 0 -and $fake.Registry["$pol\pointandprint|restrictdriverinstallationtoadministrators"].Value -eq 1 -and $fake.Registry.ContainsKey("$pol\packagepointandprint\listofservers|print1.example.test") -and @($script:PrnCheck | Where-Object { -not $_.Ok }).Count -eq 0 -and @($script:PrnCheck).Count -eq 2 -and $fake.LocalFolders.Count -eq 0 -and $fake.RemoteFolders.Count -eq 0) $ui.TxtPrnState.Text
+                Test-Smoke 'Printers: the change log has the drivers with version, server, signer and printers (category Printers)' (@(Get-AVDTuneChangeLog -Root $script:StateRoot | Where-Object { $_.Category -eq 'Printers' -and $_.Text -eq 'Printer driver Example Label Driver 2.4.0.300 from print1.example.test, signed by Example Labels Inc (printers: Label Printer)' }).Count -eq 1 -and @(Get-AVDTuneChangeLog -Root $script:StateRoot | Where-Object { $_.Category -eq 'Printers' }).Count -ge 4) $null
                 Show-Page 'Updates'
                 Test-Smoke 'Printers: the Updates page compares the drivers of the print server with the installed ones (maintenance skeleton)' ($ui.TxtUpdNotes.Text -like "*$(T 'prn.upd.same' 'print1.example.test')*") $ui.TxtUpdNotes.Text
                 Show-Page 'Printers'
                 & $click $ui.BtnPrnUndo
-                $script:SmokePrnStep = 4; return $false
+                $script:SmokePrnStep = 5; return $false
             }
-            4 {
+            5 {
                 Test-Smoke 'Printers: Undo removes the drivers AVDTune added and the policies' ($fake.Local.Count -eq 0 -and -not $fake.Registry.ContainsKey("$pol\pointandprint|restrictdriverinstallationtoadministrators") -and -not $fake.Registry.ContainsKey("$pol\packagepointandprint\listofservers|print1.example.test")) $ui.TxtPrnState.Text
                 if ($script:SmokePrnGate) { Close-AVDTuneWriteGate }
                 Show-Page 'Overview'

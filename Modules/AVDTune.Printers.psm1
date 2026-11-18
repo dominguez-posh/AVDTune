@@ -2,20 +2,23 @@
     AVDTune printer drivers from a print server (docs\plans\avdtune.md, section 3b; issue #86). Only for identity models with a domain; with Entra only the page
     points to Universal Print.
 
-      * Print servers come from AD (printQueue objects, read over the existing LDAP connection of the start sequence) or are typed (a host name only, no UNC, no path).
-      * The shared printers of the server with driver name, version, architecture and package-aware are read over the spooler RPC (Get-Printer/Get-PrinterDriver
-        -ComputerName) with the domain account of the start sequence; no WinRM for reading.
-      * The administrator picks printers (default: all shared); the needed drivers are the distinct x64 drivers of those printers.
-      * Install per driver: package-aware by a temporary printer connection (Add-Printer -ConnectionName), which is removed again (the driver stays). Not
-        package-aware: only this driver is exported on the server (pnputil /export-driver <oem>.inf over WinRM; TrustedHosts is appended and restored exactly,
-        with a journal that the next start repairs), copied into an admin-only work folder, added with pnputil /add-driver and Add-PrinterDriver; temporary
-        files are removed on both sides.
-      * Point and Print: RestrictDriverInstallationToAdministrators = 1 and the package Point and Print server list limited to the chosen servers, with undo.
-      * Every change is a step (New-AVDTuneStep) run through Invoke-AVDTune (write gate, change marker, run record, LastChange, change log). The test of a driver
-        step is the check: the driver is installed with the version of the server. The change log text names driver, version, server and printers.
-      * Maintenance (skeleton): Compare-AVDTunePrinterDrivers compares the server's versions with what AVDTune installed (config\printers.json): New, Changed, Same.
-      * Every access to the server and the master goes through the printer adapter ($P): New-AVDTunePrinterAdapter is the real one (NOT exercised by the checks
-        beyond construction, to be tried on a throw-away VM); Tests\Fakes\FakePrinters.ps1 is the fake. The password is a SecureString in memory only.
+      * Print servers come from AD only (printQueue objects over the pinned LDAPS connection of the start sequence). A typed name is taken only when it is in that list;
+        IP addresses and short names are refused (Kerberos needs the FQDN).
+      * Everything on the server goes through one WinRM session with Kerberos (FQDN, the account as UPN): the server is authenticated, no NTLM, no TrustedHosts.
+        Read: the shared printers with their driver (name, version, architecture, package-aware as the server says), and per driver the export of only its INF
+        (pnputil /export-driver <oem>.inf into an admin-only folder below the server's Windows\Temp), copied with limits (count, size, no links, all below the local
+        folder, INF and catalog on the top level) and checked: the catalog (.cat named by the INF) has a valid Authenticode signature with chain; WHQL ("Microsoft
+        Windows Hardware Compatibility Publisher") is allowed, another publisher only when the administrator confirmed it (config\printers-signers.json).
+      * The administrator confirms the plan (driver, version, INF, signer). Apply reads the server again and stops when anything differs from the confirmed plan,
+        exports again and stops when the signer differs; then pnputil /add-driver and Add-PrinterDriver. There is no install by printer connection (Point and Print
+        would take whatever the server sends). Temporary folders are removed on both sides.
+      * Check after the install (the test of each step): the driver is installed locally with the version of the server and its INF in the driver store; package-aware
+        is read from the installed driver (the server's claim is only compared).
+      * Point and Print: RestrictDriverInstallationToAdministrators = 1 and the package Point and Print list limited to the chosen servers, with undo. Unsafe values
+        found on the master (NoWarningNoElevationOnInstall = 1, UpdatePromptSettings = 2) are shown.
+      * TrustedHosts is not touched any more; a journal of the first version (#86, d63e941) is still repaired at the start.
+      * Every access goes through the printer adapter ($P): New-AVDTunePrinterAdapter is the real one (NOT exercised by the checks beyond construction and command
+        resolution, to be tried on a throw-away VM); Tests\Fakes\FakePrinters.ps1 is the fake.
 #>
 
 Set-StrictMode -Version 2.0
@@ -29,20 +32,30 @@ $script:PackageKey = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Printers\Pack
 $script:ListKey = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Printers\PackagePointAndPrint\ListofServers'
 $script:Arch = 'Windows x64'
 $script:MaxQueues = 5000
+$script:MaxFiles = 2000
+$script:MaxBytes = 500MB
+$script:Whql = 'Microsoft Windows Hardware Compatibility Publisher'
+$script:Rx = [TimeSpan]::FromMilliseconds(200)
 
 #region validation (pure)
 
 function Test-AVDTunePrinterServerName([string]$Name) {
-    # A host name (DNS or NetBIOS) only: no backslash, slash, colon, at sign, space or wildcard reaches a UNC path or WinRM
-    if (-not $Name -or $Name.Length -gt 253) { return $false }
+    # The FQDN of a print server (Kerberos needs it): a host name with at least one dot, not an IP address; no backslash, slash, colon, at sign, space or wildcard
+    if (-not $Name -or $Name.Length -gt 253 -or $Name.IndexOf('.') -lt 1) { return $false }
+    if ([regex]::IsMatch($Name, '\A[0-9.]+\z', 'None', $script:Rx)) { return $false }
     Test-AVDTuneCustomHostName $Name
 }
 
-function Test-AVDTunePrinterShareName([string]$Name) { [bool]($Name -and $Name.Length -le 80 -and [regex]::IsMatch($Name, '\A[^\\/:*?"<>|\x00-\x1F]+\z', 'None', [TimeSpan]::FromMilliseconds(200)) -and $Name.Trim() -eq $Name -and $Name -notmatch '\A\.+\z') }
+function Test-AVDTunePrinterShareName([string]$Name) { [bool]($Name -and $Name.Length -le 80 -and [regex]::IsMatch($Name, '\A[^\\/:*?"<>|\x00-\x1F]+\z', 'None', $script:Rx) -and $Name.Trim() -eq $Name -and $Name -notmatch '\A\.+\z') }
+
+function Test-AVDTunePrinterDriverName([string]$Name) {
+    # N3: the driver name goes to Add-PrinterDriver/Remove-PrinterDriver -Name: no wildcard (* ? [ ]), no control character, limited length
+    [bool]($Name -and $Name.Length -le 200 -and $Name.Trim() -eq $Name -and [regex]::IsMatch($Name, '\A[^*?\[\]\x00-\x1F]+\z', 'None', $script:Rx))
+}
 
 function Test-AVDTunePrinterInfPath([string]$Path) {
     # The INF path the server names for a driver: a local path on the server ending in .inf; it is only handed to the fixed remote block as data
-    [bool]($Path -and $Path.Length -le 260 -and [regex]::IsMatch($Path, '\A[A-Za-z]:\\[^<>"|?*\x00-\x1F]+\.inf\z', 'IgnoreCase', [TimeSpan]::FromMilliseconds(200)) -and $Path -notmatch '\\\.\.(\\|\z)')
+    [bool]($Path -and $Path.Length -le 260 -and [regex]::IsMatch($Path, '\A[A-Za-z]:\\[^<>"|?*\x00-\x1F]+\.inf\z', 'IgnoreCase', $script:Rx) -and $Path -notmatch '\\\.\.(\\|\z)')
 }
 
 function ConvertTo-AVDTunePrinterVersion($Value) {
@@ -60,6 +73,22 @@ function Get-AVDTunePrinterAvailability {
     [pscustomobject]@{ Domain = [bool]($dc -and $dc -ne 'None'); Dc = $dc }
 }
 
+function ConvertTo-AVDTunePrinterUpn {
+    # The account for Kerberos as UPN: user@domain stays, DOMAIN\user becomes user@<DNS domain> (from the directory read in the start sequence); anything else is refused
+    param([Parameter(Mandatory)][string]$User, [string]$DnsDomain)
+    if ([regex]::IsMatch($User, '\A[^\\@\s]{1,104}@[A-Za-z0-9.-]{1,253}\z', 'None', $script:Rx)) { return $User }
+    $m = [regex]::Match($User, '\A[^\\@\s]{1,15}\\([^\\@\s]{1,104})\z', 'None', $script:Rx)
+    if ($m.Success -and $DnsDomain -and (Test-AVDTuneCustomHostName $DnsDomain)) { return "$($m.Groups[1].Value)@$DnsDomain" }
+    throw 'The domain account must be user@domain (Kerberos needs the UPN).'
+}
+
+function Assert-AVDTunePrinterServerAllowed {
+    # H1: a server is used only when AD publishes it (printQueue list of the pinned LDAPS connection); compared case-insensitively
+    param([Parameter(Mandatory)][string]$Server, [string[]]$Allowed = @())
+    if (-not (Test-AVDTunePrinterServerName $Server)) { throw "'$(Remove-AVDTuneControlCharacters $Server 80)' is not the FQDN of a print server (no IP address, no short name, no UNC path)." }
+    if (@($Allowed | Where-Object { $_ -ieq $Server }).Count -eq 0) { throw "$Server is not a print server published in AD (printQueue): it is not used." }
+}
+
 #endregion
 
 #region reading
@@ -67,48 +96,50 @@ function Get-AVDTunePrinterAvailability {
 function Get-AVDTunePrinterAttr($Entry, [string]$Name) { $v = $Entry.Attributes[$Name]; if ($null -eq $v) { $null } else { @($v)[0] } }
 
 function Find-AVDTunePrintServers {
-    <# Read only: the print servers published in AD (printQueue objects) with the number of their printers. A name that is not a plain host name is left out and named. #>
+    <# Read only: the print servers published in AD (printQueue objects, serverName = FQDN) with the number of their printers. A name that is not an FQDN is left out and named. #>
     param([Parameter(Mandatory)]$Ldap, [Parameter(Mandatory)]$Connection)
     $root = @(& $Ldap.Search $Connection '' '(objectClass=*)' 'Base' @('defaultNamingContext'))
     $nc = if ($root.Count) { [string](Get-AVDTunePrinterAttr $root[0] 'defaultNamingContext') } else { '' }
     if (-not $nc) { throw 'The domain controller returned no defaultNamingContext.' }
-    $queues = @(& $Ldap.Search $Connection $nc '(objectCategory=printQueue)' 'Subtree' @('serverName', 'shortServerName', 'printerName'))
+    $queues = @(& $Ldap.Search $Connection $nc '(objectCategory=printQueue)' 'Subtree' @('serverName', 'printerName'))
     if ($queues.Count -gt $script:MaxQueues) { $queues = $queues[0..($script:MaxQueues - 1)] }
     $count = @{}; $skipped = New-Object System.Collections.ArrayList
     foreach ($q in $queues) {
-        $s = [string](Get-AVDTunePrinterAttr $q 'serverName'); if (-not $s) { $s = [string](Get-AVDTunePrinterAttr $q 'shortServerName') }
+        $s = [string](Get-AVDTunePrinterAttr $q 'serverName')
         if (-not (Test-AVDTunePrinterServerName $s)) { if ($s) { [void]$skipped.Add((Remove-AVDTuneControlCharacters $s 80)) }; continue }
         $k = $s.ToLowerInvariant(); if ($count.ContainsKey($k)) { $count[$k]++ } else { $count[$k] = 1 }
     }
     [pscustomobject]@{ Servers = @($count.Keys | Sort-Object | ForEach-Object { [pscustomobject]@{ Name = $_; Printers = $count[$_] } }); Skipped = @($skipped | Select-Object -Unique) }
 }
 
+function Invoke-AVDTunePrinterSession {
+    # One Kerberos WinRM session to the server for -Block (param($Session)); closed in finally
+    param([Parameter(Mandatory)]$P, [Parameter(Mandatory)][string]$Server, $Credential, [Parameter(Mandatory)][scriptblock]$Block)
+    $s = & $P.RemoteOpen $Server $Credential
+    try { & $Block $s } finally { & $P.RemoteClose $s }
+}
+
 function Get-AVDTunePrinterInventory {
     <#
-        Read only: the shared printers of the server with their x64 driver (name, version, architecture, package-aware, INF path) over the spooler RPC of the adapter.
-        A printer whose driver has no x64 version on the server, or whose names are not valid, gets a Problem and is never installed.
+        Read only on the master: the shared printers of the server with their x64 driver (name, version, architecture, package-aware as the server says, INF path), read
+        through the session. A printer whose driver has no x64 version on the server, or whose names are not valid, gets a Problem and is never installed.
     #>
-    param([Parameter(Mandatory)]$P, [Parameter(Mandatory)][string]$Server, $Credential)
-    if (-not (Test-AVDTunePrinterServerName $Server)) { throw "'$(Remove-AVDTuneControlCharacters $Server 80)' is not a host name of a print server (no UNC path, no path)." }
+    param([Parameter(Mandatory)]$P, [Parameter(Mandatory)]$Session, [Parameter(Mandatory)][string]$Server)
     $drivers = @{}
-    foreach ($d in @(& $P.ServerDrivers $Server $Credential)) {
-        $env = [string]$d.Environment
-        $drivers["$([string]$d.Name)|$env".ToLowerInvariant()] = $d
-    }
-    $rows = foreach ($p in @(& $P.ServerPrinters $Server $Credential | Where-Object { $_.Shared })) {
+    foreach ($d in @(& $P.RemoteDrivers $Session)) { $drivers["$([string]$d.Name)|$([string]$d.Environment)".ToLowerInvariant()] = $d }
+    $rows = foreach ($p in @(& $P.RemotePrinters $Session | Where-Object { $_.Shared })) {
         $name = Remove-AVDTuneControlCharacters ([string]$p.Name) 200; $drv = [string]$p.DriverName
         $d = $drivers["$drv|$($script:Arch)".ToLowerInvariant()]
         $problem = ''
         if (-not (Test-AVDTunePrinterShareName ([string]$p.ShareName))) { $problem = 'The share name is not valid.' }
-        elseif (-not $drv -or $drv -ne (Remove-AVDTuneControlCharacters $drv 200)) { $problem = 'The driver name is not valid.' }
+        elseif (-not (Test-AVDTunePrinterDriverName $drv)) { $problem = 'The driver name is not valid (wildcards, control characters or too long).' }
         elseif (-not $d) { $problem = "The server has no $($script:Arch) driver $drv." }
-        $pa = if ($d) { [bool]$d.PackageAware } else { $false }
-        $inf = if ($d) { [string]$d.InfPath } else { '' }
-        if (-not $problem -and -not $pa -and -not (Test-AVDTunePrinterInfPath $inf)) { $problem = 'The server names no valid INF path for this driver.' }
+        elseif (-not (Test-AVDTunePrinterInfPath ([string]$d.InfPath))) { $problem = 'The server names no valid INF path for this driver.' }
         [pscustomobject]@{ Name = $name; ShareName = [string]$p.ShareName; Driver = $drv; Version = $(if ($d) { ConvertTo-AVDTunePrinterVersion $d.Version } else { '' })
-            Architecture = $(if ($d) { $script:Arch } else { '' }); PackageAware = $pa; InfPath = $inf; Server = $Server.ToLowerInvariant(); Problem = $problem }
+            Architecture = $(if ($d) { $script:Arch } else { '' }); PackageAware = $(if ($d) { [bool]$d.PackageAware } else { $false }); InfPath = $(if ($d) { [string]$d.InfPath } else { '' })
+            Server = $Server.ToLowerInvariant(); Problem = $problem; Signer = ''; Thumbprint = ''; Whql = $false; Allowed = $false }
     }
-    [pscustomobject]@{ Server = $Server.ToLowerInvariant(); Printers = @($rows | Sort-Object Name); At = (Get-Date).ToString('o') }
+    [pscustomobject]@{ Server = $Server.ToLowerInvariant(); Printers = @($rows | Sort-Object Name); Warnings = @(); At = (Get-Date).ToString('o') }
 }
 
 function Get-AVDTunePrinterDriverPlan {
@@ -117,21 +148,184 @@ function Get-AVDTunePrinterDriverPlan {
     $use = @($Inventory.Printers | Where-Object { -not $_.Problem -and ($Selected.Count -eq 0 -or $_.Name -in $Selected) })
     @($use | Group-Object Driver | Sort-Object Name | ForEach-Object {
             $f = $_.Group[0]
-            [pscustomobject]@{ Name = $f.Driver; Version = $f.Version; Architecture = $f.Architecture; PackageAware = $f.PackageAware; InfPath = $f.InfPath; Server = $f.Server; Share = $f.ShareName; Printers = @($_.Group | ForEach-Object { $_.Name }) }
+            [pscustomobject]@{ Name = $f.Driver; Version = $f.Version; Architecture = $f.Architecture; PackageAware = $f.PackageAware; InfPath = $f.InfPath; Server = $f.Server
+                Signer = $f.Signer; Thumbprint = $f.Thumbprint; Whql = $f.Whql; Allowed = $f.Allowed; Printers = @($_.Group | ForEach-Object { $_.Name }) }
         })
 }
 
-function Get-AVDTunePrinterLocalVersion {
-    # The installed x64 driver of that name on the master: its version, or '' when it is not there
+function Compare-AVDTunePrinterPlan {
+    <# M1: the confirmed plan against a fresh read of the server. Returns the differences (empty: the same drivers with the same version, INF, package-aware claim and server). #>
+    param([object[]]$Confirmed, [object[]]$Fresh)
+    $byName = @{}; foreach ($f in @($Fresh)) { if ($f) { $byName[$f.Name] = $f } }
+    @(foreach ($c in @($Confirmed)) {
+            if (-not $c) { continue }
+            $f = $byName[[string]$c.Name]
+            if (-not $f) { "$($c.Name): no longer on the server"; continue }
+            foreach ($k in 'Version', 'InfPath', 'PackageAware', 'Server') { if ([string]$f.$k -ne [string]$c.$k) { "$($c.Name): $k is now '$($f.$k)', confirmed was '$($c.$k)'" } }
+        })
+}
+
+function Get-AVDTunePrinterLocal {
+    # The installed x64 driver of that name on the master (version, INF path, package-aware as installed), or $null
     param([Parameter(Mandatory)]$P, [Parameter(Mandatory)][string]$Name)
     $d = @(& $P.LocalDrivers | Where-Object { [string]$_.Name -eq $Name -and [string]$_.Environment -eq 'Windows x64' })[0]
-    if ($d) { ConvertTo-AVDTunePrinterVersion $d.Version } else { '' }
+    if (-not $d) { return $null }
+    [pscustomobject]@{ Version = (ConvertTo-AVDTunePrinterVersion $d.Version); InfPath = [string]$d.InfPath; PackageAware = [bool]$d.PackageAware
+        InStore = [regex]::IsMatch([string]$d.InfPath, '\A[A-Za-z]:\\Windows\\System32\\DriverStore\\FileRepository\\[^\\]+\\[^\\]+\.inf\z', 'IgnoreCase', $script:Rx) }
 }
 
 function Get-AVDTunePrinterDriverStatus {
-    # Read only: each driver of the plan with the installed version and whether it matches the server (the check after the install)
+    # Read only: each driver of the plan with the installed version, driver store and package-aware as installed; Warning when the server claimed package-aware and the installed driver is not
     param([Parameter(Mandatory)]$P, [object[]]$Drivers)
-    @($Drivers | ForEach-Object { $have = Get-AVDTunePrinterLocalVersion -P $P -Name $_.Name; [pscustomobject]@{ Name = $_.Name; Server = $_.Server; Version = $_.Version; Installed = $have; Ok = [bool]($have -and $have -eq $_.Version) } })
+    @($Drivers | Where-Object { $_ } | ForEach-Object {
+            $l = Get-AVDTunePrinterLocal -P $P -Name $_.Name
+            [pscustomobject]@{ Name = $_.Name; Server = $_.Server; Version = $_.Version; Installed = $(if ($l) { $l.Version } else { '' }); InStore = [bool]($l -and $l.InStore); PackageAware = [bool]($l -and $l.PackageAware)
+                Ok = [bool]($l -and $l.Version -eq $_.Version -and $l.InStore)
+                Warning = $(if ($l -and $_.PackageAware -and -not $l.PackageAware) { 'The server says package-aware; the installed driver is not.' } else { '' }) }
+        })
+}
+
+function Get-AVDTunePrinterPolicyWarnings {
+    # N4: Point and Print values on the master that switch the PrintNightmare protection off
+    param([Parameter(Mandatory)]$P)
+    $w = @()
+    $a = & $P.RegGet $script:PolicyKey 'NoWarningNoElevationOnInstall'; if ($a -and [string]$a.Value -eq '1') { $w += 'NoWarningNoElevationOnInstall = 1: users install drivers without a prompt.' }
+    $b = & $P.RegGet $script:PolicyKey 'UpdatePromptSettings'; if ($b -and [string]$b.Value -eq '2') { $w += 'UpdatePromptSettings = 2: driver updates without warning or elevation.' }
+    $c = & $P.RegGet $script:PolicyKey 'NoWarningNoElevationOnUpdate'; if ($c -and [string]$c.Value -eq '1') { $w += 'NoWarningNoElevationOnUpdate = 1: driver updates without a prompt.' }
+    @($w)
+}
+
+#endregion
+
+#region signers (allowlist) and the checked export
+
+function Get-AVDTunePrinterSignerPath([string]$Root) { Join-Path $Root 'config\printers-signers.json' }
+
+function Get-AVDTunePrinterSigners {
+    # config\printers-signers.json: publishers the administrator allowed besides WHQL (thumbprint 40 hex + subject); types checked, anything else is dropped
+    param([string]$Root = (Get-AVDTuneRoot))
+    $j = $null; try { $j = Read-AVDTuneJson (Get-AVDTunePrinterSignerPath $Root) } catch { }
+    @(@(Get-AVDTuneProp $j 'Signers') | Where-Object { $_ -and (Get-AVDTuneProp $_ 'Thumbprint') -is [string] -and (Get-AVDTuneProp $_ 'Subject') -is [string] -and [regex]::IsMatch($_.Thumbprint, '\A[0-9A-F]{40}\z', 'None', $script:Rx) } |
+            ForEach-Object { [pscustomobject]@{ Thumbprint = $_.Thumbprint; Subject = $_.Subject; AddedBy = [string](Get-AVDTuneProp $_ 'AddedBy'); At = [string](Get-AVDTuneProp $_ 'At') } })
+}
+
+function Add-AVDTunePrinterSigner {
+    # The administrator allows a publisher (after a confirmation in the window): thumbprint and subject of the catalog signer
+    param([string]$Root = (Get-AVDTuneRoot), [Parameter(Mandatory)][string]$Thumbprint, [Parameter(Mandatory)][string]$Subject, [string]$User)
+    if (-not [regex]::IsMatch($Thumbprint, '\A[0-9A-F]{40}\z', 'None', $script:Rx)) { throw 'Not a certificate thumbprint.' }
+    $list = @(Get-AVDTunePrinterSigners -Root $Root | Where-Object { $_.Thumbprint -ne $Thumbprint })
+    $list += [pscustomobject]@{ Thumbprint = $Thumbprint; Subject = (Remove-AVDTuneControlCharacters $Subject 300); AddedBy = (Remove-AVDTuneControlCharacters $User 80); At = (Get-Date).ToString('o') }
+    Write-AVDTuneFile (Get-AVDTunePrinterSignerPath $Root) ([ordered]@{ Schema = 1; Signers = @($list) } | ConvertTo-Json -Depth 4)
+}
+
+function Get-AVDTunePrinterDnPart([string]$Dn, [string]$Key) {
+    if (-not $Dn) { return '' }
+    try { $lines = (New-Object System.Security.Cryptography.X509Certificates.X500DistinguishedName($Dn)).Decode([System.Security.Cryptography.X509Certificates.X500DistinguishedNameFlags]::UseNewLines) -split "\r?\n" } catch { return '' }
+    $v = @(foreach ($l in $lines) { $i = $l.IndexOf('='); if ($i -gt 0 -and $l.Substring(0, $i).Trim() -ceq $Key) { $l.Substring($i + 1).Trim() } })
+    if ($v.Count -eq 1) { $v[0] } else { '' }
+}
+
+function Test-AVDTunePrinterExportFiles {
+    # N1 before the copy: the list of the export on the server (relative paths, sizes) within the limits, no path that leaves the folder, no link
+    param([object[]]$Files)
+    $f = @($Files | Where-Object { $_ })
+    if ($f.Count -eq 0) { return 'The export is empty.' }
+    if ($f.Count -gt $script:MaxFiles) { return "The export has $($f.Count) entries (more than $($script:MaxFiles))." }
+    $sum = 0L; foreach ($x in $f) { $sum += [int64]$x.Length }
+    if ($sum -gt $script:MaxBytes) { return "The export is $sum bytes (more than $($script:MaxBytes))." }
+    $bad = @($f | Where-Object { [string]$_.Path -match '(\A|\\)\.\.(\\|\z)|\A[\\/]|:' -or [bool]$_.Link })
+    if ($bad.Count) { return "The export has a path that is not allowed or a link: $($bad[0].Path)." }
+    ''
+}
+
+function Test-AVDTunePrinterLocalTree {
+    # N1 after the copy: every entry below the local folder (walked without following links), no link, within the limits
+    param([Parameter(Mandatory)]$P, [Parameter(Mandatory)][string]$Folder)
+    $t = @(& $P.LocalTree $Folder)
+    $base = $Folder.TrimEnd('\') + '\'
+    $out = @($t | Where-Object { -not ([string]$_.Path).StartsWith($base, [StringComparison]::OrdinalIgnoreCase) })
+    if ($out.Count) { return "$($out[0].Path) is not below the work folder." }
+    $links = @($t | Where-Object { $_.Link }); if ($links.Count) { return "$($links[0].Path) is a link." }
+    if ($t.Count -gt $script:MaxFiles) { return 'Too many entries in the copy.' }
+    $sum = 0L; foreach ($x in $t) { $sum += [int64]$x.Length }; if ($sum -gt $script:MaxBytes) { return 'The copy is too large.' }
+    ''
+}
+
+function Test-AVDTunePrinterCatalog {
+    <#
+        H2: the INF (top level of the copy) names its catalog (CatalogFile.NTamd64, else CatalogFile; a plain file name on the top level); the catalog must have a valid
+        Authenticode signature with chain. WHQL (signer CN "Microsoft Windows Hardware Compatibility Publisher", O Microsoft Corporation, issuer O Microsoft Corporation) is
+        allowed; another signer only when its thumbprint is in -Signers. Returns Ok, Reason, Signer (subject), Thumbprint, Whql.
+    #>
+    param([Parameter(Mandatory)]$P, [Parameter(Mandatory)][string]$Folder, [Parameter(Mandatory)][string]$InfLeaf, [object[]]$Signers = @())
+    $r = [ordered]@{ Ok = $false; Reason = ''; Signer = ''; Thumbprint = ''; Whql = $false }
+    $top = @(& $P.LocalTree $Folder | Where-Object { -not $_.Link -and (Split-Path ([string]$_.Path) -Parent).TrimEnd('\') -ieq $Folder.TrimEnd('\') } | ForEach-Object { Split-Path ([string]$_.Path) -Leaf })
+    if ($InfLeaf -notin $top) { $r.Reason = "The INF $InfLeaf is not on the top level of the export."; return [pscustomobject]$r }
+    $text = [string](& $P.ReadInf (Join-Path $Folder $InfLeaf))
+    if ($text.Length -gt 1MB) { $r.Reason = 'The INF is larger than 1 MB.'; return [pscustomobject]$r }
+    $cat = ''
+    foreach ($key in 'CatalogFile\.NTamd64', 'CatalogFile') {
+        $m = [regex]::Match($text, "(?im)^[ \t]*$key[ \t]*=[ \t]*([^\s;]+)", 'None', $script:Rx)
+        if ($m.Success) { $cat = $m.Groups[1].Value.Trim('"'); break }
+    }
+    if (-not $cat -or -not [regex]::IsMatch($cat, '\A[^\\/:*?"<>|]{1,200}\.cat\z', 'IgnoreCase', $script:Rx)) { $r.Reason = 'The INF names no catalog file: an unsigned driver is not installed.'; return [pscustomobject]$r }
+    if ($cat -notin $top) { $r.Reason = "The catalog $cat is not on the top level of the export."; return [pscustomobject]$r }
+    $s = & $P.CatalogSignature (Join-Path $Folder $cat)
+    $r.Signer = [string]$s.Subject; $r.Thumbprint = ([string]$s.Thumbprint).ToUpperInvariant()
+    if ([string]$s.Status -ne 'Valid' -or -not [bool]$s.ChainOk) { $r.Reason = "The catalog $cat has no valid signature ($($s.Status))."; return [pscustomobject]$r }
+    $r.Whql = (Get-AVDTunePrinterDnPart $s.Subject 'CN') -ceq $script:Whql -and (Get-AVDTunePrinterDnPart $s.Subject 'O') -ceq 'Microsoft Corporation' -and (Get-AVDTunePrinterDnPart $s.Issuer 'O') -ceq 'Microsoft Corporation'
+    if (-not $r.Whql -and @($Signers | Where-Object { $_.Thumbprint -eq $r.Thumbprint }).Count -eq 0) { $r.Reason = "Signed by $($r.Signer), not WHQL and not allowed by the administrator."; return [pscustomobject]$r }
+    $r.Ok = $true
+    [pscustomobject]$r
+}
+
+function Get-AVDTunePrinterCheckedExport {
+    <#
+        The export of exactly one driver (its INF on the server) into a new admin-only local folder, checked (limits, links, catalog signature). The remote folder is removed
+        in finally. Returns Folder (the caller removes it), Inf (top-level path) and Catalog (Test-AVDTunePrinterCatalog). Throws when the export or the copy is not allowed.
+    #>
+    param([Parameter(Mandatory)]$P, [Parameter(Mandatory)]$Session, [Parameter(Mandatory)]$Driver, [string]$Root = (Get-AVDTuneRoot), [object[]]$Signers = @())
+    if (-not (Test-AVDTunePrinterInfPath $Driver.InfPath)) { throw "The server names no valid INF path for $($Driver.Name)." }
+    $local = & $P.WorkFolder $Root
+    $ok = $false
+    try {
+        $exp = & $P.RemoteExport $Session $Driver.InfPath
+        try {
+            $bad = Test-AVDTunePrinterExportFiles $exp.Files
+            if ($bad) { throw $bad }
+            & $P.RemoteCopy $Session $exp $local
+        }
+        finally { & $P.RemoteRemove $Session $exp.Folder }
+        $bad = Test-AVDTunePrinterLocalTree -P $P -Folder $local
+        if ($bad) { throw $bad }
+        $leaf = Split-Path $Driver.InfPath -Leaf
+        $cat = Test-AVDTunePrinterCatalog -P $P -Folder $local -InfLeaf $leaf -Signers $Signers
+        $ok = $true
+        [pscustomobject]@{ Folder = $local; Inf = (Join-Path $local $leaf); Catalog = $cat }
+    }
+    finally { if (-not $ok) { & $P.RemoveTree $local } }
+}
+
+function Add-AVDTunePrinterSignatures {
+    <#
+        Read (no change of the master): every driver of the inventory is exported and checked once; the printers get Signer, Thumbprint, Whql and Allowed. A driver without
+        a valid signature becomes a Problem of its printers; one signed by a publisher that is not allowed stays selectable (the window asks the administrator). The local
+        copies are removed again.
+    #>
+    param([Parameter(Mandatory)]$P, [Parameter(Mandatory)]$Session, [Parameter(Mandatory)]$Inventory, [string]$Root = (Get-AVDTuneRoot), [object[]]$Signers = @())
+    $seen = @{}
+    foreach ($pr in @($Inventory.Printers | Where-Object { -not $_.Problem })) {
+        if (-not $seen.ContainsKey($pr.Driver)) {
+            $res = $null
+            try { $x = Get-AVDTunePrinterCheckedExport -P $P -Session $Session -Driver ([pscustomobject]@{ Name = $pr.Driver; InfPath = $pr.InfPath }) -Root $Root -Signers $Signers; $res = $x.Catalog; & $P.RemoveTree $x.Folder }
+            catch { $res = [pscustomobject]@{ Ok = $false; Reason = $_.Exception.Message; Signer = ''; Thumbprint = ''; Whql = $false } }
+            $seen[$pr.Driver] = $res
+        }
+        $c = $seen[$pr.Driver]
+        $pr.Signer = $c.Signer; $pr.Thumbprint = $c.Thumbprint; $pr.Whql = $c.Whql; $pr.Allowed = [bool]$c.Ok
+        if (-not $c.Ok -and -not ($c.Thumbprint -and $c.Reason -like '*not allowed by the administrator*')) { $pr.Problem = $c.Reason }
+    }
+    $Inventory
 }
 
 #endregion
@@ -143,12 +337,12 @@ function Get-AVDTunePrinterUndoPath([string]$Root) { Join-Path $Root 'config\pri
 function Get-AVDTunePrinterJournalPath([string]$Root) { Join-Path $Root 'config\printers-trustedhosts.json' }
 
 function Get-AVDTunePrinterState {
-    # config\printers.json: the chosen servers and the drivers AVDTune installed (name, version, server, printers, time); types checked, anything else is dropped
+    # config\printers.json: the chosen servers and the drivers AVDTune installed (name, version, server, signer, printers, time); types checked, anything else is dropped
     param([string]$Root = (Get-AVDTuneRoot))
     $j = $null; try { $j = Read-AVDTuneJson (Get-AVDTunePrinterStatePath $Root) } catch { }
     $servers = @(@(Get-AVDTuneProp $j 'Servers') | Where-Object { $_ -is [string] -and (Test-AVDTunePrinterServerName $_) } | ForEach-Object { $_.ToLowerInvariant() } | Select-Object -Unique)
     $drivers = @(@(Get-AVDTuneProp $j 'Drivers') | Where-Object { $_ -and (Get-AVDTuneProp $_ 'Name') -is [string] -and (Get-AVDTuneProp $_ 'Version') -is [string] -and (Test-AVDTunePrinterServerName ([string](Get-AVDTuneProp $_ 'Server'))) } |
-            ForEach-Object { [pscustomobject]@{ Name = $_.Name; Version = $_.Version; Server = ([string]$_.Server).ToLowerInvariant(); Printers = @(@(Get-AVDTuneProp $_ 'Printers') | Where-Object { $_ -is [string] }); At = [string](Get-AVDTuneProp $_ 'At') } })
+            ForEach-Object { [pscustomobject]@{ Name = $_.Name; Version = $_.Version; Server = ([string]$_.Server).ToLowerInvariant(); Signer = [string](Get-AVDTuneProp $_ 'Signer'); Printers = @(@(Get-AVDTuneProp $_ 'Printers') | Where-Object { $_ -is [string] }); At = [string](Get-AVDTuneProp $_ 'At') } })
     [pscustomobject]@{ Servers = $servers; Drivers = $drivers }
 }
 
@@ -189,14 +383,8 @@ function Compare-AVDTunePrinterDrivers {
     @($rows)
 }
 
-#endregion
-
-#region TrustedHosts (append, restore exactly, journal)
-
-function Test-AVDTunePrinterTrustedHost([string]$List, [string]$Server) { @($List -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ -eq '*' -or $_ -ieq $Server }).Count -gt 0 }
-
 function Repair-AVDTunePrinterTrustedHosts {
-    <# A journal left by a crash: TrustedHosts is set back to the value it had before AVDTune appended the server, then the journal goes. Returns $true when it repaired. #>
+    <# A journal of the first version (it appended the server to TrustedHosts): TrustedHosts is set back to the value before, then the journal goes. Returns $true when it repaired. #>
     param([Parameter(Mandatory)]$P, [string]$Root = (Get-AVDTuneRoot))
     $path = Get-AVDTunePrinterJournalPath $Root
     if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return $false }
@@ -208,58 +396,26 @@ function Repair-AVDTunePrinterTrustedHosts {
     $true
 }
 
-function Invoke-AVDTunePrinterTrustedHost {
-    <#
-        Runs -Block with the server in TrustedHosts: when it is not covered yet (exact name or *), the old value goes into a journal first, the server is appended,
-        and in finally the old value is written back exactly; the journal goes only after that worked (else the next start repairs it).
-    #>
-    param([Parameter(Mandatory)]$P, [string]$Root = (Get-AVDTuneRoot), [Parameter(Mandatory)][string]$Server, [Parameter(Mandatory)][scriptblock]$Block)
-    if (-not (Test-AVDTunePrinterServerName $Server)) { throw 'Not a host name.' }
-    [void](Repair-AVDTunePrinterTrustedHosts -P $P -Root $Root)
-    $old = [string](& $P.TrustedHostsGet)
-    if (Test-AVDTunePrinterTrustedHost $old $Server) { return (& $Block) }
-    $path = Get-AVDTunePrinterJournalPath $Root
-    Write-AVDTuneFile $path ([ordered]@{ Schema = 1; Old = $old; Server = $Server; At = (Get-Date).ToString('o') } | ConvertTo-Json)
-    $restored = $false
-    try {
-        & $P.TrustedHostsSet $(if ($old.Trim()) { "$old,$Server" } else { $Server })
-        & $Block
-    }
-    finally {
-        try { & $P.TrustedHostsSet $old; $restored = $true } catch { }
-        if ($restored) { [void](Remove-AVDTuneTreeSafe -Path $path) }
-    }
-}
-
 #endregion
 
 #region install and steps
 
-function Install-AVDTunePrinterDriverExport {
+function Install-AVDTunePrinterDriver {
     <#
-        A driver that is not package-aware: only its own INF and files are exported on the server (WinRM session of the adapter, TrustedHosts appended and restored),
-        copied into an admin-only work folder below the state folder, added to the driver store (pnputil /add-driver) and installed as printer driver. The remote
-        and the local temporary folder are removed in finally.
+        H2: one driver of the confirmed plan: export of only its INF over the Kerberos session, checked copy, the catalog signed by the confirmed signer (thumbprint) and
+        allowed, then pnputil /add-driver and Add-PrinterDriver. The local folder is removed in finally. No install by a printer connection.
     #>
-    param([Parameter(Mandatory)]$P, [Parameter(Mandatory)]$Driver, $Credential, [string]$Root = (Get-AVDTuneRoot))
-    if (-not (Test-AVDTunePrinterInfPath $Driver.InfPath)) { throw "The server names no valid INF path for $($Driver.Name)." }
-    $local = & $P.WorkFolder $Root
+    param([Parameter(Mandatory)]$P, [Parameter(Mandatory)]$Driver, $Credential, [string]$Root = (Get-AVDTuneRoot), [object[]]$Signers = @())
+    if (-not (Test-AVDTunePrinterDriverName $Driver.Name)) { throw 'The driver name is not valid.' }
+    $p = $P; $d = $Driver; $r = $Root; $sg = $Signers
+    $x = Invoke-AVDTunePrinterSession -P $P -Server $Driver.Server -Credential $Credential -Block { param($s) Get-AVDTunePrinterCheckedExport -P $p -Session $s -Driver $d -Root $r -Signers $sg }.GetNewClosure()
     try {
-        $p = $P; $d = $Driver; $cred = $Credential; $dest = $local
-        Invoke-AVDTunePrinterTrustedHost -P $P -Root $Root -Server $Driver.Server -Block {
-            $s = & $p.RemoteOpen $d.Server $cred
-            try {
-                $folder = & $p.RemoteExport $s $d.InfPath
-                try { & $p.RemoteCopy $s $folder $dest } finally { & $p.RemoteRemove $s $folder }
-            }
-            finally { & $p.RemoteClose $s }
-        }.GetNewClosure()
-        $inf = & $P.FindInf $local (Split-Path $Driver.InfPath -Leaf)
-        if (-not $inf) { throw "The export of $($Driver.Name) has no $(Split-Path $Driver.InfPath -Leaf)." }
-        & $P.AddDriverPackage $inf
+        if (-not $x.Catalog.Ok) { throw $x.Catalog.Reason }
+        if ($x.Catalog.Thumbprint -ne [string]$Driver.Thumbprint) { throw "The catalog of $($Driver.Name) is now signed by $($x.Catalog.Signer) ($($x.Catalog.Thumbprint)), not by the confirmed signer: not installed." }
+        & $P.AddDriverPackage $x.Inf
         & $P.AddDriver $Driver.Name
     }
-    finally { & $P.RemoveTree $local }
+    finally { & $P.RemoveTree $x.Folder }
 }
 
 function Get-AVDTunePrinterStepId([string]$Name) {
@@ -269,25 +425,18 @@ function Get-AVDTunePrinterStepId([string]$Name) {
 
 function Get-AVDTunePrinterDriverTitle($Driver) {
     $pr = @($Driver.Printers); $list = $(if ($pr.Count) { @($pr[0..([Math]::Min(8, $pr.Count) - 1)]) -join ', ' } else { '-' }) + $(if ($pr.Count -gt 8) { ", +$($pr.Count - 8)" } else { '' })
-    "Printer driver $($Driver.Name) $($Driver.Version) from $($Driver.Server) (printers: $list)"
+    $who = Get-AVDTunePrinterDnPart ([string]$Driver.Signer) 'CN'; if (-not $who) { $who = [string]$Driver.Signer }
+    "Printer driver $($Driver.Name) $($Driver.Version) from $($Driver.Server), signed by $who (printers: $list)"
 }
 
 function New-AVDTunePrinterDriverStep {
-    <# The step of one driver: Test = installed with the version of the server (also the check after Apply); Apply = connection or export; Undo only for a driver AVDTune added. #>
-    param([Parameter(Mandatory)]$Driver, [Parameter(Mandatory)]$P, $Credential, [string]$Root = (Get-AVDTuneRoot), $Before)
-    $d = $Driver; $cred = $Credential; $r = $Root; $pp = $P
-    $test = { param($m) $v = Get-AVDTunePrinterLocalVersion -P $pp -Name $d.Name; @{ Compliant = [bool]($v -and $v -eq $d.Version); State = $(if ($v) { $v } else { 'absent' }) } }.GetNewClosure()
-    $apply = {
-        param($m)
-        if ($d.PackageAware) {
-            if (-not (Test-AVDTunePrinterShareName $d.Share)) { throw 'The share name is not valid.' }
-            & $pp.Connect $d.Server $d.Share $cred
-            & $pp.Disconnect $d.Server $d.Share
-        }
-        else { Install-AVDTunePrinterDriverExport -P $pp -Driver $d -Credential $cred -Root $r }
-    }.GetNewClosure()
+    <# The step of one driver: Test = installed with the version of the server and its INF in the driver store (also the check after Apply); Apply = checked export; Undo only for a driver AVDTune added. #>
+    param([Parameter(Mandatory)]$Driver, [Parameter(Mandatory)]$P, $Credential, [string]$Root = (Get-AVDTuneRoot), $Before, [object[]]$Signers = @())
+    $d = $Driver; $cred = $Credential; $r = $Root; $pp = $P; $sg = $Signers
+    $test = { param($m) $l = Get-AVDTunePrinterLocal -P $pp -Name $d.Name; @{ Compliant = [bool]($l -and $l.Version -eq $d.Version -and $l.InStore); State = $(if ($l) { "$($l.Version)$(if (-not $l.InStore) { ' (INF not in the driver store)' }), package-aware: $($l.PackageAware)" } else { 'absent' }) } }.GetNewClosure()
+    $apply = { param($m) Install-AVDTunePrinterDriver -P $pp -Driver $d -Credential $cred -Root $r -Signers $sg }.GetNewClosure()
     $undo = $null
-    if ($Before -and -not [bool](Get-AVDTuneProp $Before 'Existed')) { $undo = { param($m) & $pp.RemoveDriver $d.Name }.GetNewClosure() }
+    if ($Before -and -not [bool](Get-AVDTuneProp $Before 'Existed')) { $undo = { param($m) if (-not (Test-AVDTunePrinterDriverName $d.Name)) { throw 'The driver name is not valid.' }; & $pp.RemoveDriver $d.Name }.GetNewClosure() }
     New-AVDTuneStep -Id (Get-AVDTunePrinterStepId $d.Name) -Section Printers -Title (Get-AVDTunePrinterDriverTitle $d) -Why 'Users must not install printer drivers (Point and Print restriction): every driver of the print server is in the image.' -Risk Medium -Test $test -Apply $apply -Undo $undo
 }
 
@@ -368,9 +517,10 @@ function New-AVDTunePrinterUndoStep {
 
 function Invoke-AVDTunePrinterRun {
     <#
-        Apply: the drivers of -Drivers (Get-AVDTunePrinterDriverPlan) and, with -Policy, the Point and Print policies for the chosen servers (saved ones plus these), through
-        Invoke-AVDTune. The state before is recorded for undo (an older record stays); config\printers.json gets every driver that is in place afterwards; Check lists
-        each driver with the installed and the server version. Undo: the policies back to the record, drivers AVDTune added removed.
+        Apply: the drivers of -Drivers (the confirmed plan: Name, Version, InfPath, PackageAware, Server, Signer, Thumbprint, Printers) and, with -Policy, the Point and Print
+        policies for the chosen servers (saved ones plus these), through Invoke-AVDTune. The state before is recorded for undo (an older record stays); config\printers.json
+        gets every driver that is in place afterwards; Check lists each driver as installed. Undo: the policies back to the record, drivers AVDTune added removed.
+        The caller compares the plan with a fresh read first (Compare-AVDTunePrinterPlan).
     #>
     [CmdletBinding()]
     param([Parameter(Mandatory)]$Machine, [Parameter(Mandatory)]$P, [string]$Root = (Get-AVDTuneRoot), [ValidateSet('Apply', 'Undo')][string]$Mode = 'Apply', [object[]]$Drivers = @(),
@@ -378,12 +528,15 @@ function Invoke-AVDTunePrinterRun {
     if (-not (Test-AVDTuneWriteAllowed)) { throw 'The snapshot gate is not confirmed: nothing is installed.' }
     $state = Get-AVDTunePrinterState -Root $Root
     $undo = Read-AVDTunePrinterUndo $Root
+    $signers = @(Get-AVDTunePrinterSigners -Root $Root)
     $steps = New-Object System.Collections.ArrayList; $byStep = @{}
     if ($Mode -eq 'Apply') {
         foreach ($d in @($Drivers)) {
-            if (-not (Test-AVDTunePrinterServerName $d.Server)) { throw "Not a host name: $($d.Server)." }
-            $s = New-AVDTunePrinterDriverStep -Driver $d -P $P -Credential $Credential -Root $Root
-            [void]$steps.Add($s); $byStep[$s.Id] = @{ Driver = $d; Existed = [bool](Get-AVDTunePrinterLocalVersion -P $P -Name $d.Name) }
+            if (-not (Test-AVDTunePrinterServerName $d.Server)) { throw "Not the FQDN of a print server: $($d.Server)." }
+            if (-not (Test-AVDTunePrinterDriverName $d.Name)) { throw "Not a valid driver name: $($d.Name)." }
+            if (-not [regex]::IsMatch([string]$d.Thumbprint, '\A[0-9A-F]{40}\z', 'None', $script:Rx)) { throw "$($d.Name) has no confirmed signer." }
+            $s = New-AVDTunePrinterDriverStep -Driver $d -P $P -Credential $Credential -Root $Root -Signers $signers
+            [void]$steps.Add($s); $byStep[$s.Id] = @{ Driver = $d; Existed = [bool](Get-AVDTunePrinterLocal -P $P -Name $d.Name) }
         }
         $servers = @(@($state.Servers) + @($Drivers | ForEach-Object { $_.Server }) | Where-Object { $_ } | ForEach-Object { $_.ToLowerInvariant() } | Select-Object -Unique)
         $policyBefore = $null
@@ -393,7 +546,7 @@ function Invoke-AVDTunePrinterRun {
         if ($undo.Policy) { foreach ($s in (New-AVDTunePrinterPolicyUndoSteps -P $P -Before $undo.Policy)) { [void]$steps.Add($s) } }
         foreach ($k in @($undo.Drivers.Keys)) {
             $rec = $undo.Drivers[$k]
-            $d = [pscustomobject]@{ Name = [string]$rec.Name; Version = [string]$rec.Version; Server = [string]$rec.Server; Share = ''; PackageAware = $true; InfPath = ''; Printers = @() }
+            $d = [pscustomobject]@{ Name = [string]$rec.Name; Version = [string]$rec.Version; Server = [string]$rec.Server; InfPath = ''; PackageAware = $false; Signer = ''; Thumbprint = ''; Printers = @() }
             $orig = New-AVDTunePrinterDriverStep -Driver $d -P $P -Root $Root -Before $rec
             if ($orig.Undo) { $s = New-AVDTunePrinterUndoStep -Step $orig; [void]$steps.Add($s); $byStep[$s.Id] = @{ Key = $k } }
         }
@@ -410,7 +563,7 @@ function Invoke-AVDTunePrinterRun {
             if (-not $info) { continue }
             $d = $info.Driver
             if ($r.Status -eq 'Changed' -and -not $info.Existed -and -not $undo.Drivers.ContainsKey($d.Name.ToLowerInvariant())) { $undo.Drivers[$d.Name.ToLowerInvariant()] = [ordered]@{ Name = $d.Name; Version = $d.Version; Server = $d.Server; Existed = $false }; $changed = $true }
-            if ($r.Status -in 'Changed', 'Unchanged') { $list["$($d.Server)|$($d.Name)".ToLowerInvariant()] = [pscustomobject]@{ Name = $d.Name; Version = $d.Version; Server = $d.Server; Printers = @($d.Printers); At = $now } }
+            if ($r.Status -in 'Changed', 'Unchanged') { $list["$($d.Server)|$($d.Name)".ToLowerInvariant()] = [pscustomobject]@{ Name = $d.Name; Version = $d.Version; Server = $d.Server; Signer = [string]$d.Signer; Printers = @($d.Printers); At = $now } }
         }
         Save-AVDTunePrinterState -Root $Root -State ([pscustomobject]@{ Servers = $servers; Drivers = @($list.Values | Sort-Object Server, Name) })
         $check = @(Get-AVDTunePrinterDriverStatus -P $P -Drivers $Drivers)
@@ -432,11 +585,9 @@ function Invoke-AVDTunePrinterRun {
 
 function New-AVDTunePrinterAdapter {
     <#
-        The real adapter. NOT exercised by the checks beyond construction: written from the documentation, to be tried on a throw-away VM (the master is not domain joined:
-        the domain account is used through LogonUser LOGON32_LOGON_NEW_CREDENTIALS, so the spooler RPC and the connection authenticate as that account; the password
-        goes from the SecureString into unmanaged memory only for that call and is zeroed).
+        The real adapter. NOT exercised by the checks beyond construction and command resolution: written from the documentation, to be tried on a throw-away VM.
+        WinRM with Kerberos only (FQDN, UPN, -Authentication Kerberos): the server is authenticated by the KDC, no NTLM, no TrustedHosts. The PSCredential lives in memory only.
     #>
-    $u = New-AVDTuneUpdateAdapter
     $c = New-AVDTuneCustomAdapter
     $a = [ordered]@{ Kind = 'Real' }
     $a.RegGet = $c.RegGet; $a.RegSet = $c.RegSet; $a.RegRemove = $c.RegRemove
@@ -445,89 +596,91 @@ function New-AVDTunePrinterAdapter {
         $base = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::LocalMachine, [Microsoft.Win32.RegistryView]::Registry64)
         try { $k = $base.OpenSubKey(($Path -replace '^HKLM:\\', ''), $false); if (-not $k) { return @() }; try { @($k.GetValueNames() | Where-Object { $_ }) } finally { $k.Dispose() } } finally { $base.Dispose() }
     }
-    $as = {
-        # runs Block as the domain account for the network (LOGON32_LOGON_NEW_CREDENTIALS = 9, provider WINNT50 = 3); local rights stay the administrator's
-        param($Credential, [scriptblock]$Block, [object[]]$ArgList = @())
-        if (-not $Credential) { return (& $Block @ArgList) }
-        Initialize-AVDTunePrinterLogon
-        $parts = ([string]$Credential.User).Split([char]92, 2)
-        $dom = if ($parts.Count -eq 2) { $parts[0] } else { '' }; $usr = $parts[-1]
-        $ptr = [Runtime.InteropServices.Marshal]::SecureStringToGlobalAllocUnicode($Credential.Password)
-        $token = [IntPtr]::Zero
-        try { if (-not [AVDTune.PrinterLogon]::LogonUser($usr, $dom, $ptr, 9, 3, [ref]$token)) { throw "The domain account was refused (Win32 error $([Runtime.InteropServices.Marshal]::GetLastWin32Error()))." } }
-        finally { [Runtime.InteropServices.Marshal]::ZeroFreeGlobalAllocUnicode($ptr) }
-        try {
-            $ctx = [Security.Principal.WindowsIdentity]::Impersonate($token)
-            try { & $Block @ArgList } finally { $ctx.Undo(); $ctx.Dispose() }
-        }
-        finally { [void][AVDTune.PrinterLogon]::CloseHandle($token) }
-    }
     $map = { param($d) [pscustomobject]@{ Name = [string]$d.Name; Environment = [string]$d.PrinterEnvironment; Version = $d.DriverVersion; InfPath = [string]$d.InfPath; PackageAware = $(if ($d.PSObject.Properties['IsPackageAware']) { [bool]$d.IsPackageAware } else { $false }) } }
-    $a.ServerPrinters = { param($Server, $Credential) & $as $Credential { param($s) @(Get-Printer -ComputerName $s -ErrorAction Stop | ForEach-Object { [pscustomobject]@{ Name = [string]$_.Name; ShareName = [string]$_.ShareName; Shared = [bool]$_.Shared; DriverName = [string]$_.DriverName } }) } @($Server) }.GetNewClosure()
-    $a.ServerDrivers = { param($Server, $Credential) & $as $Credential { param($s, $mp) @(Get-PrinterDriver -ComputerName $s -ErrorAction Stop | ForEach-Object { & $mp $_ }) } @($Server, $map) }.GetNewClosure()
-    $a.LocalDrivers = { @(Get-PrinterDriver -ErrorAction Stop | ForEach-Object { & $map $_ }) }.GetNewClosure()
-    $a.Connect = { param($Server, $Share, $Credential) & $as $Credential { param($n) Add-Printer -ConnectionName $n -ErrorAction Stop } @("\\$Server\$Share") }.GetNewClosure()
-    $a.Disconnect = { param($Server, $Share) Remove-Printer -Name "\\$Server\$Share" -ErrorAction Stop }
-    $a.AddDriver = { param($Name) Add-PrinterDriver -Name $Name -ErrorAction Stop }
-    $a.RemoveDriver = { param($Name) Remove-PrinterDriver -Name $Name -ErrorAction Stop }
-    $a.AddDriverPackage = {
-        param($Inf)
-        $exe = Join-Path (Get-AVDTuneSystemFolder System) 'pnputil.exe'
-        $trust = Test-AVDTuneToolTrust -Signature (& $u.VerifySignature $exe) -Name 'pnputil.exe'
-        if (-not $trust.Ok) { throw "pnputil is not trusted: $($trust.Reason)" }
-        $r = & $u.Run $exe @('/add-driver', $Inf) 300
-        if ([int]$r.ExitCode -notin 0, 259, 3010) { throw "pnputil /add-driver ended with $($r.ExitCode): $(Remove-AVDTuneControlCharacters ([string]$r.Output) 300)" }
-    }.GetNewClosure()
-    $a.TrustedHostsGet = { [string](Get-Item -LiteralPath 'WSMan:\localhost\Client\TrustedHosts' -ErrorAction Stop).Value }
-    $a.TrustedHostsSet = { param($Value) Set-Item -LiteralPath 'WSMan:\localhost\Client\TrustedHosts' -Value $Value -Force -ErrorAction Stop }
     $a.RemoteOpen = {
-        # WinRM with Negotiate (message encryption of the session); the PSCredential lives in memory only
         param($Server, $Credential)
+        if (-not $Credential) { throw 'The domain account is needed for the print server.' }
         $pc = New-Object Management.Automation.PSCredential([string]$Credential.User, $Credential.Password)
-        New-PSSession -ComputerName $Server -Credential $pc -Authentication Negotiate -ErrorAction Stop
+        New-PSSession -ComputerName $Server -Credential $pc -Authentication Kerberos -ErrorAction Stop
     }
+    $a.RemoteClose = { param($Session) if ($Session) { Remove-PSSession -Session $Session -ErrorAction SilentlyContinue } }
+    $a.RemotePrinters = { param($Session) @(Invoke-Command -Session $Session -ErrorAction Stop -ScriptBlock { @(Get-Printer -ErrorAction Stop | ForEach-Object { [pscustomobject]@{ Name = [string]$_.Name; ShareName = [string]$_.ShareName; Shared = [bool]$_.Shared; DriverName = [string]$_.DriverName } }) }) }
+    $a.RemoteDrivers = { param($Session) @(Invoke-Command -Session $Session -ErrorAction Stop -ScriptBlock { @(Get-PrinterDriver -ErrorAction Stop | ForEach-Object { [pscustomobject]@{ Name = [string]$_.Name; PrinterEnvironment = [string]$_.PrinterEnvironment; DriverVersion = $_.DriverVersion; InfPath = [string]$_.InfPath; IsPackageAware = $(if ($_.PSObject.Properties['IsPackageAware']) { [bool]$_.IsPackageAware } else { $false }) } }) }) | ForEach-Object { & $map $_ } }.GetNewClosure()
+    $a.LocalDrivers = { @(Get-PrinterDriver -ErrorAction Stop | ForEach-Object { & $map $_ }) }.GetNewClosure()
     $a.RemoteExport = {
-        # a fixed block on the server: the oem<n>.inf of exactly this driver (by its INF path in the driver store) exported into a new folder below the Windows temp folder
+        # a fixed block on the server: a new folder below Windows\Temp with an ACL for Administrators and SYSTEM only (N2), the oem<n>.inf of exactly this driver exported into it;
+        # returns the folder, the folder that holds the INF (the copy source: INF and catalog on its top level) and its entries (relative path, size, link). A failure removes the folder.
         param($Session, $InfPath)
         Invoke-Command -Session $Session -ArgumentList $InfPath -ErrorAction Stop -ScriptBlock {
             param($Inf)
-            $oem = @(Get-WindowsDriver -Online -ErrorAction Stop | Where-Object { $_.OriginalFileName -eq $Inf })[0]
-            if (-not $oem) { throw 'The driver package of this INF is not in the driver store of the server.' }
             $win = [Environment]::GetFolderPath('Windows')
             $dir = Join-Path $win ('Temp\AVDTune-' + [guid]::NewGuid().ToString('N').Substring(0, 12))
-            [void](New-Item -ItemType Directory -Path $dir -ErrorAction Stop)
-            $r = & (Join-Path ([Environment]::GetFolderPath('System')) 'pnputil.exe') /export-driver $oem.Driver $dir
-            if ($LASTEXITCODE -ne 0) { throw "pnputil /export-driver ended with $LASTEXITCODE." }
-            $dir
+            $sec = New-Object Security.AccessControl.DirectorySecurity
+            $sec.SetAccessRuleProtection($true, $false)
+            foreach ($sid in 'S-1-5-32-544', 'S-1-5-18') { $sec.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule((New-Object Security.Principal.SecurityIdentifier $sid), 'FullControl', 'ContainerInherit, ObjectInherit', 'None', 'Allow'))) }
+            if ([IO.Directory]::Exists($dir)) { throw "$dir exists already." }
+            [void][IO.Directory]::CreateDirectory($dir, $sec)
+            try {
+                $oem = @(Get-WindowsDriver -Online -ErrorAction Stop | Where-Object { $_.OriginalFileName -eq $Inf })[0]
+                if (-not $oem) { throw 'The driver package of this INF is not in the driver store of the server.' }
+                $null = & (Join-Path ([Environment]::GetFolderPath('System')) 'pnputil.exe') /export-driver $oem.Driver $dir
+                if ($LASTEXITCODE -ne 0) { throw "pnputil /export-driver ended with $LASTEXITCODE." }
+                $leaf = Split-Path $Inf -Leaf
+                $hit = @(Get-ChildItem -LiteralPath $dir -Recurse -File -Filter $leaf -ErrorAction Stop)[0]
+                if (-not $hit) { throw "The export has no $leaf." }
+                $src = $hit.DirectoryName
+                $files = @(Get-ChildItem -LiteralPath $src -Recurse -Force -ErrorAction Stop | ForEach-Object { [pscustomobject]@{ Path = $_.FullName.Substring($src.Length).TrimStart('\'); Length = $(if ($_.PSIsContainer) { 0 } else { $_.Length }); Link = (($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) } })
+                [pscustomobject]@{ Folder = $dir; Source = $src; Files = $files }
+            }
+            catch { [IO.Directory]::Delete($dir, $true); throw }
+        } | ForEach-Object { [pscustomobject]@{ Folder = [string]$_.Folder; Source = [string]$_.Source; Files = @($_.Files) } }
+    }
+    $a.RemoteCopy = { param($Session, $Export, $Local) Copy-Item -FromSession $Session -Path ([string]$Export.Source + '\*') -Destination $Local -Recurse -ErrorAction Stop }
+    $a.RemoteRemove = {
+        # N2: only a folder AVDTune made: full path, parent exactly Windows\Temp, name AVDTune-<12 hex>; .NET deletes a link inside as a link and does not follow it
+        param($Session, $Folder)
+        Invoke-Command -Session $Session -ArgumentList $Folder -ErrorAction Stop -ScriptBlock {
+            param($f)
+            $full = [IO.Path]::GetFullPath($f)
+            $parent = [IO.Path]::GetDirectoryName($full)
+            if ($parent -ne (Join-Path ([Environment]::GetFolderPath('Windows')) 'Temp') -or [IO.Path]::GetFileName($full) -cnotmatch '\AAVDTune-[0-9a-f]{12}\z') { throw "$full is not a folder of AVDTune: not deleted." }
+            if ([IO.Directory]::Exists($full)) { [IO.Directory]::Delete($full, $true) }
         }
     }
-    $a.RemoteCopy = { param($Session, $Folder, $Local) Copy-Item -FromSession $Session -Path "$Folder\*" -Destination $Local -Recurse -ErrorAction Stop }
-    $a.RemoteRemove = { param($Session, $Folder) Invoke-Command -Session $Session -ArgumentList $Folder -ErrorAction Stop -ScriptBlock { param($f) if ($f -like (Join-Path ([Environment]::GetFolderPath('Windows')) 'Temp\AVDTune-*')) { [IO.Directory]::Delete($f, $true) } } }   # on the server; .NET deletes a link inside as a link and does not follow it
-    $a.RemoteClose = { param($Session) if ($Session) { Remove-PSSession -Session $Session -ErrorAction SilentlyContinue } }
-    $a.WorkFolder = { param($Root) $d = Join-Path $Root ('temp\printers\' + [guid]::NewGuid().ToString('N').Substring(0, 12)); New-AVDTuneWorkFolder -Path $d -Base $Root; $d }
-    $a.FindInf = {
-        param($Folder, $Leaf)
-        $hit = @(Get-ChildItem -LiteralPath $Folder -Recurse -File -Filter $Leaf -Attributes !ReparsePoint -ErrorAction Stop)[0]
-        if ($hit) { $hit.FullName } else { $null }
+    $a.WorkFolder = { param($Root) New-AVDTuneDownloadFolder -Root $Root -Prefix 'printers' }
+    $a.LocalTree = {
+        # every entry below the folder, walked without following links (a link is listed and not entered)
+        param($Folder)
+        $out = New-Object System.Collections.ArrayList
+        $todo = New-Object System.Collections.Stack; $todo.Push((New-Object IO.DirectoryInfo $Folder))
+        while ($todo.Count -gt 0 -and $out.Count -le 5000) {
+            foreach ($e in $todo.Pop().GetFileSystemInfos()) {
+                $link = ($e.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0
+                [void]$out.Add([pscustomobject]@{ Path = $e.FullName; Length = $(if ($e -is [IO.FileInfo]) { $e.Length } else { 0 }); Link = $link })
+                if ($e -is [IO.DirectoryInfo] -and -not $link) { $todo.Push($e) }
+            }
+        }
+        @($out)
     }
+    $a.ReadInf = { param($Path) $f = New-Object IO.FileInfo $Path; if ($f.Length -gt 1MB) { throw 'The INF is larger than 1 MB.' }; [IO.File]::ReadAllText($Path) }
+    $a.CatalogSignature = {
+        param($Path)
+        $s = Get-AuthenticodeSignature -LiteralPath $Path
+        $chainOk = $false
+        if ($s.SignerCertificate) { $ch = New-Object Security.Cryptography.X509Certificates.X509Chain; try { $chainOk = $ch.Build($s.SignerCertificate) } finally { $ch.Dispose() } }
+        [pscustomobject]@{ Status = [string]$s.Status; ChainOk = $chainOk; Subject = $(if ($s.SignerCertificate) { [string]$s.SignerCertificate.Subject } else { '' }); Issuer = $(if ($s.SignerCertificate) { [string]$s.SignerCertificate.Issuer } else { '' }); Thumbprint = $(if ($s.SignerCertificate) { [string]$s.SignerCertificate.Thumbprint } else { '' }) }
+    }
+    $a.AddDriverPackage = {
+        # pnputil of the Windows folder through the central start (Open-AVDTuneSystemProgram: Windows signature, held while it runs; job object, timeout)
+        param($Inf)
+        $r = Invoke-AVDTuneProgram -File (Join-Path (Get-AVDTuneSystemFolder System) 'pnputil.exe') -Arguments @('/add-driver', $Inf) -TimeoutSeconds 300
+        if ([int]$r.ExitCode -notin 0, 259, 3010) { throw "pnputil /add-driver ended with $($r.ExitCode): $(Remove-AVDTuneControlCharacters ([string]$r.Output) 300)" }
+    }
+    $a.AddDriver = { param($Name) Add-PrinterDriver -Name $Name -ErrorAction Stop }
+    $a.RemoveDriver = { param($Name) Remove-PrinterDriver -Name $Name -ErrorAction Stop }
+    $a.TrustedHostsSet = { param($Value) Set-Item -LiteralPath 'WSMan:\localhost\Client\TrustedHosts' -Value $Value -Force -ErrorAction Stop }
     $a.RemoveTree = { param($Path) if ($Path -and (Test-Path -LiteralPath $Path)) { [void](Remove-AVDTuneTreeSafe -Path $Path) } }
     [pscustomobject]$a
-}
-
-function Initialize-AVDTunePrinterLogon {
-    if ('AVDTune.PrinterLogon' -as [type]) { return }
-    Add-Type -TypeDefinition @'
-using System;
-using System.Runtime.InteropServices;
-namespace AVDTune {
-    public static class PrinterLogon {
-        [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
-        public static extern bool LogonUser(string user, string domain, IntPtr password, int logonType, int provider, out IntPtr token);
-        [DllImport("kernel32.dll", SetLastError = true)]
-        public static extern bool CloseHandle(IntPtr handle);
-    }
-}
-'@
 }
 
 #endregion

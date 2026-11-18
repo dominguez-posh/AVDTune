@@ -445,6 +445,7 @@ try {
     $startAllowed = @{
         'AVDTune.psm1|New-AVDTuneChildStartInfo' = 'builds the one ProcessStartInfo'
         'AVDTune.psm1|Invoke-AVDTuneChildProcess' = 'the one Process.Start (job object, timeout)'
+        'AVDTune.Printers.psm1|New-AVDTunePrinterAdapter' = 'pnputil /export-driver inside the fixed Invoke-Command block that runs on the print server (#86): AVDTune and its central start are not there; full path from the server''s System folder; pnputil on the master goes through Invoke-AVDTuneProgram'
         'AVDTune.psm1|Move-AVDTuneStateToQuarantine' = 'icacls /setowner on the state folder that is being set aside: the central start needs the verified <state>\temp, which does not exist at that moment; full path from SystemDirectory, root only (no /T)'
     }
     $productFiles = @(Get-ChildItem -LiteralPath (Join-Path $repo 'Modules') -Filter '*.psm1') + @(Get-ChildItem -LiteralPath $repo -Filter '*.ps1') + @(Get-ChildItem -LiteralPath (Join-Path $repo 'Watermark') -Filter '*.ps1') + @(Get-ChildItem -LiteralPath (Join-Path $repo 'Shared') -Recurse -File | Where-Object { $_.Extension -in '.ps1', '.psm1' })
