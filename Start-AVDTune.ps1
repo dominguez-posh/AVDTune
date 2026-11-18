@@ -93,6 +93,7 @@ Import-Module (Join-Path $PSScriptRoot 'Modules\AVDTune.Recording.psm1') -Force 
 Import-Module (Join-Path $PSScriptRoot 'Modules\AVDTune.Printers.psm1') -Force   # printer drivers from a print server (#86): after Custom, whose registry adapter it uses
 Import-Module (Join-Path $PSScriptRoot 'Modules\AVDTune.Release.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'Modules\AVDTune.SharePoint.psm1') -Force   # change log, software list and environment document to SharePoint (#89)
+Import-Module (Join-Path $PSScriptRoot 'Modules\AVDTune.Export.psm1') -Force   # the export ZIP (#91), uses the secret table of AVDTune.SharePoint
 # Test runs of several checkouts can run at the same time: one test mutex per test state folder
 $mutexName = if ($script:TestMode) {
     $sha = [System.Security.Cryptography.SHA256]::Create()
@@ -469,6 +470,7 @@ function Update-ProtocolView {
     $ui.CmbVersion.Visibility = ConvertTo-Vis $change
     $ui.PanelNote.Visibility = ConvertTo-Vis $change
     if (Get-Variable -Scope Script -Name SpReady -ValueOnly -ErrorAction SilentlyContinue) { Show-SpCard $change }   # the SharePoint card (#89)
+    if (Get-Variable -Scope Script -Name ExpReady -ValueOnly -ErrorAction SilentlyContinue) { Show-ExportCard $change }   # export and old snapshots (#91)
     if ($change) {
         $keep = Get-ChangeLogVersion
         $versions = @(Get-AVDTuneChangeLogVersions -Root $script:StateRoot)
@@ -547,6 +549,7 @@ $script:ReadyFakeArm = $(if ($script:TestMode) { $script:Services.Arm } else { $
 . (Join-Path $PSScriptRoot 'AVDTune-Printers.ps1')   # the Printers page (#86): printer drivers from a print server; uses the App Masking and Software helpers
 . (Join-Path $PSScriptRoot 'AVDTune-Seal.ps1')
 . (Join-Path $PSScriptRoot 'AVDTune-SharePoint.ps1')   # the SharePoint card of the change log (#89); the finish uses its upload
+. (Join-Path $PSScriptRoot 'AVDTune-Export.ps1')   # export and old snapshots of the change log view (#91)
 . (Join-Path $PSScriptRoot 'AVDTune-Environment.ps1')
 . (Join-Path $PSScriptRoot 'AVDTune-Optimization.ps1')
 . (Join-Path $PSScriptRoot 'AVDTune-Language.ps1')   # the Language and region page (issue 56)

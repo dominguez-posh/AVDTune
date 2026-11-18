@@ -32,7 +32,7 @@ function Update-SealView {
         $t = New-Object System.Windows.Controls.TextBlock; $t.Text = [string][char]0x2022 + ' ' + $line; $t.TextWrapping = 'Wrap'; $t.Margin = '0,2,0,2'
         [void]$ui.PanelSealSteps.Children.Add($t)
     }
-    $ui.TxtSealLater.Text = 'Not part of this step yet: restart first and resume, DISM component cleanup, the imaging tool and snapshot housekeeping. With "upload at the finish" on (Protocol page, change log) the change log goes to SharePoint before the finish starts.'
+    $ui.TxtSealLater.Text = 'Not part of this step yet: restart first and resume, DISM component cleanup and the imaging tool (old snapshots: Protocol page, change log view). With "upload at the finish" on (Protocol page, change log) the change log goes to SharePoint before the finish starts.'
 }
 function Start-SealJob {
     foreach ($other in 'SealJob', 'UpdJob', 'BenchJob', 'ReadyJob', 'OverviewJob', 'FslJob', 'OptJob', 'OptRun') { if (Get-Variable -Scope Script -Name $other -ValueOnly -ErrorAction SilentlyContinue) { throw 'Another operation is still running.' } }

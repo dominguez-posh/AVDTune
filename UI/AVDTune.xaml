@@ -207,7 +207,7 @@
 
                         <!-- ============ Protocol and change log ============ -->
                         <Grid x:Name="PageProtocol" Visibility="Collapsed" Margin="32,24,32,0">
-                            <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+                            <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
                             <Grid>
                                 <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
                                 <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
@@ -240,6 +240,8 @@
                             <TextBlock x:Name="TxtProtocolState" Grid.Row="3" Style="{DynamicResource Hint}" Margin="0,10,0,18"/>
                             <!-- the SharePoint card (#89): built in code by AVDTune-SharePoint.ps1, shown with the change log -->
                             <ContentControl x:Name="HostSp" Grid.Row="4" Visibility="Collapsed"/>
+                            <!-- export and old snapshots (#91): built in code by AVDTune-Export.ps1, shown with the change log -->
+                            <ContentControl x:Name="HostExport" Grid.Row="5" Visibility="Collapsed" Margin="0,16,0,0"/>
                         </Grid>
 
                         <!-- ============ Updates ============ -->

@@ -2,7 +2,29 @@
 
 Golden Master management for Azure Virtual Desktop: setup, updates, update block for users, optimization, benchmark, watermark, cleanup and finish, protocol and change log. Runs locally on the Golden Master. Same look as PackTune.
 
-Status: phases 1 and 2 (shell, engine, state, protocol and change log, Overview, start sequence, updates and update block) the readiness analysis, and the FSLogix side (phase 3a: setup, function test, storage check). See docs/plans/avdtune.md.
+![Tour](docs/screenshots/demo.webp)
+
+The tour and the screenshots in `docs/screenshots` come from the GUI smoke test with demo data (fake machine, fake sign-in and fake Azure; `Tests\Record-Demo.ps1`).
+
+Status (November 2026): every page of the plan is built except **Setup** (the guided order of phase 6 is still a placeholder; its parts are the pages below); phase 7 adds the export, the housekeeping of old snapshots and this tour. What still needs a real test VM or is open is named in `docs/plans/avdtune.md` and in the page documents below.
+
+## Pages
+
+- **Overview**: start sequence (sign-in, domain, first-run questions, snapshot gate with name confirmation), image version, readiness analysis, integrity and updates of AVDTune, rollback hint.
+- **Language and region**, **Office**, **VDI components**, **Optimization**, **User experience**: the setup of the master in a fixed order, each step with Test/Apply/Undo, its reason and source.
+- **Updates** and **Update block**: Windows, Office, Edge, Teams, OneDrive, FSLogix, Defender and software updates; updates hidden for users with a maintenance mode.
+- **Software** (library, winget, Chocolatey, custom software with recording), **Customizations** (shortcuts, fonts, web apps, own steps), **Printers** (drivers from a print server).
+- **FSLogix**, **Environment** (storage account, share, private endpoint, identity), **App Masking** (rules with groups of the domain, Public Desktop).
+- **Benchmark**: baseline and every image version, comparison per version, benchmark-only mode.
+- **Cleanup and finish**: healthcheck, cleanup, tokens removed, version closed; the image is then made from a copy by the imaging tool (Hydra for Azure Virtual Desktop or another one). The master is never sysprepped.
+- **Protocol and change log**: session protocol, change log per image version with notes, SharePoint of the environment, export and old snapshots.
+
+## Export and old snapshots (phase 7, issue #91)
+
+On the Protocol page, change log view:
+
+- **Export (ZIP)**: the environment document, `environment.json`, the change log of every version (JSON and Markdown), the benchmark comparison, the customizations, printer drivers and App Masking rules in one ZIP (`Modules/AVDTune.Export.psm1`). Every file passes the secret table of `AVDTune.SharePoint` (JSON values whose name sounds secret are left out, a file in which the table still finds something is left out and named in `README.txt` of the ZIP). Written to `<state>\exports` or a chosen local folder: no part of the path may be a link, the ZIP is written to a new temp file and moved over the target in one step. An export is not imported again (not in the plan).
+- **Old snapshots of the OS disk**: "Read snapshots" lists the snapshots of this OS disk with the reason why each one stays or can go, reads the image versions of the chosen gallery image definition and records new ones (made by the imaging tool after a finish) in the change log of the finished version (gallery version, date, regions). A snapshot can go only when it is finished, not the confirmed snapshot of the gate, not the snapshot of the running image version, made by AVDTune (tag `CreatedWith=AVDTune`) or named by the snapshot name pattern, not one of the newest N, older than the minimum age (settings, default 2 and 7 days) and older than an image version of the gallery. "Delete marked snapshots" asks with the list of names, needs the open snapshot gate and an open image version, reads everything from Azure again, deletes only those names and writes one change log entry each. Without the right `Microsoft.Compute/snapshots/delete` (role Disk Snapshot Contributor or Contributor) Azure's 403 is shown with the missing right and nothing else is tried.
 
 ## Layout
 
@@ -20,6 +42,7 @@ Status: phases 1 and 2 (shell, engine, state, protocol and change log, Overview,
 - `Modules/AVDTune.SharePoint.psm1`, `AVDTune-SharePoint.ps1` (card on the Protocol page, change log view, issue 89): the change log goes to the list "AVDTune Change Log" of the SharePoint site of the environment (created with fixed columns, only entries the list does not have yet), the recorded custom software and the installed programs to the list "AVDTune Software" with the documentation and record of every recording in the folder `AVDTune\<version>` of the document library, and the environment document (HTML, also saved in `<state>\documents`). Microsoft Graph only, with the Sites token of the sign-in (Sites.Selected with write on that site); nothing that looks like a token, password or key is uploaded. Local records whose upload SharePoint still confirms (size and hash) can be removed before the finish. **Make the site readable for administrators only**: the environment document names Azure resources, the domain and OU, print servers and user names. Without a site everything stays local.
 - `AVDTune-Theme.ps1`, `AVDTune-Protocol.ps1`: AVDTune's own layer on top of the shared PackTune code.
 - `AVDTune-UiText.ps1`, `UI\Strings.en.json`, `UI\Strings.de.json`: the language of the window (EN/DE switch in the title bar, saved like the theme; the protocol follows the same switch). The files are data (flat JSON, string values only, keys `[a-z0-9.]+`); English is the fallback. In XAML an element gets its texts through its `Uid` (`<uid>` text, `<uid>.tip`, `<uid>.name`), in code through `Get-AVDTuneText 'key' args` (alias `T`). Pages that are not translated yet keep their English texts.
+- `Modules/AVDTune.Export.psm1`, `AVDTune-Export.ps1` (cards on the Protocol page, issue 91): the export ZIP and the housekeeping of old snapshots (the logic of the snapshots in `AVDTune.Snapshot.psm1`).
 - `Shared/`: copies from PackTune, never edited here. `Tools\Sync-FromPackTune.ps1` copies them and writes `Shared/SOURCE.json` (PackTune commit, SHA256 per file). Change shared code in PackTune first, then sync.
 - `Modules/AVDTune.Release.psm1`, `AVDTune-Release.ps1`, `VERSION`: integrity check, update check, update, repair and rollback against GitHub releases (card "Integrity and updates" on the Overview), see Releases below. `Tools\New-AVDTuneRelease.ps1` and `.github/workflows/release.yml` build a release.
 - State on the master: `C:\ProgramData\AVDTune` (Administrators and SYSTEM only).
@@ -45,6 +68,8 @@ On the master the tool lives side by side in `C:\Program Files\AVDTune\<version>
 Run from Windows PowerShell, or from Git Bash with `env -u PSModulePath powershell.exe -NoProfile -File ...`:
 
 - `Tests\Check-All.ps1` runs all fast checks (`-Smoke` adds the GUI smoke test).
-- `Check-Shared.ps1`, `Check-AVDTune.ps1`, `Check-Readiness.ps1`, `Check-FSLogix.ps1`, `Check-Storage.ps1`, `Check-Software.ps1` (search, install, update, remove and the library against the fake package store and fake winget/choco), `Check-Custom.ps1` (customizations: validation, Test/Apply/Undo of every kind, re-apply after a rollback, library files pinned by SHA256), `Check-WebApp.ps1` (web apps: URL rules, Edge policy list merge and exact undo, launch of the shortcut), `Check-Start.ps1` (start sequence against the fakes in `Tests\Fakes\FakeServices.ps1`), `Check-Protocol.ps1`, `Check-Theme.ps1`, `Check-UiText.ps1` (language files: same keys and placeholders, typed loader, fallback, no fixed text in the translated shell), `Check-Release.ps1` (release script, integrity, update, repair, rollback against a fake HTTP adapter and temp folders), `Check-PublicContent.ps1`; `Invoke-GuiSmoke.ps1` drives the window off-screen with a fake machine and a temporary state folder.
+- `Check-Shared.ps1`, `Check-AVDTune.ps1`, `Check-Readiness.ps1`, `Check-FSLogix.ps1`, `Check-Storage.ps1`, `Check-Software.ps1` (search, install, update, remove and the library against the fake package store and fake winget/choco), `Check-Custom.ps1` (customizations: validation, Test/Apply/Undo of every kind, re-apply after a rollback, library files pinned by SHA256), `Check-WebApp.ps1` (web apps: URL rules, Edge policy list merge and exact undo, launch of the shortcut), `Check-Start.ps1` (start sequence against the fakes in `Tests\Fakes\FakeServices.ps1`), `Check-Protocol.ps1`, `Check-Theme.ps1`, `Check-UiText.ps1` (language files: same keys and placeholders, typed loader, fallback, no fixed text in the translated shell), `Check-Release.ps1` (release script, integrity, update, repair, rollback against a fake HTTP adapter and temp folders), `Check-PublicContent.ps1`, `Check-Export.ps1` (export ZIP, secret filter, path without links; snapshot housekeeping and gallery versions against the fake ARM); `Invoke-GuiSmoke.ps1` drives the window off-screen with a fake machine and a temporary state folder.
+
+`Tests\Record-Demo.ps1` makes the tour (`docs/screenshots/demo.webp`) and the screenshots from a smoke run; it needs `img2webp` from libwebp (`winget install Google.Libwebp`). The pictures show demo data only; check them by hand before a commit (the public content check does not read images).
 
 Checks use fakes only. Real runs belong on a throwaway Windows 11 multi-session VM, never on a developer machine.

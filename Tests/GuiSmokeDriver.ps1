@@ -1530,6 +1530,51 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
             }
         }
         $true } }
+    @{ Name = 'export and old snapshots (#91)'; Do = {
+        # the cards of the change log view: the export ZIP (test mode: into <state>\exports) and the housekeeping of old OS disk snapshots against the fake ARM
+        $click = { param($b) $b.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent))) }
+        Show-Page 'Protocol'; $ui.SegChange.IsChecked = $true; Update-ProtocolView; $window.UpdateLayout()
+        Test-Smoke 'export: the cards are shown with the change log, the snapshot list is not read yet' ($ui.HostExport.Visibility -eq 'Visible' -and $ui.TxtSnapList.Text -eq (T 'exp.snap.notread') -and -not $ui.BtnSnapDelete.IsEnabled) $ui.TxtSnapList.Text
+        & $click $ui.BtnExport
+        $zip = @(Get-ChildItem -LiteralPath (Join-Path $script:StateRoot 'exports') -Filter 'avdtune-export-*.zip' -ErrorAction SilentlyContinue)
+        $names = @(); if ($zip.Count -eq 1) { Add-Type -AssemblyName System.IO.Compression.FileSystem; $z = [IO.Compression.ZipFile]::OpenRead($zip[0].FullName); try { $names = @($z.Entries | ForEach-Object FullName) } finally { $z.Dispose() } }
+        Test-Smoke 'export: one ZIP in <state>\exports with the document, environment.json, the change log and the README, a protocol entry' ($names -contains 'environment.html' -and $names -contains 'settings/environment.json' -and $names -contains 'changelog/changelog.json' -and $names -contains 'README.txt' -and $script:ExpLast -like "*$($zip[0].Name)*" -and @($script:Protocol.Actions | Where-Object { $_.Subject -like 'Export saved:*' }).Count -ge 1) "$($names -join ', ') | $script:ExpLast"
+        # three old snapshots by AVDTune and one by hand, a gallery version made after them (the imaging tool), the definition chosen
+        $arm = $script:Services.Arm; $st = $arm.Store
+        $rgPath = "/subscriptions/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee/resourceGroups/$($st.ResourceGroup)/providers/Microsoft.Compute/snapshots"
+        foreach ($o in @(@('gm-test01_osdisk-01.09.2026-1', 80, $true), @('gm-test01_osdisk-01.10.2026-1', 48, $true), @('gm-test01_osdisk-15.10.2026-1', 34, $true), @('manual-before-update', 70, $false))) {
+            $id = "$rgPath/$($o[0])"
+            $st.Snapshots[$id.ToLowerInvariant()] = @{ id = $id; name = $o[0]; location = $st.Location; tags = $(if ($o[2]) { @{ CreatedWith = 'AVDTune'; ImageVersion = '2026.09.001' } } else { @{} }); sku = @{ name = 'Standard_LRS' }
+                properties = @{ timeCreated = (Get-Date).AddDays(-$o[1]).ToUniversalTime().ToString('o'); provisioningState = 'Succeeded'; incremental = $true; creationData = @{ createOption = 'Copy'; sourceResourceId = $st.DiskId } } }
+        }
+        $sub = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'
+        $st.Search.Galleries = @(@($st.Search.Galleries) | Where-Object { $_ }) + @(@{ Sub = $sub; Rg = 'rg-images'; Name = 'galSmoke'; Images = @(@{ Name = 'avd-gm'; Versions = @(@{ Name = '1.0.4'; Published = (Get-Date).AddDays(-20); Regions = @('westeurope') }) }) })
+        $script:SmokeSnapGalleryBefore = Get-AVDTuneEnvironmentGallery (Get-AVDTuneEnvironment $script:StateRoot)
+        [void](Set-AVDTuneEnvironmentGallery -Root $script:StateRoot -DefinitionId "/subscriptions/$sub/resourceGroups/rg-images/providers/Microsoft.Compute/galleries/galSmoke/images/avd-gm" -Label 'galSmoke/avd-gm' -User 'smoke')
+        # the sign-in ended in an earlier step: the read says so; then the fake token of the sign-in step is given back for this step only
+        & $click $ui.BtnSnapRead
+        Test-Smoke 'old snapshots: without a sign-in nothing is read' (@($script:SnapPlan).Count -eq 0) $script:LastToast
+        $script:SmokeArmToken = ${function:Get-ArmToken}
+        function script:Get-ArmToken { 'fake-arm-token-value' }
+        try {
+            if (-not (Test-AVDTuneWriteAllowed)) { Open-AVDTuneWriteGate -SnapshotId 'snap-smoke' -ConfirmedBy 'Alex Example'; $script:SmokeSnapGate = $true }
+            $ui.TxtSnapKeep.Text = '1'; $ui.TxtSnapDays.Text = '30'
+            & $click $ui.BtnSnapRead; $window.UpdateLayout()
+            $offer = @($script:SnapPlan | Where-Object Delete | ForEach-Object Name)
+            Test-Smoke 'old snapshots: the three old AVDTune snapshots are offered, the newest and the one made by hand are kept, each with its reason' ($offer.Count -eq 3 -and $offer -notcontains 'manual-before-update' -and $ui.TxtSnapList.Text.Contains('[x] gm-test01_osdisk-01.09.2026-1') -and $ui.TxtSnapList.Text.Contains('[ ] manual-before-update') -and $ui.BtnSnapDelete.IsEnabled -and (Get-AVDTuneSnapshotCleanupSettings -Root $script:StateRoot).MinAgeDays -eq 30) "$($offer -join ',') | $($script:LastToast)"
+            Save-SmokeShot '50-protocol-export-snapshots'
+            & $click $ui.BtnSnapDelete
+            $removed = @(Get-AVDTuneChangeLog -Root $script:StateRoot | Where-Object { $_.Category -eq 'Snapshot' -and $_.ChangeType -eq 'Removed' })
+            Test-Smoke 'old snapshots: the deletion asks with the names, deletes exactly those in Azure, one change log entry each, the list is read again' ($script:ConfirmAsked -like '*gm-test01_osdisk-01.09.2026-1*' -and $st.Deleted.Count -eq 3 -and $removed.Count -eq 3 -and $script:SnapLast -like '3 *' -and @($script:SnapPlan).Count -eq 0 -and (Get-AVDTuneRunningWriter) -eq '') "$($st.Deleted.Count) $($removed.Count) $($script:SnapLast)"
+        }
+        finally {
+            Set-Item -Path function:script:Get-ArmToken -Value $script:SmokeArmToken
+            if ($script:SmokeSnapGate) { Close-AVDTuneWriteGate }
+            [void](Set-AVDTuneEnvironmentGallery -Root $script:StateRoot -DefinitionId $script:SmokeSnapGalleryBefore -User 'smoke')
+        }
+        $ui.SegSession.IsChecked = $true
+        Show-Page 'Overview'
+        $true } }
     @{ Name = 'task bar'; Do = {
         # the flows of the earlier steps went through the one mechanism; wait (at most 30 s) until nothing runs any more
         if (-not $script:TaskStepStart) { $script:TaskStepStart = Get-Date }
