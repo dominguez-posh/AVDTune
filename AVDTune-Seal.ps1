@@ -21,18 +21,18 @@ function Update-SealView {
     $pair = if ($script:SealJob) { @('AccentSubtle', 'Primary', 'Running') } elseif ($crash) { @('ErrorBg', 'Danger', 'Interrupted') } elseif ([bool]$state.Sealed) { @('SuccessBg', 'Success', 'Finished') } elseif ($gate.Allowed) { @('SuccessBg', 'Success', 'Allowed') } else { @('WarningBg', 'Warning', 'Locked') }
     Set-Brush $ui.PillSeal ([System.Windows.Controls.Border]::BackgroundProperty) $pair[0]
     $ui.TxtSealPill.Text = $pair[2]; Set-Brush $ui.TxtSealPill ([System.Windows.Controls.TextBlock]::ForegroundProperty) $pair[1]
-    $ui.TxtSealGate.Text = $(if ($gate.Allowed) { "Image version $($gate.Version) can be finished: the healthcheck is green or confirmed and nothing changed after it." } else { 'Locked. ' + (@($gate.Reasons) -join ' ') })
+    $ui.TxtSealGate.Text = $(if ($gate.Allowed) { (T 'seal.gate.ok' $($gate.Version)) } else { (T 'seal.gate.locked') + (@($gate.Reasons) -join ' ') })
     $ui.TxtSealNotes.Text = (@($gate.Notes) -join ' ')
     $ui.BtnSealRun.IsEnabled = ($gate.Allowed -and -not $script:SealJob)
     $ui.BoxSealCrash.Visibility = ConvertTo-Vis ([bool]$crash -and -not $script:SealJob)   # a running finish has an active journal by design
-    if ($crash) { $ui.TxtSealCrash.Text = "The finish of $(([datetime]$crash.Started).ToString('yyyy-MM-dd HH:mm')) (by $($crash.User)) did not end properly: AVDTune was closed or stopped in the middle. Windows Update or BITS may still be stopped. Repair starts them again as they were and writes a change log entry. A restart of the master starts the services as well." }
+    if ($crash) { $ui.TxtSealCrash.Text = (T 'seal.crash' $(([datetime]$crash.Started).ToString('yyyy-MM-dd HH:mm')) $($crash.User)) }
     if ($script:SealLast) { $ui.TxtSealResult.Text = [string]$script:SealLast }
     $ui.PanelSealSteps.Children.Clear()
     foreach ($line in 'Delete the files directly in the Windows temp folder and the error report folders (sub folders and links are not entered and are counted as skipped; a read-only file with more than one link stays; a file in use stays).', 'Empty the Windows Update download cache (Windows Update and BITS are stopped for it and started again at once).', 'Remove the downloaded benchmark tool (diskspd).', 'Update block on, no maintenance mode left.', 'Remove every token and the sign-in profiles, and check that no token is in AVDTune files (only the state folder is checked, not export locations you chose yourself).', 'Close the image version in state.json; write the run record and the change log.') {
         $t = New-Object System.Windows.Controls.TextBlock; $t.Text = [string][char]0x2022 + ' ' + $line; $t.TextWrapping = 'Wrap'; $t.Margin = '0,2,0,2'
         [void]$ui.PanelSealSteps.Children.Add($t)
     }
-    $ui.TxtSealLater.Text = 'Not part of this step yet: restart first and resume, DISM component cleanup, sending the change log to SharePoint, the imaging tool and snapshot housekeeping.'
+    $ui.TxtSealLater.Text = (T 'seal.notyet')
 }
 function Start-SealJob {
     foreach ($other in 'SealJob', 'UpdJob', 'BenchJob', 'ReadyJob', 'OverviewJob', 'FslJob', 'OptJob', 'OptRun') { if (Get-Variable -Scope Script -Name $other -ValueOnly -ErrorAction SilentlyContinue) { throw 'Another operation is still running.' } }
@@ -110,7 +110,7 @@ Add-Click $ui.BtnSealRun {
     Start-SealJob
 }
 Add-Click $ui.BtnSealRepair {
-    if (-not (Test-AVDTuneWriteAllowed)) { throw 'Read only: confirm a snapshot of today on the Overview first.' }; Assert-NoOtherWriter -AllowSealed   # the repair puts back what a crash left lifted, also after the version was closed (#50)
+    if (-not (Test-AVDTuneWriteAllowed)) { throw (T 'ready.err.readonly') }; Assert-NoOtherWriter -AllowSealed   # the repair puts back what a crash left lifted, also after the version was closed (#50)
     $hold = Enter-AVDTuneWriter -Kind 'finish-repair' -Title 'Repairing the finish' -AllowSealed   # the central lock (#49) while the repair writes
     try { $r = Repair-AVDTuneFinishCrash -Machine $script:Machine -Root $script:StateRoot -User ([string]$env:USERNAME) } finally { Exit-AVDTuneWriter $hold }
     [void](Add-AVDTuneProtocolNote -Protocol $script:Protocol -Group 'seal' -Subject 'Finish repaired' -Note $r.Message); Save-Protocol

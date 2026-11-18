@@ -195,12 +195,16 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         $script:LangTexts.de.Remove('title.close.tip')
         Test-Smoke 'language: an unknown key shows itself, a missing German key falls back to English' ((Get-AVDTuneText 'does.not.exist') -eq 'does.not.exist' -and (Get-AVDTuneText 'title.close.tip') -eq 'Close') $null
         $script:LangTexts.de['title.close.tip'] = 'Schlie' + [string][char]0x00DF + 'en'
-        Test-Smoke 'language: a page that is not translated yet keeps its English texts' ($ui.BtnUpdScan.Content -eq 'Search') $ui.BtnUpdScan.Content
+        # #70 step 2: the pages in German too - XAML of the main window and of the pages with their own XAML (Uid), texts with data made in code (T)
+        Test-Smoke 'language: the pages in German (Updates, FSLogix, Software, VDI, Environment; text and automation name)' ($ui.BtnUpdScan.Content -eq 'Suchen' -and [System.Windows.Automation.AutomationProperties]::GetName($ui.BtnUpdScan) -eq 'Nach Updates suchen' -and $ui.BtnFslInstall.Content -eq 'FSLogix installieren oder aktualisieren' -and $ui.BtnSwRefresh.Content -eq 'Aktualisieren' -and $ui.BtnVdiTest.Content -eq 'Testen' -and $ui.BtnEnvPlan.Content -eq 'Plan erstellen') "$($ui.BtnUpdScan.Content) / $($ui.BtnFslInstall.Content) / $($ui.BtnSwRefresh.Content) / $($ui.BtnVdiTest.Content) / $($ui.BtnEnvPlan.Content)"
+        Show-Page 'Benchmark'; $window.UpdateLayout()
+        Test-Smoke 'language: a page view made in code is German after the switch (Benchmark result card)' ($ui.TxtBenchTitle.Text -eq 'Ergebnis' -or $ui.TxtBenchTitle.Text -like 'Host-Score (*') $ui.TxtBenchTitle.Text
+        Show-Page 'Overview'; $window.UpdateLayout()
         Save-SmokeShot '03b-overview-german'
         $ui.BtnLang.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
         $window.UpdateLayout()
         $saved = Get-Content (Join-Path $script:StateRoot 'config\ui.json') -Raw | ConvertFrom-Json
-        Test-Smoke 'language: back to English, everything as before' ((Get-AVDTuneLanguage) -eq 'en' -and $ui.BtnRefresh.Content -eq 'Refresh' -and $ui.TxtChipVersion.Text -eq 'no image version' -and (Find-Text $ui.NavList 'Overview') -and (Find-Text $ui.PanelHealth 'AVD agent') -and (Get-AVDTuneText 'task.idle') -eq 'No task running' -and $saved.Language -eq 'en') $null
+        Test-Smoke 'language: back to English, everything as before' ((Get-AVDTuneLanguage) -eq 'en' -and $ui.BtnRefresh.Content -eq 'Refresh' -and $ui.TxtChipVersion.Text -eq 'no image version' -and $ui.BtnUpdScan.Content -eq 'Search' -and $ui.BtnSwRefresh.Content -eq 'Refresh' -and (Find-Text $ui.NavList 'Overview') -and (Find-Text $ui.PanelHealth 'AVD agent') -and (Get-AVDTuneText 'task.idle') -eq 'No task running' -and $saved.Language -eq 'en') $null
         $true } }
     @{ Name = 'new version'; Do = {
         Show-Page 'Overview'
@@ -1198,11 +1202,11 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         Show-Page 'AppMasking'; $window.UpdateLayout()
         $rows = $script:MaskRowUi
         Test-Smoke 'App Masking: one row per shortcut of the Public Desktop, read as a task of the task bar' ($ui.PanelMaskList.Children.Count -eq 2 -and $rows.Count -eq 2 -and (Find-Text $ui.PanelMaskList 'Contoso App.lnk') -and (Find-Text $ui.PanelMaskList 'Notes.lnk') -and @($script:UiTasks | Where-Object { $_.Kind -eq 'appmasking-read' -and $_.Status -eq 'succeeded' }).Count -ge 1) $ui.PanelMaskList.Children.Count
-        Test-Smoke 'every row has the three choices of "Visible for", the AD groups of the DC discovery and the Entra note in the group menu' ((@($rows['Notes.lnk'].Mode.ItemsSource) -join '|') -eq 'Everyone|Only members of a group|Nobody except administrators' -and $rows['Notes.lnk'].Group.Items.Count -eq 3 -and [string]$rows['Notes.lnk'].Group.Items[2].Content -like 'Microsoft Entra ID groups: not supported*' -and -not $rows['Notes.lnk'].Group.Items[2].IsEnabled -and $ui.TxtMaskEntra.Text -like '*cloud-only*learn.microsoft.com*') $null
+        Test-Smoke 'every row has the three choices of "Visible for", the AD groups of the DC discovery and the Entra note in the group menu' ((@($rows['Notes.lnk'].Mode.ItemsSource | ForEach-Object { $_.Value }) -join '|') -eq 'Everyone|Only members of a group|Nobody except administrators' -and $rows['Notes.lnk'].Group.Items.Count -eq 3 -and [string]$rows['Notes.lnk'].Group.Items[2].Content -like 'Microsoft Entra ID groups: not supported*' -and -not $rows['Notes.lnk'].Group.Items[2].IsEnabled -and $ui.TxtMaskEntra.Text -like '*cloud-only*learn.microsoft.com*') $null
         Test-Smoke 'the former wizard sits in a collapsed Advanced section' ($ui.ExpMaskAdvanced.Header -eq 'Advanced' -and -not $ui.ExpMaskAdvanced.IsExpanded -and $ui.ExpMaskAdvanced.Content.Children.Count -eq 2) $null
         Save-SmokeShot '56-appmasking-list-light'
         $r = $rows['Contoso App.lnk']
-        $r.Mode.SelectedItem = 'Only members of a group'
+        $r.Mode.SelectedValue = 'Only members of a group'
         Test-Smoke 'a group needs the menu: the group menu is enabled only for "Only members of a group"' ($r.Group.IsEnabled -and -not $rows['Notes.lnk'].Group.IsEnabled) $null
         $r.Group.SelectedIndex = 0
         & $click $r.Preview
@@ -1211,28 +1215,28 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         & $click $r.Save
         Test-Smoke 'Save asked first with old and new, then wrote one rule set for this shortcut only (.fxr and .fxa)' ($script:ConfirmAsked -like "*Now: Everyone*New: Only members of: EXAMPLE\Sales Team*" -and $script:MaskFake.M.Store.Files.Count -eq 2 -and @($script:MaskFake.M.Store.Files.Keys | Where-Object { $_ -like '*Desktop-Contoso App.fxr' -or $_ -like '*Desktop-Contoso App.fxa' }).Count -eq 2) $script:ConfirmAsked
         $r = $script:MaskRowUi['Contoso App.lnk']
-        Test-Smoke 'the list shows the assignment after the re-read (group menu selected, Notes still Everyone)' ($r.Mode.SelectedItem -eq 'Only members of a group' -and $r.Group.SelectedIndex -eq 0 -and $script:MaskRowUi['Notes.lnk'].Mode.SelectedItem -eq 'Everyone') $null
+        Test-Smoke 'the list shows the assignment after the re-read (group menu selected, Notes still Everyone)' ($r.Mode.SelectedValue -eq 'Only members of a group' -and $r.Group.SelectedIndex -eq 0 -and $script:MaskRowUi['Notes.lnk'].Mode.SelectedValue -eq 'Everyone') $null
         $n = $script:MaskRowUi['Notes.lnk']
-        $n.Mode.SelectedItem = 'Nobody except administrators'
+        $n.Mode.SelectedValue = 'Nobody except administrators'
         & $click $n.Save
-        Test-Smoke 'a second row is its own rule set and its own change (4 files), not added to the first' ($script:MaskFake.M.Store.Files.Count -eq 4 -and @($script:MaskFake.M.Store.Files.Keys | Where-Object { $_ -like '*Desktop-Notes.fxr' }).Count -eq 1 -and $script:MaskRowUi['Notes.lnk'].Mode.SelectedItem -eq 'Nobody except administrators') $script:MaskFake.M.Store.Files.Count
+        Test-Smoke 'a second row is its own rule set and its own change (4 files), not added to the first' ($script:MaskFake.M.Store.Files.Count -eq 4 -and @($script:MaskFake.M.Store.Files.Keys | Where-Object { $_ -like '*Desktop-Notes.fxr' }).Count -eq 1 -and $script:MaskRowUi['Notes.lnk'].Mode.SelectedValue -eq 'Nobody except administrators') $script:MaskFake.M.Store.Files.Count
         $script:SmokeMaskStep = 1
         $true } }
     @{ Name = 'app masking: undo (#69)'; Do = {
         if ($script:OverviewJob -or $script:ReadyJob -or $script:ReadyQueued -or $script:FslJob) { return $false }
         $click = { param($b) $b.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent))) }
         & $click $ui.BtnMaskUndo
-        Test-Smoke 'Undo puts the last change (Notes) back; the first row keeps its group' ($script:MaskFake.M.Store.Files.Count -eq 2 -and $script:MaskRowUi['Notes.lnk'].Mode.SelectedItem -eq 'Everyone' -and $script:MaskRowUi['Contoso App.lnk'].Mode.SelectedItem -eq 'Only members of a group') $script:MaskFake.M.Store.Files.Count
+        Test-Smoke 'Undo puts the last change (Notes) back; the first row keeps its group' ($script:MaskFake.M.Store.Files.Count -eq 2 -and $script:MaskRowUi['Notes.lnk'].Mode.SelectedValue -eq 'Everyone' -and $script:MaskRowUi['Contoso App.lnk'].Mode.SelectedValue -eq 'Only members of a group') $script:MaskFake.M.Store.Files.Count
         # #74: several rows in one change, one undo for all of them
-        $script:MaskRowUi['Notes.lnk'].Mode.SelectedItem = 'Nobody except administrators'
-        $script:MaskRowUi['Contoso App.lnk'].Mode.SelectedItem = 'Everyone'
+        $script:MaskRowUi['Notes.lnk'].Mode.SelectedValue = 'Nobody except administrators'
+        $script:MaskRowUi['Contoso App.lnk'].Mode.SelectedValue = 'Everyone'
         $script:ConfirmAsked = ''
         & $click $ui.BtnMaskSaveAll
         $mk = @($script:MaskFake.M.Store.Files.Keys)
         Test-Smoke 'Save all changes (#74): both changed rows in one change after one confirmation that names both' ($script:ConfirmAsked -like '*Save 2 row(s) in one change*Contoso App.lnk*Notes.lnk*' -and $mk.Count -eq 2 -and @($mk | Where-Object { $_ -like '*Desktop-Notes.f*' }).Count -eq 2) ($mk -join ', ')
         & $click $ui.BtnMaskUndo
         $mk = @($script:MaskFake.M.Store.Files.Keys)
-        Test-Smoke 'one Undo puts both rows of "Save all changes" back (#74)' ($mk.Count -eq 2 -and @($mk | Where-Object { $_ -like '*Desktop-Contoso App.f*' }).Count -eq 2 -and $script:MaskRowUi['Notes.lnk'].Mode.SelectedItem -eq 'Everyone' -and $script:MaskRowUi['Contoso App.lnk'].Mode.SelectedItem -eq 'Only members of a group') ($mk -join ', ')
+        Test-Smoke 'one Undo puts both rows of "Save all changes" back (#74)' ($mk.Count -eq 2 -and @($mk | Where-Object { $_ -like '*Desktop-Contoso App.f*' }).Count -eq 2 -and $script:MaskRowUi['Notes.lnk'].Mode.SelectedValue -eq 'Everyone' -and $script:MaskRowUi['Contoso App.lnk'].Mode.SelectedValue -eq 'Only members of a group') ($mk -join ', ')
         if ($script:SmokeMaskGateOpened) { Close-AVDTuneWriteGate }
         Show-Page 'Overview'
         $true } }

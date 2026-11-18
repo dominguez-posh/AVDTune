@@ -86,6 +86,7 @@ try {
     Test-Check 'format arguments fill {0} {1}' ((T 'rel.install.in' '1.2.3' 'C:\x') -ceq '1.2.3 in C:\x installieren') (T 'rel.install.in' '1.2.3' 'C:\x')
     Test-Check 'without arguments braces stay as they are' ((T 'stage.env.snapname') -like '*{OsDisk}*') $null
     Test-Check 'a wrong format string does not throw' ((T 'rel.install.in' '1.2.3') -is [string]) $null
+    Test-Check 'a list argument is joined with spaces (as in "$list"), a missing one stays empty in its place' ((T 'rel.install.in' @('a', 'b') 'C:\x') -ceq 'a b in C:\x installieren' -and (T 'rel.install.in' $(if ($false) { 'x' }) 'C:\x') -ceq ' in C:\x installieren') (T 'rel.install.in' @('a', 'b') 'C:\x')
     $saved = $script:LangTexts.de['nav.overview']; [void]$script:LangTexts.de.Remove('nav.overview')
     Test-Check 'a key that German lacks falls back to English' ((Get-AVDTuneText 'nav.overview') -ceq 'Overview') $null
     $script:LangTexts.de['nav.overview'] = $saved
@@ -133,6 +134,63 @@ try {
     $page = [IO.File]::ReadAllText((Join-Path $repo 'Start-AVDTune.ps1'))
     Test-Check 'ProtocolLanguage follows the one switch (no separate protocol language box any more)' ($page -notmatch 'CmbProtocolLanguage' -and $page -match 'ProtocolLanguage = \$script:Settings\.Language' -and $page -match 'Add-Click \$ui\.BtnLang') $null
     Test-Check 'the settings file keeps ProtocolLanguage for older versions and gets Language' ($page -match 'Language = \$script:Settings\.Language; ProtocolLanguage = \$script:Settings\.Language') $null
+    Test-Check 'a switch registers the tree again (pages with their own XAML or made in code) before it sets the texts' ($page -match '(?s)function Update-Localized \{.{0,400}Register-AVDTuneLocalized \$window\)\s+Update-AVDTuneLocalized' -and $page -match "AVDTune-Language\.ps1'\)[^\r\n]*\r?\n\[void\]\(Register-AVDTuneLocalized \`$window\); Update-AVDTuneLocalized") $null
+
+    # ---------------------------------------------------------------- the pages (#70 step 2): every key asked exists, no fixed UI text left (AST), no fixed text in any XAML
+    $pageFiles = 'AVDTune-AppMasking.ps1', 'AVDTune-Benchmark.ps1', 'AVDTune-Custom.ps1', 'AVDTune-CustomSoftware.ps1', 'AVDTune-Environment.ps1', 'AVDTune-FSLogix.ps1', 'AVDTune-Language.ps1', 'AVDTune-Office.ps1',
+        'AVDTune-Optimization.ps1', 'AVDTune-Printers.ps1', 'AVDTune-Seal.ps1', 'AVDTune-Software.ps1', 'AVDTune-Updates.ps1', 'AVDTune-UserExperience.ps1', 'AVDTune-Vdi.ps1'
+    $textCommands = 'T', 'Get-AVDTuneText', 'Set-AVDTuneUid', 'Get-AVDTuneEngineText'
+    $uiProps = 'Text', 'Content', 'ToolTip', 'Header', 'Title'
+    $uiHelper = '\A(New-(?!Object\z|Item\z|AVDTune)[A-Za-z]+|Confirm-Action|Show-[A-Za-z]*(Dialog|Message)[A-Za-z]*)\z'
+    $prose = '[A-Za-z]{2,}[ ,.:;!?()''/-]+[A-Za-z]{2,}'
+    $staticOf = {
+        # the fixed part of a string: a constant as it is, an expandable string without its $variables and $( ) parts
+        param($ast)
+        if ($ast -is [System.Management.Automation.Language.StringConstantExpressionAst]) { return $ast.Value }
+        $v = $ast.Extent.Text; $base = $ast.Extent.StartOffset
+        foreach ($n in @($ast.NestedExpressions | Sort-Object { $_.Extent.StartOffset } -Descending)) { $v = $v.Remove($n.Extent.StartOffset - $base, $n.Extent.EndOffset - $n.Extent.StartOffset).Insert($n.Extent.StartOffset - $base, ' ') }
+        $v
+    }
+    $isString = { param($ast) ($ast -is [System.Management.Automation.Language.StringConstantExpressionAst] -and $ast.StringConstantType -ne 'BareWord') -or $ast -is [System.Management.Automation.Language.ExpandableStringExpressionAst] }   # bare words are member and key names
+    $pageAsked = New-Object System.Collections.Generic.HashSet[string]
+    foreach ($f in $pageFiles) {
+        $ast = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $repo $f), [ref]$null, [ref]$null)
+        $found = New-Object System.Collections.Generic.List[string]
+        foreach ($cmd in $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] }, $true)) {
+            $name = $cmd.GetCommandName()
+            $args1 = @($cmd.CommandElements | Select-Object -Skip 1)
+            if ($name -in $textCommands) { foreach ($e in $args1) { if ($e -is [System.Management.Automation.Language.StringConstantExpressionAst] -and $e.Value -match '\A[a-z0-9]+(\.[a-z0-9]+)+\z') { [void]$pageAsked.Add($e.Value) } }; continue }
+            $helper = ($name -and $name -match $uiHelper) -or ($cmd.InvocationOperator -eq 'Ampersand' -and $cmd.CommandElements[0] -is [System.Management.Automation.Language.VariableExpressionAst])
+            if ($helper) { foreach ($e in $args1) { if ((& $isString $e) -and (& $staticOf $e) -match $prose) { $found.Add("$($e.Extent.StartLineNumber): $($e.Extent.Text)") } } }
+        }
+        foreach ($as in $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.AssignmentStatementAst] -and $n.Left -is [System.Management.Automation.Language.MemberExpressionAst] }, $true)) {
+            if ([string]$as.Left.Member.Value -notin $uiProps) { continue }
+            foreach ($s in $as.Right.FindAll({ param($n) (& $isString $n) }, $true)) {
+                $p = $s.Parent; $inCommand = $false
+                # not a text of its own: an argument of a command or of a method (ToString('yyyy-MM-dd')), an operand of a comparison
+                while ($p -and $p -ne $as) { if ($p -is [System.Management.Automation.Language.CommandAst] -or $p -is [System.Management.Automation.Language.InvokeMemberExpressionAst] -or ($p -is [System.Management.Automation.Language.BinaryExpressionAst] -and $p.Operator -notin 'Format', 'Plus')) { $inCommand = $true; break }; $p = $p.Parent }
+                if (-not $inCommand -and (& $staticOf $s) -match '[A-Za-z]{3,}') { $found.Add("$($s.Extent.StartLineNumber): $($s.Extent.Text)") }
+            }
+        }
+        foreach ($im in $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.InvokeMemberExpressionAst] -and $n.Expression.Extent.Text -match '(MessageBox|AutomationProperties)\]\z' -and [string]$n.Member.Value -in 'Show', 'SetName' }, $true)) {   # message boxes and automation names
+            foreach ($e in @($im.Arguments)) { if ((& $isString $e) -and (& $staticOf $e) -match $prose) { $found.Add("$($e.Extent.StartLineNumber): $($e.Extent.Text)") } }
+        }
+        Test-Check "$f has no fixed UI text left (texts of elements, helpers that make elements, message boxes)" ($found.Count -eq 0) ((@($found) | Select-Object -First 6) -join ' | ')
+    }
+    $pageUnknown = @($pageAsked | Where-Object { -not ($en.ContainsKey($_) -or $en.ContainsKey("$_.tip") -or $en.ContainsKey("$_.name")) } | Sort-Object)
+    Test-Check 'every key that the pages ask for (T, Set-AVDTuneUid, Get-AVDTuneEngineText) exists in the language files' ($pageUnknown.Count -eq 0 -and $pageAsked.Count -gt 300) (($pageUnknown -join ', ') + " ($($pageAsked.Count) keys asked)")
+    $pageLiterals = @($pageFiles | ForEach-Object { [System.Management.Automation.PSParser]::Tokenize([IO.File]::ReadAllText((Join-Path $repo $_)), [ref]$null) } | Where-Object { $_.Type -eq 'String' } | ForEach-Object { $_.Content })
+    $pageSample = @($en.GetEnumerator() | Where-Object { $_.Value.Length -ge 24 -and $_.Value -notmatch '[{}\r\n]' -and $_.Key -notmatch '^(health\.|stage\.|nav\.|ready\.group\.)' })
+    $logicValues = 'Nobody except administrators', 'Custom (set in the Rule Editor)'   # the visibility modes of the App Masking module: values in the code, shown through cust.vis.* and mask.vis.*
+    $pageStill = @($pageSample | Where-Object { $v = $_.Value; $v -notin $logicValues -and @($pageLiterals | Where-Object { $_.Contains($v) }).Count -gt 0 } | ForEach-Object { $_.Key })
+    Test-Check 'no English text of a key is left as fixed text in the page code' ($pageStill.Count -eq 0) (($pageStill | Select-Object -First 8) -join ', ')
+    foreach ($xf in 'AVDTune.xaml', 'Software.xaml', 'Vdi.xaml', 'AVDTune.Environment.xaml') {
+        [xml]$px = [IO.File]::ReadAllText((Join-Path $repo "UI\$xf"))
+        $fixed = @($px.SelectNodes('//*') | ForEach-Object { $n = $_; foreach ($a in 'Text', 'Content', 'ToolTip', 'Header', 'Title', 'AutomationProperties.Name') { $v = $n.GetAttribute($a); if ($v -and $v -notmatch '\A\{' -and $v -match '[A-Za-z]{2,}' -and $v -cne 'AVDTune') { "$($n.LocalName)[$($n.GetAttribute('Name'))] $a=$v" } } })
+        Test-Check "UI\$xf has no fixed text (every text through a Uid key)" ($fixed.Count -eq 0) ((@($fixed) | Select-Object -First 6) -join '; ')
+        $pu = @($px.SelectNodes("//*[@*[local-name()='Uid']]") | ForEach-Object { $u = $_.GetAttribute('Uid'); if (-not ((Test-AVDTuneTextKey $u) -and $u.Contains('.') -and ($en.ContainsKey($u) -or $en.ContainsKey("$u.name") -or $en.ContainsKey("$u.tip")))) { $u } })
+        Test-Check "UI\$xf : every Uid is a key with a text" ($pu.Count -eq 0) ($pu -join ', ')
+    }
 
     # ---------------------------------------------------------------- Uid elements in WPF (STA runspace: WPF needs it)
     $wpf = {

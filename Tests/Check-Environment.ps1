@@ -811,7 +811,7 @@ try {
     Test-Check 'the hooks in Start-AVDTune.ps1: module, navigation entry, page switch, view and the page file' ($main -match "'Environment'(, '\w+')*\) \{ Import" -and $main -match "Key = 'Environment'" -and $main -match "Update-EnvView" -and $main -match "AVDTune-Environment\.ps1") $null
     Test-Check 'the page changes nothing without the plan hash: apply and undo pass the hash of the plan that was shown' ($pageScript -match 'ConfirmedHash \$A\.Hash' -and ([regex]::Matches($pageScript, 'Hash = \$p\.Hash')).Count -eq 2 -and ([regex]::Matches($pageScript, 'ConfirmedHash')).Count -eq 2 -and $pageScript -match "Confirm-Action") $null
     $masterPart = $pageScript.Substring($pageScript.IndexOf('function Get-EnvPlanned'))
-    Test-Check 'the master part takes the plan that was shown (Spec and Identity), not the form, and names VHDLocations in the confirmation' ($masterPart -notmatch 'Get-EnvSpec' -and ([regex]::Matches($masterPart, '-Spec \$pl\.Spec -Identity \$pl\.Identity')).Count -eq 2 -and $masterPart -match 'VHDLocations = \$\(Get-AVDTuneEnvVhdLocation \$pl\.Spec\)' -and $masterPart -match 'Make the plan first') $null
+    Test-Check 'the master part takes the plan that was shown (Spec and Identity), not the form, and names VHDLocations in the confirmation' ($masterPart -notmatch 'Get-EnvSpec' -and ([regex]::Matches($masterPart, '-Spec \$pl\.Spec -Identity \$pl\.Identity')).Count -eq 2 -and $masterPart -match "T 'env\.ask\.fslogix' \`$\(Get-AVDTuneEnvVhdLocation \`$pl\.Spec\)" -and (Get-Content -Raw -Encoding UTF8 (Join-Path $repo 'UI\Strings.en.json') | ConvertFrom-Json).'env.ask.fslogix' -like '*VHDLocations = {0}*' -and $masterPart -match 'Make the plan first') $null
 }
 finally {
     Close-AVDTuneWriteGate

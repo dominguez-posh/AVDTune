@@ -240,15 +240,15 @@ function Update-SoftwareView {
     if (-not $ui.TxtSwSite.IsKeyboardFocused) { $ui.TxtSwSite.Text = [string]$s.StoreSiteUrl }
     if (-not $ui.TxtSwLibrary.IsKeyboardFocused) { $ui.TxtSwLibrary.Text = [string]$s.StoreLibrary }
     $ui.TxtSwNotes.Text = (@($script:SwNotes) -join "`r`n")
-    if (-not $script:SwScanned -and -not $busy) { $ui.TxtSwState.Text = 'Nothing read yet. Press Refresh.' }
+    if (-not $script:SwScanned -and -not $busy) { $ui.TxtSwState.Text = (T 'sw.notread') }
 
     # managed packages
     $ui.PanelSwManaged.Children.Clear()
     if ($script:SwManaged.Count -eq 0) { [void]$ui.PanelSwManaged.Children.Add((New-Text $(if ($script:SwScanned) { 'winget and Chocolatey manage no package here.' } else { 'Not read yet.' }) 'Hint')) }
     foreach ($p in @($script:SwManaged | Sort-Object Source, Name)) {
         $buttons = @()
-        if ($p.Available) { $buttons += New-SwButton 'Update' (New-AVDTuneSoftwareItem -Action Update -Source $p.Source -Id $p.Id -Title $p.Name -Installed $p.Version) "Update $($p.Name) from $($p.Version) to $($p.Available)?" "Update $($p.Name)" }
-        $buttons += New-SwButton 'Remove' (New-AVDTuneSoftwareItem -Action Remove -Source $p.Source -Id $p.Id -Title $p.Name -Installed $p.Version) "Remove $($p.Name) ($($p.Version)) from this master?" "Remove $($p.Name)"
+        if ($p.Available) { $buttons += New-SwButton 'Update' (New-AVDTuneSoftwareItem -Action Update -Source $p.Source -Id $p.Id -Title $p.Name -Installed $p.Version) (T 'sw.ask.update' $($p.Name) $($p.Version) $($p.Available)) "Update $($p.Name)" }
+        $buttons += New-SwButton 'Remove' (New-AVDTuneSoftwareItem -Action Remove -Source $p.Source -Id $p.Id -Title $p.Name -Installed $p.Version) (T 'sw.ask.remove' $($p.Name) $($p.Version)) "Remove $($p.Name)"
         $ver = if ($p.Available) { "$($p.Version) -> $($p.Available)" } else { [string]$p.Version }
         [void]$ui.PanelSwManaged.Children.Add((New-SwRow @('110', '300', '200', '*') @((New-SwPill $script:SwPill[$p.Source][2] $script:SwPill[$p.Source]), (New-SwText $p.Name $false $true), (New-SwText $ver $true), (New-SwButtons $buttons))))
     }
@@ -257,29 +257,29 @@ function Update-SoftwareView {
     # search results
     $ui.PanelSwResults.Children.Clear()
     foreach ($p in @($script:SwResults)) {
-        $b = New-SwButton 'Install' (New-AVDTuneSoftwareItem -Action Install -Source $p.Source -Id $p.Id -Title $p.Name) "Install $($p.Name) ($($p.Id)) from $($p.Source) on this master?" "Install $($p.Name)"
+        $b = New-SwButton 'Install' (New-AVDTuneSoftwareItem -Action Install -Source $p.Source -Id $p.Id -Title $p.Name) (T 'sw.ask.install' $($p.Name) $($p.Id) $($p.Source)) "Install $($p.Name)"
         [void]$ui.PanelSwResults.Children.Add((New-SwRow @('110', '300', '200', '*') @((New-SwPill $script:SwPill[$p.Source][2] $script:SwPill[$p.Source]), (New-SwText $p.Name $false $true), (New-SwText "$($p.Id)  $($p.Version)" $true), (New-SwButtons @($b)))))
     }
 
     # library
     $ui.PanelSwLibrary.Children.Clear()
     $lib = $script:SwLibrary
-    if (-not $s.StoreSiteUrl) { $ui.TxtSwLibState.Text = 'No site entered. Enter the SharePoint site of the package store (https://<tenant>.sharepoint.com/sites/<name>) and press Save and read.' }
-    elseif ($script:SwLibraryError) { $ui.TxtSwLibState.Text = "The library was not read: $($script:SwLibraryError)" }
-    elseif (-not $lib) { $ui.TxtSwLibState.Text = $(if ($script:SwScanned) { 'The library was not read.' } else { 'Not read yet.' }) }
+    if (-not $s.StoreSiteUrl) { $ui.TxtSwLibState.Text = (T 'sw.lib.nosite') }
+    elseif ($script:SwLibraryError) { $ui.TxtSwLibState.Text = (T 'cust.lib.error' $($script:SwLibraryError)) }
+    elseif (-not $lib) { $ui.TxtSwLibState.Text = $(if ($script:SwScanned) { (T 'sw.lib.notread') } else { (T 'sw.lib.notyet') }) }
     elseif ($lib.State -ne 'Ready') { $ui.TxtSwLibState.Text = [string]$lib.Message }
-    else { $ui.TxtSwLibState.Text = "$($lib.Message) $(@($lib.Items).Count) version(s)." + $(if (@($lib.Notes).Count) { ' ' + (@($lib.Notes) -join ' ') } else { '' }) }
+    else { $ui.TxtSwLibState.Text = (T 'sw.lib.versions' $($lib.Message) $(@($lib.Items).Count)) + $(if (@($lib.Notes).Count) { ' ' + (@($lib.Notes) -join ' ') } else { '' }) }
     if ($lib -and $lib.State -eq 'Ready') {
         $items = @($lib.Items)
         foreach ($i in @($items | Sort-Object AppId, @{ Expression = { $_.Version }; Descending = $true })) {
             $buttons = @()
             if ($i.Installable) {
                 $installedOfApp = @($items | Where-Object { $_.AppId -eq $i.AppId -and $_.Installed } | Select-Object -First 1)
-                if ($i.Installed) { $buttons += New-SwButton 'Remove' (New-AVDTuneSoftwareItem -Action Remove -Source library -Id $i.AppId -Version $i.Version -Title $i.Name -Installed $i.Installed) "Remove $($i.Name) $($i.Version) from this master?" "Remove $($i.Name) $($i.Version)" }
-                elseif ($installedOfApp.Count -gt 0 -and (Compare-AVDTuneVersion $i.Version $installedOfApp[0].Version) -gt 0) { $buttons += New-SwButton 'Update' (New-AVDTuneSoftwareItem -Action Update -Source library -Id $i.AppId -Version $i.Version -Title $i.Name -Installed $installedOfApp[0].Version) "Update $($i.Name) from $($installedOfApp[0].Version) to $($i.Version)?" "Update $($i.Name) to $($i.Version)" }
-                elseif ($installedOfApp.Count -eq 0) { $buttons += New-SwButton 'Install' (New-AVDTuneSoftwareItem -Action Install -Source library -Id $i.AppId -Version $i.Version -Title $i.Name) "Install $($i.Name) $($i.Version) from the library? It is checked against Intune first." "Install $($i.Name) $($i.Version)" }
+                if ($i.Installed) { $buttons += New-SwButton 'Remove' (New-AVDTuneSoftwareItem -Action Remove -Source library -Id $i.AppId -Version $i.Version -Title $i.Name -Installed $i.Installed) (T 'sw.ask.libremove' $($i.Name) $($i.Version)) "Remove $($i.Name) $($i.Version)" }
+                elseif ($installedOfApp.Count -gt 0 -and (Compare-AVDTuneVersion $i.Version $installedOfApp[0].Version) -gt 0) { $buttons += New-SwButton 'Update' (New-AVDTuneSoftwareItem -Action Update -Source library -Id $i.AppId -Version $i.Version -Title $i.Name -Installed $installedOfApp[0].Version) (T 'sw.ask.update' $($i.Name) $($installedOfApp[0].Version) $($i.Version)) (T 'sw.lib.update.tip' $($i.Name) $($i.Version)) }
+                elseif ($installedOfApp.Count -eq 0) { $buttons += New-SwButton 'Install' (New-AVDTuneSoftwareItem -Action Install -Source library -Id $i.AppId -Version $i.Version -Title $i.Name) (T 'sw.ask.libinstall' $($i.Name) $($i.Version)) "Install $($i.Name) $($i.Version)" }
             }
-            $status = if ($i.Installed) { New-SwPill 'Installed' $script:SwPill.ok } elseif ($i.Installable) { New-SwPill 'Available' $script:SwPill.library } else { New-SwPill 'Not installable' $script:SwPill.warn }
+            $status = if ($i.Installed) { New-SwPill 'Installed' $script:SwPill.ok } elseif ($i.Installable) { New-SwPill 'Available' $script:SwPill.library } else { New-SwPill (T 'sw.lib.notinstallable') $script:SwPill.warn }
             $detail = if ($i.Installable) { "$($i.AppId)  $($i.Version)" } else { "$($i.AppId)  $($i.Version): $($i.Why)" }
             [void]$ui.PanelSwLibrary.Children.Add((New-SwRow @('130', '300', '300', '*') @($status, (New-SwText $i.Name $false $true), (New-SwText $detail $true), (New-SwButtons $buttons))))
         }
@@ -287,14 +287,14 @@ function Update-SoftwareView {
 
     # installed
     $ui.PanelSwInstalled.Children.Clear()
-    $ui.TxtSwInstalledTitle.Text = "Installed on this master ($($script:SwInstalled.Count))"
+    $ui.TxtSwInstalledTitle.Text = (T 'sw.installed.title' $($script:SwInstalled.Count))
     foreach ($i in $script:SwInstalled) { [void]$ui.PanelSwInstalled.Children.Add((New-SwRow @('420', '160', '*') @((New-SwText $i.Name), (New-SwText $i.Version $true), (New-SwText ("$($i.Publisher)" + $(if ($i.Arch -eq 'x86') { ' (32 bit)' } else { '' })) $true)))) }
     if ($script:SwInstalled.Count -eq 0) { [void]$ui.PanelSwInstalled.Children.Add((New-Text $(if ($script:SwScanned) { 'Nothing found.' } else { 'Not read yet.' }) 'Hint')) }
 
     # history
     $ui.PanelSwHistory.Children.Clear()
     $hist = @(Get-AVDTuneSoftwareHistory -Root $script:StateRoot -Last 12)
-    if ($hist.Count -eq 0) { [void]$ui.PanelSwHistory.Children.Add((New-Text 'No software run yet.' 'Hint')) }
+    if ($hist.Count -eq 0) { [void]$ui.PanelSwHistory.Children.Add((New-Text (T 'sw.norun') 'Hint')) }
     foreach ($h in $hist) {
         $t = New-Object System.Windows.Controls.TextBlock
         $t.Text = "{0}   {1,-9}  {2,-7}  {3}{4}" -f ([datetime]$h.At).ToString('yyyy-MM-dd HH:mm'), $h.Status, $h.Action, $h.Title, $(if ($h.Status -eq 'Failed') { " ($($h.Code)): $($h.Message)" } else { '' })
@@ -306,15 +306,15 @@ function Update-SoftwareView {
 
 # ---------------------------------------------------------------- actions
 function Start-SwRun([object[]]$Items, [string]$Question) {
-    if (-not (Test-AVDTuneWriteAllowed)) { throw 'Read only: confirm a snapshot of today on the Overview first.' }; Assert-NoOtherWriter
+    if (-not (Test-AVDTuneWriteAllowed)) { throw (T 'ready.err.readonly') }; Assert-NoOtherWriter
     $list = @($Items | Where-Object { $_ })
     if ($list.Count -eq 0) { throw 'Nothing to do.' }
     if (-not $Question) { $Question = "Run $($list.Count) software change(s) on this master?" }
     if (-not (Confirm-Action $Question 'Software')) { return }
-    $ui.TxtSwState.Text = 'Starting ...'
+    $ui.TxtSwState.Text = (T 'task.bar.starting')
     Start-SwJob 'Run' $list
 }
-Add-Click $ui.BtnSwRefresh { Start-SwJob 'Scan' $null; $ui.TxtSwState.Text = 'Reading ...' }
+Add-Click $ui.BtnSwRefresh { Start-SwJob 'Scan' $null; $ui.TxtSwState.Text = (T 'sw.reading') }
 Add-Click $ui.BtnSwUpdateAll {
     $items = @($script:SwManaged | Where-Object { $_.Available } | ForEach-Object { New-AVDTuneSoftwareItem -Action Update -Source $_.Source -Id $_.Id -Title $_.Name -Installed $_.Version })
     Start-SwRun $items "Update $($items.Count) package(s) from winget and Chocolatey?"
@@ -324,7 +324,7 @@ Add-Click $ui.BtnSwSearch {
     if (-not (Test-AVDTuneSearchText $q)) { throw 'The search text may contain letters, digits, space and . _ + - (up to 64 characters, starting with a letter or digit).' }
     $source = switch ($ui.CmbSwSource.SelectedIndex) { 1 { 'winget' } 2 { 'chocolatey' } default { 'Both' } }
     Start-SwJob 'Search' @{ Query = $q; Source = $source }
-    $ui.TxtSwState.Text = 'Searching ...'
+    $ui.TxtSwState.Text = (T 'sw.searching')
 }
 Add-Click $ui.BtnSwSaveSite {
     $s = Set-AVDTuneSoftwareSettings -Root $script:StateRoot -StoreSiteUrl $ui.TxtSwSite.Text -StoreLibrary $ui.TxtSwLibrary.Text

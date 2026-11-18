@@ -105,20 +105,20 @@ function Complete-UpdJob {
     try {
     switch -Wildcard ($job.Kind) {
         'Scan' {
-            if ($err) { $ui.TxtUpdState.Text = "The search failed: $err" } else {
+            if ($err) { $ui.TxtUpdState.Text = (T 'upd.searchfail' $err) } else {
                 $script:UpdItems = @($result.Items); $script:UpdNotes = @($result.Notes)
-                $ui.TxtUpdState.Text = "Searched at $((Get-Date).ToString('HH:mm:ss')): $(@($script:UpdItems | Where-Object Selectable).Count) item(s) can be updated."
+                $ui.TxtUpdState.Text = (T 'upd.searched' $((Get-Date).ToString('HH:mm:ss')) $(@($script:UpdItems | Where-Object Selectable).Count))
             }
             Update-UpdatesView
             Complete-AVDTuneUiTask $job.Task -Failed:([bool]$err) -Summary $(if ($err) { "The search failed: $err" } else { [string]$ui.TxtUpdState.Text })
         }
         'Run' {
-            if ($err) { $ui.TxtUpdState.Text = "The run stopped: $err"; Show-Error $err }
+            if ($err) { $ui.TxtUpdState.Text = (T 'upd.runstopped' $err); Show-Error $err }
             if ($result) {
                 $script:UpdLastRun = $result
                 foreach ($r in $result.Results) { Register-StepResult $r }
                 $ok = @($result.Results | Where-Object { $_.Status -eq 'Changed' }).Count; $bad = @($result.Results | Where-Object { $_.Status -eq 'Failed' }).Count
-                $ui.TxtUpdState.Text = "Run finished: $ok updated, $bad failed.$(if ($result.Reboot) { ' A restart is needed.' })$(if ($err) { " $err" })"
+                $ui.TxtUpdState.Text = (T 'upd.runfinished' $ok $bad $(if ($result.Reboot) { (T 'upd.restart') }) $(if ($err) { " $err" }))
                 Show-Toast $ui.TxtUpdState.Text
             }
             Update-UpdatesView; Start-OverviewRefresh; Update-UpdateBlockView
@@ -183,7 +183,7 @@ function New-UpdGroupHead([string]$Text) {
 }
 function Update-UpdatesView {
     $ui.PanelUpdItems.Children.Clear()
-    if ($script:UpdItems.Count -eq 0) { $ui.TxtUpdState.Text = $(if ($script:UpdJob) { $ui.TxtUpdState.Text } else { 'Nothing searched yet. Press Search.' }) }
+    if ($script:UpdItems.Count -eq 0) { $ui.TxtUpdState.Text = $(if ($script:UpdJob) { $ui.TxtUpdState.Text } else { (T 'upd.notsearched') }) }
     $last = ''
     foreach ($item in ($script:UpdItems | Sort-Object { @('Windows', 'Microsoft 365 Apps', 'Edge', 'Teams', 'OneDrive', 'FSLogix', 'Defender', 'Software').IndexOf([string]$_.Group) }, Title)) {
         if ($item.Group -ne $last) { [void]$ui.PanelUpdItems.Children.Add((New-UpdGroupHead $item.Group)); $last = $item.Group }
@@ -196,7 +196,7 @@ function Update-UpdatesView {
     # history
     $ui.PanelUpdHistory.Children.Clear()
     $hist = @(Get-AVDTuneUpdateHistory -Root $script:StateRoot -Last 12)
-    if ($hist.Count -eq 0) { $t = New-Text 'No update run yet.' 'Hint'; [void]$ui.PanelUpdHistory.Children.Add($t) }
+    if ($hist.Count -eq 0) { $t = New-Text (T 'upd.norun') 'Hint'; [void]$ui.PanelUpdHistory.Children.Add($t) }
     foreach ($h in $hist) {
         $line = "{0}   {1}   {2}{3}" -f ([datetime]$h.At).ToString('yyyy-MM-dd HH:mm'), $h.Status.PadRight(9), $h.Title, $(if ($h.Code -and $h.Status -eq 'Failed') { " ($($h.Code)): $($h.Message)" } else { '' })
         $t = New-Object System.Windows.Controls.TextBlock; $t.Text = $line; $t.TextWrapping = 'Wrap'; $t.FontFamily = 'Cascadia Mono, Consolas'; $t.FontSize = 12; $t.Margin = '0,2,0,2'
@@ -208,20 +208,20 @@ function Update-UpdatesView {
     if (-not $ui.TxtUpdKbs.IsKeyboardFocused) { $ui.TxtUpdKbs.Text = ($s.ExcludedKbs -join ', ') }
 }
 function Start-UpdateRun([object[]]$Items) {
-    if (-not (Test-AVDTuneWriteAllowed)) { throw 'Read only: confirm a snapshot of today on the Overview first.' }; Assert-NoOtherWriter
+    if (-not (Test-AVDTuneWriteAllowed)) { throw (T 'ready.err.readonly') }; Assert-NoOtherWriter
     $list = @($Items | Where-Object { $_.Selectable })
     if ($list.Count -eq 0) { throw 'Nothing is selected.' }
     $block = Get-AVDTuneUpdateBlockStatus $script:Machine
     $ask = "Update $($list.Count) item(s)?`nThe update block is lifted for the run and put back afterwards."
     if (-not (Confirm-Action $ask 'Update')) { return }
-    $ui.TxtUpdState.Text = 'Starting the run ...'
+    $ui.TxtUpdState.Text = (T 'upd.starting')
     Start-UpdJob 'Run' $list
 }
-Add-Click $ui.BtnUpdScan { Start-UpdJob 'Scan' $null; $ui.TxtUpdState.Text = 'Searching ...' }
+Add-Click $ui.BtnUpdScan { Start-UpdJob 'Scan' $null; $ui.TxtUpdState.Text = (T 'upd.searching') }
 Add-Click $ui.BtnUpdAll { Start-UpdateRun @($script:UpdItems | Where-Object { $_.Selectable -and $_.Status -eq 'Available' -or $_.Selectable -and $_.Status -eq 'Check' }) }
 Add-Click $ui.BtnUpdSelected { Start-UpdateRun @($script:UpdItems | Where-Object { $_.Selectable -and $script:UpdChecked[$_.Id] }) }
-Add-Click $ui.BtnRepairDism { if (-not (Test-AVDTuneWriteAllowed)) { throw 'Read only: confirm a snapshot first.' }; if (Confirm-Action 'Run DISM /Online /Cleanup-Image /RestoreHealth? This takes a while.' 'Repair') { Start-UpdJob 'Repair-Dism' $null } }
-Add-Click $ui.BtnRepairSfc { if (-not (Test-AVDTuneWriteAllowed)) { throw 'Read only: confirm a snapshot first.' }; if (Confirm-Action 'Run sfc /scannow? This takes a while.' 'Repair') { Start-UpdJob 'Repair-Sfc' $null } }
+Add-Click $ui.BtnRepairDism { if (-not (Test-AVDTuneWriteAllowed)) { throw 'Read only: confirm a snapshot first.' }; if (Confirm-Action (T 'upd.ask.dism') 'Repair') { Start-UpdJob 'Repair-Dism' $null } }
+Add-Click $ui.BtnRepairSfc { if (-not (Test-AVDTuneWriteAllowed)) { throw 'Read only: confirm a snapshot first.' }; if (Confirm-Action (T 'upd.ask.sfc') 'Repair') { Start-UpdJob 'Repair-Sfc' $null } }
 Add-Click $ui.BtnUpdSave {
     $kbs = ConvertTo-AVDTuneKbList ([string]$ui.TxtUpdKbs.Text)
     $s = Set-AVDTuneUpdateSettings -Root $script:StateRoot -IncludeDrivers ([bool]$ui.ChkUpdDrivers.IsChecked) -IncludePreviews ([bool]$ui.ChkUpdPreviews.IsChecked) -ExcludedKbs $kbs -MicrosoftUpdate ([bool]$ui.ChkUpdMicrosoft.IsChecked)
@@ -239,10 +239,10 @@ function Update-UpdateBlockView {
     if ($crash) { $pair = @('ErrorBg', 'Danger', 'Interrupted') }
     Set-Brush $ui.PillBlock ([System.Windows.Controls.Border]::BackgroundProperty) $pair[0]
     $ui.TxtBlockPill.Text = $pair[2]; Set-Brush $ui.TxtBlockPill ([System.Windows.Controls.TextBlock]::ForegroundProperty) $pair[1]
-    $ui.TxtBlockSummary.Text = "$($st.Compliant) of $($st.Applicable) settings are in place.$(if ($st.State -ne 'On' -and $st.Missing) { ' Missing: ' + $st.Missing + '.' })"
+    $ui.TxtBlockSummary.Text = (T 'upd.ublk.count' $($st.Compliant) $($st.Applicable) $(if ($st.State -ne 'On' -and $st.Missing) { (T 'upd.ublk.missing') + $st.Missing + '.' }))
     $ui.TxtBlockFindings.Text = (@($st.Findings) -join "`r`n")
     $ui.BoxBlockCrash.Visibility = ConvertTo-Vis ([bool]$crash)
-    if ($crash) { $ui.TxtBlockCrash.Text = "The maintenance mode of $(([datetime]$crash.Started).ToString('yyyy-MM-dd HH:mm')) (by $($crash.User)) did not end properly: AVDTune was closed or stopped in the middle. The update block may be lifted. Repair puts back what was on before and writes a change log entry." }
+    if ($crash) { $ui.TxtBlockCrash.Text = (T 'upd.ublk.crash' $(([datetime]$crash.Started).ToString('yyyy-MM-dd HH:mm')) $($crash.User)) }
     $ui.PanelBlockItems.Children.Clear()
     $last = ''
     foreach ($i in $st.Items) {
@@ -253,18 +253,18 @@ function Update-UpdateBlockView {
         $pill = New-Object System.Windows.Controls.Border; Set-Brush $pill ([System.Windows.Controls.Border]::StyleProperty) 'Pill'; $pill.Padding = '10,2'; $pill.HorizontalAlignment = 'Left'; $pill.VerticalAlignment = 'Center'
         Set-Brush $pill ([System.Windows.Controls.Border]::BackgroundProperty) $k[0]
         $pt = New-Object System.Windows.Controls.TextBlock; $pt.Text = $k[2]; $pt.FontSize = 12; $pt.FontWeight = 'SemiBold'; Set-Brush $pt ([System.Windows.Controls.TextBlock]::ForegroundProperty) $k[1]; $pill.Child = $pt
-        $t = New-Object System.Windows.Controls.TextBlock; $t.Text = [string]$i.Title; $t.TextWrapping = 'Wrap'; $t.VerticalAlignment = 'Center'; $t.SetValue([System.Windows.Controls.Grid]::ColumnProperty, 1); $t.Margin = '0,0,10,0'; $t.ToolTip = "$($i.Why)`r`nSource: $($i.Source)"
+        $t = New-Object System.Windows.Controls.TextBlock; $t.Text = [string]$i.Title; $t.TextWrapping = 'Wrap'; $t.VerticalAlignment = 'Center'; $t.SetValue([System.Windows.Controls.Grid]::ColumnProperty, 1); $t.Margin = '0,0,10,0'; $t.ToolTip = (T 'upd.ublk.tip' $($i.Why) $($i.Source))
         $s = New-Object System.Windows.Controls.TextBlock; $s.Text = [string]$i.State; $s.VerticalAlignment = 'Center'; $s.SetValue([System.Windows.Controls.Grid]::ColumnProperty, 2); Set-Brush $s ([System.Windows.Controls.TextBlock]::ForegroundProperty) 'MutedText'
         foreach ($e in $pill, $t, $s) { [void]$g.Children.Add($e) }
         [void]$ui.PanelBlockItems.Children.Add($g)
     }
 }
 function Start-BlockChange([string]$Mode) {
-    if (-not (Test-AVDTuneWriteAllowed)) { throw 'Read only: confirm a snapshot of today on the Overview first.' }; Assert-NoOtherWriter
-    $ask = if ($Mode -eq 'Off') { 'Switch the update block off? Users can then see and run updates until you switch it on again. Do this only for work on the master.' } else { 'Switch the update block on?' }
-    if (-not (Confirm-Action $ask 'Update block')) { return }
+    if (-not (Test-AVDTuneWriteAllowed)) { throw (T 'ready.err.readonly') }; Assert-NoOtherWriter
+    $ask = if ($Mode -eq 'Off') { (T 'ublk.ask.off') } else { (T 'ready.ask.updateblock') }
+    if (-not (Confirm-Action $ask (T 'nav.updateblock'))) { return }
     Start-UpdJob "Block-$Mode" $null
 }
 Add-Click $ui.BtnBlockOn { Start-BlockChange 'On' }
 Add-Click $ui.BtnBlockOff { Start-BlockChange 'Off' }
-Add-Click $ui.BtnBlockRepair { if (-not (Test-AVDTuneWriteAllowed)) { throw 'Read only: confirm a snapshot of today on the Overview first.' }; Start-UpdJob 'Block-Repair' $null }
+Add-Click $ui.BtnBlockRepair { if (-not (Test-AVDTuneWriteAllowed)) { throw (T 'ready.err.readonly') }; Start-UpdJob 'Block-Repair' $null }

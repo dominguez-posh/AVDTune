@@ -38,11 +38,11 @@ function Initialize-OptPage {
     foreach ($h in 'Auto', 'Auto') { $r = New-Object System.Windows.Controls.RowDefinition; $r.Height = $h; [void]$head.RowDefinitions.Add($r) }
     foreach ($w in '*', 'Auto') { $c = New-Object System.Windows.Controls.ColumnDefinition; $c.Width = $w; [void]$head.ColumnDefinitions.Add($c) }
     $title = New-Text 'Optimization' 'PageTitle'
-    $sub = New-Text 'Settings for a multi-session master, from the data of the Windows Desktop Optimization Tool (WDOT) and the Microsoft Defender preset for VDI. Nothing is applied until you select entries and press Apply. Each entry has its reason, risk and source; changes can be undone, except AppX removal.' 'Subtitle'
+    $sub = New-Text (T 'opt.subtitle') 'Subtitle'
     $sub.SetValue([System.Windows.Controls.Grid]::RowProperty, 1); $sub.SetValue([System.Windows.Controls.Grid]::ColumnSpanProperty, 2)
     $btns = New-Object System.Windows.Controls.StackPanel; $btns.Orientation = 'Horizontal'; $btns.VerticalAlignment = 'Center'; $btns.Margin = '24,0,0,0'; $btns.SetValue([System.Windows.Controls.Grid]::ColumnProperty, 1)
-    $undo = New-Object System.Windows.Controls.Button; $undo.Content = 'Undo selected'; $undo.Margin = '0,0,8,0'; [System.Windows.Automation.AutomationProperties]::SetName($undo, 'Undo the selected optimizations')
-    $apply = New-Object System.Windows.Controls.Button; $apply.Content = 'Apply selected'; Set-Brush $apply ([System.Windows.Controls.Button]::StyleProperty) 'PrimaryButton'; [System.Windows.Automation.AutomationProperties]::SetName($apply, 'Apply the selected optimizations to this master')
+    $undo = New-Object System.Windows.Controls.Button; $undo.Content = (T 'opt.undo'); $undo.Margin = '0,0,8,0'; [System.Windows.Automation.AutomationProperties]::SetName($undo, (T 'opt.undo.name'))
+    $apply = New-Object System.Windows.Controls.Button; $apply.Content = (T 'opt.apply'); Set-Brush $apply ([System.Windows.Controls.Button]::StyleProperty) 'PrimaryButton'; [System.Windows.Automation.AutomationProperties]::SetName($apply, (T 'opt.apply.name'))
     foreach ($b in $undo, $apply) { [void]$btns.Children.Add($b) }
     foreach ($e in $title, $sub, $btns) { [void]$head.Children.Add($e) }
     [void]$stack.Children.Add($head)
@@ -57,13 +57,13 @@ function Initialize-OptPage {
     $presetRow = New-Object System.Windows.Controls.WrapPanel; $presetRow.Margin = '0,10,0,0'
     $presetButtons = @{}
     foreach ($p in @(@('recommended', 'AVD multi-session (recommended)'), @('conservative', 'Conservative'), @('all', 'Everything'), @('none', 'Nothing'))) {
-        $b = New-Object System.Windows.Controls.Button; $b.Content = $p[1]; $b.Margin = '0,0,8,6'; $b.DataContext = $p[0]; [System.Windows.Automation.AutomationProperties]::SetName($b, "Select the preset $($p[1])")
+        $b = New-Object System.Windows.Controls.Button; $b.Content = $p[1]; $b.Margin = '0,0,8,6'; $b.DataContext = $p[0]; [System.Windows.Automation.AutomationProperties]::SetName($b, (T 'opt.preset.name' $($p[1])))
         $b.Tag = [string]$p[1]; [void]$presetRow.Children.Add($b); $presetButtons[$p[0]] = $b   # Tag: the label without the status
     }
-    $refresh = New-Object System.Windows.Controls.Button; $refresh.Content = 'Refresh state'; $refresh.Margin = '16,0,8,6'; [System.Windows.Automation.AutomationProperties]::SetName($refresh, 'Read the state of the list again')
+    $refresh = New-Object System.Windows.Controls.Button; $refresh.Content = (T 'opt.refresh'); $refresh.Margin = '16,0,8,6'; [System.Windows.Automation.AutomationProperties]::SetName($refresh, (T 'opt.refresh.name'))
     [void]$presetRow.Children.Add($refresh)
     [void]$cardStack.Children.Add($presetRow)
-    $only = New-Object System.Windows.Controls.CheckBox; $only.Content = 'Show only entries that are not in place yet'; $only.Margin = '0,4,0,0'
+    $only = New-Object System.Windows.Controls.CheckBox; $only.Content = (T 'opt.onlymissing'); $only.Margin = '0,4,0,0'
     [void]$cardStack.Children.Add($only)
     $summary = New-Text '' 'Hint' '0,10,0,0'
     [void]$cardStack.Children.Add($summary)
@@ -142,7 +142,7 @@ function Complete-OptRead {
     Set-OptBusy $false
     if ($script:CurrentPage -eq 'Optimization') {
         Show-OptList
-        if ($err) { $ui.TxtOptSummary.Text = "The state could not be read: $err $(if ($script:OptStatus) { 'The list shows the earlier state; Apply and Undo wait for a successful read.' }) Press Refresh state to try again."; Show-Error "The optimization state could not be read: $err" }
+        if ($err) { $ui.TxtOptSummary.Text = (T 'opt.readfail' $err $(if ($script:OptStatus) { (T 'opt.readfail.old') })); Show-Error "The optimization state could not be read: $err" }
     }
 }
 $script:Timer.Add_Tick({ try { Complete-OptRead } catch { Show-Error $_.Exception.Message } })
@@ -176,12 +176,12 @@ function Update-OptPresetStatus {
         $awayText = $(if ($away -gt 0) { " $away of them $(if ($away -eq 1) { 'is' } else { 'are' }) not on this host (counted as in place)." } else { '' })
         # green only when at least one entry of the set is on this host and every entry that is, is in place (a set that is all "not on this host" says nothing)
         if ($here.Count -gt 0 -and $done -eq $rows.Count) {
-            $b.Content = "$label  $([char]0x2713) in place"; Set-Brush $b ([System.Windows.Controls.Button]::ForegroundProperty) 'Success'
-            $b.ToolTip = "All $($rows.Count) entries of this set are in place.$awayText"
+            $b.Content = (T 'opt.set.allin' $label $([char]0x2713)); Set-Brush $b ([System.Windows.Controls.Button]::ForegroundProperty) 'Success'
+            $b.ToolTip = (T 'opt.set.allin.text' $($rows.Count) $awayText)
         }
         else {
-            $b.Content = "$label  ($done of $($rows.Count) in place)"
-            $b.ToolTip = "$done of $($rows.Count) entries of this set are in place.$awayText"
+            $b.Content = (T 'opt.set.some' $label $done $($rows.Count))
+            $b.ToolTip = (T 'opt.set.some.text' $done $($rows.Count) $awayText)
         }
     }
 }
@@ -193,9 +193,9 @@ function Show-OptList {
     try {
         $ui.PanelOptList.Children.Clear(); $ui.OptInputBoxes = @{}
         $ui.BoxOptErrors.Visibility = ConvertTo-Vis ($st -and -not $st.DataValid)
-        if (-not $st) { $ui.TxtOptSummary.Text = $(if ($script:OptJob) { 'Reading the state of the master ...' } else { '' }); $ui.BtnOptApply.IsEnabled = $false; $ui.BtnOptUndo.IsEnabled = $false; return }
+        if (-not $st) { $ui.TxtOptSummary.Text = $(if ($script:OptJob) { (T 'opt.reading') } else { '' }); $ui.BtnOptApply.IsEnabled = $false; $ui.BtnOptUndo.IsEnabled = $false; return }
         if (-not $st.DataValid) {
-            $ui.TxtOptErrors.Text = "The optimization data is not valid, so nothing can be applied. " + (@($st.DataErrors | Select-Object -First 6) -join "`r`n")
+            $ui.TxtOptErrors.Text = (T 'opt.datainvalid') + (@($st.DataErrors | Select-Object -First 6) -join "`r`n")
             $ui.TxtOptSummary.Text = ''; $ui.BtnOptApply.IsEnabled = $false; $ui.BtnOptUndo.IsEnabled = $false
             return
         }
@@ -207,7 +207,7 @@ function Show-OptList {
             $open = @($rows | Where-Object { $_.Present -and -not $_.Compliant })
             $shown = if ($script:OptOnlyOpen) { $open } else { $rows }
             if ($shown.Count -eq 0) { continue }
-            [void]$ui.PanelOptList.Children.Add((New-UpdGroupHead "$(Get-AVDTuneOptimizationCategoryLabel $cat)  ($($open.Count) of $($rows.Count) not in place)"))
+            [void]$ui.PanelOptList.Children.Add((New-UpdGroupHead (T 'opt.set.missing' $(Get-AVDTuneOptimizationCategoryLabel $cat) $($open.Count) $($rows.Count))))
             foreach ($r in $shown) {
                 $g = New-Object System.Windows.Controls.Grid; $g.Margin = '0,5,0,5'
                 foreach ($w in 28, '*', 190) { $c = New-Object System.Windows.Controls.ColumnDefinition; $c.Width = $w; [void]$g.ColumnDefinitions.Add($c) }
@@ -221,18 +221,18 @@ function Show-OptList {
                 [void]$line.Children.Add($t)
                 $rp = $pillStyle[[string]$r.Risk]
                 [void]$line.Children.Add((New-OptPill "Risk: $($r.Risk)" $rp[0] $rp[1]))
-                if ($r.Irreversible) { [void]$line.Children.Add((New-OptPill 'Cannot be undone' 'ErrorBg' 'Danger')) }
-                if ($r.Reboot) { [void]$line.Children.Add((New-OptPill 'Needs restart' 'Hover' 'MutedText')) }
-                if ($r.Default) { [void]$line.Children.Add((New-OptPill 'Default on' 'AccentSubtle' 'Primary')) }
+                if ($r.Irreversible) { [void]$line.Children.Add((New-OptPill (T 'opt.pill.irreversible') 'ErrorBg' 'Danger')) }
+                if ($r.Reboot) { [void]$line.Children.Add((New-OptPill (T 'opt.pill.reboot') 'Hover' 'MutedText')) }
+                if ($r.Default) { [void]$line.Children.Add((New-OptPill (T 'opt.pill.default') 'AccentSubtle' 'Primary')) }
                 [void]$mid.Children.Add($line)
                 [void]$mid.Children.Add((New-Text ([string]$r.Why) 'Hint' '0,3,0,0'))
                 if ([string]$r.Input -eq 'UncPath') {
                     # #41: the share is an input; prefilled with the path that is set now; checked (format here, readability in the run) when Apply is pressed
                     if (-not $script:OptInputs.ContainsKey([string]$r.Id) -and (Test-AVDTuneUncPath ([string]$r.State))) { $script:OptInputs[[string]$r.Id] = [string]$r.State }
                     $inLine = New-Object System.Windows.Controls.StackPanel; $inLine.Orientation = 'Horizontal'; $inLine.Margin = '0,6,0,0'
-                    $inLbl = New-Text 'Share (UNC):' $null '0,0,8,0'; $inLbl.VerticalAlignment = 'Center'
+                    $inLbl = New-Text (T 'opt.share') $null '0,0,8,0'; $inLbl.VerticalAlignment = 'Center'
                     $tb = New-Object System.Windows.Controls.TextBox; $tb.Width = 380; $tb.MaxLength = 260; $tb.DataContext = [string]$r.Id; $tb.Text = [string]$script:OptInputs[[string]$r.Id]
-                    [System.Windows.Automation.AutomationProperties]::SetName($tb, "UNC path for $($r.Title)"); $tb.ToolTip = '\\server\share\folder - no user name or password: the share is read with the logon of this session'
+                    [System.Windows.Automation.AutomationProperties]::SetName($tb, (T 'opt.share.name' $($r.Title))); $tb.ToolTip = (T 'opt.share.tip')
                     $tb.Add_TextChanged({ param($s) $script:OptInputs[[string]$s.DataContext] = [string]$s.Text.Trim() })
                     $ui.OptInputBoxes[[string]$r.Id] = $tb
                     foreach ($x in $inLbl, $tb) { [void]$inLine.Children.Add($x) }
@@ -245,12 +245,12 @@ function Show-OptList {
                 $pill = New-OptPill $k[2] $k[0] $k[1]; $pill.Margin = '0'; $pill.HorizontalAlignment = 'Left'
                 [void]$sp.Children.Add($pill)
                 $stT = New-Text $stateText $null '0,3,0,0'; Set-Brush $stT ([System.Windows.Controls.TextBlock]::ForegroundProperty) 'MutedText'; [void]$sp.Children.Add($stT)
-                if ($r.HasBackup) { [void]$sp.Children.Add((New-Text 'Undo is possible' 'Hint' '0,2,0,0')) }
+                if ($r.HasBackup) { [void]$sp.Children.Add((New-Text (T 'opt.undopossible') 'Hint' '0,2,0,0')) }
                 foreach ($e in $chk, $mid, $sp) { [void]$g.Children.Add($e) }
                 [void]$ui.PanelOptList.Children.Add($g)
             }
         }
-        $ui.TxtOptNotes.Text = 'The state is read from this master (Refresh state reads it again). An entry that is not on this host, such as a service or task that does not exist on this build, cannot be selected. Undo is offered where AVDTune saved the value that was there before; it restores that value and does not turn back anything AVDTune did not set. A service that was set to "Automatic (delayed start)" comes back as "Automatic". Apply and Undo run on the window thread and can take a while with many entries.'
+        $ui.TxtOptNotes.Text = (T 'opt.hint')
     }
     finally { $script:OptBuilding = $false }
     Update-OptSummary
@@ -259,13 +259,13 @@ function Show-OptList {
 function Update-OptSummary {
     $st = $script:OptStatus
     if (-not $st -or -not $st.DataValid) { return }
-    if ($script:OptJob -or $script:OptRun) { $ui.TxtOptSummary.Text = $(if ($script:OptRun) { 'Running ...' } else { 'Reading the state of the master ...' }); return }
+    if ($script:OptJob -or $script:OptRun) { $ui.TxtOptSummary.Text = $(if ($script:OptRun) { (T 'opt.running') } else { (T 'opt.reading') }); return }
     $sel = @(Get-OptSelectedRows)
     $open = @($sel | Where-Object { -not $_.Compliant })
     $irr = @($open | Where-Object { $_.Irreversible })
     $src = @($st.Sources | Where-Object { $_.Id -eq 'wdot' })[0]
-    $ui.TxtOptSummary.Text = "$($st.Rows.Count) entries; $(@($st.Rows | Where-Object { $_.Present -and $_.Compliant }).Count) already in place. Selected: $($sel.Count), of which $($open.Count) would change something$(if ($irr.Count -gt 0) { " ($($irr.Count) AppX removal(s) that cannot be undone)" })." +
-        $(if ($src) { " Data based on $($src.Name), $($src.License) licence, $($src.Copyright)." } else { '' }) + $(if ($st.BackupError) { " $($st.BackupError)" } else { '' })
+    $ui.TxtOptSummary.Text = (T 'opt.summary' $($st.Rows.Count) $(@($st.Rows | Where-Object { $_.Present -and $_.Compliant }).Count) $($sel.Count) $($open.Count) $(if ($irr.Count -gt 0) { (T 'opt.summary.appx' $($irr.Count)) })) +
+        $(if ($src) { (T 'opt.summary.data' $($src.Name) $($src.License) $($src.Copyright)) } else { '' }) + $(if ($st.BackupError) { " $($st.BackupError)" } else { '' })
 }
 
 function Update-OptView {
@@ -279,7 +279,7 @@ function Start-OptChange([string]$Mode) {
     if ($script:OptRun) { throw 'Another optimization run is still running.' }
     if ($script:OptStale) { throw 'The last read of the state failed, so the list may be out of date. Press Refresh state first.' }
     Assert-NoOtherWriter
-    if (-not (Test-AVDTuneWriteAllowed)) { throw 'Read only: confirm a snapshot of today on the Overview first.' }
+    if (-not (Test-AVDTuneWriteAllowed)) { throw (T 'ready.err.readonly') }
     $st = $script:OptStatus
     if (-not $st -or -not $st.DataValid) { throw 'The optimization data is not valid; nothing can be applied.' }
     $sel = @(Get-OptSelectedRows)
@@ -312,7 +312,7 @@ function Start-OptChange([string]$Mode) {
     $confirmIrr = $false
     if ($irr.Count -gt 0) {
         $names = (@($irr | Select-Object -First 6 | ForEach-Object { $_.Title -replace '^Remove app: ', '' }) -join ', ') + $(if ($irr.Count -gt 6) { ", and $($irr.Count - 6) more" })
-        if (-not (Confirm-Action "$($irr.Count) AppX package(s) will be REMOVED for all users and from the provisioning list: $names.`n`nThis cannot be undone. They come back only with a reset, a new image or a re-install from the Store. Remove them?" 'Optimization: cannot be undone')) { return }
+        if (-not (Confirm-Action (T 'opt.ask.appx' $($irr.Count) $names) (T 'opt.ask.appx.title'))) { return }
         $confirmIrr = $true
     }
     $ids = @($sel | ForEach-Object { $_.Id })

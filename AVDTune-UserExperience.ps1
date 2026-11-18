@@ -47,7 +47,7 @@ function Update-WmPreview {
     $pv = Test-AVDTuneWatermarkPattern $s.Pattern
     if (-not $pv.Valid) { $ui.TxtWmMatch.Text = $pv.Error }
     else {
-        $ui.TxtWmMatch.Text = "This host ($hostName) would show the watermark: $(& $yn (Test-AVDTuneWatermarkName $s.Pattern $hostName))." + $(if ($try -and $try -ne $hostName) { " '$try': $(& $yn (Test-AVDTuneWatermarkName $s.Pattern $try))." } else { '' }) + ' The match ignores case and may match anywhere in the name; start with ^ to match the beginning.'
+        $ui.TxtWmMatch.Text = (T 'ux.match.host' $hostName $(& $yn (Test-AVDTuneWatermarkName $s.Pattern $hostName))) + $(if ($try -and $try -ne $hostName) { " '$try': $(& $yn (Test-AVDTuneWatermarkName $s.Pattern $try))." } else { '' }) + (T 'ux.match.hint')
     }
     $ui.BoxWmSwatch.Background = ConvertTo-WmBrush $s.Color
     $k = $script:WmPreviewScale
@@ -58,7 +58,7 @@ function Update-WmPreview {
     $ui.RectWmTaskbar.Height = $taskbar; [System.Windows.Controls.Canvas]::SetTop($ui.RectWmTaskbar, 270 - $taskbar)
     $pos = Get-AVDTuneWatermarkPlacement -WorkArea @{ X = 0; Y = 0; Width = 480; Height = (270 - $taskbar) } -Width ([int][Math]::Ceiling($tb.DesiredSize.Width)) -Height ([int][Math]::Ceiling($tb.DesiredSize.Height)) -Corner $s.Corner -Margin ([int][Math]::Round($s.Margin * $k))
     [System.Windows.Controls.Canvas]::SetLeft($tb, $pos.X); [System.Windows.Controls.Canvas]::SetTop($tb, $pos.Y)
-    $ui.TxtWmPreviewNote.Text = 'Scaled preview (50 %) of a 960 x 540 screen with the taskbar at the bottom. The label sits in the work area, so the taskbar stays free. On several monitors every one gets its own label.'
+    $ui.TxtWmPreviewNote.Text = (T 'ux.preview.text')
 }
 
 function Update-WatermarkView {
@@ -70,14 +70,14 @@ function Update-WatermarkView {
     Set-Brush $ui.PillWm ([System.Windows.Controls.Border]::BackgroundProperty) $pair[0]
     $ui.TxtWmPill.Text = $pair[2]; Set-Brush $ui.TxtWmPill ([System.Windows.Controls.TextBlock]::ForegroundProperty) $pair[1]
     $core = @($st.Items | Where-Object { $_.Group -eq 'Overlay' })
-    $ui.TxtWmSummary.Text = "$(@($core | Where-Object Compliant).Count) of $($core.Count) parts are in place on this master."
+    $ui.TxtWmSummary.Text = (T 'ux.parts' $(@($core | Where-Object Compliant).Count) $($core.Count))
     $yn = if ($st.HostMatch) { 'yes' } else { 'no' }
-    $ui.TxtWmHost.Text = "This host is $($st.HostName); with the saved pattern the watermark would appear here: $yn.$(if (-not $st.SettingsSaved) { ' No settings are saved yet: these are the defaults.' })"
-    if ($st.SettingsErrors.Count -gt 0) { $ui.TxtWmHost.Text += ' The saved settings are not valid and are replaced by the defaults: ' + ($st.SettingsErrors -join ' ') }
+    $ui.TxtWmHost.Text = (T 'ux.host' $($st.HostName) $yn $(if (-not $st.SettingsSaved) { (T 'ux.defaults') }))
+    if ($st.SettingsErrors.Count -gt 0) { $ui.TxtWmHost.Text += (T 'ux.invalid') + ($st.SettingsErrors -join ' ') }
     $ui.BoxWmLegacy.Visibility = ConvertTo-Vis ([bool]$st.Legacy.Present)
     if ($st.Legacy.Present) {
         $parts = @(); if ($st.Legacy.Task) { $parts += "the scheduled task $($st.Legacy.TaskName)" }; if ($st.Legacy.Vbs) { $parts += "the launcher $($st.Legacy.VbsPath)" }
-        $ui.TxtWmLegacy.Text = "Found: $($parts -join ' and '). Both can run next to the new watermark, so users would see two labels. Removing them keeps a backup of the task definition and the launcher in AVDTune's state folder and can be undone. Overlays that are running right now are not stopped; they end when the user signs out."
+        $ui.TxtWmLegacy.Text = (T 'ux.foreign' $($parts -join ' and '))
     }
     $ui.PanelWmItems.Children.Clear()
     $last = ''
@@ -91,12 +91,12 @@ function Update-WatermarkView {
         $pill = New-Object System.Windows.Controls.Border; Set-Brush $pill ([System.Windows.Controls.Border]::StyleProperty) 'Pill'; $pill.Padding = '10,2'; $pill.HorizontalAlignment = 'Left'; $pill.VerticalAlignment = 'Center'
         Set-Brush $pill ([System.Windows.Controls.Border]::BackgroundProperty) $k[0]
         $pt = New-Object System.Windows.Controls.TextBlock; $pt.Text = $k[2]; $pt.FontSize = 12; $pt.FontWeight = 'SemiBold'; Set-Brush $pt ([System.Windows.Controls.TextBlock]::ForegroundProperty) $k[1]; $pill.Child = $pt
-        $t = New-Object System.Windows.Controls.TextBlock; $t.Text = [string]$i.Title; $t.TextWrapping = 'Wrap'; $t.VerticalAlignment = 'Center'; $t.SetValue([System.Windows.Controls.Grid]::ColumnProperty, 1); $t.Margin = '0,0,10,0'; $t.ToolTip = "$($i.Why)`r`nSource: $($i.Source)"
+        $t = New-Object System.Windows.Controls.TextBlock; $t.Text = [string]$i.Title; $t.TextWrapping = 'Wrap'; $t.VerticalAlignment = 'Center'; $t.SetValue([System.Windows.Controls.Grid]::ColumnProperty, 1); $t.Margin = '0,0,10,0'; $t.ToolTip = (T 'ux.row.tip' $($i.Why) $($i.Source))
         $s = New-Object System.Windows.Controls.TextBlock; $s.Text = [string]$i.State; $s.TextWrapping = 'Wrap'; $s.VerticalAlignment = 'Center'; $s.SetValue([System.Windows.Controls.Grid]::ColumnProperty, 2); Set-Brush $s ([System.Windows.Controls.TextBlock]::ForegroundProperty) 'MutedText'
         foreach ($e in $pill, $t, $s) { [void]$g.Children.Add($e) }
         [void]$ui.PanelWmItems.Children.Add($g)
     }
-    $ui.TxtWmNotes.Text = 'The label appears at the next sign-in of a user (the task starts at logon, one overlay per session); changed settings are read then too. It is not verified on a multi-session host yet, and a console window can flash briefly at logon unless the headless start is switched on. Hover a row for the reason and the source.'
+    $ui.TxtWmNotes.Text = (T 'ux.hint')
     Update-WmPreview
 }
 
@@ -115,21 +115,21 @@ function Test-WmFormChanged {
     (($r.Settings | ConvertTo-Json -Compress -Depth 5) -ne ($script:WmSaved | ConvertTo-Json -Compress -Depth 5))
 }
 function Start-WatermarkChange([string]$Mode) {
-    if (-not (Test-AVDTuneWriteAllowed)) { throw 'Read only: confirm a snapshot of today on the Overview first.' }; Assert-NoOtherWriter
+    if (-not (Test-AVDTuneWriteAllowed)) { throw (T 'ready.err.readonly') }; Assert-NoOtherWriter
     $st = Get-AVDTuneWatermarkStatus -Machine $script:Machine -Root $script:StateRoot -SourceRoot $script:WmSourceRoot
     $ask = switch ($Mode) {
         'On' {
             $r = ConvertTo-AVDTuneWatermarkSettings (Get-WmFormRaw)
-            if (-not $r.Valid) { throw ('The settings are not valid: ' + ($r.Errors -join ' ')) }
-            "Install the watermark on this master?`nProgram files in C:\Program Files\AVDTune\Watermark, a settings copy for users in C:\ProgramData\AVDTune-Public and the scheduled task 'AVDTune Watermark' at logon for all users." +
-            $(if (Test-WmFormChanged) { "`nThe changed settings are saved first." } else { '' }) +
-            $(if ($r.Settings.Microsoft.Enabled) { "`nThe Microsoft QR code watermark is switched on: afterwards only clients that support watermarking can connect." } else { '' }) +
-            $(if ($st.Legacy.Present) { "`nThe old overlay is not touched (own button)." } else { '' })
+            if (-not $r.Valid) { throw (T 'ux.err.invalid' ($r.Errors -join ' ')) }
+            (T 'ux.ask.on') +
+            $(if (Test-WmFormChanged) { "`n" + (T 'ux.ask.on.save') } else { '' }) +
+            $(if ($r.Settings.Microsoft.Enabled) { "`n" + (T 'ux.ask.on.ms') } else { '' }) +
+            $(if ($st.Legacy.Present) { "`n" + (T 'ux.ask.on.legacy') } else { '' })
         }
-        'Off' { "Remove the watermark from this master?`nThe scheduled task, the program files, the settings copy and the Microsoft policy are removed. The saved settings in AVDTune stay." }
-        'LegacyRemove' { "Remove the old overlay?`nThe scheduled task $($st.Legacy.TaskName) and the launcher PilotOverlayLauncher.vbs are removed. A backup is kept so this can be undone. Overlays that are running are not stopped." }
+        'Off' { (T 'ux.ask.off') }
+        'LegacyRemove' { (T 'ux.ask.legacy' $st.Legacy.TaskName) }
     }
-    if (-not (Confirm-Action $ask 'Watermark')) { return }
+    if (-not (Confirm-Action $ask (T 'ux.x.watermark'))) { return }
     $window.Cursor = [System.Windows.Input.Cursors]::Wait
     try {
         if ($Mode -eq 'On' -and (Test-WmFormChanged)) { [void](Save-WatermarkForm) }

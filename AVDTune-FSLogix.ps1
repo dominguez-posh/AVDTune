@@ -51,7 +51,7 @@ function Assert-FslFresh {
         throw "The FSLogix state on the page is older than $($script:FslMaxAgeMinutes) minutes. It is being read again: check the page and confirm again when the read is done."
     }
 }
-function Assert-FslWrite { if (-not (Test-AVDTuneWriteAllowed)) { throw 'Read only: confirm a snapshot of today on the Overview first.' }; Assert-NoOtherWriter; Assert-FslFresh }
+function Assert-FslWrite { if (-not (Test-AVDTuneWriteAllowed)) { throw (T 'ready.err.readonly') }; Assert-NoOtherWriter; Assert-FslFresh }
 function Get-FslGateSnapshot { $g = Get-AVDTuneWriteGate; if ($g) { [string]$g.SnapshotId } else { '' } }
 
 function Set-FslPill($Border, $Text, [string]$Status) {
@@ -156,7 +156,7 @@ function Complete-FslRead {
     Update-FslButtons
     if ($script:CurrentPage -eq 'FSLogix') {
         Show-FslState
-        if ($err) { $ui.TxtFslState.Text = "The FSLogix state could not be read: $err $(if ($script:FslState) { 'The page shows the earlier state; changes wait for a successful read.' }) Open the page again or use Retry on the task bar."; Show-Error "The FSLogix state could not be read: $err" }
+        if ($err) { $ui.TxtFslState.Text = (T 'fsl.readfail' $err $(if ($script:FslState) { (T 'fsl.readfail.old') })); Show-Error "The FSLogix state could not be read: $err" }
     }
 }
 function Update-FslButtons {
@@ -226,33 +226,33 @@ function Complete-FslLatestLookup {
 }
 function Update-FslInstall {
     $st = $script:FslState
-    if (-not $st) { Set-FslPill $ui.PillFslInstall $ui.TxtFslInstallPill 'info'; $ui.TxtFslInstallPill.Text = 'Reading ...'; $ui.PillFslInstall.ToolTip = $null; $ui.TxtFslVersion.Text = 'Reading the installation of the master ...'; return }
+    if (-not $st) { Set-FslPill $ui.PillFslInstall $ui.TxtFslInstallPill 'info'; $ui.TxtFslInstallPill.Text = (T 'fsl.reading'); $ui.PillFslInstall.ToolTip = $null; $ui.TxtFslVersion.Text = (T 'fsl.reading.install'); return }
     $info = $st.Info
     $vs = $null
     if ($info.Installed) {
         Start-FslLatestLookup
         $vs = Get-AVDTuneFSLogixVersionState -Installed $info.Version -Latest $(if ($script:FslLatestResult) { $script:FslLatestResult.Result })
-        if ($script:FslLatestLookup -and -not $script:FslLatestResult) { Set-FslPill $ui.PillFslInstall $ui.TxtFslInstallPill 'info'; $ui.TxtFslInstallPill.Text = 'Installed, checking for updates ...' }
+        if ($script:FslLatestLookup -and -not $script:FslLatestResult) { Set-FslPill $ui.PillFslInstall $ui.TxtFslInstallPill 'info'; $ui.TxtFslInstallPill.Text = (T 'fsl.checkupdates') }
         else { Set-FslPill $ui.PillFslInstall $ui.TxtFslInstallPill $vs.Pill; $ui.TxtFslInstallPill.Text = $vs.Text }
         $ui.PillFslInstall.ToolTip = $(if ($vs.Reason) { $vs.Reason } else { $null })
         $svc = if ($info.Frxsvc.Present) { "frxsvc $($info.Frxsvc.Status)" } else { 'frxsvc missing' }
         $drv = if (-not $info.DriversRead) { 'drivers not read' } elseif ($info.Drivers.Count -gt 0) { "drivers: $($info.Drivers -join ', ')" } else { 'no filter driver loaded' }
-        $ui.TxtFslVersion.Text = "FSLogix $($info.Version); $svc; $drv"
+        $ui.TxtFslVersion.Text = (T 'fsl.version' $($info.Version) $svc $drv)
     }
-    else { Set-FslPill $ui.PillFslInstall $ui.TxtFslInstallPill 'red'; $ui.TxtFslInstallPill.Text = 'Not installed'; $ui.TxtFslVersion.Text = 'FSLogix is not installed on this master.' }
-    $ui.TxtFslLatest.Text = $(if ($vs -and $vs.State -in 'Update', 'Unknown' -and $vs.Reason -and -not $script:FslLatest) { $vs.Reason } elseif ($script:FslLatest) { $script:FslLatest } else { 'The newest release is looked up when you press Install or update (Microsoft download page; the file is checked for the Microsoft signature before it runs, in a folder only administrators can write to).' })
+    else { Set-FslPill $ui.PillFslInstall $ui.TxtFslInstallPill 'red'; $ui.TxtFslInstallPill.Text = (T 'ov.val.notinstalled'); $ui.TxtFslVersion.Text = (T 'fsl.notinstalled') }
+    $ui.TxtFslLatest.Text = $(if ($vs -and $vs.State -in 'Update', 'Unknown' -and $vs.Reason -and -not $script:FslLatest) { $vs.Reason } elseif ($script:FslLatest) { $script:FslLatest } else { (T 'fsl.newest.hint') })
 }
 
 # ---------------------------------------------------------------- the form: settings
 function Update-FslSettings {
     $st = $script:FslState
-    if (-not $st) { $ui.TxtFslSettingsState.Text = 'Reading the settings of the master ...'; return }
+    if (-not $st) { $ui.TxtFslSettingsState.Text = (T 'fsl.reading.settings'); return }
     $keep = @{}; foreach ($k in $script:FslInputs.Keys) { $e = $script:FslInputs[$k]; if ($e.Box.Text -ne $e.Shown) { $keep[$k] = $e.Box.Text } }   # only what the administrator typed
     $ui.PanelFslSettings.Children.Clear(); $script:FslInputs = @{}
     $odfcHead = $false
     foreach ($s in @($st.Settings)) {
-        if ($s.Scope -eq 'ODFC' -and -not $odfcHead) { $odfcHead = $true; [void]$ui.PanelFslSettings.Children.Add((New-UpdGroupHead 'Office container (ODFC), optional')) }
-        elseif ($s.Scope -eq 'Profile' -and $s.Name -eq 'Enabled') { [void]$ui.PanelFslSettings.Children.Add((New-UpdGroupHead 'Profile container')) }
+        if ($s.Scope -eq 'ODFC' -and -not $odfcHead) { $odfcHead = $true; [void]$ui.PanelFslSettings.Children.Add((New-UpdGroupHead (T 'fsl.head.odfc'))) }
+        elseif ($s.Scope -eq 'Profile' -and $s.Name -eq 'Enabled') { [void]$ui.PanelFslSettings.Children.Add((New-UpdGroupHead (T 'fsl.head.profile'))) }
         $g = New-Object System.Windows.Controls.Grid; $g.Margin = '0,5,0,5'
         foreach ($w in 220, 240, 140, 90, '*') { $c = New-Object System.Windows.Controls.ColumnDefinition; $c.Width = $w; [void]$g.ColumnDefinitions.Add($c) }
         $name = New-Object System.Windows.Controls.TextBlock; $name.Text = $s.Name; $name.FontWeight = 'SemiBold'; $name.VerticalAlignment = 'Center'
@@ -261,11 +261,11 @@ function Update-FslSettings {
         $key = "$($s.Scope):$($s.Name)"
         $box.Text = $(if ($keep.ContainsKey($key)) { $keep[$key] } else { $shown })
         [System.Windows.Automation.AutomationProperties]::SetName($box, "$($s.Scope) setting $($s.Name)")
-        $rec = New-Object System.Windows.Controls.TextBlock; $rec.Text = $(if ($null -ne $s.Recommended) { "recommended $($s.Recommended)" } else { '' }); $rec.VerticalAlignment = 'Center'; $rec.SetValue([System.Windows.Controls.Grid]::ColumnProperty, 2)
+        $rec = New-Object System.Windows.Controls.TextBlock; $rec.Text = $(if ($null -ne $s.Recommended) { (T 'fsl.recommended' $($s.Recommended)) } else { '' }); $rec.VerticalAlignment = 'Center'; $rec.SetValue([System.Windows.Controls.Grid]::ColumnProperty, 2)
         Set-Brush $rec ([System.Windows.Controls.TextBlock]::ForegroundProperty) 'MutedText'
         $pillStatus = switch ($s.Status) { 'ok' { 'green' } 'differs' { 'yellow' } default { 'info' } }
         $pill = New-FslPillBlock $pillStatus $(switch ($s.Status) { 'ok' { 'Set' } 'differs' { 'Differs' } default { 'Not set' } }); $pill.SetValue([System.Windows.Controls.Grid]::ColumnProperty, 3)
-        $why = New-Object System.Windows.Controls.TextBlock; $why.Text = $s.Explain + $(if (-not $s.Verified -and $s.Note) { " (Learn: $($s.Note))" }); $why.TextWrapping = 'Wrap'; $why.FontSize = 12; $why.SetValue([System.Windows.Controls.Grid]::ColumnProperty, 4)
+        $why = New-Object System.Windows.Controls.TextBlock; $why.Text = $s.Explain + $(if (-not $s.Verified -and $s.Note) { (T 'fsl.learn' $($s.Note)) }); $why.TextWrapping = 'Wrap'; $why.FontSize = 12; $why.SetValue([System.Windows.Controls.Grid]::ColumnProperty, 4)
         Set-Brush $why ([System.Windows.Controls.TextBlock]::ForegroundProperty) 'MutedText'
         $tip = "Source: $($s.Source)`r`nA recommendation stated on Microsoft Learn: $(if ($s.Verified) { 'yes' } else { 'no' })$(if ($s.Note) { "`r`n" + $s.Note })"
         foreach ($e in $name, $box, $rec, $pill, $why) { $e.ToolTip = $tip; [void]$g.Children.Add($e) }
@@ -273,7 +273,7 @@ function Update-FslSettings {
         $script:FslInputs[$key] = @{ Box = $box; Scope = $s.Scope; Name = $s.Name; Type = $s.Type; Shown = $shown; Recommended = $s.Recommended }
     }
     $lc = $st.LastChange
-    $ui.TxtFslSettingsState.Text = if ($lc) { "LastChange: $(([datetime]$lc.At).ToString('yyyy-MM-dd HH:mm')) by $($lc.User) ($($lc.Plan))." } else { 'No FSLogix change recorded yet.' }
+    $ui.TxtFslSettingsState.Text = if ($lc) { (T 'fsl.lastchange' $(([datetime]$lc.At).ToString('yyyy-MM-dd HH:mm')) $($lc.User) $($lc.Plan)) } else { (T 'fsl.nochange') }
 }
 function Get-FslFormValues {
     $vals = @{}
@@ -294,30 +294,30 @@ function Show-FslRun($Run, [string]$What) {
 }
 Add-Click $ui.BtnFslFill {
     foreach ($e in $script:FslInputs.Values) { if ($e.Scope -eq 'Profile' -and $null -ne $e.Recommended) { $e.Box.Text = [string]$e.Recommended } }
-    $ui.TxtFslSettingsState.Text = 'Microsoft''s recommended values are filled in (VHDLocations is yours). Press Test to see what would change.'
+    $ui.TxtFslSettingsState.Text = (T 'fsl.filled')
 }
 Add-Click $ui.BtnFslSettingsTest {
     # a dry run: reads the registry values of the form (quick) and writes nothing
     $vals = Get-FslFormValues
-    if ($vals.Count -eq 0) { $ui.TxtFslSettingsState.Text = 'Nothing to change: every filled value equals the current one.'; return }
+    if ($vals.Count -eq 0) { $ui.TxtFslSettingsState.Text = (T 'fsl.nothingtochange'); return }
     $run = Set-AVDTuneFSLogixSettings -Machine $script:Machine -Root $script:StateRoot -Values $vals -WhatIf
     $lines = @($run.Results | ForEach-Object { "$($_.Id -replace '^fslogix\.', ''): $($_.Status)$(if ($_.Status -eq 'WhatIf') { " (now $(Format-FslValue $_.Before))" })" })
-    $ui.TxtFslSettingsState.Text = "Test (nothing written): " + ($lines -join '; ')
+    $ui.TxtFslSettingsState.Text = (T 'fsl.test.prefix') + ($lines -join '; ')
 }
 Add-Click $ui.BtnFslSettingsApply {
     Assert-FslWrite
     $vals = Get-FslFormValues
-    if ($vals.Count -eq 0) { throw 'Nothing to change: every filled value equals the current one.' }
+    if ($vals.Count -eq 0) { throw (T 'fsl.nothingtochange') }
     # the same Apply also sets the recommended lists: what it would change there comes from the read of the page and is named in this one confirmation (nothing is said when the lists stay as they are)
     $listPlan = $script:FslState.Plan
     $listText = Format-AVDTuneFSLogixListChanges $listPlan
     $askText = "Write $($vals.Count) FSLogix setting(s) to the registry of this master?$(if ($listText) { " Also: $listText.$(if ($listPlan.Notice) { ' ' + $listPlan.Notice })" })"
-    if (-not (Confirm-Action $askText 'FSLogix settings')) { return }
+    if (-not (Confirm-Action $askText (T 'fsl.settings.title'))) { return }
     Start-FslJob 'Settings' @{ Values = $vals; Lists = [bool]$listText; ListHash = (Get-AVDTuneFSLogixListPlanHash $listPlan) }   # the job writes the lists only when they are still as confirmed
 }
 Add-Click $ui.BtnFslSettingsUndo {
     Assert-FslWrite
-    if (-not (Confirm-Action 'Put back the FSLogix settings that were found before the last change?' 'Undo')) { return }
+    if (-not (Confirm-Action (T 'fsl.ask.undosettings') 'Undo')) { return }
     Start-FslJob 'SettingsUndo' @{}
 }
 
@@ -332,23 +332,23 @@ function Resolve-FslSid([string]$Text, $Choices) {
 }
 function Update-FslGroups {
     $st = $script:FslState
-    if (-not $st) { $ui.TxtFslGroups.Text = 'Reading the include and exclude lists ...'; return }
+    if (-not $st) { $ui.TxtFslGroups.Text = (T 'fsl.reading.lists'); return }
     $g = $st.Groups
     $fmt = { param($l) if ($null -eq $l) { 'the group does not exist' } elseif (@($l).Count -eq 0) { '(empty)' } else { @($l) -join ', ' } }
-    $ui.TxtFslGroups.Text = "Include list ($($g.IncludeName)):`r`n  $(& $fmt $g.Include)`r`nExclude list ($($g.ExcludeName)):`r`n  $(& $fmt $g.Exclude)"
+    $ui.TxtFslGroups.Text = (T 'fsl.lists' $($g.IncludeName) $(& $fmt $g.Include) $($g.ExcludeName) $(& $fmt $g.Exclude))
     $ch = $st.Choices
     foreach ($cmb in $ui.CmbFslGroup, $ui.CmbFslUsersGroup, $ui.CmbFslAdminsGroup) { $keepText = $cmb.Text; $cmb.ItemsSource = @($ch.Groups | ForEach-Object { $_.Name }); $cmb.Text = $keepText }
     $plan = $st.Plan
     $want = @(foreach ($l in 'Include', 'Exclude') { $x = @($plan.Entries | Where-Object { $_.List -eq $l }); if ($x.Count -gt 0) { "$($l.ToLowerInvariant()) $((@($x | ForEach-Object { $_.Label })) -join ', ')" } }) -join '; '
-    $ui.TxtFslListsNotice.Text = "Recommended: $want.$(if ($plan.Notice) { ' ' + $plan.Notice })"
-    $ui.TxtFslGroupHint.Text = $(if ($ch.Source -eq 'Directory') { "$(@($ch.Groups).Count) groups from the domain controller. Pick one or type a SID." } else { $ch.Hint })
+    $ui.TxtFslListsNotice.Text = (T 'fsl.lists.recommended' $want $(if ($plan.Notice) { ' ' + $plan.Notice }))
+    $ui.TxtFslGroupHint.Text = $(if ($ch.Source -eq 'Directory') { (T 'fsl.lists.groups' $(@($ch.Groups).Count)) } else { $ch.Hint })
 }
 function Invoke-FslGroupChange([string]$Action, [string]$Text) {
     Assert-FslWrite
     $list = [string]$ui.CmbFslList.SelectedItem
     $sid = Resolve-FslSid $Text (Get-FslGroupChoices)
     if (-not $sid) { throw "'$Text' is neither a group of the domain nor a SID (S-1-...)." }
-    if (-not (Confirm-Action "$Action $sid in the FSLogix $list list?" 'FSLogix lists')) { return }
+    if (-not (Confirm-Action (T 'fsl.ask.listmember' $Action $sid $list) (T 'fsl.lists.title'))) { return }
     Start-FslJob 'Group' @{ List = $list; Action = $Action; Sid = $sid }
 }
 function Invoke-FslRecommendedLists {
@@ -357,14 +357,14 @@ function Invoke-FslRecommendedLists {
     Assert-FslWrite
     $plan = $script:FslState.Plan
     $text = Format-AVDTuneFSLogixListChanges $plan
-    if (-not $text) { $ui.TxtFslState.Text = "The recommended lists are already set.$(if ($plan.Notice) { ' ' + $plan.Notice })"; Show-Toast $ui.TxtFslState.Text; return }
-    if (-not (Confirm-Action "Set the recommended lists? $text.$(if ($plan.Notice) { ' ' + $plan.Notice })" 'FSLogix lists')) { return }
+    if (-not $text) { $ui.TxtFslState.Text = (T 'fsl.lists.alreadyset' $(if ($plan.Notice) { ' ' + $plan.Notice })); Show-Toast $ui.TxtFslState.Text; return }
+    if (-not (Confirm-Action (T 'fsl.ask.lists' $text $(if ($plan.Notice) { ' ' + $plan.Notice })) (T 'fsl.lists.title'))) { return }
     Start-FslJob 'Lists' @{ ListHash = (Get-AVDTuneFSLogixListPlanHash $plan) }   # the job writes only when the lists are still as confirmed
 }
 Add-Click $ui.BtnFslListsApply { Invoke-FslRecommendedLists }
 Add-Click $ui.BtnFslListsUndo {
     Assert-FslWrite
-    if (-not (Confirm-Action 'Remove the members that the last Apply recommended lists added? Entries that were there before stay.' 'Undo')) { return }
+    if (-not (Confirm-Action (T 'fsl.ask.undolists') 'Undo')) { return }
     Start-FslJob 'ListsUndo' @{}
 }
 $ui.CmbFslList.ItemsSource = @('Exclude', 'Include'); $ui.CmbFslList.SelectedIndex = 0
@@ -377,9 +377,9 @@ function Build-FslTemplate {
     $ui.PanelFslTemplate.Children.Clear(); $script:FslTemplateBoxes = @{}
     foreach ($t in (Get-AVDTuneRedirectionTemplate)) {
         $cb = New-Object System.Windows.Controls.CheckBox
-        $cb.Content = "$($t.Group): $(@($t.Paths).Count) folder(s)" + $(if (-not $t.Verified) { ' (usual cache folders, not on Microsoft Learn)' } else { ' (Microsoft Learn)' })
+        $cb.Content = (T 'fsl.redir.group' $($t.Group) $(@($t.Paths).Count)) + $(if (-not $t.Verified) { (T 'fsl.redir.unverified') } else { (T 'fsl.redir.learn') })
         $cb.IsChecked = [bool]$t.Verified; $cb.Margin = '0,2,0,2'; $cb.ToolTip = "$($t.Note)`r`n$(@($t.Paths) -join "`r`n")"
-        [System.Windows.Automation.AutomationProperties]::SetName($cb, "Template group $($t.Group)")
+        [System.Windows.Automation.AutomationProperties]::SetName($cb, (T 'fsl.redir.group.name' $($t.Group)))
         [void]$ui.PanelFslTemplate.Children.Add($cb)
         $script:FslTemplateBoxes[$t.Group] = $cb
     }
@@ -390,30 +390,30 @@ function Update-FslRedirections {
     if (-not $st) { return }
     if (-not $ui.TxtFslRedirFolder.IsKeyboardFocused -and -not $ui.TxtFslRedirFolder.Text) { $ui.TxtFslRedirFolder.Text = [string]$st.RedirDefault }
     if (-not $ui.TxtFslRedirXml.Text -and $st.RedirTarget) {
-        if ($st.RedirError) { $ui.TxtFslRedirState.Text = "$($st.RedirTarget) could not be read: $($st.RedirError)" }
-        elseif ($null -ne $st.RedirText) { $ui.TxtFslRedirXml.Text = [string]$st.RedirText; $ui.TxtFslRedirState.Text = "Read from $($st.RedirTarget)." }
+        if ($st.RedirError) { $ui.TxtFslRedirState.Text = (T 'fsl.redir.readfail' $($st.RedirTarget) $($st.RedirError)) }
+        elseif ($null -ne $st.RedirText) { $ui.TxtFslRedirXml.Text = [string]$st.RedirText; $ui.TxtFslRedirState.Text = (T 'fsl.redir.readfrom' $($st.RedirTarget)) }
     }
 }
 Add-Click $ui.BtnFslRedirGenerate {
     $paths = @(foreach ($t in (Get-AVDTuneRedirectionTemplate)) { if ($script:FslTemplateBoxes[$t.Group].IsChecked) { $t.Paths } })
     if ($paths.Count -eq 0) { throw 'Tick at least one template group.' }
     $ui.TxtFslRedirXml.Text = New-AVDTuneRedirectionsXml -Excludes $paths -ExcludeCommonFolders 0
-    $ui.TxtFslRedirState.Text = "Generated: $($paths.Count) exclude(s), Copy 0 (empty local folder, nothing copied)."
+    $ui.TxtFslRedirState.Text = (T 'fsl.redir.generated' $($paths.Count))
 }
 Add-Click $ui.BtnFslRedirValidate {
     $v = Test-AVDTuneRedirectionsXml $ui.TxtFslRedirXml.Text
-    $ui.TxtFslRedirState.Text = if ($v.Ok) { "Valid: $($v.Excludes.Count) excludes, $($v.Includes.Count) includes, ExcludeCommonFolders $($v.ExcludeCommonFolders)." } else { 'Not valid: ' + ($v.Problems -join ' ') }
+    $ui.TxtFslRedirState.Text = if ($v.Ok) { (T 'fsl.redir.valid' $($v.Excludes.Count) $($v.Includes.Count) $($v.ExcludeCommonFolders)) } else { (T 'fsl.redir.invalid') + ($v.Problems -join ' ') }
 }
 Add-Click $ui.BtnFslRedirSave {
     Assert-FslWrite
     $folder = $ui.TxtFslRedirFolder.Text.Trim()
     if (-not $folder) { throw 'Enter the folder (RedirXMLSourceFolder), a share or a local folder. Users need read access to it.' }
-    if (-not (Confirm-Action "Write redirections.xml to $folder and set RedirXMLSourceFolder?" 'redirections.xml')) { return }
+    if (-not (Confirm-Action (T 'fsl.ask.redir' $folder) (T 'fsl.title.redir'))) { return }
     Start-FslJob 'Redirections' @{ Xml = [string]$ui.TxtFslRedirXml.Text; Folder = $folder }
 }
 Add-Click $ui.BtnFslRedirUndo {
     Assert-FslWrite
-    if (-not (Confirm-Action 'Put back the redirections.xml that was there before the last save?' 'Undo')) { return }
+    if (-not (Confirm-Action (T 'fsl.ask.undoredir') 'Undo')) { return }
     Start-FslJob 'RedirectionsUndo' @{}
 }
 
@@ -421,38 +421,38 @@ Add-Click $ui.BtnFslRedirUndo {
 function Update-FslDefender {
     $ui.PanelFslDefender.Children.Clear()
     $st = $script:FslState
-    if (-not $st) { $ui.TxtFslDefState.Text = 'Reading the Defender exclusions ...'; return }
+    if (-not $st) { $ui.TxtFslDefState.Text = (T 'fsl.reading.defender'); return }
     $s = $st.Defender
-    if (-not $s.Readable) { $ui.TxtFslDefState.Text = 'The Defender exclusions cannot be read here (another antivirus, or a policy hides them). Check them by hand against Microsoft''s list.'; return }
+    if (-not $s.Readable) { $ui.TxtFslDefState.Text = (T 'fsl.defender.unreadable'); return }
     $open = @($s.Items | Where-Object { -not $_.Present }).Count
-    $ui.TxtFslDefState.Text = "$(@($s.Items).Count - $open) of $(@($s.Items).Count) exclusions are set.$(if (@($s.NotDefender).Count -gt 0) { ' Not Defender types (other tools): ' + ((@($s.NotDefender) | ForEach-Object { $_.Value }) -join '; ') + '.' })"
+    $ui.TxtFslDefState.Text = (T 'fsl.defender.count' $(@($s.Items).Count - $open) $(@($s.Items).Count) $(if (@($s.NotDefender).Count -gt 0) { (T 'fsl.defender.other') + ((@($s.NotDefender) | ForEach-Object { $_.Value }) -join '; ') + '.' }))
     foreach ($i in $s.Items) {
         $g = New-Object System.Windows.Controls.Grid; $g.Margin = '0,2,0,2'
         foreach ($w in 30, 100, 80, '*') { $c = New-Object System.Windows.Controls.ColumnDefinition; $c.Width = $w; [void]$g.ColumnDefinitions.Add($c) }
         # one checkbox per exclusion (default on): what is switched off is not set and not in the undo list. A set exclusion cannot be switched off here (Undo removes the ones AVDTune added).
         $chk = New-Object System.Windows.Controls.CheckBox; $chk.VerticalAlignment = 'Center'; $chk.Tag = [string]$i.Value
         $chk.IsChecked = (-not $i.Present -and -not $script:FslDefOff.ContainsKey(([string]$i.Value).ToLowerInvariant())) -or [bool]$i.Present; $chk.IsEnabled = -not $i.Present
-        [System.Windows.Automation.AutomationProperties]::SetName($chk, "Set this exclusion: $($i.Value)")
+        [System.Windows.Automation.AutomationProperties]::SetName($chk, (T 'fsl.defender.item.name' $($i.Value)))
         $chk.Add_Checked({ param($src, $e) try { $script:FslDefOff.Remove(([string]$src.Tag).ToLowerInvariant()) } catch { } })
         $chk.Add_Unchecked({ param($src, $e) try { $script:FslDefOff[([string]$src.Tag).ToLowerInvariant()] = $true } catch { } })
         $pill = New-FslPillBlock $(if ($i.Present) { 'green' } else { 'yellow' }) $(if ($i.Present) { 'Set' } else { 'Missing' })
         $pill.SetValue([System.Windows.Controls.Grid]::ColumnProperty, 1)
         $kind = New-Object System.Windows.Controls.TextBlock; $kind.Text = $i.Kind; $kind.VerticalAlignment = 'Center'; $kind.SetValue([System.Windows.Controls.Grid]::ColumnProperty, 2); Set-Brush $kind ([System.Windows.Controls.TextBlock]::ForegroundProperty) 'MutedText'
-        $val = New-Object System.Windows.Controls.TextBlock; $val.Text = $i.Value + $(if ($i.Risk) { "   [risk: $($i.Risk)]" }); $val.FontFamily = 'Cascadia Mono, Consolas'; $val.FontSize = 12; $val.TextWrapping = 'Wrap'; $val.VerticalAlignment = 'Center'; $val.SetValue([System.Windows.Controls.Grid]::ColumnProperty, 3)
+        $val = New-Object System.Windows.Controls.TextBlock; $val.Text = $i.Value + $(if ($i.Risk) { (T 'fsl.defender.risk' $($i.Risk)) }); $val.FontFamily = 'Cascadia Mono, Consolas'; $val.FontSize = 12; $val.TextWrapping = 'Wrap'; $val.VerticalAlignment = 'Center'; $val.SetValue([System.Windows.Controls.Grid]::ColumnProperty, 3)
         [void]$g.Children.Add($chk)
-        foreach ($e in $pill, $kind, $val) { $e.ToolTip = "$($i.Reason)`r`nSource: $($i.Source)`r`nStated on Microsoft Learn: $(if ($i.Verified) { 'yes' } else { 'no' })$(if ($i.Note) { "`r`n" + $i.Note })"; [void]$g.Children.Add($e) }
+        foreach ($e in $pill, $kind, $val) { $e.ToolTip = (T 'fsl.defender.tip' $($i.Reason) $($i.Source) $(if ($i.Verified) { 'yes' } else { 'no' }) $(if ($i.Note) { "`r`n" + $i.Note })); [void]$g.Children.Add($e) }
         [void]$ui.PanelFslDefender.Children.Add($g)
     }
 }
 Add-Click $ui.BtnFslDefAdd {
     Assert-FslWrite
     $off = @($script:FslDefOff.Keys)
-    if (-not (Confirm-Action "Add the checked, missing FSLogix exclusions to Microsoft Defender Antivirus on this master? Some are folders that users can write to (marked [risk] in the list): files there are not scanned. Untick an exclusion to leave it out.$(if ($off.Count -gt 0) { " $($off.Count) are unticked and will not be set." })" 'Defender exclusions')) { return }
+    if (-not (Confirm-Action (T 'fsl.ask.defender' $(if ($off.Count -gt 0) { " $($off.Count) are unticked and will not be set." })) (T 'fsl.defender.title'))) { return }
     Start-FslJob 'Defender' @{ Skip = $off; DefenderHash = (Get-AVDTuneFSLogixDefenderHash -State $script:FslState.Defender -Skip $off) }   # the job sets only what was confirmed
 }
 Add-Click $ui.BtnFslDefUndo {
     Assert-FslWrite
-    if (-not (Confirm-Action 'Remove the Defender exclusions that AVDTune added?' 'Undo')) { return }
+    if (-not (Confirm-Action (T 'fsl.ask.undodefender') 'Undo')) { return }
     Start-FslJob 'DefenderUndo' @{}
 }
 
@@ -463,25 +463,25 @@ function Update-FslTestView {
     $r = $script:FslTest
     if ($r) {
         Set-FslPill $ui.PillFslTest $ui.TxtFslTestPill $r.Overall; $ui.TxtFslTestPill.Text = $script:ReadyPill[$r.Overall][2]
-        $ui.TxtFslTestSummary.Text = "$($r.Counts.Red) red, $($r.Counts.Yellow) yellow, $($r.Counts.Green) green$(if ($r.WriteTests) { '; with the write tests on the share' } else { '; without the write tests' }). Run at $(([datetime]$r.At).ToString('HH:mm:ss'))."
+        $ui.TxtFslTestSummary.Text = (T 'fsl.test.summary' $($r.Counts.Red) $($r.Counts.Yellow) $($r.Counts.Green) $(if ($r.WriteTests) { (T 'fsl.test.withwrite') } else { (T 'fsl.test.withoutwrite') }) $(([datetime]$r.At).ToString('HH:mm:ss')))
         $order = @{ red = 0; yellow = 1; green = 2; info = 3 }
         foreach ($row in ($r.Rows | Sort-Object { $order[[string]$_.Status] }, Step)) { [void]$ui.PanelFslTest.Children.Add((New-FslResultRow $row)) }
     }
-    elseif ($rec) { Set-FslPill $ui.PillFslTest $ui.TxtFslTestPill $rec.Overall; $ui.TxtFslTestPill.Text = $script:ReadyPill[[string]$rec.Overall][2]; $ui.TxtFslTestSummary.Text = "Last test $(([datetime]$rec.At).ToString('yyyy-MM-dd HH:mm')) by $($rec.User): $($rec.Red) red, $($rec.Yellow) yellow. Run the test to see the rows." }
-    else { Set-FslPill $ui.PillFslTest $ui.TxtFslTestPill 'unknown'; $ui.TxtFslTestPill.Text = 'Not run'; $ui.TxtFslTestSummary.Text = 'The function test has not been run on this master.' }
+    elseif ($rec) { Set-FslPill $ui.PillFslTest $ui.TxtFslTestPill $rec.Overall; $ui.TxtFslTestPill.Text = $script:ReadyPill[[string]$rec.Overall][2]; $ui.TxtFslTestSummary.Text = (T 'fsl.test.last' $(([datetime]$rec.At).ToString('yyyy-MM-dd HH:mm')) $($rec.User) $($rec.Red) $($rec.Yellow)) }
+    else { Set-FslPill $ui.PillFslTest $ui.TxtFslTestPill 'unknown'; $ui.TxtFslTestPill.Text = (T 'ready.pill.notrun'); $ui.TxtFslTestSummary.Text = (T 'fsl.test.notrun') }
 }
 function Update-FslStorageView {
     $ui.PanelFslStorage.Children.Clear()
     $r = $script:FslStorage
     $undo = Get-AVDTuneStorageAclUndo -Root $script:StateRoot
     $ui.BtnFslAclUndo.Visibility = $(if ($undo) { 'Visible' } else { 'Collapsed' })   # the ACL AVDTune set can be put back (#24)
-    if (-not $r) { $ui.TxtFslStorageSummary.Text = 'The storage check has not been run.'; $ui.BtnFslAclSet.Visibility = 'Collapsed'; $ui.TxtFslAclDiff.Visibility = 'Collapsed'; return }
-    $ui.TxtFslStorageSummary.Text = "Account $($r.Account): $($r.Overall) ($($r.Counts.Red) red, $($r.Counts.Yellow) yellow, $($r.Counts.Unknown) not checkable, $($r.Counts.Green) green)$(if ($r.KeyUsed) { '. The account key was used for this run (in memory only).' })"
+    if (-not $r) { $ui.TxtFslStorageSummary.Text = (T 'fsl.storage.notrun'); $ui.BtnFslAclSet.Visibility = 'Collapsed'; $ui.TxtFslAclDiff.Visibility = 'Collapsed'; return }
+    $ui.TxtFslStorageSummary.Text = (T 'fsl.storage.summary' $($r.Account) $($r.Overall) $($r.Counts.Red) $($r.Counts.Yellow) $($r.Counts.Unknown) $($r.Counts.Green) $(if ($r.KeyUsed) { (T 'fsl.storage.keyused') }))
     $order = @{ red = 0; yellow = 1; unknown = 2; green = 3; info = 4 }
     foreach ($row in ($r.Rows | Sort-Object { $order[[string]$_.Status] }, Step)) { [void]$ui.PanelFslStorage.Children.Add((New-FslResultRow $row)) }
     if ($r.AclDiff) {
         $d = $r.AclDiff
-        $ui.TxtFslAclDiff.Text = "On the share root now:`r`n  " + ($d.Found -join "`r`n  ") + "`r`n`r`nMicrosoft's recommendation (Learn, configure storage permissions):`r`n  " + ($d.Expected -join "`r`n  ") + "`r`n`r`nFindings:`r`n  " + (($d.Findings | ForEach-Object { "$($_.Status): $($_.Text)" }) -join "`r`n  ")
+        $ui.TxtFslAclDiff.Text = (T 'fsl.acl.now') + ($d.Found -join "`r`n  ") + (T 'fsl.acl.recommended') + ($d.Expected -join "`r`n  ") + (T 'fsl.acl.findings') + (($d.Findings | ForEach-Object { "$($_.Status): $($_.Text)" }) -join "`r`n  ")
         $ui.TxtFslAclDiff.Visibility = 'Visible'; $ui.BtnFslAclSet.Visibility = 'Visible'
     }
     else { $ui.TxtFslAclDiff.Visibility = 'Collapsed'; $ui.BtnFslAclSet.Visibility = 'Collapsed' }
@@ -553,25 +553,16 @@ function Get-FslSids {
     @{ Users = $users; Admins = $admins }
 }
 function Get-FslKindText([string]$Kind) {
-    switch ($Kind) {
-        'Install' { 'install' } 'Test' { 'function test' } 'Storage' { 'storage check' } 'Settings' { 'FSLogix settings' } 'SettingsUndo' { 'Undo of the FSLogix settings' }
-        'Group' { 'FSLogix list' } 'Lists' { 'FSLogix lists' } 'ListsUndo' { 'Undo of the FSLogix lists' } 'Redirections' { 'redirections.xml' } 'RedirectionsUndo' { 'Undo of redirections.xml' }
-        'Defender' { 'Defender exclusions' } 'DefenderUndo' { 'Undo of the Defender exclusions' } 'Acl' { 'NTFS ACL' } 'AclUndo' { 'Undo of the NTFS ACL' } default { $Kind }
-    }
+    # the name of a task kind in the chosen language (keys fsl.kind.*), the kind itself when there is no key
+    $k = 'fsl.kind.' + $Kind.ToLowerInvariant()
+    if ((Test-AVDTuneTextKey $k) -and (Test-AVDTuneHasText $k)) { T $k } else { $Kind }
 }
 function New-FslTask([string]$Kind, [bool]$Write) {
     # Retry only for what reads (function test without the write tests, storage check): the install, the write tests that create files on the share and every change of
     # the master or the share start from their own confirmation
-    $title = switch ($Kind) {
-        'Install' { 'Installing or updating FSLogix' } 'Test' { $(if ($Write) { 'FSLogix function test with write tests' } else { 'FSLogix function test' }) } 'Storage' { 'FSLogix storage check' }
-        'Settings' { 'Applying FSLogix settings' } 'SettingsUndo' { 'Undo of the FSLogix settings' } 'Group' { 'Changing an FSLogix list' } 'Lists' { 'Applying the recommended FSLogix lists' } 'ListsUndo' { 'Undo of the recommended FSLogix lists' }
-        'Redirections' { 'Writing redirections.xml' } 'RedirectionsUndo' { 'Undo of redirections.xml' } 'Defender' { 'Setting the Defender exclusions' } 'DefenderUndo' { 'Undo of the Defender exclusions' } 'AclUndo' { 'Undo of the NTFS ACL of the share root' } default { 'Setting the NTFS ACL of the share root' }
-    }
-    $step = switch ($Kind) {
-        'Install' { 'Looking up the newest release' } 'Test' { 'Checking the master against Microsoft''s FSLogix requirements' } 'Storage' { 'Reading the storage account, the share and its settings' }
-        'Settings' { 'Writing the setting(s) to the registry' } 'Redirections' { 'Checking the text and writing the file to the folder' } 'Defender' { 'Adding the ticked exclusions to Microsoft Defender Antivirus' } 'Acl' { 'Reading the ACL again and setting the recommended one' } 'AclUndo' { 'Reading the ACL again and putting back the one from before' }
-        default { 'Changing the master' }
-    }
+    # title and step on the task bar in the chosen language (keys fsl.task.* and fsl.step.*)
+    $title = if ($Kind -eq 'Test' -and $Write) { T 'fsl.task.testwrite' } elseif ($Kind -in 'Install', 'Test', 'Storage', 'Settings', 'SettingsUndo', 'Group', 'Lists', 'ListsUndo', 'Redirections', 'RedirectionsUndo', 'Defender', 'DefenderUndo', 'AclUndo') { T ('fsl.task.' + $Kind.ToLowerInvariant()) } else { T 'fsl.task.acl' }
+    $step = if ($Kind -in 'Install', 'Test', 'Storage', 'Settings', 'Redirections', 'Defender', 'Acl', 'AclUndo') { T ('fsl.step.' + $Kind.ToLowerInvariant()) } else { T 'fsl.step.other' }
     $taskKind = switch ($Kind) {
         { $_ -in 'Settings', 'SettingsUndo' } { 'fslogix-settings' } { $_ -in 'Lists', 'ListsUndo' } { 'fslogix-lists' } 'Group' { 'fslogix-groups' } { $_ -in 'Redirections', 'RedirectionsUndo' } { 'fslogix-redirections' }
         { $_ -in 'Defender', 'DefenderUndo' } { 'fslogix-defender' } { $_ -in 'Acl', 'AclUndo' } { 'fslogix-acl' } default { "fslogix-$($Kind.ToLower())" }
@@ -639,7 +630,7 @@ function Start-FslJob([string]$Kind, [hashtable]$Arg = @{}) {
     }
     Set-ShutdownBlock $true
     Update-FslButtons; Set-FslCursor
-    if ($script:CurrentPage -eq 'FSLogix') { $ui.TxtFslState.Text = "$(Get-FslKindText $Kind): running ..." }
+    if ($script:CurrentPage -eq 'FSLogix') { $ui.TxtFslState.Text = (T 'fsl.running' $(Get-FslKindText $Kind)) }
 }
 function Complete-FslChangeTask($Task, $Result) {
     # the task of a change: failed when a step of a run failed or the change says Failed (ACL); otherwise the count of changed steps
@@ -679,14 +670,14 @@ function Complete-FslJob {
     $what = Get-FslKindText $job.Kind
     if ($job.Kind -eq 'Storage') { $ui.PwdFslPassword.Clear(); $ui.ChkFslKey.IsChecked = $false }   # the password and the key confirmation are for one run, also after an error
     if ($err -or -not $result) {
-        Complete-AVDTuneUiTask $job.Task -Failed -Summary "The $what failed: $err"; $ui.TxtFslState.Text = "The $what failed: $err"; Show-Error $ui.TxtFslState.Text
+        Complete-AVDTuneUiTask $job.Task -Failed -Summary "The $what failed: $err"; $ui.TxtFslState.Text = (T 'fsl.failed' $what $err); Show-Error $ui.TxtFslState.Text
         if ($script:CloseWhenDone) { $script:CloseWhenDone = $false }   # the administrator sees the error first
         Update-FslView; return
     }
     switch ($job.Kind) {
         'Install' {
             Register-StepResult $result.Result
-            $ui.TxtFslState.Text = "FSLogix: $($result.Install.Status). $($result.Install.Message)$(if ($result.Result.Reboot) { ' Restart the master before you test.' })"
+            $ui.TxtFslState.Text = (T 'fsl.installresult' $($result.Install.Status) $($result.Install.Message) $(if ($result.Result.Reboot) { (T 'fsl.restartfirst') }))
             Complete-AVDTuneUiTask $job.Task -Failed:([bool]($result.Install.Status -eq 'Failed')) -Summary $ui.TxtFslState.Text
             Show-Toast $ui.TxtFslState.Text
             $script:FslLatest = $result.Install.Message
@@ -697,7 +688,7 @@ function Complete-FslJob {
             $rec = Save-AVDTuneFSLogixTestRun -Root $script:StateRoot -Result $result -User (Get-FslUser) -SnapshotId (Get-FslGateSnapshot) -Machine $script:Machine
             [void](Add-AVDTuneProtocolNote -Protocol $script:Protocol -Group 'fslogix' -Subject 'FSLogix function test' -Note "$($result.Overall): $($result.Counts.Red) red, $($result.Counts.Yellow) yellow, $($result.Counts.Green) green")
             Save-Protocol
-            $ui.TxtFslState.Text = "FSLogix function test: $($result.Overall) ($($result.Counts.Red) red, $($result.Counts.Yellow) yellow, $($result.Counts.Green) green)."
+            $ui.TxtFslState.Text = (T 'fsl.test.result' $($result.Overall) $($result.Counts.Red) $($result.Counts.Yellow) $($result.Counts.Green))
             Complete-AVDTuneUiTask $job.Task -Summary $ui.TxtFslState.Text
             Show-Toast $ui.TxtFslState.Text
             if (-not $script:ReadyJob) { Start-ReadyJob 'Manual' '' } else { $script:ReadyQueued = @{ Kind = 'Manual'; FixId = '' } }   # the healthcheck row follows the test
@@ -707,7 +698,7 @@ function Complete-FslJob {
             [void](Save-AVDTuneStorageCheckRun -Root $script:StateRoot -Result $result -User (Get-FslUser) -SnapshotId (Get-FslGateSnapshot))
             [void](Add-AVDTuneProtocolNote -Protocol $script:Protocol -Group 'fslogix' -Subject 'FSLogix storage check' -Note "$($result.Overall): $($result.Counts.Red) red, $($result.Counts.Yellow) yellow, $($result.Counts.Unknown) not checkable$(if ($result.KeyUsed) { '; the account key was used for this run (in memory only)' })")
             Save-Protocol
-            $ui.TxtFslState.Text = "Storage check: $($result.Overall)."
+            $ui.TxtFslState.Text = (T 'fsl.storage.result' $($result.Overall))
             Complete-AVDTuneUiTask $job.Task -Summary "Storage check: $($result.Overall) ($($result.Counts.Red) red, $($result.Counts.Yellow) yellow, $($result.Counts.Unknown) not checkable)"
             Show-Toast $ui.TxtFslState.Text
             $ui.PwdFslPassword.Clear(); $ui.ChkFslKey.IsChecked = $false   # the confirmation of the key fallback is for one run
@@ -747,19 +738,19 @@ $script:FslSessionEnding = [System.Windows.SessionEndingCancelEventHandler]{ par
 if ([System.Windows.Application]::Current) { [System.Windows.Application]::Current.add_SessionEnding($script:FslSessionEnding) }
 $window.Add_Closed({ try { if ($script:FslSessionEnding -and [System.Windows.Application]::Current) { [System.Windows.Application]::Current.remove_SessionEnding($script:FslSessionEnding) } } catch { } })   # a handler left on the application keeps the process from ending
 
-Add-Click $ui.BtnFslTest { Start-FslJob 'Test' @{ Write = $false }; $ui.TxtFslState.Text = 'Running the function test ...' }
+Add-Click $ui.BtnFslTest { Start-FslJob 'Test' @{ Write = $false }; $ui.TxtFslState.Text = (T 'fsl.test.running') }
 Add-Click $ui.BtnFslTestWrite {
-    if (-not (Confirm-Action 'The write tests create a test folder and file and a small test VHDX on the share and delete them again. Run them?' 'Write tests')) { return }
-    Start-FslJob 'Test' @{ Write = $true }; $ui.TxtFslState.Text = 'Running the function test with the write tests ...'
+    if (-not (Confirm-Action (T 'fsl.ask.writetests') (T 'fsl.writetests'))) { return }
+    Start-FslJob 'Test' @{ Write = $true }; $ui.TxtFslState.Text = (T 'fsl.test.runningwrite')
 }
 Add-Click $ui.BtnFslInstall {
     Assert-FslWrite
-    if (-not (Confirm-Action 'Download the newest FSLogix from Microsoft, check its signature and install it (or update FSLogix)? A restart follows.' 'FSLogix')) { return }
-    Start-FslJob 'Install' @{}; $ui.TxtFslState.Text = 'Looking up the newest release ...'
+    if (-not (Confirm-Action (T 'fsl.ask.install') 'FSLogix')) { return }
+    Start-FslJob 'Install' @{}; $ui.TxtFslState.Text = (T 'fsl.lookingup')
 }
 Add-Click $ui.BtnFslStorage {
-    if ($ui.ChkFslKey.IsChecked -and -not (Confirm-Action 'The storage account key gives full access to the whole account. It is only used if the role for reading the ACL is missing, kept in memory for this run and removed at the end. The change log says that it was used. Allow it for this run?' 'Account key')) { $ui.ChkFslKey.IsChecked = $false; return }
-    Start-FslJob 'Storage' @{}; $ui.TxtFslState.Text = 'Running the storage check ...'
+    if ($ui.ChkFslKey.IsChecked -and -not (Confirm-Action (T 'fsl.ask.accountkey') (T 'fsl.accountkey'))) { $ui.ChkFslKey.IsChecked = $false; return }
+    Start-FslJob 'Storage' @{}; $ui.TxtFslState.Text = (T 'fsl.storage.running')
 }
 Add-Click $ui.BtnFslAclSet {
     $r = $script:FslStorage
@@ -768,7 +759,7 @@ Add-Click $ui.BtnFslAclSet {
     if ($sids.Users.Count -eq 0 -or $sids.Admins.Count -eq 0) { throw 'Name the users group and the administrators group.' }
     Assert-FslWrite
     if ($r.KeyUsed) { throw 'The ACL was read with the account key; setting it needs the token path (role Storage File Data Privileged Contributor).' }
-    if (-not (Confirm-Action "Set the recommended ACL on the root of the share $($r.AclDiff.Share) of $($r.AclDiff.Account)? The diff above is what changes (the ACL is read again first; if it changed since, nothing is set)." 'NTFS ACL')) { return }
+    if (-not (Confirm-Action (T 'fsl.ask.acl' $($r.AclDiff.Share) $($r.AclDiff.Account)) (T 'fsl.title.acl'))) { return }
     $d = $r.AclDiff
     $share = [pscustomobject]@{ Account = [string]$d.Account; Share = [string]$d.Share }   # the share the check looked at and the administrator saw, not the first location again
     if (-not $share.Account -or -not $share.Share) { throw 'The diff does not name the share: run the storage check again.' }
@@ -780,7 +771,7 @@ Add-Click $ui.BtnFslAclUndo {
     if (-not $u) { throw 'There is nothing to undo: AVDTune has not set an ACL on a share root.' }
     Assert-FslWrite
     $before = @(); try { $before = @((ConvertFrom-AVDTuneSddl -Sddl $u.Before -DomainSid 'S-1-5-21-1-1-1').Aces | ForEach-Object { Format-AVDTuneAce $_ }) } catch { }
-    if (-not (Confirm-Action "Put back the ACL the root of the share $($u.Share) of $($u.Account) had before AVDTune set it?`r`n`r`n  $($before -join "`r`n  ")`r`n`r`nThe ACL is read again first; if it changed after AVDTune set it, nothing is set." 'NTFS ACL')) { return }
+    if (-not (Confirm-Action (T 'fsl.ask.undoacl' $($u.Share) $($u.Account) $($before -join "`r`n  ")) (T 'fsl.title.acl'))) { return }
     Start-FslJob 'AclUndo' @{}
 }
 
@@ -788,7 +779,7 @@ Add-Click $ui.BtnFslAclUndo {
 function Show-FslState {
     # draws the page from the last read (nothing is read here)
     $applies = Test-FslApplies
-    $ui.TxtFslSubtitle.Text = $(if ($applies) { 'Install and update FSLogix, set the profile container with Microsoft''s recommended values, edit redirections.xml, set the Defender exclusions and test that profiles will work. Everything that changes the master is behind the snapshot gate.' } else { 'The environment says: no FSLogix. The page is shown read only; change the answers on the Overview if this is wrong.' })
+    $ui.TxtFslSubtitle.Text = $(if ($applies) { (T 'fsl.subtitle') } else { (T 'fsl.notused') })
     Update-FslInstall; Update-FslSettings; Update-FslGroups; Update-FslRedirections; Update-FslDefender; Update-FslTestView; Update-FslStorageView
     Update-FslButtons
 }
