@@ -11,7 +11,7 @@
 # BadSiteId (the site lookup answers an id of another host), WrongSize (the read back size of an upload is one byte more), Redirect (a write answers 302),
 # DuplicateList (a second list of the change log name exists), Huge (an answer larger than 4 MB), NoHash (items without file.hashes).
 # Item metadata carries file.hashes.quickXorHash (here: Base64 of the SHA1 of the content, made up), so a file changed in the store (.Files) has another hash.
-# New-AVDTuneFakeWebFailure gives a -GetResponse for Invoke-AVDTuneSpHttp that throws like .NET through PowerShell: a MethodInvocationException with an inner
+# Get-AVDTuneFakeWebFailure gives a -GetResponse for Invoke-AVDTuneSpHttp that throws like .NET through PowerShell: a MethodInvocationException with an inner
 # WebException that carries the answer (status, Retry-After).
 # All names are made up.
 
@@ -136,7 +136,7 @@ public sealed class AVDTuneFakeWebResponse : WebResponse {
 "@
 }
 
-function New-AVDTuneFakeWebFailure {
+function Get-AVDTuneFakeWebFailure {
     # A -GetResponse for Invoke-AVDTuneSpHttp: throws a MethodInvocationException whose inner WebException carries a fake answer (as $req.GetResponse() does for 4xx/5xx)
     param([int]$Status = 429, [string]$RetryAfter = '7', [string]$Body = '{"error":{"code":"TooManyRequests"}}')
     $resp = New-Object AVDTuneFakeWebResponse ($Status, $RetryAfter, $Body)

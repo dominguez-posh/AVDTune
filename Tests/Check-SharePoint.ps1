@@ -63,13 +63,13 @@ try {
     $again = @(@('Passwort=(removed)', '-Password (removed)', 'net use \\print1\share /user:dom\svc (removed)', '?sv=(removed)&sig=(removed)') | Where-Object { -not (Test-AVDTuneSpSecretFree $_) })
     Test-Check 'secret table: what it replaced is not found again (a cleaned text passes)' ($again.Count -eq 0) ($again -join ' | ')
     # review B1: an error answer comes wrapped by PowerShell (MethodInvocationException with an inner WebException)
-    $r429 = Invoke-AVDTuneSpHttp -Method GET -Url 'https://graph.microsoft.com/v1.0/sites' -GetResponse (New-AVDTuneFakeWebFailure -Status 429 -RetryAfter '9')
+    $r429 = Invoke-AVDTuneSpHttp -Method GET -Url 'https://graph.microsoft.com/v1.0/sites' -GetResponse (Get-AVDTuneFakeWebFailure -Status 429 -RetryAfter '9')
     Test-Check 'transport (B1): the answer behind the wrapped WebException is read (status 429, Retry-After 9)' ($r429.Status -eq 429 -and $r429.Headers.RetryAfter -eq '9') "$($r429.Status) $($r429.Headers.RetryAfter)"
     $outer = Get-AVDTuneSpErrorResponse ([pscustomobject]@{ InnerException = $null; Response = 'outer' })
     Test-Check 'transport (B1): an exception with the answer on itself still works, one without any answer means not reachable' ($outer -eq 'outer' -and (Get-ThrownText { Invoke-AVDTuneSpHttp -Method GET -Url 'https://graph.microsoft.com/v1.0/sites' -GetResponse { throw 'no network' } }) -like '*cannot be reached*') $null
     $waits = New-Object System.Collections.ArrayList
-    $c403 = New-AVDTuneSpContext -Token 't' -SiteUrl 'https://contoso.sharepoint.com/sites/AVD' -Transport { param($m, $u, $h, $b, $c) Invoke-AVDTuneSpHttp -Method $m -Url $u -Headers $h -GetResponse (New-AVDTuneFakeWebFailure -Status 403 -RetryAfter '' -Body '{"error":{"code":"accessDenied"}}') }
-    $c429 = New-AVDTuneSpContext -Token 't' -SiteUrl 'https://contoso.sharepoint.com/sites/AVD' -MaxRetries 2 -Sleep { param($x) [void]$waits.Add($x) } -Transport { param($m, $u, $h, $b, $c) Invoke-AVDTuneSpHttp -Method $m -Url $u -Headers $h -GetResponse (New-AVDTuneFakeWebFailure -Status 429 -RetryAfter '5') }
+    $c403 = New-AVDTuneSpContext -Token 't' -SiteUrl 'https://contoso.sharepoint.com/sites/AVD' -Transport { param($m, $u, $h, $b, $c) Invoke-AVDTuneSpHttp -Method $m -Url $u -Headers $h -GetResponse (Get-AVDTuneFakeWebFailure -Status 403 -RetryAfter '' -Body '{"error":{"code":"accessDenied"}}') }
+    $c429 = New-AVDTuneSpContext -Token 't' -SiteUrl 'https://contoso.sharepoint.com/sites/AVD' -MaxRetries 2 -Sleep { param($x) [void]$waits.Add($x) } -Transport { param($m, $u, $h, $b, $c) Invoke-AVDTuneSpHttp -Method $m -Url $u -Headers $h -GetResponse (Get-AVDTuneFakeWebFailure -Status 429 -RetryAfter '5') }
     $t403 = Get-ThrownText { Invoke-AVDTuneSpRequest -Context $c403 -Url 'https://graph.microsoft.com/v1.0/sites' }
     $t429 = Get-ThrownText { Invoke-AVDTuneSpRequest -Context $c429 -Url 'https://graph.microsoft.com/v1.0/sites' }
     Test-Check 'transport (B1): through the real transport a 403 gets the Sites.Selected note and 429 is waited out with Retry-After' ($t403 -like '*403*accessDenied*Sites.Selected*' -and $t429 -like '*429*3 times*' -and ($waits -join ',') -eq '5,5') "$t403 | $t429 | $($waits -join ',')"
