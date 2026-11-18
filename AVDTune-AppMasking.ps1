@@ -323,6 +323,7 @@ function Get-MaskLdap {
         $ldap = New-AVDTuneLdapAdapter
         $r = Connect-AVDTuneDirectory -Ldap $ldap -Server $server -User $user -Password $secure -Pins $pins
     }
+    catch { if ($fromStart) { Clear-AVDTuneSessionDcAccount; Update-MaskDcHint }; throw }   # Finn N3: an error while signing in with the kept account forgets it too
     finally { $secure.Dispose() }
     if ($r.Status -ne 'Connected' -and $fromStart) { Clear-AVDTuneSessionDcAccount; Update-MaskDcHint }   # the kept account did not work: it is forgotten, the form asks
     if ($r.Status -ne 'Connected') { throw "No connection to the domain controller ($($r.Status)): $($r.Message) Pin the certificate and connect in the start sequence first." }

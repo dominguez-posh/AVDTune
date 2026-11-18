@@ -40,6 +40,8 @@ public sealed class IsolatedUser : IAppLauncher, IDisposable
     public const string Prefix = "avdtb-";
     public const string Marker = "AVDTune benchmark: temporary standard user, removed after the run";
     public const int PasswordLength = 40;
+    /// <summary>The account expires this long after it was made (Finn's review of #92, M2): an account a crash left behind can no longer sign in after that, even before it is removed.</summary>
+    public static readonly TimeSpan Lifetime = TimeSpan.FromHours(6);
     /// <summary>Window station: ENUMDESKTOPS, READATTRIBUTES, ACCESSGLOBALATOMS, ENUMERATE. Not ACCESSCLIPBOARD (the admin's clipboard), READSCREEN, WRITEATTRIBUTES, EXITWINDOWS, CREATEDESKTOP.</summary>
     public const uint WinstaRights = 0x1 | 0x2 | 0x20 | 0x100;
     /// <summary>Desktop: READOBJECTS, CREATEWINDOW, CREATEMENU, HOOKCONTROL (Office sets thread hooks), ENUMERATE, WRITEOBJECTS. Not JOURNALRECORD, JOURNALPLAYBACK, SWITCHDESKTOP.</summary>
@@ -81,6 +83,9 @@ public sealed class IsolatedUser : IAppLauncher, IDisposable
         return pw;
     }
 
+    /// <summary>acct_expires of USER_INFO_1017: seconds since 1970-01-01 UTC, <see cref="Lifetime"/> after <paramref name="utcNow"/>.</summary>
+    public static uint ExpiresAt(DateTime utcNow) => checked((uint)((utcNow.ToUniversalTime() + Lifetime) - DateTime.UnixEpoch).TotalSeconds);
+
     public static bool PasswordOk(char[] pw) => pw.Length >= 16 && pw.Any(c => Upper.Contains(c)) && pw.Any(c => Lower.Contains(c)) && pw.Any(c => Digits.Contains(c)) && pw.Any(c => Symbols.Contains(c));
 
     /// <summary>The environment of the user's programs: the user's own block (CreateEnvironmentBlock, not inherited from AVDTune) with TEMP and TMP in the work folder.</summary>
@@ -111,6 +116,7 @@ public sealed class IsolatedUser : IAppLauncher, IDisposable
         {
             u = new IsolatedUser(name, (SecurityIdentifier)new NTAccount(Environment.MachineName, name).Translate(typeof(SecurityIdentifier)));
             u.Leftovers.AddRange(left);
+            SetExpiry(name, ExpiresAt(DateTime.UtcNow));
             AddToUsers(name);
             if (GroupProblem(LocalGroups(name), UsersName()) is { } gp) throw new InvalidOperationException(gp);
             if (!LogonUserW(name, ".", pw, 2, 0, out u._token)) throw new Win32Exception(Marshal.GetLastWin32Error(), "the temporary user could not log on (LogonUser, interactive)");
@@ -221,8 +227,8 @@ public sealed class IsolatedUser : IAppLauncher, IDisposable
         if (_disposed) return;
         _disposed = true;
         var problems = new List<string>();
+        KillProcessesOf(Sid);   // first the processes, then their window station entry (Finn N2): nothing of the user runs while the entry goes
         if (_uiGranted) { try { UiEntries(Sid, false); } catch (Exception e) { problems.Add("window station entry: " + e.Message); } }
-        KillProcessesOf(Sid);
         if (_profile != IntPtr.Zero) { UnloadUserProfile(_token, _profile); _profile = IntPtr.Zero; }
         if (_token != IntPtr.Zero) { CloseHandle(_token); _token = IntPtr.Zero; }
         if (RemoveAccount(Name, Sid) is { } p) problems.Add(p);
@@ -298,6 +304,25 @@ public sealed class IsolatedUser : IAppLauncher, IDisposable
     }
 
     internal static int DeleteAccount(string name) => NetUserDel(null, name);
+
+    /// <summary>Sets the expiry of the account (USER_INFO_1017). Fails closed: an account without an expiry is not used.</summary>
+    internal static void SetExpiry(string name, uint expires)
+    {
+        int rc = NetUserSetInfo(null, name, 1017, ref expires, out _);
+        if (rc != 0) throw new Win32Exception(rc, "the expiry of the temporary user could not be set");
+    }
+
+    /// <summary>acct_expires of the account (USER_INFO_2), for the self test.</summary>
+    internal static uint AccountExpiry(string name)
+    {
+        int rc = NetUserGetInfo(null, name, 2, out IntPtr b);
+        try
+        {
+            if (rc != 0) throw new Win32Exception(rc, "the account could not be read");
+            return Marshal.PtrToStructure<UserInfo2>(b).AcctExpires;
+        }
+        finally { if (b != IntPtr.Zero) NetApiBufferFree(b); }
+    }
     internal static bool AccountExists(string name) { int rc = NetUserGetInfo(null, name, 0, out IntPtr b); if (b != IntPtr.Zero) NetApiBufferFree(b); return rc == 0; }
 
     private static string UsersName() { var n = new SecurityIdentifier(UsersSid).Translate(typeof(NTAccount)).Value; return n.Substring(n.IndexOf('\\') + 1); }
@@ -490,6 +515,13 @@ public sealed class IsolatedUser : IAppLauncher, IDisposable
     private struct StartupInfo { public int cb; public string? Reserved, Desktop, Title; public int X, Y, XSize, YSize, XChars, YChars, Fill, Flags; public short ShowWindow, Reserved2Size; public IntPtr Reserved2, StdIn, StdOut, StdErr; }
     [StructLayout(LayoutKind.Sequential)] private struct ProcessInformation { public IntPtr Process, Thread; public int ProcessId, ThreadId; }
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)] private struct UserInfo1 { public string Name; public IntPtr Password; public uint PasswordAge, Priv; public string? HomeDir, Comment; public uint Flags; public string? ScriptPath; }
+    [StructLayout(LayoutKind.Sequential)]
+    private struct UserInfo2
+    {
+        public IntPtr Name, Password; public uint PasswordAge, Priv; public IntPtr HomeDir, Comment; public uint Flags; public IntPtr ScriptPath; public uint AuthFlags;
+        public IntPtr FullName, UsrComment, Parms, Workstations; public uint LastLogon, LastLogoff, AcctExpires, MaxStorage, UnitsPerWeek; public IntPtr LogonHours;
+        public uint BadPwCount, NumLogons; public IntPtr LogonServer; public uint CountryCode, CodePage;
+    }
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)] private struct ProfileInfo { public int Size, Flags; public string UserName; public string? ProfilePath, DefaultPath, ServerName, PolicyPath; public IntPtr Profile; }
     [StructLayout(LayoutKind.Sequential)] private struct WtsProcessInfo { public int SessionId, ProcessId; public IntPtr ProcessName, UserSid; }
 

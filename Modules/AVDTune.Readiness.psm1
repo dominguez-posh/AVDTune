@@ -663,6 +663,13 @@ function Invoke-AVDTuneReadiness {
         else { Add-Row 'hy.default-hive' $hy 'green' 'The default user profile is not loaded.' }
     }
 
+    Invoke-Check 'hy.bench-users' $hy {
+        # temporary standard users of the benchmark that a crash left behind (#92, Finn M1): an account with a password nobody knows must not go into the image
+        $left = @(& $Machine.BenchUsers)
+        if ($left.Count -gt 0) { Add-Row 'hy.bench-users' $hy 'red' ("Temporary benchmark user(s) left behind: " + (@($left | ForEach-Object { "$($_.Name)$(if ($_.Profile) { " (profile $($_.Profile))" })$(if (-not $_.Account) { ' (account already gone)' })" }) -join '; ') + '. They must not go into the image.') 'Remove them with the button (a profile in use needs a restart first).' 'readiness.bench-users-remove' -Found (@($left | ForEach-Object { $_.Name }) -join '; ') }
+        else { Add-Row 'hy.bench-users' $hy 'green' 'No temporary benchmark user left behind.' }
+    }
+
     # ---- families (needs the flags of the checks above)
     Invoke-Check 'hw.families' $hw {
         $fams = @(Get-AVDTuneReadinessFamilies -Data $Data -OsArch $osArch -StornvmeProblem $flags.Stornvme -Gen1 $flags.Gen1 -ManaMissing $flags.ManaMissing -DriveDUse $flags.DriveD)
@@ -817,8 +824,16 @@ function Get-AVDTuneReadinessFixes {
         if ($r.ExitCode -ne 0) { throw "sc.exe config stornvme start=boot failed (exit code $($r.ExitCode)): $([string]$r.Output)" }
     }
     $hiveTest = { param($m) $l = [bool](& $m.HiveLoaded); @{ Compliant = (-not $l); State = $(if ($l) { 'loaded' } else { 'not loaded' }) } }
+    $benchTest = { param($m) $l = @(& $m.BenchUsers); @{ Compliant = ($l.Count -eq 0); State = $(if ($l.Count -gt 0) { (@($l | ForEach-Object { $_.Name }) -join ', ') } else { 'none' }) } }
+    $benchApply = {
+        param($m)
+        foreach ($x in @(& $m.BenchUsers)) { & $m.BenchUserRemove ([string]$x.Sid) }
+        $still = @(& $m.BenchUsers)
+        if ($still.Count -gt 0) { throw "Still there: $(@($still | ForEach-Object { $_.Name }) -join ', '). Restart the master and remove them again." }
+    }
     $hiveApply = { param($m) $r = Invoke-AVDTuneDefaultHiveUnload -Machine $m; if (-not $r.Unloaded) { throw "HKU\AVDTune_DefaultUser could not be unloaded (reg unload, exit code $($r.ExitCode)); restart the master." } }
     @{
+        'readiness.bench-users-remove' = (New-AVDTuneStep -Id 'readiness.bench-users-remove' -Section Setup -Title 'Remove the temporary benchmark users left behind' -Why 'The benchmark starts the application tests as a throw-away standard user (#92); a crash can leave the account (random password nobody knows) and its profile. They are removed before the image is finished.' -Risk Low -Reboot $false -SourceUrl 'https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.localaccounts/remove-localuser' -Test $benchTest -Apply $benchApply)
         'readiness.default-hive-unload' = (New-AVDTuneStep -Id 'readiness.default-hive-unload' -Section Setup -Title 'Unload the default user profile (HKU\AVDTune_DefaultUser)' -Why 'An interrupted optimization run left the default user profile loaded; it is unloaded so that new users and Sysprep get the complete profile (#40).' -Risk Low -Reboot $false -SourceUrl 'https://learn.microsoft.com/en-us/windows-hardware/manufacture/desktop/sysprep--generalize--a-windows-installation' -Test $hiveTest -Apply $hiveApply)
         'readiness.stornvme-boot' =(New-AVDTuneStep -Id 'readiness.stornvme-boot' -Section Setup -Title 'NVMe driver (stornvme): start at boot' -Why "Microsoft's SCSI to NVMe conversion sets it for Windows (sc.exe config stornvme start=boot) so that the OS finds its disk on an NVMe controller. Takes effect after the next restart; the master keeps working on SCSI sizes." -Risk Medium -Reboot $true -SourceUrl 'https://learn.microsoft.com/en-us/azure/virtual-machines/nvme-linux' -Test $test -Apply $apply)
     }

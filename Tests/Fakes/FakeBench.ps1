@@ -9,6 +9,7 @@
 # Round 2: Gpu ($true: a hardware GPU is listed), SkipApps (app keys that are 'not installed'), NoSite (the Speedometer copy is missing; default $true), ShareFails ($true: the share folder cannot be made),
 # VhdFails, VhdParallelFails, CapacityFails, CapacityBlock (the info.capacity object), RefusedPrograms (names the adapter would refuse). .Store.ShareFolders = test folders that exist now (the checks look for leftovers).
 # Round 2 fixes: Volumes and WorkLeftovers (what the leftover scan reports).
+# #92: IsolatedInfo (the info.isolatedUser block of an 'apps' result: used, leftoversRemoved, cleanupProblem).
 # .Store holds the state, .Log what was asked (never a secret).
 
 . $(if (Get-Command Resolve-AVDTuneTestScript -ErrorAction Ignore) { $fakeShared = Resolve-AVDTuneTestScript -Path (Join-Path $PSScriptRoot 'FakeShared.ps1') -AppRoot (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent); if (-not $fakeShared) { throw 'FakeShared.ps1 is not a file below the Tests folder of this copy.' }; $fakeShared } else { Join-Path $PSScriptRoot 'FakeShared.ps1' })   # fakes that several runspaces use at once (#80), through the test script gate when the module is loaded
@@ -48,7 +49,7 @@ function New-AVDTuneFakeBench {
         Sessions = @(); UptimeMinutes = 120; CpuLoad = 2.0; FreeGiB = 100.0; PendingReboot = $false; OnBattery = $false; UpdateBusyCalls = 0; LockBusy = $false
         ZipSha256 = [string]$Config.diskspd.zipSha256; ExeSha256 = [string]$Config.diskspd.exeSha256; ZipBytes = [long]$Config.diskspd.zipBytes; SigStatus = 'Valid'; SigSubject = 'CN=Microsoft Windows, O=Microsoft Corporation'
         DownloadFails = $false; DiskspdExitCode = 0; DiskspdXml = $null; TaskRegisterFails = $false; Throttle = 0.98
-        Gpu = $false; SkipApps = @(); NoSite = $true; ShareFails = $false; VhdFails = $false; VhdParallelFails = $false; CapacityFails = $false; CapacityBlock = $null; RefusedPrograms = @(); ShareFolders = @{}; Volumes = @(); WorkLeftovers = @()
+        Gpu = $false; SkipApps = @(); NoSite = $true; ShareFails = $false; VhdFails = $false; VhdParallelFails = $false; CapacityFails = $false; CapacityBlock = $null; RefusedPrograms = @(); ShareFolders = @{}; Volumes = @(); WorkLeftovers = @(); IsolatedInfo = $null
         Tasks = @{}; Counts = @{}; Log = (New-Object System.Collections.ArrayList); BusyAsked = 0; LockHeld = $false; Sleeps = 0
         Reference = $Reference; Config = $Config
     }
@@ -155,6 +156,7 @@ function New-AVDTuneFakeBench {
         $list = @($list | Where-Object { $store.SkipMeasures -notcontains $_.id })
         $o = [pscustomobject]@{ schemaVersion = 1; command = 'apps'; measures = @($list) }
         if (@($store.RefusedPrograms).Count -gt 0) { $o | Add-Member refusedPrograms @($store.RefusedPrograms) }
+        if ($store.IsolatedInfo) { $o | Add-Member info ([pscustomobject]@{ isolatedUser = $store.IsolatedInfo }) }
         $o
     }.GetNewClosure()
     $b.ShareMakeFolder = {

@@ -117,8 +117,13 @@ public static class Apps
         return false;
     }
 
-    public static List<Measure> Run(Options o)
+    public static List<Measure> Run(Options o) => Run(o, out _);
+
+    /// <summary>As <see cref="Run(Options)"/>; <paramref name="info"/> says how the programs ran (isolatedUser: used, leftoversRemoved, cleanupProblem) for the info block of the result,
+    /// so AVDTune can warn when an account was left behind or one of an earlier run was removed (Finn's review of #92, M1).</summary>
+    public static List<Measure> Run(Options o, out Dictionary<string, object?>? info)
     {
+        info = null;
         var list = new List<Measure>();
         if (string.IsNullOrWhiteSpace(o.Dir) || !Directory.Exists(o.Dir)) return new() { Measure.Not("host.app.word.warm", "ms", false, "failed", "--dir (an existing work folder) is needed") };
         var work = Path.Combine(o.Dir, "apps-" + Guid.NewGuid().ToString("N").Substring(0, 12));
@@ -188,9 +193,14 @@ public static class Apps
         {
             (launcher as IDisposable)?.Dispose();   // ends the user's processes and removes profile and account before the work folder goes
             RemoveFolder(work);
+            if (launcher is IsolatedUser iso) info = new Dictionary<string, object?> { ["isolatedUser"] = IsolatedInfo(iso.Leftovers, iso.CleanupProblem) };
         }
         return list;
     }
+
+    /// <summary>The isolatedUser block of the result info (pure, so the shape is checked without an account).</summary>
+    public static Dictionary<string, object?> IsolatedInfo(IEnumerable<string> leftoversRemoved, string? cleanupProblem) => new()
+    { ["used"] = true, ["leftoversRemoved"] = leftoversRemoved.ToList(), ["cleanupProblem"] = cleanupProblem };
 
     /// <summary>The launcher of a run: a new temporary standard user (default, issue #92), or the reduced admin token with <c>--reduced-token</c>.</summary>
     private static IAppLauncher MakeLauncher(Options o) => o.ReducedToken ? new ReducedTokenLauncher() : IsolatedUser.Create();

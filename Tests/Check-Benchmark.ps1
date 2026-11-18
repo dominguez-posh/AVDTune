@@ -172,6 +172,16 @@ try {
     $m = New-Master
     $b = New-AVDTuneFakeBench -Reference $ref -Config $config -Seed @{ Factor = 1.2 }
     $seen = New-Object System.Collections.ArrayList
+    # #92 (Finn M1): what the measure program says about the temporary standard user becomes a warning of the run
+    $iw = @(Get-AVDTuneBenchIsolatedWarnings ([pscustomobject]@{ info = [pscustomobject]@{ isolatedUser = [pscustomobject]@{ used = $true; leftoversRemoved = @('avdtb-0123456789ab: removed'); cleanupProblem = 'the profile could not be deleted (error 32)' } } }))
+    $iwNone = @(Get-AVDTuneBenchIsolatedWarnings ([pscustomobject]@{ info = [pscustomobject]@{ isolatedUser = [pscustomobject]@{ used = $true; leftoversRemoved = @(); cleanupProblem = $null } } }))
+    $iwOld = @(Get-AVDTuneBenchIsolatedWarnings ([pscustomobject]@{ measures = @() }))
+    Test-Check 'temporary user (#92 M1): a clean-up problem and removed leftovers become warnings; a clean run and an older result give none' ($iw.Count -eq 2 -and $iw[0] -like '*not removed completely*error 32*Finish refuses*' -and $iw[1] -like '*earlier run*avdtb-0123456789ab*' -and $iwNone.Count -eq 0 -and $iwOld.Count -eq 0) ($iw -join ' | ')
+    $bIso = New-AVDTuneFakeBench -Reference $ref -Config $config -Seed @{ IsolatedInfo = [pscustomobject]@{ used = $true; leftoversRemoved = @(); cleanupProblem = 'the account could not be deleted (error 5)' } }
+    $isoWarn = New-Object System.Collections.ArrayList
+    [void](Invoke-AVDTuneBenchApps -Bench $bIso -WorkDir $tmp -Mode Quick -Warnings $isoWarn)
+    $benchPage = [IO.File]::ReadAllText((Join-Path $repo 'AVDTune-Benchmark.ps1'))
+    Test-Check 'temporary user (#92 M1): the warning of an apps run reaches the run (Warnings of Invoke-AVDTuneBenchRun into the result) and the page shows it and notes it in the protocol' ($isoWarn.Count -eq 1 -and $isoWarn[0] -like '*error 5*' -and $benchPage.Contains("Where-Object { [string]`$_ -like '*Temporary benchmark user*' }") -and $benchPage.Contains("-Subject ('Warning: ' + (`$userWarn -join ' '))")) ($isoWarn -join ' | ')
     $run = Invoke-AVDTuneBenchmark -Machine $m -Bench $b -Root $tmp -Mode Full -Kind baseline -User 'admin1' -SkipIdleCheck -Progress { param($t, $p) [void]$seen.Add($t) }
     $r = $run.Result
     Test-Check 'run: result stored under runs\benchmark, validates, no problems' ((Test-Path $run.Path) -and $run.Path -like '*runs\benchmark\*' -and (@(Test-AVDTuneBenchmarkResult -Result (Get-AVDTuneBenchmarkResult -Root $tmp -RunId $run.RunId)[0]).Count -eq 0)) (@(Test-AVDTuneBenchmarkResult -Result $r) -join ';')

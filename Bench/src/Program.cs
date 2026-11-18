@@ -53,7 +53,7 @@ Result: one JSON document on stdout, progress on stderr. Exit code 0 when it ran
                 case "disp": measures.AddRange(Display.Run(o)); break;
                 case "all": measures.AddRange(Cpu.Run(o)); measures.AddRange(MemoryBench.Run(o)); measures.AddRange(Display.Run(o)); break;
                 case "files": measures.AddRange(FilesBench.Run(o)); break;
-                case "apps": measures.AddRange(Apps.Run(o)); break;
+                case "apps": measures.AddRange(Apps.Run(o, out var appInfo)); extra = appInfo; break;
                 case "share": measures.AddRange(ShareBench.Run(o)); break;
                 case "gpu": measures.AddRange(Gpu.Run(o)); break;
                 case "gpuinfo": extra = Gpu.Info(); break;

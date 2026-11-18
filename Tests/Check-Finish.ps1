@@ -106,6 +106,12 @@ try {
     Test-Check 'gate: a healthcheck whose run record is missing blocks' (-not $g.Allowed -and ($g.Reasons -join ' ') -like '*run record of the healthcheck is missing*') ($g.Reasons -join '|')
     [void](Save-Healthcheck -Root $root)
     Test-Check 'gate: a fresh green healthcheck opens it again' ((Test-AVDTuneFinishGate -Root $root).Allowed) ((Test-AVDTuneFinishGate -Root $root).Reasons -join '|')
+    # #92 (Finn M1): a temporary benchmark user left behind blocks the finish even after a green healthcheck (a benchmark is no change of the master)
+    $bum = New-AVDTuneFakeMachine -Seed @{ BenchUsers = @([pscustomobject]@{ Name = 'avdtb-0123456789ab'; Sid = 'S-1-5-21-1-2-3-1050'; Profile = 'C:\Users\avdtb-0123456789ab'; Account = $true }) }
+    $bug = Test-AVDTuneFinishGate -Root $root -Machine $bum
+    $buText = Get-ThrownText { Invoke-AVDTuneFinish -Machine $bum -Fin (New-AVDTuneFakeFinish -Seed (Get-Fake $root)) -Root $root -User 'admin1' }
+    $sealSrc = [IO.File]::ReadAllText((Join-Path $repo 'AVDTune-Seal.ps1'))
+    Test-Check 'gate (#92 M1): a temporary benchmark user left behind blocks the finish (gate and Invoke, named); a clean machine passes; the Seal page asks with its machine' (-not $bug.Allowed -and ($bug.Reasons -join ' ') -like '*avdtb-0123456789ab*readiness fix*' -and $buText -like '*avdtb-0123456789ab*' -and (Test-AVDTuneFinishGate -Root $root -Machine (New-Master)).Allowed -and ([regex]::Matches($sealSrc, 'Test-AVDTuneFinishGate -Root \$script:StateRoot -Machine \$script:Machine')).Count -eq 3 -and ([regex]::Matches($sealSrc, 'Test-AVDTuneFinishGate')).Count -eq 4) ($bug.Reasons -join '|')
     $old = New-Root
     [void](Save-Healthcheck -Root $old)
     $s = Get-AVDTuneState $old

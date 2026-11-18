@@ -88,6 +88,8 @@ public static class LauncherSelfTest
             u = IsolatedUser.Create();
             add("isolated user: made with the prefix and the marker", u.Name.StartsWith(IsolatedUser.Prefix, StringComparison.Ordinal) && IsolatedUser.AccountExists(u.Name), u.Name);
             var groups = IsolatedUser.LocalGroups(u.Name);
+            uint exp = IsolatedUser.AccountExpiry(u.Name), nowSec = (uint)(DateTime.UtcNow - DateTime.UnixEpoch).TotalSeconds;
+            add("isolated user: the account expires a few hours after it was made (M2)", exp > nowSec && exp <= nowSec + (uint)IsolatedUser.Lifetime.TotalSeconds + 60, $"expires {exp}, now {nowSec}");
             add("isolated user: member of Users only", groups.Count == 1 && new System.Security.Principal.NTAccount(groups[0]).Translate(typeof(System.Security.Principal.SecurityIdentifier)).Value == "S-1-5-32-545", string.Join(", ", groups));
             add("isolated user: its profile is loaded (own folder)", u.ProfilePath != null && Directory.Exists(u.ProfilePath), u.ProfilePath ?? "no profile path");
             add("isolated user: the window station and desktop have an entry for it while it runs", IsolatedUser.UiHasEntry(u.Sid), "");
