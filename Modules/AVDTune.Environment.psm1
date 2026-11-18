@@ -593,7 +593,7 @@ function Get-AVDTuneEnvJournal {
     $j
 }
 
-function Save-AVDTuneEnvJournal([string]$Root, $Journal) { Write-AVDTuneFile (Get-AVDTuneEnvJournalPath $Root) ($Journal | ConvertTo-Json -Depth 10) }
+function Save-AVDTuneEnvJournal([string]$Root, $Journal) { Invoke-AVDTuneStateLock { Write-AVDTuneFile (Get-AVDTuneEnvJournalPath $Root) ($Journal | ConvertTo-Json -Depth 10) } }   # under the state lock (#45 review)
 
 #endregion
 
@@ -608,6 +608,7 @@ function Invoke-AVDTuneEnvApply {
     [CmdletBinding()]
     param([Parameter(Mandatory)]$Arm, [Parameter(Mandatory)][string]$Token, [Parameter(Mandatory)]$Spec, [ValidateSet('EntraKerberos', 'EntraDs', 'AdDs')][string]$Identity = 'EntraKerberos', [string]$Identities = 'CloudOnly',
         [string]$ConfirmedHash, [string]$Root = (Get-AVDTuneRoot), [string]$User, [string]$SnapshotId, [int]$PollSeconds = 5, [int]$TimeoutSeconds = 900, [int]$MaxPolls = 400, [switch]$WhatIf)
+    if (-not $WhatIf) { Assert-AVDTuneNotSealed -Root $Root }   # #50: a finished version takes no change (also before any undo or backup file is written)
     if (-not $WhatIf -and -not (Test-AVDTuneWriteAllowed)) { throw 'The snapshot gate is not confirmed: AVDTune is read only until a snapshot newer than its last change is confirmed on the Overview.' }
     $state = Get-AVDTuneState $Root
     $plan = Get-AVDTuneEnvPlan -Arm $Arm -Token $Token -Spec $Spec -Identity $Identity -Identities $Identities -User $User -ImageVersion ([string]$state.ImageVersion)
@@ -622,6 +623,8 @@ function Invoke-AVDTuneEnvApply {
     $entries = New-Object System.Collections.ArrayList
     $run = [pscustomobject][ordered]@{ RunId = $runId; Started = $started.ToString('o'); Ended = $null; User = $User; SnapshotId = $SnapshotId; SubscriptionId = [string]$Spec.SubscriptionId; Account = [string]$Spec.AccountName; ResourceGroup = [string]$Spec.ResourceGroup; DnsZoneResourceGroup = [string](Get-AVDTuneProp $Spec 'DnsZoneResourceGroup'); PrivateEndpointName = [string](Get-AVDTuneProp $Spec 'PrivateEndpointName'); Status = 'Running'; Steps = $entries }
     $journal.Runs = @(@($journal.Runs) | Where-Object { $_ }) + $run
+    [AppDomain]::CurrentDomain.SetData('AVDTune.EnvApplyRun', $runId)   # #45: this run is not an interrupted one while it runs here
+    try {
     $results = New-Object System.Collections.ArrayList
     $stopped = $false
     foreach ($s in $todo) {
@@ -683,11 +686,83 @@ function Invoke-AVDTuneEnvApply {
     $status = if ($failed) { 'Failed' } elseif (@($results | Where-Object Status -eq 'Changed').Count -gt 0) { 'Changed' } else { 'Unchanged' }
     $msg = if ($failed) { 'Stopped at the first failure: ' + (@($results | Where-Object Status -eq 'Failed')[0].Message) } else { "Done: $(@($results | Where-Object Status -eq 'Changed').Count) resource(s) created or changed." }
     [pscustomobject]@{ Status = $status; Message = $msg; Results = @($results); Plan = $plan; RunId = $runId }
+    }
+    finally { [AppDomain]::CurrentDomain.SetData('AVDTune.EnvApplyRun', $null) }
 }
 
 #endregion
 
 #region undo
+function Resolve-AVDTuneEnvInterrupted {
+    <#
+        #45: closes the runs of the journal that stopped in the middle (Get-AVDTuneEnvInterrupted) after reading the real state of each open step (GET only):
+          Create, the resource exists and was made after the step was written (creation time): Done with its identity (the undo may take it back as usual);
+          exists but older, or of unknown age: Failed, marked Foreign or IdentityMissing (the undo keeps it); missing: Failed (nothing was made).
+          Update (and the account settings): whether the change reached Azure cannot be read back: Failed with that note (the undo restores the recorded old value).
+        A journal entry that does not match its run is not read: Failed. The run gets its end and the status Interrupted. A change log note per run. Returns what was found.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)]$Arm, [Parameter(Mandatory)][string]$Token, [string]$Root = (Get-AVDTuneRoot), [string]$User)
+    $open = @(Get-AVDTuneEnvInterrupted -Root $Root)
+    if ($open.Count -eq 0) { return @() }
+    $ids = @($open | ForEach-Object { $_.RunId })
+    # 1. the real state, read without the lock (GETs can take long); the decisions are made on a copy of the journal
+    $journal = Get-AVDTuneEnvJournal -Root $Root
+    $found = New-Object System.Collections.ArrayList
+    $decided = @{}
+    foreach ($run in @($journal.Runs)) {
+        if (-not $run -or [string]$run.RunId -notin $ids) { continue }
+        foreach ($e in @($run.Steps)) {
+            if (-not $e -or [string]$e.Status -ne 'Started') { continue }
+            $decided["$([string]$run.RunId)|$([string]$e.Id)|$([string]$e.Path)"] = $e
+            $rule = Test-AVDTuneEnvJournalEntry -Run $run -E $e
+            $status = 'Failed'; $msg = ''
+            if (-not $rule) { $msg = 'Interrupted; the journal entry does not match its run, so its resource was not read.' }
+            elseif ($e.Action -eq 'Create' -and $e.Type -notin 'smb', 'identity') {
+                $r = Get-AVDTuneEnvResource -Arm $Arm -Token $Token -Path "$([string]$e.Path)?api-version=$($rule.Api)" -What 'read the state of an interrupted step'
+                if (-not $r.Exists) { $msg = 'Interrupted before Azure made the resource: nothing was created.' }
+                else {
+                    $idn = Get-AVDTuneEnvIdentity $r.Body; $created = Get-AVDTuneEnvCreated $r.Body
+                    $at = ConvertTo-AVDTuneUtc (Get-AVDTuneProp $e 'At')
+                    if ($created -and $at -and $created.UtcDateTime -ge $at) { $status = 'Done'; $msg = 'Interrupted; found created at the next start.'; $e | Add-Member -NotePropertyName Identity -NotePropertyValue $idn -Force }
+                    elseif ($created) { $idn['Foreign'] = $true; $e | Add-Member -NotePropertyName Identity -NotePropertyValue $idn -Force; $msg = 'Interrupted; the resource is older than the step: it is not treated as AVDTune''s.' }
+                    else { $e | Add-Member -NotePropertyName IdentityMissing -NotePropertyValue 'Interrupted; the resource carries no creation time.' -Force; $msg = 'Interrupted; the resource exists but its age is unknown: the undo keeps it.' }
+                    $e | Add-Member -NotePropertyName Etag -NotePropertyValue ([string](Get-AVDTuneProp $r.Body 'etag')) -Force
+                }
+            }
+            else { $msg = 'Interrupted; whether the change reached Azure cannot be read back. Run the plan again, or take it back (the recorded old value is restored).' }
+            $e.Status = $status; $e.Message = $msg
+            [void]$found.Add([pscustomobject]@{ RunId = [string]$run.RunId; Id = [string]$e.Id; Path = [string]$e.Path; Status = $status; Message = $msg })
+        }
+    }
+    # 2. written under the state lock, on the journal as it is NOW: not while another AVDTune process changes something or a run of the wizard is carried out
+    #    in this process (it would only look interrupted); only steps that are still Started and were read above change
+    Invoke-AVDTuneStateLock {
+        Assert-AVDTuneNoForeignChange -Root $Root
+        if ([AppDomain]::CurrentDomain.GetData('AVDTune.EnvApplyRun')) { throw 'A run of the environment wizard is carried out right now: the interrupted run is closed when it has ended.' }
+        $now = Get-AVDTuneEnvJournal -Root $Root
+        foreach ($run in @($now.Runs)) {
+            if (-not $run -or [string]$run.RunId -notin $ids) { continue }
+            foreach ($e in @($run.Steps)) {
+                if (-not $e -or [string]$e.Status -ne 'Started') { continue }
+                $d = $decided["$([string]$run.RunId)|$([string]$e.Id)|$([string]$e.Path)"]
+                if (-not $d) { continue }
+                $e.Status = $d.Status; $e.Message = $d.Message
+                foreach ($k in 'Identity', 'IdentityMissing', 'Etag') { if ($d.PSObject.Properties[$k]) { $e | Add-Member -NotePropertyName $k -NotePropertyValue $d.$k -Force } }
+            }
+            if (@(@($run.Steps) | Where-Object { $_ -and [string]$_.Status -eq 'Started' }).Count -gt 0) { continue }   # a step that was not read keeps the run open
+            if (-not (Get-AVDTuneProp $run 'Ended')) { $run.Ended = (Get-Date).ToString('o') }
+            if ($run.PSObject.Properties['Status']) { $run.Status = 'Interrupted' } else { $run | Add-Member -NotePropertyName Status -NotePropertyValue 'Interrupted' }
+        }
+        Save-AVDTuneEnvJournal $Root $now
+    }
+    $state = Get-AVDTuneState $Root
+    if ($state.ImageVersion) {
+        foreach ($id in $ids) { [void](Add-AVDTuneChangeLogEntry -Root $Root -Version $state.ImageVersion -Category 'Azure' -Component 'Azure: interrupted run' -ChangeType Note -Text "Run $id of the environment wizard was interrupted; closed at the next start: $(@($found | Where-Object { $_.RunId -eq $id } | ForEach-Object { "$($_.Id) $($_.Status)" }) -join ', ')" -User $User) }
+    }
+    @($found)
+}
+
 
 function Get-AVDTuneEnvIdentity {
     <# What identifies one resource over its life (creation time, guid): recorded at the create, compared at the undo. #>
@@ -905,6 +980,7 @@ function Invoke-AVDTuneEnvUndo {
     <# Takes back what the undo plan lists, after the confirmation of its hash; same gate and change log rules as the apply, no LastChange. Returns @{ Status; Message; Results }. #>
     [CmdletBinding()]
     param([Parameter(Mandatory)]$Arm, [Parameter(Mandatory)][string]$Token, [string]$ConfirmedHash, [string]$Root = (Get-AVDTuneRoot), $Files, [string]$StorageToken, [string]$User, [string]$SnapshotId, [int]$PollSeconds = 5, [int]$TimeoutSeconds = 900, [int]$MaxPolls = 400)
+    Assert-AVDTuneNotSealed -Root $Root   # #50: a finished version takes no change
     if (-not (Test-AVDTuneWriteAllowed)) { throw 'The snapshot gate is not confirmed: AVDTune is read only until a snapshot newer than its last change is confirmed on the Overview.' }
     $plan = Get-AVDTuneEnvUndoPlan -Arm $Arm -Token $Token -Root $Root -Files $Files -StorageToken $StorageToken
     if (-not $ConfirmedHash -or $plan.Hash -ne $ConfirmedHash) { return [pscustomobject]@{ Status = 'Refused'; Message = 'The undo plan differs from the one that was confirmed (or nothing was confirmed). Nothing was changed.'; Results = @(); Plan = $plan } }
@@ -998,7 +1074,7 @@ function Invoke-AVDTuneEnvVerify {
 
 #endregion
 
-Export-ModuleMember -Function Test-AVDTuneEnvSegment, Test-AVDTuneEnvGuid, Test-AVDTuneEnvSubnetId, Get-AVDTuneEnvVNetId, Get-AVDTuneEnvQuota, Test-AVDTuneEnvSpec, Get-AVDTuneEnvVhdLocation, ConvertTo-AVDTuneEntraSid,
+Export-ModuleMember -Function Resolve-AVDTuneEnvInterrupted, Test-AVDTuneEnvSegment, Test-AVDTuneEnvGuid, Test-AVDTuneEnvSubnetId, Get-AVDTuneEnvVNetId, Get-AVDTuneEnvQuota, Test-AVDTuneEnvSpec, Get-AVDTuneEnvVhdLocation, ConvertTo-AVDTuneEntraSid,
     Get-AVDTuneEnvIdentityModel, Assert-AVDTuneEnvArmPath, Invoke-AVDTuneEnvArmRaw, ConvertTo-AVDTuneEnvArmError, Get-AVDTuneEnvResource, Wait-AVDTuneEnvOperation, Invoke-AVDTuneEnvWrite,
     ConvertTo-AVDTuneEnvCanonical, Get-AVDTuneEnvRoleName, Get-AVDTuneEnvRights, Get-AVDTuneEnvPlan, Get-AVDTuneEnvJournal, Invoke-AVDTuneEnvApply, Get-AVDTuneEnvUndoPlan, Invoke-AVDTuneEnvUndo,
     Test-AVDTuneEnvShareEmpty, Get-AVDTuneEnvShareNames, Get-AVDTuneEnvIdentity, ConvertTo-AVDTuneEnvSafeBefore, Test-AVDTuneEnvJournalEntry, Get-AVDTuneEnvRuleByPath, Get-AVDTuneEnvPollPath,

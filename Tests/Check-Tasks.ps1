@@ -191,5 +191,51 @@ $script:RelJob = @{ Kind = 'Install' }; Set-ShutdownBlock $false; $relKept = ($s
 $script:RelJob = @{ Kind = 'Start' }; Set-ShutdownBlock $false; $relReleased = ($script:DestroyCount -eq $d0 + 1); $script:RelJob = $null
 Test-Check 'shutdown block (#49): a running release check does not keep the block of an ended run' ($relKept -and $relReleased -and 'RelJob' -in $script:WriterJobVariables) "released=$relReleased"
 
+# #50: after the finish every write start of a page is refused with the clear text; the crash repairs pass -AllowSealed (and only they)
+$script:FakeSealed = $true
+function Test-AVDTuneSealed { param($Root) $script:FakeSealed }
+function T([string]$Key) { $Key }
+$sealErr = $null; try { Assert-NoOtherWriter } catch { $sealErr = $_.Exception.Message }
+$sealRepair = $true; try { Assert-NoOtherWriter -AllowSealed } catch { $sealRepair = $false }
+$script:FakeSealed = $false; $sealOpen = $true; try { Assert-NoOtherWriter } catch { $sealOpen = $false }
+$allowUsers = @(Get-ChildItem -LiteralPath $repo -Filter 'AVDTune-*.ps1' | Select-String -Pattern 'Assert-NoOtherWriter -AllowSealed' | ForEach-Object { $_.Filename } | Sort-Object -Unique)
+Test-Check 'sealed (#50): a write start is refused while the version is finished (text shell.sealed), the crash repairs (finish, benchmark, maintenance mode) pass, an open version passes' ($sealErr -eq 'shell.sealed' -and $sealRepair -and $sealOpen -and ($allowUsers -join ',') -eq 'AVDTune-Benchmark.ps1,AVDTune-Seal.ps1,AVDTune-Updates.ps1' -and [IO.File]::ReadAllText((Join-Path $repo 'AVDTune-Updates.ps1')).Contains("Assert-NoOtherWriter -AllowSealed:(`$Kind -eq 'Block-Repair')")) "err=$sealErr users=$($allowUsers -join ',')"
+# #50/#66 review: every function of a page that starts a writer job (assigns one of WriterJobVariables) asks Assert-NoOtherWriter itself, not only some of its callers
+$unguarded = @()
+foreach ($pf in Get-ChildItem -LiteralPath $repo -Filter 'AVDTune-*.ps1') {
+    $pAst = [Management.Automation.Language.Parser]::ParseFile($pf.FullName, [ref]$null, [ref]$null)
+    foreach ($fnAst in $pAst.FindAll({ param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] }, $true)) {
+        $fnText = $fnAst.Extent.Text
+        foreach ($wv in $script:WriterJobVariables) { if ($fnText.Contains("`$script:$wv = @{") -and -not $fnText.Contains('Assert-NoOtherWriter')) { $unguarded += "$($pf.Name):$($fnAst.Name)" } }
+    }
+}
+Test-Check 'writers (#50 review): every page function that starts a writer job calls Assert-NoOtherWriter (Start-OptRun, Start-SwJob, Start-UpdJob included)' ($unguarded.Count -eq 0) ($unguarded -join ', ')
+# #50 review: the module writers outside Start-AVDTuneChange refuse a finished version themselves (masking, benchmark quiet mode, environment apply and undo)
+$guardFns = @(@('AVDTune.Masking.psm1', 'Save-AVDTuneRuleSet'), @('AVDTune.Masking.psm1', 'Remove-AVDTuneRuleSet'), @('AVDTune.Masking.psm1', 'Undo-AVDTuneMaskingChange'), @('AVDTune.Masking.psm1', 'Add-AVDTuneComfortShortcut'),
+    @('AVDTune.Benchmark.psm1', 'Start-AVDTuneBenchmarkQuiet'), @('AVDTune.Environment.psm1', 'Invoke-AVDTuneEnvApply'), @('AVDTune.Environment.psm1', 'Invoke-AVDTuneEnvUndo'))
+$noGuard = @(foreach ($g in $guardFns) {
+        $mAst = [Management.Automation.Language.Parser]::ParseFile((Join-Path $repo "Modules\$($g[0])"), [ref]$null, [ref]$null)
+        $mFn = $mAst.Find({ param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $g[1] }, $true)
+        if (-not $mFn -or $mFn.Body.Extent.Text -notmatch 'Assert-AVDTuneNotSealed -Root \$Root') { $g[1] }
+    })
+Test-Check 'sealed (#50 review): masking, benchmark quiet mode and environment apply/undo refuse a finished version in the module' ($noGuard.Count -eq 0) ($noGuard -join ', ')
+
+# #49 (4): the global lock of the write buttons (one command, WPF disables the button while a writer job runs and gives the page its own state back)
+Add-Type -AssemblyName PresentationFramework
+$cmd49 = New-AVDTuneWriterLockCommand
+$b1 = New-Object System.Windows.Controls.Button; $b2 = New-Object System.Windows.Controls.Button; $b2.IsEnabled = $false
+$ui49 = @{ BtnSealRun = $b1; BtnUpdAll = $b2; BtnRefresh = (New-Object System.Windows.Controls.Button) }
+Update-AVDTuneWriterLock -Command $cmd49 -Ui $ui49; $idle = ($b1.IsEnabled -and -not $b2.IsEnabled -and $ui49.BtnRefresh.IsEnabled)
+$script:SwJob = @{ Kind = 'Run' }; Update-AVDTuneWriterLock -Command $cmd49 -Ui $ui49; $locked = (-not $b1.IsEnabled -and -not $b2.IsEnabled -and $ui49.BtnRefresh.IsEnabled)
+$b2.IsEnabled = $true; $stillLocked = -not $b2.IsEnabled   # a page that enables its button meanwhile does not lift the lock
+$script:SwJob = @{ Kind = 'Scan' }; Update-AVDTuneWriterLock -Command $cmd49 -Ui $ui49; $scanFree = $b1.IsEnabled
+$script:SwJob = $null; $b2.IsEnabled = $false; Update-AVDTuneWriterLock -Command $cmd49 -Ui $ui49; $back = ($b1.IsEnabled -and -not $b2.IsEnabled)
+Test-Check 'writer lock (#49.4): listed write buttons are disabled while a writer job runs (not a read-only kind, not other buttons); the page state comes back afterwards' ($idle -and $locked -and $stillLocked -and $scanFree -and $back -and [object]::ReferenceEquals($b1.Command, $cmd49)) "idle=$idle locked=$locked still=$stillLocked scan=$scanFree back=$back"
+$xamlText = (Get-ChildItem -LiteralPath (Join-Path $repo 'UI') -Filter '*.xaml' | ForEach-Object { [IO.File]::ReadAllText($_.FullName) }) -join "`n"
+$codeText = (Get-ChildItem -LiteralPath $repo -Filter 'AVDTune-*.ps1' | ForEach-Object { [IO.File]::ReadAllText($_.FullName) }) -join "`n"
+$unknownButtons = @($script:WriterButtons | Where-Object { -not $xamlText.Contains("x:Name=""$_""") -and -not $codeText.Contains("`$ui.$_ = ") })
+$taskBarText = [IO.File]::ReadAllText((Join-Path $repo 'AVDTune-TaskBar.ps1'))
+Test-Check 'writer lock (#49.4): every listed button exists (XAML or built by its page) and the window timer runs the lock' ($unknownButtons.Count -eq 0 -and $taskBarText -match '\$script:Timer\.Add_Tick\(\{ try \{ Update-AVDTuneWriterLock -Command \$script:WriterLock -Ui \$ui \}') ($unknownButtons -join ', ')
+
 if ($script:failed -gt 0) { throw "$script:failed check(s) failed." }
 'Check-Tasks: all checks passed.'

@@ -674,8 +674,37 @@ try {
         $syncV.Release = $true; [void]$rsV.EndInvoke($hV)
         Stop-AVDTuneChange -Root $rn -Owner $kStop
         Test-Check 'stop (#66): the same stop works when the lock is free again' (-not (Test-AVDTuneChangeInProgress -Root $rn)) $null
+        # #58: a state.json held open (virus scanner) longer than the retries: the stop does not throw and does not swallow the error either; the marker stays (fail closed),
+        # the holder is released (the next start of this process is a holder again), the error is kept for the window; with the file free the next stop clears the marker
+        $kHeld = Start-AVDTuneChange -Root $rn
+        $hold = [IO.File]::Open((Join-Path $rn 'state.json'), [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+        $thrownH = $null; try { Stop-AVDTuneChange -Root $rn -Owner $kHeld } catch { $thrownH = $_.Exception.Message } finally { $hold.Dispose() }
+        $errH = Get-AVDTuneChangeStopError
+        Test-Check 'stop (#58): a state.json write that fails after the retries is reported for the window (not swallowed), does not throw, and the marker stays' (-not $thrownH -and $errH -like '*could not be recorded*' -and (Test-AVDTuneChangeInProgress -Root $rn)) "thrown=$thrownH err=$errH"
+        $kAgain = Start-AVDTuneChange -Root $rn
+        Stop-AVDTuneChange -Root $rn -Owner $kAgain
+        Test-Check 'stop (#58): ... the holder was released: the next start holds the marker and its stop clears it' ($kAgain -eq $true -and -not (Test-AVDTuneChangeInProgress -Root $rn) -and -not (Get-AVDTuneChangeStopError)) "again=$kAgain"
     }
     finally { & (Get-Module AVDTune) { $script:StateLockSeconds = 30 }; if ($rsV) { $rsV.Dispose() }; $mtx2.Dispose() }
+    # #50: after the finish (Sealed) every writer is refused by the central marker until a new version is started; the repairs of a crash pass -AllowSealed
+    $rs50 = Join-Path $tmp 'issue50-sealed'; [void](Initialize-AVDTuneState -Root $rs50); [void](Start-AVDTuneImageVersion -Root $rs50 -Date ([datetime]'2026-11-01') -User 'admin1')
+    [void](Set-AVDTuneState -Root $rs50 -Values @{ Sealed = $true })
+    $e50 = Get-ThrownText { [void](Start-AVDTuneChange -Root $rs50) }
+    Test-Check 'sealed (#50): a change of a finished version is refused with the hint to start a new version, no marker is set' ($e50 -like '*2026.11.001 is finished*Start a new version*' -and -not (Test-AVDTuneChangeInProgress -Root $rs50) -and (Test-AVDTuneSealed -Root $rs50)) $e50
+    $k50 = Start-AVDTuneChange -Root $rs50 -AllowSealed; Stop-AVDTuneChange -Root $rs50 -Owner $k50
+    Test-Check 'sealed (#50): a crash repair (-AllowSealed) still gets the marker' ($k50 -eq $true -and -not (Test-AVDTuneChangeInProgress -Root $rs50)) $null
+    # fail closed (#50 review): a value written by hand (string, number) counts as finished; only a missing field or a real false is open; an unreadable state.json refuses
+    $sealedAs = @{}
+    foreach ($case in @(@('string', 'true'), @('stringFalse', 'false'), @('number', 1), @('false', $false))) { [void](Set-AVDTuneState -Root $rs50 -Values @{ Sealed = $case[1] }); $sealedAs[$case[0]] = Test-AVDTuneSealed -Root $rs50 }
+    $sj = Join-Path $rs50 'state.json'; $sjKeep = [IO.File]::ReadAllText($sj)
+    $noSeal = $sjKeep | ConvertFrom-Json; $noSeal.PSObject.Properties.Remove('Sealed'); [IO.File]::WriteAllText($sj, ($noSeal | ConvertTo-Json -Depth 8)); $sealedAs['missing'] = Test-AVDTuneSealed -Root $rs50
+    [IO.File]::WriteAllText($sj, '{ "Sealed": fal'); $eBroken = Get-ThrownText { [void](Start-AVDTuneChange -Root $rs50) }
+    [IO.File]::WriteAllText($sj, $sjKeep)
+    Test-Check 'sealed (#50): fail closed: "true", "false" and 1 count as finished, a missing field and a real false are open, a broken state.json refuses the change' ($sealedAs.string -and $sealedAs.stringFalse -and $sealedAs.number -and -not $sealedAs.false -and -not $sealedAs.missing -and $eBroken -and -not (Test-AVDTuneChangeInProgress -Root $rs50)) "$(($sealedAs.GetEnumerator() | ForEach-Object { "$($_.Key)=$($_.Value)" }) -join ' ') broken=$eBroken"
+    [void](Set-AVDTuneState -Root $rs50 -Values @{ Sealed = $true })
+    [void](Start-AVDTuneImageVersion -Root $rs50 -Date ([datetime]'2026-11-02') -User 'admin1')
+    $k50b = Start-AVDTuneChange -Root $rs50; Stop-AVDTuneChange -Root $rs50 -Owner $k50b
+    Test-Check 'sealed (#50): after Start new version changes work again' ($k50b -eq $true -and -not (Test-AVDTuneSealed -Root $rs50)) $null
     # ---------------------------------------------------------------- findings of the security review of #27
     # 1: a change in progress (marker): first change = its start, no new version, no snapshot as the current state meanwhile
     $rp = Join-Path $tmp 'issue27-progress'; [void](Initialize-AVDTuneState -Root $rp); [void](Start-AVDTuneImageVersion -Root $rp -Date ([datetime]'2026-11-01') -User 'admin1')

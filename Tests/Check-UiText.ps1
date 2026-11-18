@@ -167,5 +167,11 @@ try {
     finally { $rs.Dispose() }
 }
 finally { Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue }
+# #25 (2): the confirmation of the app setup names what it creates in the tenant (service principals of Azure Service Management and Azure Storage) and the
+# Storage permission, in both languages, and the window shows exactly this key before the setup
+$conf = @{}
+foreach ($l in 'en', 'de') { $conf[$l] = [string]([IO.File]::ReadAllText((Join-Path $repo "UI\Strings.$l.json"), [Text.Encoding]::UTF8) | ConvertFrom-Json).'stage.signin.confirm' }
+$startPage = [IO.File]::ReadAllText((Join-Path $repo 'AVDTune-Start.ps1'))
+Test-Check 'confirmation of the setup (#25): names the service principals of Azure Service Management and Azure Storage and Azure Storage user_impersonation (en, de); shown before the setup' ($conf.en -like '*creates the service principals*Azure Service Management and Azure Storage*' -and $conf.en -like '*Azure Storage user_impersonation*' -and $conf.de -like '*Dienstprinzipale*Azure Service Management und Azure Storage*' -and $conf.de -like '*Azure Storage user_impersonation*' -and $startPage -match "\`$setup -and -not \(Confirm-Action \(T 'stage\.signin\.confirm'") $null
 if ($script:failed -gt 0) { throw "$script:failed check(s) failed." }
 'Check-UiText: all checks passed.'

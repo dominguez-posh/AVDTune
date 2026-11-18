@@ -792,6 +792,7 @@ function Start-AVDTuneBenchmarkQuiet {
         Order: journal first (what will be stopped), then the restore task, then the stops. Defender is never touched.
     #>
     param([Parameter(Mandatory)]$Machine, [Parameter(Mandatory)]$Bench, [Parameter(Mandatory)][string]$Root, [Parameter(Mandatory)][string]$RunId)
+    Assert-AVDTuneNotSealed -Root $Root   # #50: no quiet mode (services stopped) on a finished version; Stop and the crash repair stay allowed
     $journal = Get-AVDTuneBenchmarkJournalPath $Root
     if (Test-Path -LiteralPath $journal) { throw 'A restore journal of an interrupted benchmark exists. Repair it first (Repair-AVDTuneBenchmarkCrash).' }
     $planned = @()

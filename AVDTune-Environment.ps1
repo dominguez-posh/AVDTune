@@ -141,9 +141,18 @@ function Update-EnvView {
     $ui.TxtEnvState.Text = $(if (Test-AVDTuneWriteAllowed) { 'The snapshot is confirmed: the plan can be carried out.' } else { 'Read only: you can make the plan; creating needs the confirmed snapshot of the Overview.' })
 }
 
+# #45: a run that stopped in the middle (journal step still Started) is closed first, from the real state of its resources (GET only), and named in the protocol
+function Resolve-EnvInterrupted([string]$Token) {
+    if (@(Get-AVDTuneEnvInterrupted -Root $script:StateRoot).Count -eq 0) { return }
+    $found = @(Resolve-AVDTuneEnvInterrupted -Arm (Get-EnvArm) -Token $Token -Root $script:StateRoot -User (Get-EnvUser))
+    $text = T 'env.interrupted.closed' ((@($found | ForEach-Object { "$($_.Id): $($_.Status) ($($_.Message))" }) -join '; '))
+    [void](Add-AVDTuneProtocolNote -Protocol $script:Protocol -Group 'other' -Subject $text); Save-Protocol
+    Show-Toast $text
+}
 Add-Click $ui.BtnEnvPlan {
     $tok = Get-EnvToken
     if (-not $tok.Token) { throw $tok.Reason }
+    Resolve-EnvInterrupted $tok.Token
     $spec = Get-EnvSpec; $identity = Get-EnvIdentity; $a = Get-EnvAnswers
     $script:EnvPlan = Invoke-EnvTask 'Environment' 'Plan the FSLogix storage' 'Reading Azure (nothing is changed)' { Get-AVDTuneEnvPlan -Arm (Get-EnvArm) -Token $tok.Token -Spec $spec -Identity $identity -Identities ([string]$a.Identities) -User (Get-EnvUser) -ImageVersion ([string](Get-AVDTuneState $script:StateRoot).ImageVersion) }
     Show-EnvPlan $script:EnvPlan "Plan (hash $($script:EnvPlan.Hash))"
@@ -169,6 +178,7 @@ Add-Click $ui.BtnEnvApply {
 Add-Click $ui.BtnEnvUndoPlan {
     $tok = Get-EnvToken
     if (-not $tok.Token) { throw $tok.Reason }
+    Resolve-EnvInterrupted $tok.Token
     $script:EnvUndoPlan = Invoke-EnvTask 'Environment' 'Plan the undo' 'Reading Azure (nothing is changed)' { Get-AVDTuneEnvUndoPlan -Arm (Get-EnvArm) -Token $tok.Token -Root $script:StateRoot }
     Show-EnvPlan ([pscustomobject]@{ Steps = @($script:EnvUndoPlan.Steps) }) 'What AVDTune may take back'
     $ui.BtnEnvUndo.IsEnabled = ($script:EnvUndoPlan.Count -gt 0)

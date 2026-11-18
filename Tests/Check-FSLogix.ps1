@@ -13,6 +13,9 @@ $repo = Split-Path $PSScriptRoot -Parent
 Import-Module (Join-Path $repo 'Modules\AVDTune.psm1') -Force
 Import-Module (Join-Path $repo 'Modules\AVDTune.Updates.psm1') -Force
 Import-Module (Join-Path $repo 'Modules\AVDTune.FSLogix.psm1') -Force
+Import-Module (Join-Path $repo 'Modules\AVDTune.Start.psm1') -Force
+# answers exactly as the pages get them from the start sequence (Get-AVDTuneEnvironmentAnswers: key Dc, no DomainController)
+function New-RealAnswers([string]$Dc) { Get-AVDTuneEnvironmentAnswers ([pscustomobject]@{ Answers = [pscustomobject]@{ Dc = $Dc } }) }
 . (Join-Path $PSScriptRoot 'Fakes\FakeMachine.ps1')
 . (Join-Path $PSScriptRoot 'Fakes\FakeFSLogix.ps1')
 
@@ -101,10 +104,10 @@ try {
     $nog = New-AVDTuneFakeFSLogix -Seed @{ Groups = @{} }
     $failed1 = Set-AVDTuneFSLogixGroupMember -Machine $m -F $nog -Root $tmp -List Exclude -Action Add -Sid 'S-1-5-32-544' -User a
     Test-Check 'a missing local group (FSLogix not installed) is a Failed step with the reason' ($failed1.Results[0].Status -eq 'Failed' -and $failed1.Results[0].Message -like '*does not exist*') $null
-    $ch0 = Get-AVDTuneFSLogixGroupChoices -Root $tmp -Answers ([pscustomobject]@{ DomainController = 'None' })
+    $ch0 = Get-AVDTuneFSLogixGroupChoices -Root $tmp -Answers ((New-RealAnswers 'None'))
     Test-Check 'group choices without a domain: a hint for Entra SIDs, no groups' ($ch0.Source -eq 'None' -and $ch0.Hint -like '*S-1-12-1*') $null
     Write-AVDTuneFile (Join-Path $tmp 'config\directory.json') (([ordered]@{ ReadAt = '2026-11-15'; Directory = @{ Groups = @(@{ Name = 'AVD-Users'; Sid = $sddlUsers }) } }) | ConvertTo-Json -Depth 6)
-    $ch1 = Get-AVDTuneFSLogixGroupChoices -Root $tmp -Answers ([pscustomobject]@{ DomainController = 'OnPremises' })
+    $ch1 = Get-AVDTuneFSLogixGroupChoices -Root $tmp -Answers ((New-RealAnswers 'AdDsOnPrem'))
     Test-Check 'group choices with the domain information: the groups with SIDs' ($ch1.Source -eq 'Directory' -and $ch1.Groups[0].Sid -eq $sddlUsers) $null
 
     # ---------------------------------------------------------------- recommended lists (issue 62)
@@ -112,7 +115,7 @@ try {
     Test-Check 'SID validation is anchored (\A...\z): a trailing newline or a prefix is no SID; the domain SID is strict S-1-5-21-x-y-z' (-not (Test-AVDTuneSid "S-1-1-0`n") -and -not (Test-AVDTuneSid "x S-1-1-0") -and (Test-AVDTuneSid 'S-1-1-0') -and (Test-AVDTuneDomainSid $dom) -and -not (Test-AVDTuneDomainSid "$dom`n") -and -not (Test-AVDTuneDomainSid 'S-1-5-21-1-2') -and -not (Test-AVDTuneDomainSid 'S-1-5-32-544') -and -not (Test-AVDTuneDomainSid "$dom-512") -and -not (Test-AVDTuneDomainSid 'S-1-5-21-a-b-c')) $null
     $dirFile = Join-Path $tmp 'config\directory.json'; $dirKeep = Get-Content -LiteralPath $dirFile -Raw
     $setDir = { param($info) if ($null -eq $info) { Remove-Item -LiteralPath $dirFile -Force -ErrorAction SilentlyContinue } else { Write-AVDTuneFile $dirFile (([ordered]@{ ReadAt = '2026-11-17'; Directory = $info }) | ConvertTo-Json -Depth 6) } }
-    $ansDom = [pscustomobject]@{ DomainController = 'OnPremises' }; $ansEntra = [pscustomobject]@{ DomainController = 'None' }
+    $ansDom = (New-RealAnswers 'AdDsOnPrem'); $ansEntra = (New-RealAnswers 'None')
     & $setDir @{ DomainSid = $dom; Groups = @() }
     $rDom = Get-AVDTuneFSLogixRecommendedLists -Root $tmp -Answers $ansDom
     Test-Check 'with a domain: include Everyone, exclude local Administrators and Domain Admins (domain SID from the DC information + -512), no notice' ((@($rDom.Include) -join ',') -eq 'S-1-1-0' -and (@($rDom.Exclude) -join ',') -eq "S-1-5-32-544,$dom-512" -and $rDom.Notice -eq '') (@($rDom.Exclude) -join ',')

@@ -300,6 +300,7 @@ function Start-OptChange([string]$Mode) {
 function Start-OptRun([string]$Mode, [string[]]$Ids, [bool]$ConfirmIrr, [string]$User, $Gate) {
     # Apply or Undo as a task in the background (the work of an entry, Defender and AppX removal included, no longer blocks the window). The confirmations are
     # done before. The window stays open until the run is done (closing handler below), like for the other operations that change the master.
+    Assert-NoOtherWriter   # every start of a writer job asks the central check (#50/#66 review)
     if ($script:OptRun) { throw 'Another optimization run is still running.' }
     $label = if ($Mode -eq 'Undo') { 'Undoing optimizations' } else { 'Applying optimizations' }
     $task = Start-AVDTuneUiTask -Kind 'optimization' -Title $label -Step "$($Ids.Count) entries"   # no Retry: it changes the master and starts only after its confirmation

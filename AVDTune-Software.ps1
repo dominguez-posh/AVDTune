@@ -104,6 +104,7 @@ function Get-SwTaskTitle([string]$Kind, $Argument) {
     }
 }
 function Start-SwJob([string]$Kind, $Argument) {
+    if ($Kind -eq 'Run') { Assert-NoOtherWriter }   # the scan and the search only read; a run changes the master (#50/#66 review)
     if ($script:SwJob) { throw 'Another software operation is still running.' }
     if ($script:UpdJob) { throw 'An update operation is running. Wait until it is done.' }
     if ($script:OptRun) { throw 'An optimization run is going. Wait until it is done.' }
