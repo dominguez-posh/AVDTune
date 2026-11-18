@@ -32,7 +32,7 @@ function Update-SealView {
         $t = New-Object System.Windows.Controls.TextBlock; $t.Text = [string][char]0x2022 + ' ' + $line; $t.TextWrapping = 'Wrap'; $t.Margin = '0,2,0,2'
         [void]$ui.PanelSealSteps.Children.Add($t)
     }
-    $ui.TxtSealLater.Text = 'Not part of this step yet: restart first and resume, DISM component cleanup, sending the change log to SharePoint, log off or shut down, the imaging tool and snapshot housekeeping.'
+    $ui.TxtSealLater.Text = 'Not part of this step yet: restart first and resume, DISM component cleanup, sending the change log to SharePoint, the imaging tool and snapshot housekeeping.'
 }
 function Start-SealJob {
     foreach ($other in 'SealJob', 'UpdJob', 'BenchJob', 'ReadyJob', 'OverviewJob', 'FslJob', 'OptJob', 'OptRun') { if (Get-Variable -Scope Script -Name $other -ValueOnly -ErrorAction SilentlyContinue) { throw 'Another operation is still running.' } }
@@ -64,6 +64,19 @@ function Start-SealJob {
     Set-ShutdownBlock $true; Set-SealBusy $true
 }
 
+# #46: the end action after a successful finish (ComboBox CmbSealEnd): asked first, the protocol is written before; shutdown.exe through the engine (full path, Authenticode).
+# Test mode: the start is recorded in SealEndRan instead (the developer's machine is never signed out or shut down).
+$script:SealEndRan = $null
+function Invoke-SealEndAction {
+    $action = @('None', 'LogOff', 'Shutdown')[[Math]::Max(0, $ui.CmbSealEnd.SelectedIndex)]
+    if ($action -eq 'None') { return }
+    $v = [string](Get-AVDTuneState $script:StateRoot).ImageVersion
+    if (-not (Confirm-Action (T $(if ($action -eq 'LogOff') { 'seal.end.ask.logoff' } else { 'seal.end.ask.shutdown' }) $v) 'AVDTune')) { return }
+    [void](Add-AVDTuneProtocolNote -Protocol $script:Protocol -Group 'seal' -Subject $(if ($action -eq 'LogOff') { "Sign out after the finish of $v" } else { "Shut down after the finish of $v" })); Save-Protocol
+    $runner = if ($script:TestMode) { { param($File, $Arguments) $script:SealEndRan = @{ File = $File; Arguments = @($Arguments) }; [pscustomobject]@{ ExitCode = 0; Output = '' } } } else { $null }
+    try { if ($runner) { [void](Invoke-AVDTuneFinishEndAction -Action $action -Root $script:StateRoot -Runner $runner) } else { [void](Invoke-AVDTuneFinishEndAction -Action $action -Root $script:StateRoot) } }
+    catch { $why = T 'seal.end.failed' $_.Exception.Message; [void](Add-AVDTuneProtocolNote -Protocol $script:Protocol -Group 'seal' -Subject $why); Save-Protocol; Show-Error $why }
+}
 function Complete-SealJob {
     $job = $script:SealJob
     if (-not $job) { return }
@@ -85,6 +98,7 @@ function Complete-SealJob {
     if (-not $failed) { try { Update-StartView } catch { } }
     Update-SealView; Start-OverviewRefresh
     Complete-AVDTuneUiTask $job.Task -Failed:$failed -Summary $text
+    if (-not $failed) { Invoke-SealEndAction }   # #46: sign out or shut down, as chosen, after asking
     if ($script:CloseWhenDone -and -not $script:SealJob -and -not $script:UpdJob -and -not $script:BenchJob) { if ($failed) { $script:CloseWhenDone = $false } else { $window.Close() } }
 }
 $script:Timer.Add_Tick({ try { Complete-SealJob } catch { Show-Error $_.Exception.Message } })

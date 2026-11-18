@@ -707,6 +707,14 @@
                                         <TextBlock x:Name="TxtSealSubtitle" Grid.Row="1" Grid.ColumnSpan="2" Style="{DynamicResource Subtitle}" Text="The last button of an image version. The master is never sysprepped: AVDTune cleans up, puts the update block in its end state, removes every token and closes the version; the image is made by your imaging tool afterwards."/>
                                         <Button x:Name="BtnSealRun" Grid.Column="1" Style="{DynamicResource PrimaryButton}" Content="Finish" VerticalAlignment="Center" Margin="24,0,0,0" AutomationProperties.Name="Finish this image version"/>
                                     </Grid>
+                                    <StackPanel Orientation="Horizontal" Margin="0,12,0,0">
+                                        <TextBlock Uid="seal.end.label" VerticalAlignment="Center" Margin="0,0,8,0"/>
+                                        <ComboBox x:Name="CmbSealEnd" Uid="seal.end" Width="220" SelectedIndex="0">
+                                            <ComboBoxItem Uid="seal.end.none"/>
+                                            <ComboBoxItem Uid="seal.end.logoff"/>
+                                            <ComboBoxItem Uid="seal.end.shutdown"/>
+                                        </ComboBox>
+                                    </StackPanel>
                                     <Border Style="{DynamicResource CardBox}" Margin="0,16,0,0" Background="{DynamicResource Card}" Padding="20,16">
                                         <StackPanel>
                                             <StackPanel Orientation="Horizontal">

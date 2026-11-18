@@ -497,6 +497,22 @@ exit 0
     # ---------------------------------------------------------------- the module never writes a secret
     $src = [IO.File]::ReadAllText((Join-Path $repo 'Modules\AVDTune.Finish.psm1'))
     Test-Check 'security: no start of a program, no environment variable, no Get-Command in the finish module' ($src -notmatch '(?m)^\s*[^#\r\n]*(Start-Process|Invoke-Expression|\$env:|Get-Command|\[Diagnostics\.Process\])') $null
+
+    # ---------------------------------------------------------------- #46: sign out or shut down after a successful finish
+    $r46 = Join-Path $base 'issue46'; [void](Initialize-AVDTuneState -Root $r46); [void](Start-AVDTuneImageVersion -Root $r46 -Date ([datetime]'2026-11-01') -User 'admin1')
+    $calls46 = New-Object System.Collections.ArrayList
+    $run46 = { param($File, $Arguments) [void]$calls46.Add(@{ File = $File; Arguments = (@($Arguments) -join ' ') }); [pscustomobject]@{ ExitCode = 0; Output = '' } }.GetNewClosure()
+    $e46 = Get-ThrownText { Invoke-AVDTuneFinishEndAction -Action Shutdown -Root $r46 -Runner $run46 }
+    Test-Check 'end action (#46): refused while the version is not finished, nothing is started' ($e46 -like '*not finished*' -and $calls46.Count -eq 0) $e46
+    [void](Set-AVDTuneState -Root $r46 -Values @{ Sealed = $true })
+    [void](Invoke-AVDTuneFinishEndAction -Action LogOff -Root $r46 -Runner $run46); [void](Invoke-AVDTuneFinishEndAction -Action Shutdown -Root $r46 -Runner $run46)
+    $sys46 = Join-Path ([Environment]::GetFolderPath('System')) 'shutdown.exe'
+    Test-Check 'end action (#46): shutdown.exe from the system folder, /l to sign out, /s /t 0 /d p:4:1 to shut down' ($calls46.Count -eq 2 -and $calls46[0].File -ieq $sys46 -and $calls46[0].Arguments -eq '/l' -and $calls46[1].File -ieq $sys46 -and $calls46[1].Arguments -eq '/s /t 0 /d p:4:1') (($calls46 | ForEach-Object { "$($_.File) $($_.Arguments)" }) -join '; ')
+    $e46b = Get-ThrownText { Invoke-AVDTuneFinishEndAction -Action LogOff -Root $r46 -Runner { param($File, $Arguments) [pscustomobject]@{ ExitCode = 1190; Output = 'pending' } } }
+    $fn46 = (Get-Command Invoke-AVDTuneFinishEndAction).ScriptBlock.ToString()
+    Test-Check 'end action (#46): a refused request throws with the exit code; the real start goes through Invoke-AVDTuneProgram (Authenticode, no shell)' ($e46b -like '*1190*' -and $fn46 -match 'Invoke-AVDTuneProgram -File \$File' -and $fn46 -match "Get-AVDTuneSystemFolder System") $e46b
+    $sealPage = [IO.File]::ReadAllText((Join-Path $repo 'AVDTune-Seal.ps1'))
+    Test-Check 'end action (#46): the page runs it only after a successful finish, asks first, writes the protocol before, and records instead of starting in test mode' ($sealPage -match 'if \(-not \$failed\) \{ Invoke-SealEndAction \}' -and $sealPage -match "if \(-not \(Confirm-Action \(T" -and $sealPage.IndexOf('Save-Protocol', $sealPage.IndexOf('function Invoke-SealEndAction')) -lt $sealPage.IndexOf('Invoke-AVDTuneFinishEndAction', $sealPage.IndexOf('function Invoke-SealEndAction')) -and $sealPage -match 'if \(\$script:TestMode\) \{ \{ param\(\$File, \$Arguments\) \$script:SealEndRan') $null
 }
 finally {
     Close-AVDTuneWriteGate

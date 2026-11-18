@@ -648,7 +648,23 @@ function Invoke-AVDTuneFinish {
     finally { Stop-AVDTuneChange -Root $Root -Owner $changeOwner }
 }
 
+function Invoke-AVDTuneFinishEndAction {
+    <#
+        The end action after a successful finish (#46): sign out (shutdown.exe /l) or shut down (shutdown.exe /s /t 0, planned maintenance). Only while the version is
+        finished (Sealed); the window asks first and writes the protocol before. shutdown.exe comes from the system folder of Windows (never PATH) and starts through
+        Invoke-AVDTuneProgram (Authenticode of the Windows program, held until it ends, no shell, no window). -Runner replaces the start in the checks.
+    #>
+    param([Parameter(Mandatory)][ValidateSet('LogOff', 'Shutdown')][string]$Action, [string]$Root = (Get-AVDTuneRoot),
+        [scriptblock]$Runner = { param($File, $Arguments) Invoke-AVDTuneProgram -File $File -Arguments $Arguments -TimeoutSeconds 60 })
+    if (-not (Test-AVDTuneSealed -Root $Root)) { throw 'The version is not finished: sign out or shut down after the finish only follows a successful finish.' }
+    $file = Join-Path (Get-AVDTuneSystemFolder System) 'shutdown.exe'
+    $arguments = if ($Action -eq 'LogOff') { @('/l') } else { @('/s', '/t', '0', '/d', 'p:4:1') }
+    $r = & $Runner $file $arguments
+    if ($null -eq $r -or $r.ExitCode -ne 0) { throw "shutdown.exe did not accept the request (exit code $(if ($r) { $r.ExitCode } else { 'none' })): $(if ($r) { [string]$r.Output })" }
+    $r
+}
+
 #endregion
 
-Export-ModuleMember -Function New-AVDTuneFinishAdapter, Clear-AVDTuneFolderContents, Get-AVDTuneFinishRebootWait, Get-AVDTuneFileLinkCount, Clear-AVDTuneReadOnlyMark, Find-AVDTuneTokenFiles, Test-AVDTuneNoLinkChain, Get-AVDTuneFinishRecord, Get-AVDTuneFinishCrash,
+Export-ModuleMember -Function Invoke-AVDTuneFinishEndAction, New-AVDTuneFinishAdapter, Clear-AVDTuneFolderContents, Get-AVDTuneFinishRebootWait, Get-AVDTuneFileLinkCount, Clear-AVDTuneReadOnlyMark, Find-AVDTuneTokenFiles, Test-AVDTuneNoLinkChain, Get-AVDTuneFinishRecord, Get-AVDTuneFinishCrash,
     Start-AVDTuneFinishLift, Restore-AVDTuneFinishLift, Test-AVDTuneFinishBinding, Get-AVDTuneFinishConfirmText, Repair-AVDTuneFinishCrash, Test-AVDTuneFinishGate, Get-AVDTuneFinishSteps, Invoke-AVDTuneFinish
