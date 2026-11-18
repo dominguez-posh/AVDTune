@@ -17,7 +17,7 @@ Import-Module (Join-Path $PSScriptRoot 'AVDTune.psm1')
 Import-Module (Join-Path $PSScriptRoot 'AVDTune.Updates.psm1')
 Import-Module (Join-Path $PSScriptRoot 'AVDTune.UpdateBlock.psm1')   # status of the update block and the maintenance record (Undo of the updates fix must not take a value the block owns)
 Import-Module (Join-Path $PSScriptRoot 'AVDTune.Trust.psm1')
-Import-Module (Join-Path $PSScriptRoot 'AVDTune.Benchmark.psm1')   # Invoke-AVDTuneChildProcess (issue 19): allowlist environment, job object
+Import-Module (Join-Path $PSScriptRoot 'AVDTune.Benchmark.psm1')   # the measure program helpers; Invoke-AVDTuneChildProcess (allowlist environment, job object) is in AVDTune.psm1 (#76)
 
 $script:Learn = 'https://learn.microsoft.com'
 $script:OdtPageUrl = 'https://www.microsoft.com/en-us/download/details.aspx?id=49117'
@@ -868,7 +868,7 @@ function New-AVDTuneOfficeAdapter {
         }
         catch { @{ Ok = $false; Text = ''; Error = $_.Exception.Message } }
     }
-    $a.NewTempFolder = { param($Root) $dir = Join-Path (Join-Path $Root 'temp') ('office-' + [guid]::NewGuid().ToString('N')); [void][IO.Directory]::CreateDirectory($dir); $dir }
+    $a.NewTempFolder = { param($Root) New-AVDTuneDownloadFolder -Root $Root -Prefix office }   # created with its protected ACL in one step (#79)
     $a.IsProtectedFolder = { param($Dir, $Root) Test-AVDTuneAdminOnlyPath -Path $Dir -Base (Split-Path $Root -Parent) }
     $a.Download = {
         param($Url, $Dest, $MaxBytes)
@@ -881,7 +881,7 @@ function New-AVDTuneOfficeAdapter {
             try {
                 if ([int]$resp.StatusCode -ne 200) { return @{ Ok = $false; Error = "HTTP $([int]$resp.StatusCode)" } }
                 if ($resp.ContentLength -gt $MaxBytes) { return @{ Ok = $false; Error = 'The file is larger than expected.' } }
-                $in = $resp.GetResponseStream(); $out = New-Object IO.FileStream($Dest, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None); $total = 0
+                $in = $resp.GetResponseStream(); $out = New-AVDTuneAdminFile -Path $Dest; $total = 0   # CreateNew with an explicit admin-only ACL (#79)
                 try { $buf = New-Object byte[] 81920; while (($n = $in.Read($buf, 0, $buf.Length)) -gt 0) { $total += $n; if ($total -gt $MaxBytes) { throw 'The download is larger than expected.' }; $out.Write($buf, 0, $n) } } finally { $out.Dispose(); $in.Dispose() }
             }
             finally { $resp.Close() }

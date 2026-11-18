@@ -22,6 +22,22 @@ param([switch]$HideConsole)
 # New-Object would be autoloaded through the inherited path, from any module there that exports that name. Same value as Get-AVDTuneSystemModulePath.
 [Environment]::SetEnvironmentVariable('PSModulePath', [IO.Path]::Combine([Environment]::GetFolderPath('Windows'), 'System32\WindowsPowerShell\v1.0\Modules') + ';' + [IO.Path]::Combine([Environment]::GetFolderPath('ProgramFiles'), 'WindowsPowerShell\Modules'), 'Process')
 $ErrorActionPreference = 'Stop'
+# Then TEMP/TMP of this process (#54), also before any cmdlet and before the first Add-Type: they come from HKCU\Environment, which a non-elevated process of the same
+# administrator can set, and csc writes and loads the compiled DLL there. Until the state folder is verified: a new folder below the Windows TEMP folder (users may create
+# items there but not delete or change ours), Administrators and SYSTEM only (a check run, not elevated, also its own user); then <state>\temp\host (Set-AVDTuneProcessTemp).
+$script:BootTemp = [IO.Path]::Combine([Environment]::GetFolderPath('Windows'), 'Temp', 'AVDTune-' + [guid]::NewGuid().ToString('N'))
+$bootAcl = [System.Security.AccessControl.DirectorySecurity]::new(); $bootAcl.SetAccessRuleProtection($true, $false)
+$bootElevated = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+$bootOwner = $(if ($bootElevated) { 'S-1-5-32-544' } else { [Security.Principal.WindowsIdentity]::GetCurrent().User.Value })
+$bootSids = @('S-1-5-32-544', 'S-1-5-18'); if (-not $bootElevated) { $bootSids += $bootOwner }
+if ($bootElevated) { $bootAcl.SetOwner([Security.Principal.SecurityIdentifier]::new('S-1-5-32-544')) }
+foreach ($sid in $bootSids) { $bootAcl.AddAccessRule([System.Security.AccessControl.FileSystemAccessRule]::new([Security.Principal.SecurityIdentifier]::new($sid), [System.Security.AccessControl.FileSystemRights]::FullControl, [System.Security.AccessControl.InheritanceFlags]'ContainerInherit, ObjectInherit', [System.Security.AccessControl.PropagationFlags]::None, [System.Security.AccessControl.AccessControlType]::Allow)) }
+[void][IO.Directory]::CreateDirectory($script:BootTemp, $bootAcl)
+# the folder is ours only when it has exactly what was asked for (#54 review B5): no link, owner, protected, only these accounts; someone who made it first does not pass
+$bootGot = [IO.Directory]::GetAccessControl($script:BootTemp)
+$bootRules = @($bootGot.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]))
+if ((([IO.File]::GetAttributes($script:BootTemp) -band [IO.FileAttributes]::ReparsePoint) -ne 0) -or -not $bootGot.AreAccessRulesProtected -or $bootGot.GetOwner([Security.Principal.SecurityIdentifier]).Value -ne $bootOwner -or @($bootRules | Where-Object { $_.IsInherited -or $_.AccessControlType -ne 'Allow' -or $bootSids -notcontains $_.IdentityReference.Value }).Count -gt 0) { throw "AVDTune: the start folder $($script:BootTemp) is not AVDTune's own (owner, rules or a link): AVDTune does not start." }
+foreach ($n in 'TEMP', 'TMP') { [Environment]::SetEnvironmentVariable($n, $script:BootTemp, 'Process') }
 if ($PSVersionTable.PSEdition -ne 'Desktop') {
     throw "This WPF tool requires Windows PowerShell 5.1: powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`""
 }
@@ -55,6 +71,7 @@ function Get-TestScript([string]$Name) {
 }
 function Stop-WithMessage([string]$Text) {
     # In test mode never a dialog: it would appear on the developer's desktop and block an unattended run
+    try { [IO.Directory]::Delete($script:BootTemp) } catch { }   # the start folder below the Windows TEMP (#54), when still there and empty (not recursive)
     if ($script:TestMode) { [Console]::Error.WriteLine("AVDTune: $Text"); exit 1 }
     [void][System.Windows.MessageBox]::Show($Text, 'AVDTune', 'OK', 'Error')
     exit 1
@@ -92,6 +109,9 @@ if ($script:TestMode) {
 else { $script:Machine = New-AVDTuneMachine }
 # The state folder is checked before it is trusted (owner, explicit rules, links; repaired when possible, Modules\AVDTune.psm1)
 try { [void](Initialize-AVDTuneState -Root $script:StateRoot) } catch { Stop-WithMessage $_.Exception.Message }
+# TEMP/TMP of this process now in the verified state folder (#54): <state>\temp\host, admin-only, fresh per start; the start folder below the Windows TEMP folder goes
+try { [void](Set-AVDTuneProcessTemp -StateRoot $script:StateRoot) } catch { Stop-WithMessage $_.Exception.Message }
+try { [void](Remove-AVDTuneTreeSafe -Path $script:BootTemp) } catch { }   # through handles, a link inside removed as a link
 # Staging folders of a Teams update that a crash left behind (Modules\AVDTune.Updates.psm1); after the check, links are never followed
 try { [void](Clear-AVDTuneStageFolder -Root $script:StateRoot) } catch { }
 $script:WorkRoot = $script:StateRoot

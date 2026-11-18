@@ -412,11 +412,8 @@ function New-AVDTuneMachine {
         # File and arguments are separate; the command line is built here with quoting per argument, never from free text
         param($File, [string[]]$Arguments, [int]$TimeoutSeconds = 120)
         # environment and TEMP from Windows, not from this process (issue #47): New-AVDTuneChildStartInfo
-        $psi = New-AVDTuneChildStartInfo -File $File -Arguments $Arguments
-        $p = [System.Diagnostics.Process]::Start($psi)
-        $out = $p.StandardOutput.ReadToEndAsync(); $err = $p.StandardError.ReadToEndAsync()
-        if (-not $p.WaitForExit($TimeoutSeconds * 1000)) { try { $p.Kill() } catch { }; return [pscustomobject]@{ ExitCode = -1; Output = 'timeout' } }
-        [pscustomobject]@{ ExitCode = $p.ExitCode; Output = ($out.Result + $err.Result) }
+        # Windows programs only with their Windows signature, held until they end (#71); the whole tree in a job object (#76)
+        Invoke-AVDTuneProgram -File $File -Arguments $Arguments -TimeoutSeconds $TimeoutSeconds
     }
     $m.Imds = {
         # Azure instance metadata: only reachable inside Azure; $null elsewhere
@@ -696,6 +693,7 @@ function Get-AVDTuneStateSecurityProblems {
 
 $script:ChildEnvHooks = @{ Root = ''; AclReader = $null }   # for the checks: a state folder of their own and a fake ACL reader (they run unelevated); only honoured inside the test mode (Test-AVDTuneTestMode), set from the module scope only
 $script:ChildEnvHooks.Machine = $null   # test hook: scriptblock (name) -> raw HKLM environment value
+$script:ChildEnvHooks.Windows = ''   # test hook: the Windows folder for Test-AVDTuneSystemProgramPath (a copy of a program counts as a Windows program, #71)
 
 function Get-AVDTuneSystemFolder {
     # Fixed system folders from Windows itself, never from environment variables (a user can set those in HKCU\Environment)
@@ -866,14 +864,9 @@ function Initialize-AVDTuneToolTemp {
         and has no owner or rule of someone else (Get-AVDTuneStateSecurityProblems on the folder itself); otherwise it is set aside (renamed to <tool>.untrusted-<stamp>, never
         repaired or deleted in place) and a new one is created in one step with the protected ACL. Returns the path.
     #>
-    param([Parameter(Mandatory)][ValidateSet('base', 'winget', 'choco', 'msiexec', 'bench', 'office', 'apps')][string]$Tool, [Parameter(Mandatory)][string]$StateRoot, [scriptblock]$ReadAcl)
-    $parent = Join-Path $StateRoot 'temp'
+    param([Parameter(Mandatory)][ValidateSet('base', 'winget', 'choco', 'msiexec', 'bench', 'office', 'apps', 'host')][string]$Tool, [Parameter(Mandatory)][string]$StateRoot, [scriptblock]$ReadAcl)
+    $parent = Initialize-AVDTuneTempParent -StateRoot $StateRoot   # no link on the way, temp created with its protected ACL (#79)
     $dir = Join-Path $parent $Tool
-    foreach ($c in @($StateRoot, $parent)) {
-        $attr = $null; try { $attr = [IO.File]::GetAttributes($c) } catch { continue }
-        if ($attr -band [IO.FileAttributes]::ReparsePoint) { throw "A part of the path $c is a link: stopped." }
-    }
-    if (-not (Test-Path -LiteralPath $parent)) { [void][IO.Directory]::CreateDirectory($parent) }
     $info = New-Object IO.DirectoryInfo $dir
     $file = New-Object IO.FileInfo $dir
     if ($info.Exists -or $file.Exists) {
@@ -893,11 +886,98 @@ function Initialize-AVDTuneToolTemp {
         catch { if (-not $bad) { return $dir }; throw }   # in use by a running program of the same tool: that folder was checked and stays admin-only
     }
     Remove-AVDTuneChildTempLeftovers -Parent $parent -Tool $Tool
+    New-AVDTuneOwnFolder -Path $dir
+    $dir
+}
+
+function New-AVDTuneOwnFolderSecurity {
+    # The ACL of a folder AVDTune creates for itself: Administrators and SYSTEM only, protected, owner Administrators when elevated. AVDTune runs elevated;
+    # a non-elevated process (the checks) also gets its own user, so it does not lock itself out of its own folder.
     $elevated = Test-AVDTuneElevated
     $security = New-AVDTuneStateSecurity -WithOwner:$elevated
-    # AVDTune starts these programs elevated; a non-elevated process (the checks) must not lock itself out of its own folder
     if (-not $elevated) { $security.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule([Security.Principal.WindowsIdentity]::GetCurrent().User, 'FullControl', 'ContainerInherit, ObjectInherit', 'None', 'Allow'))) }
-    (New-Object IO.DirectoryInfo $dir).Create($security)
+    $security
+}
+
+function Test-AVDTuneOwnFolder {
+    <#
+        Pure: is this the ACL of a folder AVDTune made for itself (New-AVDTuneOwnFolderSecurity)? Owner $Owner, protected, only allow rules for the SIDs in $Allowed, none inherited,
+        not a link. $Acl: Owner (SID), Protected, Rules (@{ Sid; Allow; Inherited }), Link. Returns the problems ('' each), empty when it is ours.
+    #>
+    param([Parameter(Mandatory)]$Acl, [Parameter(Mandatory)][string]$Owner, [Parameter(Mandatory)][string[]]$Allowed)
+    $p = New-Object System.Collections.ArrayList
+    if ($Acl.Link) { [void]$p.Add('it is a link') }
+    if ($Acl.Owner -ne $Owner) { [void]$p.Add("owner $($Acl.Owner)") }
+    if (-not $Acl.Protected) { [void]$p.Add('rules inherited from above') }
+    foreach ($r in @($Acl.Rules)) {
+        if ($r.Inherited) { [void]$p.Add("inherited rule for $($r.Sid)") }
+        elseif (-not $r.Allow) { [void]$p.Add("deny rule for $($r.Sid)") }
+        elseif ($Allowed -notcontains $r.Sid) { [void]$p.Add("rule for $($r.Sid)") }
+    }
+    @($p)
+}
+
+function New-AVDTuneOwnFolder {
+    <#
+        Creates a folder in one step with New-AVDTuneOwnFolderSecurity and reads it back (#54/#79 review B5): DirectoryInfo.Create keeps a folder that someone made first, with his
+        owner and rules. Anything but the asked owner (Administrators when elevated, else this user), protection and the own rules throws: stopped, nothing is put into it.
+    #>
+    param([Parameter(Mandatory)][string]$Path)
+    (New-Object IO.DirectoryInfo $Path).Create((New-AVDTuneOwnFolderSecurity))
+    $elevated = Test-AVDTuneElevated
+    $me = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+    $sec = [IO.Directory]::GetAccessControl($Path)
+    $acl = [pscustomobject]@{
+        Owner = $sec.GetOwner([Security.Principal.SecurityIdentifier]).Value; Protected = $sec.AreAccessRulesProtected
+        Link = (([IO.File]::GetAttributes($Path) -band [IO.FileAttributes]::ReparsePoint) -ne 0)
+        Rules = @(foreach ($r in $sec.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier])) { @{ Sid = $r.IdentityReference.Value; Allow = ($r.AccessControlType -eq 'Allow'); Inherited = $r.IsInherited } })
+    }
+    $problems = @(Test-AVDTuneOwnFolder -Acl $acl -Owner $(if ($elevated) { 'S-1-5-32-544' } else { $me }) -Allowed $(if ($elevated) { @('S-1-5-32-544', 'S-1-5-18') } else { @('S-1-5-32-544', 'S-1-5-18', $me) }))
+    if ($problems.Count -gt 0) { throw "$Path is not AVDTune's own folder after it was created ($($problems -join '; ')): stopped." }
+}
+
+function Initialize-AVDTuneTempParent {
+    # <state>\temp: the state folder and temp must be no links (throws), temp is created in one step with the protected ACL when missing (#79). Returns the path.
+    param([Parameter(Mandatory)][string]$StateRoot)
+    $parent = Join-Path $StateRoot 'temp'
+    foreach ($c in @($StateRoot, $parent)) {
+        $attr = $null; try { $attr = [IO.File]::GetAttributes($c) } catch { continue }
+        if ($attr -band [IO.FileAttributes]::ReparsePoint) { throw "A part of the path $c is a link: stopped." }
+    }
+    if (-not (Test-Path -LiteralPath $parent)) { New-AVDTuneOwnFolder -Path $parent }
+    $parent
+}
+
+function New-AVDTuneDownloadFolder {
+    <#
+        A new work folder for downloads and staged copies (#79): <Root>\temp\<Prefix>-<guid> (without -Prefix: <guid>, the staging folder of the updates), created in one
+        step with the protected ACL (New-AVDTuneOwnFolderSecurity), never with inherited rights. <Root> and <Root>\temp must be no links. Returns the path.
+    #>
+    param([Parameter(Mandatory)][string]$Root, [ValidatePattern('^[a-z]{0,20}$')][string]$Prefix = '')
+    $parent = Initialize-AVDTuneTempParent -StateRoot $Root
+    $name = [guid]::NewGuid().ToString('N'); if ($Prefix) { $name = "$Prefix-$name" }
+    $dir = Join-Path $parent $name
+    if (Test-Path -LiteralPath $dir) { throw "$dir exists already: stopped." }
+    New-AVDTuneOwnFolder -Path $dir
+    $dir
+}
+
+function New-AVDTuneAdminFile {
+    # A new file (CreateNew: an existing one throws) with an explicit admin-only ACL (New-AVDTuneFileSecurity -AdminOnly, #79), open for writing; the caller disposes the stream.
+    param([Parameter(Mandatory)][string]$Path)
+    New-Object IO.FileStream($Path, [IO.FileMode]::CreateNew, [Security.AccessControl.FileSystemRights]'Write, ReadPermissions', [IO.FileShare]::None, 65536, [IO.FileOptions]::None, (New-AVDTuneFileSecurity -AdminOnly))
+}
+
+function Set-AVDTuneProcessTemp {
+    <#
+        TEMP and TMP of this process itself (#54): the elevated AVDTune inherits them from HKCU\Environment, which a non-elevated process of the same administrator
+        can set, and [IO.Path]::GetTempPath() and Add-Type (csc writes its sources and the compiled DLL there and loads it) use them. Start-AVDTune.ps1 sets them first to
+        the Windows TEMP folder (from GetFolderPath, before any module loads) and, once the state folder is verified, to <state>\temp\host (admin-only, fresh per start,
+        Initialize-AVDTuneToolTemp). Returns the path.
+    #>
+    param([Parameter(Mandatory)][string]$StateRoot)
+    $dir = Initialize-AVDTuneToolTemp -Tool host -StateRoot $StateRoot -ReadAcl $(if ((Test-AVDTuneTestMode).Enabled) { $script:ChildEnvHooks.AclReader })
+    foreach ($n in 'TEMP', 'TMP') { [Environment]::SetEnvironmentVariable($n, $dir, [EnvironmentVariableTarget]::Process) }
     $dir
 }
 
@@ -1309,6 +1389,254 @@ function New-AVDTuneChildStartInfo {
     $psi
 }
 
+function Initialize-AVDTuneProcessJob {
+    <#
+        AVDTune.Native.ChildJob (#26, #76): a program started inside a job object from its first instruction. CreateProcess with PROC_THREAD_ATTRIBUTE_JOB_LIST (in the job when it is
+        made); where Windows refuses the list: made suspended, put into the job, then resumed (it has run no code outside the job). Its own pipes for stdout and stderr, stdin an empty
+        pipe, only these three handles inherited (PROC_THREAD_ATTRIBUTE_HANDLE_LIST). The job ends every process of the tree when its last handle is closed (also when AVDTune dies).
+    #>
+    if ('AVDTune.Native.ChildJob' -as [type]) { return }
+    Add-Type -TypeDefinition @"
+using System; using System.ComponentModel; using System.IO; using System.Text; using System.Threading; using System.Threading.Tasks; using System.Runtime.InteropServices; using Microsoft.Win32.SafeHandles;
+namespace AVDTune.Native {
+  public sealed class ChildResult { public int ExitCode; public string Output = ""; public string Error = ""; public bool TimedOut; public int ProcessId; public string JobMode = ""; }
+  public static class ChildJob {
+    [StructLayout(LayoutKind.Sequential)] struct BasicLimit { public long PerProcessUserTimeLimit, PerJobUserTimeLimit; public uint LimitFlags; public UIntPtr MinWs, MaxWs; public uint ActiveProcessLimit; public UIntPtr Affinity; public uint PriorityClass, SchedulingClass; }
+    [StructLayout(LayoutKind.Sequential)] struct IoCounters { public ulong a, b, c, d, e, f; }
+    [StructLayout(LayoutKind.Sequential)] struct ExtendedLimit { public BasicLimit Basic; public IoCounters Io; public UIntPtr ProcessMemory, JobMemory, PeakProcess, PeakJob; }
+    [StructLayout(LayoutKind.Sequential)] struct BasicAccounting { public long TotalUserTime, TotalKernelTime, PeriodUserTime, PeriodKernelTime; public uint PageFaults, TotalProcesses, ActiveProcesses, TerminatedProcesses; }
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)] struct StartupInfo { public int cb; public string lpReserved, lpDesktop, lpTitle; public int dwX, dwY, dwXSize, dwYSize, dwXCountChars, dwYCountChars, dwFillAttribute, dwFlags; public short wShowWindow, cbReserved2; public IntPtr lpReserved2, hStdInput, hStdOutput, hStdError; }
+    [StructLayout(LayoutKind.Sequential)] struct StartupInfoEx { public StartupInfo StartupInfo; public IntPtr lpAttributeList; }
+    [StructLayout(LayoutKind.Sequential)] struct ProcessInformation { public IntPtr hProcess, hThread; public int dwProcessId, dwThreadId; }
+    [StructLayout(LayoutKind.Sequential)] struct SecurityAttributes { public int nLength; public IntPtr lpSecurityDescriptor; public int bInheritHandle; }
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] static extern IntPtr CreateJobObject(IntPtr attributes, string name);
+    [DllImport("kernel32.dll", SetLastError = true)] static extern bool SetInformationJobObject(IntPtr job, int infoClass, ref ExtendedLimit info, int length);
+    [DllImport("kernel32.dll", SetLastError = true)] static extern bool AssignProcessToJobObject(IntPtr job, IntPtr process);
+    [DllImport("kernel32.dll", SetLastError = true)] static extern bool TerminateJobObject(IntPtr job, uint exitCode);
+    [DllImport("kernel32.dll", SetLastError = true)] static extern bool QueryInformationJobObject(IntPtr job, int infoClass, out BasicAccounting info, int length, IntPtr returned);
+    [DllImport("kernel32.dll", SetLastError = true)] static extern bool CloseHandle(IntPtr handle);
+    [DllImport("kernel32.dll", SetLastError = true)] static extern bool CreatePipe(out IntPtr read, out IntPtr write, ref SecurityAttributes sa, int size);
+    [DllImport("kernel32.dll", SetLastError = true)] static extern bool SetHandleInformation(IntPtr handle, int mask, int flags);
+    [DllImport("kernel32.dll", SetLastError = true)] static extern bool InitializeProcThreadAttributeList(IntPtr list, int count, int flags, ref IntPtr size);
+    [DllImport("kernel32.dll", SetLastError = true)] static extern bool UpdateProcThreadAttribute(IntPtr list, int flags, IntPtr attribute, IntPtr value, IntPtr size, IntPtr previous, IntPtr returnSize);
+    [DllImport("kernel32.dll")] static extern void DeleteProcThreadAttributeList(IntPtr list);
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] static extern bool CreateProcessW(string app, StringBuilder cmd, IntPtr pa, IntPtr ta, bool inherit, uint flags, string env, string cwd, ref StartupInfoEx si, out ProcessInformation pi);
+    [DllImport("kernel32.dll", SetLastError = true)] static extern uint ResumeThread(IntPtr thread);
+    [DllImport("kernel32.dll", SetLastError = true)] static extern bool TerminateProcess(IntPtr process, uint code);
+    [DllImport("kernel32.dll", SetLastError = true)] static extern uint WaitForSingleObject(IntPtr handle, uint ms);
+    [DllImport("kernel32.dll", SetLastError = true)] static extern bool GetExitCodeProcess(IntPtr process, out uint code);
+    const uint CREATE_SUSPENDED = 0x4, CREATE_UNICODE_ENVIRONMENT = 0x400, EXTENDED_STARTUPINFO_PRESENT = 0x80000, CREATE_NO_WINDOW = 0x08000000;
+    static readonly IntPtr AttrHandleList = (IntPtr)0x20002, AttrJobList = (IntPtr)0x2000D;
+    // test hook of the checks: the job list counts as refused, so the second way (suspended, assign, resume) runs
+    public static bool ForceSuspendedPath;
+    public static IntPtr Create() {
+      IntPtr j = CreateJobObject(IntPtr.Zero, null); if (j == IntPtr.Zero) throw new Win32Exception();
+      ExtendedLimit l = new ExtendedLimit(); l.Basic.LimitFlags = 0x2000;   // JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+      if (!SetInformationJobObject(j, 9, ref l, Marshal.SizeOf(typeof(ExtendedLimit)))) { int e = Marshal.GetLastWin32Error(); CloseHandle(j); throw new Win32Exception(e); }
+      return j;
+    }
+    public static int Active(IntPtr job) { BasicAccounting i; if (!QueryInformationJobObject(job, 1, out i, Marshal.SizeOf(typeof(BasicAccounting)), IntPtr.Zero)) throw new Win32Exception(); return (int)i.ActiveProcesses; }
+    public static void Terminate(IntPtr job) { TerminateJobObject(job, 0xFFFFFFFF); }
+    public static void Close(IntPtr job) { CloseHandle(job); }
+    static void Pipe(out IntPtr ours, out IntPtr theirs, bool theirsWrites) {
+      SecurityAttributes sa = new SecurityAttributes(); sa.nLength = Marshal.SizeOf(typeof(SecurityAttributes)); sa.bInheritHandle = 1;
+      IntPtr r, w; if (!CreatePipe(out r, out w, ref sa, 0)) throw new Win32Exception();
+      ours = theirsWrites ? r : w; theirs = theirsWrites ? w : r;
+      if (!SetHandleInformation(ours, 1, 0)) { int e = Marshal.GetLastWin32Error(); CloseHandle(r); CloseHandle(w); throw new Win32Exception(e); }   // our end is not inherited
+    }
+    static bool TryCreate(string file, string commandLine, string environment, string workDir, IntPtr job, IntPtr[] inherit, bool jobList, out ProcessInformation pi, out int error) {
+      pi = new ProcessInformation(); error = 0;
+      IntPtr size = IntPtr.Zero; int count = jobList ? 2 : 1;
+      InitializeProcThreadAttributeList(IntPtr.Zero, count, 0, ref size);
+      IntPtr list = Marshal.AllocHGlobal(size), handles = Marshal.AllocHGlobal(IntPtr.Size * inherit.Length), jobs = Marshal.AllocHGlobal(IntPtr.Size);
+      bool made = false;
+      try {
+        if (!InitializeProcThreadAttributeList(list, count, 0, ref size)) { error = Marshal.GetLastWin32Error(); return false; }
+        made = true;
+        for (int i = 0; i < inherit.Length; i++) Marshal.WriteIntPtr(handles, i * IntPtr.Size, inherit[i]);
+        if (!UpdateProcThreadAttribute(list, 0, AttrHandleList, handles, (IntPtr)(IntPtr.Size * inherit.Length), IntPtr.Zero, IntPtr.Zero)) { error = Marshal.GetLastWin32Error(); return false; }
+        if (jobList) {
+          Marshal.WriteIntPtr(jobs, job);
+          if (!UpdateProcThreadAttribute(list, 0, AttrJobList, jobs, (IntPtr)IntPtr.Size, IntPtr.Zero, IntPtr.Zero)) { error = Marshal.GetLastWin32Error(); return false; }
+        }
+        StartupInfoEx si = new StartupInfoEx(); si.StartupInfo.cb = Marshal.SizeOf(typeof(StartupInfoEx)); si.StartupInfo.dwFlags = 0x100;   // STARTF_USESTDHANDLES
+        si.StartupInfo.hStdInput = inherit[0]; si.StartupInfo.hStdOutput = inherit[1]; si.StartupInfo.hStdError = inherit[2]; si.lpAttributeList = list;
+        StringBuilder cmd = new StringBuilder(commandLine);
+        if (!CreateProcessW(file, cmd, IntPtr.Zero, IntPtr.Zero, true, CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT | EXTENDED_STARTUPINFO_PRESENT | CREATE_NO_WINDOW, environment, string.IsNullOrEmpty(workDir) ? null : workDir, ref si, out pi)) { error = Marshal.GetLastWin32Error(); return false; }
+        return true;
+      }
+      finally { if (made) DeleteProcThreadAttributeList(list); Marshal.FreeHGlobal(list); Marshal.FreeHGlobal(handles); Marshal.FreeHGlobal(jobs); }
+    }
+    // Starts file (full path; commandLine starts with the quoted file) with exactly this environment block (k=v\0...\0\0) inside job and waits: for the program, with waitForTree
+    // also for every process of the job, at most timeoutMs in all. A timeout ends the whole job; without waitForTree what the program left behind ends with it. Throws when nothing ran.
+    public static ChildResult Run(IntPtr job, string file, string commandLine, string environment, string workDir, int timeoutMs, bool waitForTree, Encoding encoding) {
+      IntPtr inR = IntPtr.Zero, inW = IntPtr.Zero, outR = IntPtr.Zero, outW = IntPtr.Zero, errR = IntPtr.Zero, errW = IntPtr.Zero;
+      ProcessInformation pi = new ProcessInformation(); ChildResult res = new ChildResult();
+      try {
+        Pipe(out inW, out inR, false); Pipe(out outR, out outW, true); Pipe(out errR, out errW, true);
+        IntPtr[] inherit = new IntPtr[] { inR, outW, errW };
+        int error;
+        if (!ForceSuspendedPath && TryCreate(file, commandLine, environment, workDir, job, inherit, true, out pi, out error)) res.JobMode = "joblist";
+        else {
+          if (!TryCreate(file, commandLine, environment, workDir, job, inherit, false, out pi, out error)) throw new Win32Exception(error, "The program could not be started: " + new Win32Exception(error).Message);
+          if (!AssignProcessToJobObject(job, pi.hProcess)) { int e = Marshal.GetLastWin32Error(); TerminateProcess(pi.hProcess, 0xFFFFFFFF); throw new Win32Exception(e, "The program could not be put into a job object and was ended before it ran: " + new Win32Exception(e).Message); }
+          res.JobMode = "suspended";
+        }
+        res.ProcessId = pi.dwProcessId;
+        CloseHandle(inR); inR = IntPtr.Zero; CloseHandle(outW); outW = IntPtr.Zero; CloseHandle(errW); errW = IntPtr.Zero; CloseHandle(inW); inW = IntPtr.Zero;   // stdin: end of file at once
+        Encoding enc = encoding ?? Encoding.Default;
+        FileStream os = new FileStream(new SafeFileHandle(outR, true), FileAccess.Read, 4096, false); outR = IntPtr.Zero;
+        FileStream es = new FileStream(new SafeFileHandle(errR, true), FileAccess.Read, 4096, false); errR = IntPtr.Zero;
+        Task<string> outTask = Task.Run(() => { using (StreamReader r = new StreamReader(os, enc)) return r.ReadToEnd(); });
+        Task<string> errTask = Task.Run(() => { using (StreamReader r = new StreamReader(es, enc)) return r.ReadToEnd(); });
+        if (ResumeThread(pi.hThread) == 0xFFFFFFFF) { int e = Marshal.GetLastWin32Error(); TerminateJobObject(job, 0xFFFFFFFF); throw new Win32Exception(e); }
+        System.Diagnostics.Stopwatch clock = System.Diagnostics.Stopwatch.StartNew();
+        bool timedOut = WaitForSingleObject(pi.hProcess, (uint)Math.Max(0, timeoutMs)) != 0;
+        if (!timedOut && waitForTree) {
+          while (Active(job) > 0) { if (clock.ElapsedMilliseconds >= timeoutMs) { timedOut = true; break; } Thread.Sleep(250); }
+        }
+        if (!timedOut && !waitForTree) { Task.WaitAll(new Task[] { outTask, errTask }, 2000); TerminateJobObject(job, 0xFFFFFFFF); }   // what it left behind ends now (and with it its copies of the pipes)
+        if (timedOut) {
+          TerminateJobObject(job, 0xFFFFFFFF);
+          System.Diagnostics.Stopwatch until = System.Diagnostics.Stopwatch.StartNew();
+          while (Active(job) > 0 && until.ElapsedMilliseconds < 30000) Thread.Sleep(100);
+          WaitForSingleObject(pi.hProcess, 10000);
+        }
+        Task.WaitAll(new Task[] { outTask, errTask }, 10000);
+        uint code; GetExitCodeProcess(pi.hProcess, out code);
+        res.TimedOut = timedOut; res.ExitCode = timedOut ? -1 : unchecked((int)code);
+        res.Output = outTask.IsCompleted ? outTask.Result : ""; res.Error = errTask.IsCompleted ? errTask.Result : "";
+        return res;
+      }
+      finally { foreach (IntPtr h in new IntPtr[] { inR, inW, outR, outW, errR, errW, pi.hThread, pi.hProcess }) if (h != IntPtr.Zero) CloseHandle(h); }
+    }
+  }
+}
+"@
+}
+
+function Invoke-AVDTuneChildProcess {
+    <#
+        The one place that starts a program and waits for it (#76; Benchmark, Updates/Language, Office, the machine adapter): no shell, no window, output read asynchronously
+        (stdout and stderr, so neither pipe can fill up and block it), a timeout, and the process in a job object (kill on close): on a timeout, or when this function ends,
+        the whole tree is ended. Fail closed: a job that cannot be made or a process that cannot be put into it means no run (the process is ended).
+        -StartInfo: a start built by New-AVDTuneChildStartInfo. Otherwise -FileName (full path) and -Arguments (already quoted); -CleanEnvironment passes only the allowlist
+        of Get-AVDTuneChildEnvironment (-Tool) with TEMP/TMP in -TempDir. -WaitForTree: returns only when every process of the tree has ended (a lock held by the caller,
+        Global\PackTune for winget and choco, stays held until then); the timeout covers the whole tree. Returns ExitCode (-1 on a timeout), Output, Error, TimedOut.
+    #>
+    param([Diagnostics.ProcessStartInfo]$StartInfo, [string]$FileName, [string]$Arguments = '', [int]$TimeoutMs = 600000, [switch]$CleanEnvironment, [string]$TempDir,
+        [ValidateSet('base', 'bench', 'office', 'apps')][string]$Tool = 'bench', [switch]$WaitForTree)
+    if ($StartInfo) { $psi = $StartInfo }
+    else {
+        if (-not [IO.Path]::IsPathRooted($FileName)) { throw "A program is started with its full path, not through PATH: $FileName" }
+        $psi = New-Object System.Diagnostics.ProcessStartInfo
+        $psi.FileName = $FileName; $psi.Arguments = $Arguments
+        $psi.UseShellExecute = $false; $psi.RedirectStandardOutput = $true; $psi.RedirectStandardError = $true; $psi.CreateNoWindow = $true
+        if ($CleanEnvironment) {
+            if (-not $TempDir) { throw 'A clean environment needs a TEMP folder.' }
+            $psi.EnvironmentVariables.Clear()
+            $clean = Get-AVDTuneChildEnvironment -Tool $Tool -TempDir $TempDir
+            foreach ($k in $clean.Keys) { $psi.EnvironmentVariables[$k] = [string]$clean[$k] }
+        }
+    }
+    if ($psi.UseShellExecute -or -not $psi.CreateNoWindow -or -not $psi.RedirectStandardOutput -or -not $psi.RedirectStandardError) { throw 'A program is started without shell and window, with its output read.' }
+    if (-not [IO.Path]::IsPathRooted($psi.FileName)) { throw "A program is started with its full path, not through PATH: $($psi.FileName)" }
+    # the start as Process.Start would make it (quoted file, then the arguments; exactly the environment of the start info), but inside the job from the first instruction (#26)
+    $cmdLine = '"' + $psi.FileName + '"' + $(if ($psi.Arguments) { ' ' + $psi.Arguments } else { '' })
+    $envBlock = (@(@($psi.EnvironmentVariables.Keys) | Sort-Object | ForEach-Object { "$_=$($psi.EnvironmentVariables[$_])" }) -join "`0") + "`0`0"
+    $encoding = $(if ($psi.StandardOutputEncoding) { $psi.StandardOutputEncoding } else { [Console]::OutputEncoding })
+    Initialize-AVDTuneProcessJob
+    $job = [AVDTune.Native.ChildJob]::Create()
+    try {
+        $r = [AVDTune.Native.ChildJob]::Run($job, $psi.FileName, $cmdLine, $envBlock, $psi.WorkingDirectory, $TimeoutMs, [bool]$WaitForTree, $encoding)
+        [pscustomobject]@{ ExitCode = $r.ExitCode; Output = $r.Output; Error = $r.Error; TimedOut = $r.TimedOut; JobMode = $r.JobMode }
+    }
+    catch [Management.Automation.MethodInvocationException] { throw "$([IO.Path]::GetFileName($psi.FileName)): $($_.Exception.InnerException.Message)" }
+    finally { [AVDTune.Native.ChildJob]::Terminate($job); [AVDTune.Native.ChildJob]::Close($job) }   # nothing of the tree outlives the call
+}
+
+function Test-AVDTuneWindowsSignature {
+    <#
+        Pure: is this the signature of a program of Windows itself (#71)? Valid (Windows programs are catalog-signed: Get-AuthenticodeSignature finds the catalog), signer
+        O and CN exactly Microsoft Corporation / Microsoft Windows, issuer O Microsoft Corporation and CN Microsoft Windows Production PCA <year>, and the original file name
+        (without .mui) is the file name. $Signature: Status, Subject, Issuer, OriginalFilename. Returns @{ Ok; Reason }.
+    #>
+    param($Signature, [Parameter(Mandatory)][string]$Name)
+    $part = {
+        param([string]$Dn, [string]$Key)
+        if (-not $Dn) { return '' }
+        try { $lines = (New-Object System.Security.Cryptography.X509Certificates.X500DistinguishedName($Dn)).Decode([System.Security.Cryptography.X509Certificates.X500DistinguishedNameFlags]::UseNewLines) -split "\r?\n" } catch { return '' }
+        $v = @(foreach ($l in $lines) { $i = $l.IndexOf('='); if ($i -gt 0 -and $l.Substring(0, $i).Trim() -ceq $Key) { $l.Substring($i + 1).Trim() } })
+        if ($v.Count -eq 1) { $v[0] } else { '' }
+    }
+    if (-not $Signature -or [string]$Signature.Status -ne 'Valid') { return @{ Ok = $false; Reason = "$Name has no valid signature ($(if ($Signature) { $Signature.Status } else { 'none' }))" } }
+    $ok = (& $part $Signature.Subject 'O') -ceq 'Microsoft Corporation' -and (& $part $Signature.Subject 'CN') -ceq 'Microsoft Windows' -and
+        (& $part $Signature.Issuer 'O') -ceq 'Microsoft Corporation' -and (& $part $Signature.Issuer 'CN') -cmatch '^Microsoft Windows Production PCA \d{4}( |$)'
+    if (-not $ok) { return @{ Ok = $false; Reason = "$Name is not signed by Microsoft Windows (signer '$($Signature.Subject)', issuer '$($Signature.Issuer)')" } }
+    $orig = ([string]$Signature.OriginalFilename) -replace '(?i)\.mui$', ''
+    if ($orig -ine $Name) { return @{ Ok = $false; Reason = "$Name carries the original file name '$orig'" } }
+    @{ Ok = $true; Reason = '' }
+}
+
+function Open-AVDTuneSystemProgram {
+    <#
+        A program of the Windows folder before its start (#71): no link, Windows signature (Test-AVDTuneWindowsSignature), and the file held open for reading without write
+        and delete sharing from before the check until the caller disposes the returned stream after the run (no swap in between). Throws with the reason: nothing is started.
+    #>
+    param([Parameter(Mandatory)][string]$Path)
+    $name = [IO.Path]::GetFileName($Path)
+    $stream = $null
+    try {
+        if (([IO.File]::GetAttributes($Path) -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw "$name is a link" }
+        $stream = [IO.File]::Open($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+        $s = Get-AuthenticodeSignature -LiteralPath $Path
+        $orig = ''; try { $orig = [string](Get-Item -LiteralPath $Path).VersionInfo.OriginalFilename } catch { }
+        $trust = Test-AVDTuneWindowsSignature -Name $name -Signature ([pscustomobject]@{
+                Status = [string]$s.Status; OriginalFilename = $orig
+                Subject = $(if ($s.SignerCertificate) { [string]$s.SignerCertificate.Subject } else { '' }); Issuer = $(if ($s.SignerCertificate) { [string]$s.SignerCertificate.Issuer } else { '' })
+            })
+        if (-not $trust.Ok) { throw $trust.Reason }
+        $stream
+    }
+    catch {
+        if ($stream) { $stream.Dispose() }
+        throw "$($_.Exception.Message): $name is not started."
+    }
+}
+
+function Test-AVDTuneSystemProgramPath {
+    # $true when $Path lies in the Windows folder (System32 and below): such a program is only started after Open-AVDTuneSystemProgram. The folder is a hook of the checks (test mode only).
+    param([Parameter(Mandatory)][string]$Path)
+    $win = $(if ($script:ChildEnvHooks.Windows -and (Test-AVDTuneTestMode).Enabled) { $script:ChildEnvHooks.Windows } else { Get-AVDTuneSystemFolder Windows })
+    [IO.Path]::GetFullPath($Path).StartsWith(([IO.Path]::GetFullPath($win).TrimEnd('\') + '\'), [StringComparison]::OrdinalIgnoreCase)
+}
+
+function Invoke-AVDTuneProgram {
+    <#
+        Starts a program by its full path with the clean start of New-AVDTuneChildStartInfo through Invoke-AVDTuneChildProcess (#53, #71, #76) and waits for it.
+        A program of the Windows folder (dsregcmd, manage-bde, sc, fltmc, reg, klist, ...) is checked first (Open-AVDTuneSystemProgram) and held until it has ended; a failed
+        check throws (fail closed). Any other program has been checked by the caller (Test-AVDTuneToolTrust right before). Returns ExitCode and Output (stdout + stderr);
+        a timeout ends the whole tree and returns ExitCode -1, Output 'timeout'. Start errors throw.
+    #>
+    param([Parameter(Mandatory)][string]$File, [string[]]$Arguments = @(), [int]$TimeoutSeconds = 120, [switch]$WaitForTree)
+    if (-not [IO.Path]::IsPathRooted($File)) { throw "A program is started with its full path, not through PATH: $File" }
+    $full = [IO.Path]::GetFullPath($File)   # one spelling for the check, the hold and the start ('..', trailing dots and spaces resolved)
+    $hold = $null
+    if (Test-AVDTuneSystemProgramPath -Path $full) {
+        # a Windows program only as an .exe (no .cmd/.bat/.com through the command interpreter or another loader), and the start is exactly the file that is held (#71 review B2)
+        if ([IO.Path]::GetExtension($full) -ine '.exe') { throw "$([IO.Path]::GetFileName($full)) is not an .exe: a program of the Windows folder only starts as an .exe. It is not started." }
+        $hold = Open-AVDTuneSystemProgram -Path $full
+    }
+    try {
+        $psi = New-AVDTuneChildStartInfo -File $full -Arguments $Arguments
+        if ($hold -and -not [string]::Equals([IO.Path]::GetFullPath($psi.FileName), $hold.Name, [StringComparison]::OrdinalIgnoreCase)) { throw "$([IO.Path]::GetFileName($full)) to start is not the file that was checked ($($hold.Name)): it is not started." }
+        $r = Invoke-AVDTuneChildProcess -StartInfo $psi -TimeoutMs ($TimeoutSeconds * 1000) -WaitForTree:$WaitForTree
+        if ($r.TimedOut) { return [pscustomobject]@{ ExitCode = -1; Output = 'timeout' } }
+        [pscustomobject]@{ ExitCode = $r.ExitCode; Output = ([string]$r.Output + [string]$r.Error) }
+    }
+    finally { if ($hold) { $hold.Dispose() } }
+}
+
 #endregion
 
 function Move-AVDTuneStateToQuarantine {
@@ -1324,9 +1652,12 @@ function Move-AVDTuneStateToQuarantine {
     if (-not $dir.Exists -and -not $file.Exists) { return '' }
     if ($dir.Exists -and ($dir.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { $dir.Delete(); return '' }   # removes the link, not its target
     if ($file.Exists -and ($file.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { $file.Delete(); return '' }
-    $icacls = Join-Path ([Environment]::SystemDirectory) 'icacls.exe'
+    $icacls = Join-Path $(if ($script:ChildEnvHooks.Windows -and (Test-AVDTuneTestMode).Enabled) { Join-Path $script:ChildEnvHooks.Windows 'System32' } else { [Environment]::SystemDirectory }) 'icacls.exe'   # the Windows folder is a hook of the checks (test mode only)
     $ErrorActionPreference = 'Continue'   # icacls writes its refusal to stderr; that must not stop the quarantine
-    try { [void](& $icacls $Root '/setowner' '*S-1-5-32-544' '/C' '/L' '/Q' 2>&1) } catch { }   # root only; a failure is fine, the rename below decides
+    # root only; a failure is fine, the rename below decides. icacls only after its Windows signature, held until it has ended (#71 review B3); a failed check skips it
+    $held = $null
+    try { $held = Open-AVDTuneSystemProgram -Path $icacls } catch { }
+    if ($held) { try { [void](& $icacls $Root '/setowner' '*S-1-5-32-544' '/C' '/L' '/Q' 2>&1) } catch { } finally { $held.Dispose() } }
     $parent = Split-Path $Root -Parent
     $stamp = (Get-Date).ToString('yyyyMMdd-HHmmss', [Globalization.CultureInfo]::InvariantCulture)
     $target = Join-Path $parent "$(Split-Path $Root -Leaf).untrusted-$stamp"
@@ -2244,7 +2575,7 @@ function Get-AVDTuneOverview {
 
 #endregion
 
-Export-ModuleMember -Function Move-AVDTuneFileReplace, Get-AVDTuneDcFromNtDomain, Get-AVDTuneSystemFolder, Get-AVDTuneSystemModulePath, Set-AVDTuneSafeModulePath, Test-AVDTuneModulePathStable, Assert-AVDTuneModulePathStable, Get-AVDTuneModulePathProblems, New-AVDTunePowerShell, New-AVDTuneRunspacePool, Get-AVDTuneChocolateyRoot, Get-AVDTuneChildTool, Initialize-AVDTuneToolTemp, Get-AVDTuneChildEnvironment, Get-AVDTuneProfilePath, Get-AVDTuneHklmValue, New-AVDTuneChildStartInfo, Get-AVDTuneProp, Get-AVDTuneWebResponse, Test-AVDTuneElevated, Get-AVDTuneRoot, Test-AVDTuneDefaultRoot, Test-AVDTuneTestMode, Resolve-AVDTuneTestScript, Get-AVDTuneLongPath, Get-AVDTuneTestModeRefusal, Confirm-AVDTuneAction, ConvertTo-AVDTuneArgument, New-AVDTuneMachine, Invoke-AVDTuneMachine, Invoke-AVDTuneDefaultHiveUnload, Remove-AVDTuneTreeSafe,
+Export-ModuleMember -Function Move-AVDTuneFileReplace, Get-AVDTuneDcFromNtDomain, Get-AVDTuneSystemFolder, Get-AVDTuneSystemModulePath, Set-AVDTuneSafeModulePath, Test-AVDTuneModulePathStable, Assert-AVDTuneModulePathStable, Get-AVDTuneModulePathProblems, New-AVDTunePowerShell, New-AVDTuneRunspacePool, Get-AVDTuneChocolateyRoot, Get-AVDTuneChildTool, Initialize-AVDTuneToolTemp, Get-AVDTuneChildEnvironment, Get-AVDTuneProfilePath, Get-AVDTuneHklmValue, New-AVDTuneChildStartInfo, Invoke-AVDTuneChildProcess, Invoke-AVDTuneProgram, Open-AVDTuneSystemProgram, New-AVDTuneDownloadFolder, New-AVDTuneOwnFolder, Test-AVDTuneOwnFolder, New-AVDTuneAdminFile, Set-AVDTuneProcessTemp, Initialize-AVDTuneTempParent, Test-AVDTuneWindowsSignature, Test-AVDTuneSystemProgramPath, Get-AVDTuneProp, Get-AVDTuneWebResponse, Test-AVDTuneElevated, Get-AVDTuneRoot, Test-AVDTuneDefaultRoot, Test-AVDTuneTestMode, Resolve-AVDTuneTestScript, Get-AVDTuneLongPath, Get-AVDTuneTestModeRefusal, Confirm-AVDTuneAction, ConvertTo-AVDTuneArgument, New-AVDTuneMachine, Invoke-AVDTuneMachine, Invoke-AVDTuneDefaultHiveUnload, Remove-AVDTuneTreeSafe,
     New-AVDTuneStateSecurity, Initialize-AVDTuneState, Read-AVDTuneAclInfo, Get-AVDTuneStateSecurityProblems, Move-AVDTuneStateToQuarantine, New-AVDTuneProtectedFolder, Assert-AVDTuneStateSecurity, Get-AVDTuneStateSecurityReport, Get-AVDTuneState, Set-AVDTuneState, Test-AVDTuneImageVersion, Get-AVDTuneNextImageVersion, Start-AVDTuneImageVersion,
     Add-AVDTuneRun, Get-AVDTuneRun, Get-AVDTuneLastChange, Get-AVDTuneChangeTimes, Get-AVDTuneChangeMarker, Invoke-AVDTuneStateLock, Get-AVDTuneChangeStopError, Test-AVDTuneChangeInProgress, Assert-AVDTuneNoForeignChange, Resolve-AVDTuneStaleChange, Start-AVDTuneChange, Stop-AVDTuneChange, Get-AVDTuneSnapshotClockBufferMinutes, ConvertTo-AVDTuneUtc, Get-AVDTuneSnapshotWindow, Test-AVDTuneSnapshotInWindow,New-AVDTuneStep, Invoke-AVDTuneStep, New-AVDTuneStepFromData, Get-AVDTuneStepCatalog, Invoke-AVDTune,
     Add-AVDTuneChangeLogEntry, Get-AVDTuneChangeLog, Get-AVDTuneChangeLogVersions, ConvertTo-AVDTuneChangeLogDocument, Export-AVDTuneChangeLog,

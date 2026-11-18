@@ -948,8 +948,7 @@ function New-AVDTuneCustomAdapter {
         $folder = Split-Path $Path -Parent
         $problems = if ($folder -ieq [Environment]::GetFolderPath('CommonDesktopDirectory')) { @((Get-AVDTunePublicDesktopFindings -Path $Path).Problems) } else { @(Get-AVDTuneWriteChainProblems -Path $Path -AllowMissingLeaf) }
         if (@($problems).Count -gt 0) { throw "The folder of $Path is not safe ($(@($problems) -join '; ')): no shortcut was written." }
-        $tempDir = Join-Path (Get-AVDTuneRoot) 'temp'
-        [void][IO.Directory]::CreateDirectory($tempDir)
+        $tempDir = Initialize-AVDTuneTempParent -StateRoot (Get-AVDTuneRoot)   # no link on the way, created with its protected ACL when missing (#79)
         $tp = @(Get-AVDTuneAclProblems (Read-AVDTuneAclReport $tempDir)); if ($tp.Count -gt 0) { throw "$tempDir is not safe ($($tp -join '; '))." }
         $temp = Join-Path $tempDir ([guid]::NewGuid().ToString('N').Substring(0, 8) + '.tmp.lnk')
         $shell = New-Object -ComObject WScript.Shell
@@ -966,7 +965,7 @@ function New-AVDTuneCustomAdapter {
     $a.Download = { param($Context, $Name, $Sha256, $Destination) [void](Save-AVDTuneAssetFile -Context $Context -Name $Name -Sha256 $Sha256 -Destination $Destination) }
     $a.RunScript = {
         # The signed Windows PowerShell from System32 (never PATH), the script held open (read sharing only) and checked against its pin through that handle while it runs,
-        # a broken signature stops it, the tree runs in a job object (update adapter Run) and ends at the timeout
+        # a broken signature stops it, the tree runs in a job object (update adapter Run = the central start Invoke-AVDTuneProgram, #76: powershell.exe is checked again for its Windows signature and held while it runs, #71) and ends at the timeout
         param($Path, $Sha256, $Mode, $TimeoutSeconds)
         $ps = Join-Path (Get-AVDTuneSystemFolder System) 'WindowsPowerShell\v1.0\powershell.exe'
         $trust = Test-AVDTuneToolTrust -Signature (& $u.VerifySignature $ps) -Name 'powershell.exe'

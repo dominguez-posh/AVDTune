@@ -1181,7 +1181,10 @@ function Invoke-AVDTuneFSLogixTest {
             else { Add (New-AVDTuneFsRow "$tag.smb" 3 "$t : SMB session" 'red' "The share could not be opened: $($p.Error)" 'Check the share name, the storage account and the network.' -Verified $false) }
         }
         Guard "$tag.kerberos" 3 "$t : Kerberos ticket" {
-            $tickets = @(& $F.KerberosTickets)
+            # klist that cannot be run (no Windows signature, timeout, start error) is a row with its reason, not "no ticket" (#53 review B4)
+            $tickets = $null; $why = ''
+            try { $tickets = @(& $F.KerberosTickets) } catch { $why = $_.Exception.Message }
+            if ($why) { Add (New-AVDTuneFsRow "$tag.kerberos" 3 "$t : Kerberos ticket" 'yellow' "The Kerberos tickets could not be read: $why" -Verified $false); return }
             if ($tickets | Where-Object { $_ -like "*cifs/$h*" }) { Add (New-AVDTuneFsRow "$tag.kerberos" 3 "$t : Kerberos ticket" 'green' "A Kerberos ticket for cifs/$h exists." -Verified $false) }
             else { Add (New-AVDTuneFsRow "$tag.kerberos" 3 "$t : Kerberos ticket" 'info' "No ticket for cifs/$h in this session. A not joined master has none; the session hosts get it at the user's sign-in." -Verified $false) }
         }
@@ -1311,8 +1314,7 @@ function New-AVDTuneFSLogixAdapter {
     }
     $a.NewTempFolder = {
         param($Root)
-        $dir = Join-Path (Join-Path $Root 'temp') ('fslogix-' + [guid]::NewGuid().ToString('N'))
-        [void][IO.Directory]::CreateDirectory($dir); $dir
+        New-AVDTuneDownloadFolder -Root $Root -Prefix fslogix   # created with its protected ACL in one step (#79)
     }
     $a.IsProtectedFolder = { param($Dir, $Root) Test-AVDTuneAdminOnlyPath -Path $Dir -Base (Split-Path $Root -Parent) }
     $a.Download = {
@@ -1325,7 +1327,7 @@ function New-AVDTuneFSLogixAdapter {
             $resp = $req.GetResponse()
             try {
                 if ($resp.ContentLength -gt $MaxBytes) { return @{ Ok = $false; Error = 'The file is larger than expected.' } }
-                $in = $resp.GetResponseStream(); $out = [IO.File]::Create($Dest); $total = 0
+                $in = $resp.GetResponseStream(); $out = New-AVDTuneAdminFile -Path $Dest; $total = 0   # CreateNew with an explicit admin-only ACL (#79)
                 try { $buf = New-Object byte[] 81920; while (($n = $in.Read($buf, 0, $buf.Length)) -gt 0) { $total += $n; if ($total -gt $MaxBytes) { throw 'The download is larger than expected.' }; $out.Write($buf, 0, $n) } } finally { $out.Dispose(); $in.Dispose() }
             }
             finally { $resp.Close() }
@@ -1454,7 +1456,13 @@ function New-AVDTuneFSLogixAdapter {
         }
         finally { if ($id) { $id.Dispose() }; [void][AVDTune.Logon]::CloseHandle($token) }
     }
-    $a.KerberosTickets = { try { @((& (Join-Path (Get-AVDTuneSystemFolder System) 'klist.exe') 2>$null) | Where-Object { $_ -match 'cifs/' }) } catch { @() } }
+    # klist through the central start (#53): clean environment, Windows signature checked and the file held (#71), job object with timeout (#76). A failed start, a timeout
+    # or an exit code other than 0 throws with the reason (the check shows it as its row instead of "no ticket")
+    $a.KerberosTickets = {
+        $r = Invoke-AVDTuneProgram -File (Join-Path (Get-AVDTuneSystemFolder System) 'klist.exe') -TimeoutSeconds 30
+        if ($r.ExitCode -ne 0) { throw "klist.exe ended with $($r.ExitCode) ($(([string]$r.Output).Trim() -replace '\s+', ' ' | ForEach-Object { if ($_.Length -gt 200) { $_.Substring(0, 200) } else { $_ } }))" }
+        @(([string]$r.Output -split "\r?\n") | Where-Object { $_ -match 'cifs/' })
+    }
     $a.DefenderGet = { try { $p = Get-MpPreference -ErrorAction Stop; @{ Paths = @($p.ExclusionPath | Where-Object { $_ -and $_ -notmatch 'Administrators' }); Processes = @($p.ExclusionProcess | Where-Object { $_ -and $_ -notmatch 'Administrators' }) } } catch { $null } }
     $a.DefenderAdd = { param($Kind, $Value) if ($Kind -eq 'Process') { Add-MpPreference -ExclusionProcess $Value -ErrorAction Stop } else { Add-MpPreference -ExclusionPath $Value -ErrorAction Stop } }
     $a.DefenderRemove = { param($Kind, $Value) if ($Kind -eq 'Process') { Remove-MpPreference -ExclusionProcess $Value -ErrorAction Stop } else { Remove-MpPreference -ExclusionPath $Value -ErrorAction Stop } }
