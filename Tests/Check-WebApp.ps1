@@ -81,11 +81,20 @@ try {
     $m1 = Merge-AVDTuneWebAppPolicy -Current $foreign -Entry $e0
     $p1 = ConvertFrom-AVDTuneWebAppPolicy $m1
     Test-Check 'merge: the foreign entry stays first, the own one is added' ($p1.Count -eq 2 -and $p1[0].url -eq 'https://other.example.test/' -and $p1[1].url -eq $i0.StartUrl) $m1
-    $m2 = Merge-AVDTuneWebAppPolicy -Current $m1 -Entry $e2
-    $p2 = ConvertFrom-AVDTuneWebAppPolicy $m2
-    Test-Check 'merge: the entry of the same URL is replaced in place, not added twice' ($p2.Count -eq 2 -and $p2[1].default_launch_container -eq 'tab') $m2
+    Test-Check 'merge: the own entry already in place leaves the value unchanged (same text)' ((Merge-AVDTuneWebAppPolicy -Current $m1 -Entry $e0) -ceq $m1) $null
+    $t2 = Get-ThrownText { Merge-AVDTuneWebAppPolicy -Current $m1 -Entry $e2 }
+    $t3 = Get-ThrownText { Merge-AVDTuneWebAppPolicy -Current '[{"url":"https://crm.example.test/app","custom_name":"Theirs"}]' -Entry $e0 }
+    $t4 = Get-ThrownText { Merge-AVDTuneWebAppPolicy -Current ('[' + (Get-AVDTuneWebAppEntryText $e0) + ',' + (Get-AVDTuneWebAppEntryText $e0) + ']') -Entry $e0 }
+    Test-Check 'merge: an entry of the same URL that is not exactly AVDTune''s, or several of them, stops it (nothing replaced or deleted, review #88)' ($t2 -like '*did not write*' -and $t3 -like '*did not write*' -and $t4 -like '*2 entries*') "$t2 | $t3 | $t4"
+    # a foreign entry nested deeper than ConvertTo-Json -Depth 5 keeps, with its spacing, escapes and brackets inside strings, its exact text (review #88)
+    $deep = '{ "url" : "https://deep.example.test/", "x": {"a":{"b":{"c":{"d":{"e":{"f":[1,{"g":"]}\"[{"}]}}}}}}, "u":"ä" }'
+    $md = Merge-AVDTuneWebAppPolicy -Current ("[`r`n  $deep`r`n]") -Entry $e0
+    $pd = ConvertFrom-AVDTuneWebAppPolicy $md
+    Test-Check 'merge: a foreign entry is kept as its exact text (deep nesting, spacing, escapes, brackets in strings)' ($pd.Count -eq 2 -and $pd[0].Raw -ceq $deep -and $md.Contains($deep)) $md
+    $gone = Get-AVDTuneWebAppPolicyUndo -Current $md -Own (Get-AVDTuneWebAppEntryText $e0) -OldExisted $true -OldText ("[`r`n  $deep`r`n]")
+    Test-Check 'undo: only the own entry goes; the list from before comes back as its exact text' (-not $gone.Remove -and $gone.Text -ceq "[`r`n  $deep`r`n]") $gone.Text
     Test-Check 'merge of a single entry gives a JSON list (not an object)' ((Merge-AVDTuneWebAppPolicy -Current '' -Entry $e0).StartsWith('[')) $null
-    $notList = @('{"url":"https://x.example.test/"}', 'not json', '[1,2]', '[{"name":"x"}]', '[{"url":5}]')
+    $notList = @('{"url":"https://x.example.test/"}', 'not json', '[1,2]', '[{"name":"x"}]', '[{"url":5}]', '[{"url":"https://x.example.test/"} junk', '[{"url":"https://x.example.test/"},]', '[{"url":"https://x.example.test/"}] x', '[{"url":"https://x.example.test/"')
     $acc = @($notList | Where-Object { -not (Get-ThrownText { ConvertFrom-AVDTuneWebAppPolicy $_ }) })
     Test-Check 'a value that is not a JSON list of entries with a url is not changed (throws)' ($acc.Count -eq 0) ($acc -join ' | ')
 
@@ -126,7 +135,7 @@ try {
     $u1 = Invoke-AVDTuneCustomRun -Machine $mach -C $c -Root $tmp -Mode Undo -Ids @($ids['Wiki'])
     $pu = ConvertFrom-AVDTuneWebAppPolicy ([string]$c.Store.Registry[$key].Value)
     Test-Check 'Undo of one web app: only its entry and shortcut go, the other web app, the foreign and the later entry stay' ($u1.Run.Results[0].Status -eq 'Changed' -and $pu.Count -eq 3 -and @($pu | Where-Object { $_.url -eq 'https://wiki.example.test/' }).Count -eq 0 -and @($pu | Where-Object { $_.url -eq 'https://late.example.test/' }).Count -eq 1 -and -not $c.Store.Shortcuts.ContainsKey('c:\programdata\microsoft\windows\start menu\programs\wiki.lnk') -and $c.Store.Shortcuts.ContainsKey('c:\users\public\desktop\crm web.lnk')) ([string]$c.Store.Registry[$key].Value)
-    $c.Store.Registry[$key] = @{ Value = (Get-AVDTuneWebAppPolicyUndo -Current ([string]$c.Store.Registry[$key].Value) -Url 'https://late.example.test/' -OldExisted $true -OldText '').Text; Kind = 'String' }
+    $c.Store.Registry[$key] = @{ Value = (Get-AVDTuneWebAppPolicyUndo -Current ([string]$c.Store.Registry[$key].Value) -Own (Get-AVDTuneWebAppEntryText ([pscustomobject]@{ url = 'https://late.example.test/' })) -OldExisted $true -OldText '').Text; Kind = 'String' }
     $u2 = Invoke-AVDTuneCustomRun -Machine $mach -C $c -Root $tmp -Mode Undo -Ids @($ids['CRM Web'])
     Test-Check 'Undo of the last own web app: the value is exactly the old text again (same spacing), the shortcuts are gone' ($u2.Run.Results[0].Status -eq 'Changed' -and [string]$c.Store.Registry[$key].Value -ceq $foreign -and $c.Store.Shortcuts.Count -eq 0) ([string]$c.Store.Registry[$key].Value)
     Test-Check 'Undo removes the undo records' ((Read-AVDTuneCustomUndo $tmp).Count -eq 0) $null
@@ -139,10 +148,21 @@ try {
     Test-Check 'no value before Apply: Undo removes WebAppInstallForceList again' ($had -and -not $c.Store.Registry.ContainsKey($key)) $null
     $sameUrl = '[{"url":"https://wiki.example.test/","default_launch_container":"tab","custom_name":"Theirs"}]'
     $c.Store.Registry[$key] = @{ Value = $sameUrl; Kind = 'String' }
-    [void](Invoke-AVDTuneCustomRun -Machine $mach -C $c -Root $tmp -Mode Apply -Ids @($ids['Wiki']) -Context @{ Fake = $true })
-    $mid = ConvertFrom-AVDTuneWebAppPolicy ([string]$c.Store.Registry[$key].Value)
+    $n = $c.Store.Log.Count
+    $fs = Invoke-AVDTuneCustomRun -Machine $mach -C $c -Root $tmp -Mode Apply -Ids @($ids['Wiki']) -Context @{ Fake = $true }
+    Test-Check 'a foreign entry of the same URL: Apply fails with the reason and writes nothing (no policy, no shortcut)' ($fs.Run.Results[0].Status -eq 'Failed' -and $fs.Run.Results[0].Message -like '*did not write*' -and [string]$c.Store.Registry[$key].Value -ceq $sameUrl -and @($c.Store.Log | Select-Object -Skip $n | Where-Object { $_ -like 'RegSet*' -or $_ -like 'ShortcutWrite*' -or $_ -like 'CopyFile*' }).Count -eq 0) $fs.Run.Results[0].Message
+    # AVDTune's exact entry was already there (e.g. from an earlier master): Apply writes the shortcut, Undo leaves the entry as it was
+    $wikiItem = @($saved.Items | Where-Object { $_.Name -eq 'Wiki' })[0]
+    $already = '[' + (Get-AVDTuneWebAppEntryText (New-AVDTuneWebAppPolicyEntry -Item $wikiItem)) + ']'
+    $c.Store.Registry[$key] = @{ Value = $already; Kind = 'String' }
+    $ap = Invoke-AVDTuneCustomRun -Machine $mach -C $c -Root $tmp -Mode Apply -Ids @($ids['Wiki']) -Context @{ Fake = $true }
     [void](Invoke-AVDTuneCustomRun -Machine $mach -C $c -Root $tmp -Mode Undo -Ids @($ids['Wiki']))
-    Test-Check 'an entry of the same URL from before is replaced by Apply and comes back exactly by Undo' ($mid.Count -eq 1 -and $mid[0].default_launch_container -eq 'window' -and [string]$c.Store.Registry[$key].Value -ceq $sameUrl) ([string]$c.Store.Registry[$key].Value)
+    Test-Check 'the own entry was there before: Apply only adds the shortcut, Undo keeps the entry' ($ap.Run.Results[0].Status -eq 'Changed' -and [string]$c.Store.Registry[$key].Value -ceq $already -and -not $c.Store.Shortcuts.ContainsKey('c:\programdata\microsoft\windows\start menu\programs\wiki.lnk')) ([string]$c.Store.Registry[$key].Value)
+    # the icon is fetched before the policy is written: without the library (not cached) the step fails and the policy stays (review #88)
+    $c.Store.Registry.Remove($key)
+    foreach ($k in @($c.Store.Files.Keys | Where-Object { $_ -like 'c:\programdata\avdtune-public\icons\*' -or $_ -like '*\custom\files\*' })) { $c.Store.Files.Remove($k) }
+    $ni = Invoke-AVDTuneCustomRun -Machine $mach -C $c -Root $tmp -Mode Apply -Ids @($ids['CRM Web'])
+    Test-Check 'an icon that cannot be fetched stops the step before the policy is written' ($ni.Run.Results[0].Status -eq 'Failed' -and -not $c.Store.Registry.ContainsKey($key)) $ni.Run.Results[0].Message
 
     # a value that is not a JSON list or not REG_SZ is not touched
     foreach ($case in @(@{ Value = 'garbage'; Kind = 'String' }, @{ Value = 1; Kind = 'DWord' })) {
@@ -169,6 +189,19 @@ try {
     }
     $type = Get-ThrownText { Initialize-AVDTuneLinkPropertyType }
     Test-Check 'the IPropertyStore helper for the AppUserModelID compiles (it is only used by the real adapter)' ($null -eq $type -and ('AVDTune.Native.LinkAumid' -as [type])) $type
+    $pvSize = [Runtime.InteropServices.Marshal]::SizeOf([type]'AVDTune.Native.PropVariant')
+    Test-Check 'PROPVARIANT has its native size (24 bytes on x64, at least 16 on x86): GetValue cannot write behind it (review #88)' ($(if ([IntPtr]::Size -eq 8) { $pvSize -eq 24 } else { $pvSize -ge 16 })) "size $pvSize, pointer $([IntPtr]::Size)"
+    # one round trip on a link made here in the temp folder (no program is started; the link points to a file of the temp folder)
+    $lnkDir = Join-Path $tmp 'lnk'; [void](New-Item -ItemType Directory -Path $lnkDir)
+    $lnk = Join-Path $lnkDir 'roundtrip.lnk'; $tgt = Join-Path $lnkDir 'target.txt'; [IO.File]::WriteAllText($tgt, 'x')
+    $rt = Get-ThrownText {
+        $sh = New-Object -ComObject WScript.Shell
+        try { $l = $sh.CreateShortcut($lnk); $l.TargetPath = $tgt; $l.Save(); [void][Runtime.InteropServices.Marshal]::ReleaseComObject($l) } finally { [void][Runtime.InteropServices.Marshal]::ReleaseComObject($sh) }
+        $script:aumidBefore = Get-AVDTuneLinkAumid $lnk
+        Set-AVDTuneLinkAumid $lnk 'AVDTune.WebApp.abcdef012345'
+        $script:aumidAfter = Get-AVDTuneLinkAumid $lnk
+    }
+    Test-Check 'AppUserModelID: set on a real .lnk through IPropertyStore and read back (empty before)' ($null -eq $rt -and $script:aumidBefore -eq '' -and $script:aumidAfter -ceq 'AVDTune.WebApp.abcdef012345') "$rt before='$($script:aumidBefore)' after='$($script:aumidAfter)'"
 }
 finally {
     Close-AVDTuneWriteGate

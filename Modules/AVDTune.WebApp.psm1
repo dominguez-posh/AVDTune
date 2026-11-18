@@ -87,53 +87,95 @@ function New-AVDTuneWebAppPolicyEntry {
 }
 
 function ConvertFrom-AVDTuneWebAppPolicy {
-    <# The value as a list of entries. $null or '' = no list. Anything that is not a JSON list of objects with a url text throws (it is not changed then). #>
+    <#
+        The value as its entries, each as the exact text it has in the value (Raw) and its url (review #88: foreign entries are never serialized anew, so nothing
+        of them is lost). $null or '' = no list. Anything that is not a JSON list of objects with a url text throws (it is not changed then).
+    #>
     param([AllowNull()][AllowEmptyString()][string]$Text)
     if (-not $Text -or -not $Text.Trim()) { return , @() }
     if ($Text.Length -gt 262144) { throw 'WebAppInstallForceList is larger than 256 KB: not changed.' }
-    try { $p = ConvertFrom-Json -InputObject $Text } catch { throw 'WebAppInstallForceList is not JSON: not changed.' }
-    if ($p -isnot [array]) { if ($p -is [pscustomobject] -and $Text.TrimStart().StartsWith('[')) { $p = @($p) } else { throw 'WebAppInstallForceList is not a JSON list: not changed.' } }
-    foreach ($e in $p) { if ($e -isnot [pscustomobject] -or -not ($e.PSObject.Properties['url'] -and $e.url -is [string])) { throw 'WebAppInstallForceList has an entry without a url: not changed.' } }
-    , @($p)
+    $bad = 'WebAppInstallForceList is not a JSON list of entries: not changed.'
+    $n = $Text.Length; $i = 0
+    $skip = { while ($i -lt $n -and [char]::IsWhiteSpace($Text[$i])) { $i++ } }
+    . $skip
+    if ($i -ge $n -or $Text[$i] -ne '[') { throw $bad }
+    $i++; . $skip
+    $out = New-Object System.Collections.ArrayList
+    if ($i -lt $n -and $Text[$i] -eq ']') { $i++ }
+    else {
+        while ($true) {
+            . $skip
+            if ($i -ge $n -or $Text[$i] -ne '{') { throw $bad }
+            # one object: brackets counted outside strings, escapes inside strings skipped
+            $start = $i; $depth = 0; $inStr = $false
+            while ($i -lt $n) {
+                $ch = $Text[$i]
+                if ($inStr) { if ($ch -eq '\') { $i++ } elseif ($ch -eq '"') { $inStr = $false } }
+                elseif ($ch -eq '"') { $inStr = $true }
+                elseif ($ch -eq '{' -or $ch -eq '[') { $depth++ }
+                elseif ($ch -eq '}' -or $ch -eq ']') { $depth--; if ($depth -eq 0) { break } }
+                $i++
+            }
+            if ($i -ge $n) { throw $bad }
+            $raw = $Text.Substring($start, $i - $start + 1); $i++
+            try { $o = ConvertFrom-Json -InputObject $raw } catch { throw $bad }
+            if ($o -isnot [pscustomobject] -or -not ($o.PSObject.Properties['url'] -and $o.url -is [string])) { throw 'WebAppInstallForceList has an entry without a url: not changed.' }
+            [void]$out.Add([pscustomobject]@{ Raw = $raw; Url = [string]$o.url })
+            . $skip
+            if ($i -lt $n -and $Text[$i] -eq ',') { $i++; continue }
+            if ($i -lt $n -and $Text[$i] -eq ']') { $i++; break }
+            throw $bad
+        }
+    }
+    . $skip
+    if ($i -lt $n) { throw $bad }
+    , @($out)
 }
 
-function ConvertTo-AVDTuneWebAppPolicyText([object[]]$Entries) { if (@($Entries).Count -eq 0) { return '' }; ConvertTo-Json -InputObject @($Entries) -Depth 5 -Compress }
+function ConvertTo-AVDTuneWebAppPolicyText([object[]]$Entries) { if (@($Entries).Count -eq 0) { return '' }; '[' + (@($Entries | ForEach-Object { $_.Raw }) -join ',') + ']' }
+
+function Get-AVDTuneWebAppEntryText($Entry) { ConvertTo-Json -InputObject $Entry -Depth 5 -Compress }   # AVDTune's own entry (two levels at most)
 
 function Test-AVDTuneWebAppSameUrl([string]$A, [string]$B) { $A.TrimEnd('/') -ieq $B.TrimEnd('/') }
 
 function Find-AVDTuneWebAppPolicyEntry {
-    # The entry of a URL in a list (first match), or $null
+    # The entries of a URL in a list (all of them)
     param([object[]]$Entries, [Parameter(Mandatory)][string]$Url)
-    @(@($Entries) | Where-Object { $_ -and (Test-AVDTuneWebAppSameUrl $_.url $Url) })[0]
+    , @(@($Entries) | Where-Object { $_ -and (Test-AVDTuneWebAppSameUrl $_.Url $Url) })
 }
 
 function Merge-AVDTuneWebAppPolicy {
-    # The new value with the entry of the URL replaced in place (or added at the end); every other entry stays as it is
+    <#
+        The new value with the own entry added at the end; every other entry stays as its exact text. An entry of the same URL that is not exactly AVDTune's entry
+        (someone else's, or several) stops it: nothing is replaced or deleted (review #88). The own entry already in place: the value is returned unchanged.
+    #>
     param([AllowNull()][AllowEmptyString()][string]$Current, [Parameter(Mandatory)]$Entry)
     $list = ConvertFrom-AVDTuneWebAppPolicy $Current
-    $out = @(); $done = $false
-    foreach ($e in $list) { if (Test-AVDTuneWebAppSameUrl $e.url $Entry.url) { if (-not $done) { $out += $Entry; $done = $true } } else { $out += $e } }
-    if (-not $done) { $out += $Entry }
-    ConvertTo-AVDTuneWebAppPolicyText $out
+    $own = Get-AVDTuneWebAppEntryText $Entry
+    $same = Find-AVDTuneWebAppPolicyEntry -Entries $list -Url $Entry.url
+    if ($same.Count -gt 1) { throw "WebAppInstallForceList has $($same.Count) entries for $($Entry.url): not changed (remove the extra ones by hand)." }
+    if ($same.Count -eq 1) {
+        if ($same[0].Raw -ceq $own) { return [string]$Current }
+        throw "WebAppInstallForceList has an entry for $($Entry.url) that AVDTune did not write: not replaced."
+    }
+    ConvertTo-AVDTuneWebAppPolicyText (@($list) + [pscustomobject]@{ Raw = $own; Url = $Entry.url })
 }
 
 function Test-AVDTuneWebAppPolicyHas {
+    # In place: exactly one entry of the URL, and it is AVDTune's entry as it would write it now
     param([AllowNull()][AllowEmptyString()][string]$Current, [Parameter(Mandatory)]$Entry)
-    $hit = Find-AVDTuneWebAppPolicyEntry -Entries (ConvertFrom-AVDTuneWebAppPolicy $Current) -Url $Entry.url
-    [bool]($hit -and (ConvertTo-Json -InputObject $hit -Depth 5 -Compress) -ceq (ConvertTo-Json -InputObject $Entry -Depth 5 -Compress))
+    $same = Find-AVDTuneWebAppPolicyEntry -Entries (ConvertFrom-AVDTuneWebAppPolicy $Current) -Url $Entry.url
+    [bool]($same.Count -eq 1 -and $same[0].Raw -ceq (Get-AVDTuneWebAppEntryText $Entry))
 }
 
 function Get-AVDTuneWebAppPolicyUndo {
     <#
-        What undo writes: the entry of the URL taken out of the current list and the entry from before put back (-OldEntry, JSON text or ''). When the result is the
-        list from before (-OldText, -OldExisted), the old value comes back exactly as it was (same text, or no value). Returns @{ Remove = bool; Text = string }.
+        What undo writes: only AVDTune's own entry (exact text -Own) is taken out, foreign entries of any URL stay as they are. When the result is the list from before
+        (-OldText, -OldExisted), the old value comes back exactly as it was (same text, or no value). Returns @{ Remove = bool; Text = string }.
     #>
-    param([AllowNull()][AllowEmptyString()][string]$Current, [Parameter(Mandatory)][string]$Url, [string]$OldEntry, [bool]$OldExisted, [AllowNull()][AllowEmptyString()][string]$OldText)
+    param([AllowNull()][AllowEmptyString()][string]$Current, [Parameter(Mandatory)][string]$Own, [bool]$OldExisted, [AllowNull()][AllowEmptyString()][string]$OldText)
     $list = ConvertFrom-AVDTuneWebAppPolicy $Current
-    $old = if ($OldEntry) { ConvertFrom-Json -InputObject $OldEntry } else { $null }
-    $out = @(); $done = $false
-    foreach ($e in $list) { if (Test-AVDTuneWebAppSameUrl $e.url $Url) { if ($old -and -not $done) { $out += $old; $done = $true } } else { $out += $e } }
-    if ($old -and -not $done) { $out += $old }
+    $out = @($list | Where-Object { $_.Raw -cne $Own })
     $text = ConvertTo-AVDTuneWebAppPolicyText $out
     $oldList = $null; try { $oldList = ConvertTo-AVDTuneWebAppPolicyText (ConvertFrom-AVDTuneWebAppPolicy $OldText) } catch { }
     if ($null -ne $oldList -and $text -ceq $oldList) { return [pscustomobject]@{ Remove = (-not $OldExisted); Text = [string]$OldText } }
@@ -149,7 +191,7 @@ using System.Runtime.InteropServices;
 using System.Runtime.InteropServices.ComTypes;
 namespace AVDTune.Native {
     [StructLayout(LayoutKind.Sequential, Pack = 4)] public struct PropertyKey { public Guid fmtid; public uint pid; }
-    [StructLayout(LayoutKind.Explicit, Size = 16)] public struct PropVariant { [FieldOffset(0)] public ushort vt; [FieldOffset(8)] public IntPtr p; }
+    [StructLayout(LayoutKind.Explicit, Size = 24)] public struct PropVariant { [FieldOffset(0)] public ushort vt; [FieldOffset(8)] public IntPtr p; }
     [ComImport, Guid("886D8EEB-8CF2-4446-8D02-CDBA1DBDCF99"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
     interface IPropertyStore {
         [PreserveSig] int GetCount(out uint c);
@@ -186,4 +228,4 @@ function Set-AVDTuneLinkAumid([string]$Path, [string]$Id) { Initialize-AVDTuneLi
 
 Export-ModuleMember -Function Get-AVDTuneWebAppSpike, Get-AVDTuneWebAppPolicyLocation, Get-AVDTuneWebAppWindowModes, Test-AVDTuneWebAppUrl, Get-AVDTuneWebAppOrigin, Get-AVDTuneWebAppIdGuess,
     Get-AVDTuneWebAppId, Get-AVDTuneWebAppLaunch, New-AVDTuneWebAppPolicyEntry, ConvertFrom-AVDTuneWebAppPolicy, ConvertTo-AVDTuneWebAppPolicyText, Test-AVDTuneWebAppSameUrl,
-    Find-AVDTuneWebAppPolicyEntry, Merge-AVDTuneWebAppPolicy, Test-AVDTuneWebAppPolicyHas, Get-AVDTuneWebAppPolicyUndo, Initialize-AVDTuneLinkPropertyType, Get-AVDTuneLinkAumid, Set-AVDTuneLinkAumid
+    Find-AVDTuneWebAppPolicyEntry, Merge-AVDTuneWebAppPolicy, Test-AVDTuneWebAppPolicyHas, Get-AVDTuneWebAppPolicyUndo, Get-AVDTuneWebAppEntryText, Initialize-AVDTuneLinkPropertyType, Get-AVDTuneLinkAumid, Set-AVDTuneLinkAumid

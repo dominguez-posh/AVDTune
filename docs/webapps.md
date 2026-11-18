@@ -14,14 +14,14 @@ Those fields are meant to become the manifest of a PackTune package of the kind 
 
 ## What Apply does
 
-1. `HKLM\SOFTWARE\Policies\Microsoft\Edge`, value `WebAppInstallForceList` (REG_SZ, a JSON list as Microsoft documents it for Edge): the entry of the start URL is replaced in place or added at the end (`url`, `default_launch_container`, `create_desktop_shortcut: false`, `fallback_app_name`). Every other entry stays as it is, in its order. A value that is not a JSON list of entries with a `url`, or not REG_SZ, is not touched (the step fails with the reason).
-2. Icon: an `.ico` is copied to `C:\ProgramData\AVDTune-Public\Icons\<sha>.ico` (read only for users) and used by the shortcut. A `.png` is only kept for `custom_icon` once that is verified; until then the shortcut shows the Edge icon.
+1. Icon first: an `.ico` is copied to `C:\ProgramData\AVDTune-Public\Icons\<sha>.ico` (read only for users) and used by the shortcut; a missing or tampered icon stops the step before anything else is written. A `.png` is only kept for `custom_icon` once that is verified; until then the shortcut shows the Edge icon.
+2. `HKLM\SOFTWARE\Policies\Microsoft\Edge`, value `WebAppInstallForceList` (REG_SZ, a JSON list as Microsoft documents it for Edge): AVDTune's entry (`url`, `default_launch_container`, `create_desktop_shortcut: false`, `fallback_app_name`) is added at the end. Every other entry is kept as its exact text (never parsed and written anew, so nothing nested is lost), in its order. An entry of the same URL that is not exactly AVDTune's, or several, stops the step: AVDTune never replaces or deletes a foreign entry. A value that is not a JSON list of entries with a `url`, or not REG_SZ, is not touched (the step fails with the reason).
 3. Shortcuts (Public Desktop and/or Start menu, marked with the item id; a foreign shortcut of the same name is not replaced):
    - app id known (entered, or computed once the scheme is verified): `msedge_proxy.exe --profile-directory=Default --app-id=<id>` from the Edge folder under Program Files (x86) (never PATH). This starts the installed app.
    - otherwise: `msedge.exe --app=<url>` with the AppUserModelID `AVDTune.WebApp.<id>` on the shortcut (Tab: `msedge.exe <url>` without one). That window is not the installed app: the taskbar may still group it under Edge with the Edge icon, so the icon problem of plan 3a stays in this case.
 4. Edge startup boost and background mode are not switched on.
 
-Undo takes out the entry of the start URL and puts back the entry of that URL from before (if there was one). When the result is the list from before, the old value comes back exactly (same text; no value when there was none). Entries others added in between stay.
+Undo takes out only AVDTune's own entry (its exact text); when that exact entry was already there before Apply, it stays. When the result is the list from before, the old value comes back exactly (same text; no value when there was none). Entries others added in between stay.
 
 ## Not verified (spike on a Windows 11 multi-session VM)
 
@@ -32,7 +32,7 @@ The results go into `$script:Spike` at the top of `Modules\AVDTune.WebApp.psm1` 
 3. `custom_name` and `custom_icon` (`CustomName`, `CustomIcon`): whether Edge on Windows honours them, and whether `custom_icon` takes a `file:///` URL of the icon copy with its SHA256.
 4. The AppUserModelID of the window of an installed app (`ProxyAumid`, with `{0}` for the app id): with it the shortcut, the pinned entry and the running window show the same icon.
 5. Pinned icon, running window, Start menu and the shortcut after a logon with FSLogix, for both launch forms.
-6. The IPropertyStore code that sets the AppUserModelID on a link (compiles in the check; only the real adapter uses it).
+6. The IPropertyStore code that sets the AppUserModelID on a link: the check sets and reads it on a .lnk in a temp folder (PROPVARIANT 24 bytes on x64); whether the taskbar uses it for an `msedge.exe --app` window is open.
 
 ## Follow-ups (not built)
 

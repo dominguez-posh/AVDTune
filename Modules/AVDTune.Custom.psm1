@@ -542,11 +542,11 @@ function Get-AVDTuneCustomBefore {
         }
         'Font' { $r = & $C.RegGet $script:FontKey (Get-AVDTuneCustomFontValueName $Item); @{ FileExisted = ($null -ne (& $C.FileHash (Join-Path (& $C.Folder 'Fonts') $Item.File))); ValueExisted = [bool]$r; Value = $(if ($r) { [string]$r.Value } else { '' }) } }
         'WebApp' {
-            # the whole value of WebAppInstallForceList as it was and the entry of this URL in it (undo puts back exactly that)
+            # the whole value of WebAppInstallForceList as it was and the exact text of the entry of this URL in it (undo puts back exactly that)
             $pk = Get-AVDTuneWebAppPolicyLocation
             $r = & $C.RegGet $pk.Key $pk.Value
             $old = ''
-            if ($r -and [string]$r.Kind -eq 'String') { try { $hit = Find-AVDTuneWebAppPolicyEntry -Entries (ConvertFrom-AVDTuneWebAppPolicy ([string]$r.Value)) -Url $Item.StartUrl; if ($hit) { $old = ConvertTo-Json -InputObject $hit -Depth 5 -Compress } } catch { } }
+            if ($r -and [string]$r.Kind -eq 'String') { try { $hit = Find-AVDTuneWebAppPolicyEntry -Entries (ConvertFrom-AVDTuneWebAppPolicy ([string]$r.Value)) -Url $Item.StartUrl; if ($hit.Count -eq 1) { $old = [string]$hit[0].Raw } } catch { } }
             @{ Existed = [bool]$r; Text = $(if ($r) { [string]$r.Value } else { '' }); OldEntry = $old }
         }
         default { @{} }
@@ -664,6 +664,7 @@ function New-AVDTuneCustomStep {
             $icon = if ($ext -eq '.ico') { "$iconCopy,0" } else { "$($launch.Target),0" }
             $entry = New-AVDTuneWebAppPolicyEntry -Item $i -IconPath $(if ($needCopy) { $iconCopy } else { '' })
             $pk = Get-AVDTuneWebAppPolicyLocation
+            $own = Get-AVDTuneWebAppEntryText $entry
             $readPolicy = { $r = & $C.RegGet $pk.Key $pk.Value; if (-not $r) { return '' }; if ([string]$r.Kind -ne 'String') { throw "$($pk.Key)\$($pk.Value) is $($r.Kind), not REG_SZ: not changed." }; [string]$r.Value }.GetNewClosure()
             $test = { param($m) $miss = @()
                 try { if (-not (Test-AVDTuneWebAppPolicyHas -Current (& $readPolicy) -Entry $entry)) { $miss += 'Edge policy' } } catch { $miss += "Edge policy ($($_.Exception.Message))" }
@@ -672,20 +673,20 @@ function New-AVDTuneCustomStep {
             $apply = { param($m)
                 foreach ($p in $paths) { $s = & $C.ShortcutRead $p; if ($s -and $s.Description -cne $desc) { throw "$p exists and was not made by AVDTune for this item: it is not replaced." } }
                 $cur = & $readPolicy
-                $new = Merge-AVDTuneWebAppPolicy -Current $cur -Entry $entry
-                if ($new -cne $cur) { & $C.RegSet $pk.Key $pk.Value $new 'String' }
-                if ($needCopy) {
+                $new = Merge-AVDTuneWebAppPolicy -Current $cur -Entry $entry   # throws for a foreign entry of this URL before anything is written
+                if ($needCopy) {   # the icon first: a missing or tampered icon stops the step before the policy is written (review #88)
                     $h = & $C.FileHash $iconCopy
                     if ($null -ne $h -and $h -ne $i.IconSha256) { throw "$iconCopy exists with other content." }
                     if ($null -eq $h) { & $C.CopyFile (& $get $i.IconFile $i.IconSha256) $iconCopy 'UsersRead' }
                 }
+                if ($new -cne $cur) { & $C.RegSet $pk.Key $pk.Value $new 'String' }
                 foreach ($p in $paths) { & $C.ShortcutWrite $p $launch.Target $launch.Arguments $icon '' $desc $launch.AppUserModelId } }.GetNewClosure()
             $b = if ($Before) { $Before } else { @{ Existed = $false; Text = ''; OldEntry = '' } }   # without a record: only the own entry is taken out
             $undo = { param($m)
                 foreach ($p in $paths) { $s = & $C.ShortcutRead $p; if ($s -and $s.Description -ceq $desc) { & $C.ShortcutDelete $p } }
                 $r = & $C.RegGet $pk.Key $pk.Value
-                if (-not $r -or [string]$r.Kind -ne 'String') { return }
-                $u = Get-AVDTuneWebAppPolicyUndo -Current ([string]$r.Value) -Url $i.StartUrl -OldEntry ([string]$b.OldEntry) -OldExisted ([bool]$b.Existed) -OldText ([string]$b.Text)
+                if (-not $r -or [string]$r.Kind -ne 'String' -or [string]$b.OldEntry -ceq $own) { return }   # the same entry was there before AVDTune: it stays
+                $u = Get-AVDTuneWebAppPolicyUndo -Current ([string]$r.Value) -Own $own -OldExisted ([bool]$b.Existed) -OldText ([string]$b.Text)
                 if ($u.Remove) { & $C.RegRemove $pk.Key $pk.Value } elseif ($u.Text -cne [string]$r.Value) { & $C.RegSet $pk.Key $pk.Value $u.Text 'String' } }.GetNewClosure()
         }
         'Script' {
