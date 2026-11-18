@@ -1463,6 +1463,62 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
             }
         }
         $true } }
+    @{ Name = 'sharepoint (#89)'; Do = {
+        # the SharePoint card of the change log: site, uploads as writer jobs against the fake Graph (shared with the runspace), document, removal of confirmed records
+        if ($script:SpJob -or $script:CswJob) { return $false }
+        $click = { param($b) $b.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent))) }
+        $fake = $script:SpFake.Store
+        $ver = [string](Get-AVDTuneState $script:StateRoot).ImageVersion
+        switch ([int]$script:SmokeSpStep) {
+            0 {
+                Show-Page 'Protocol'; $ui.SegChange.IsChecked = $true; Update-ProtocolView; $window.UpdateLayout()
+                Test-Smoke 'SharePoint: the card is shown with the change log and says that without a site everything stays local' ($ui.HostSp.Visibility -eq 'Visible' -and $ui.TxtSpState.Text -like ((T 'sp.nosite').Substring(0, 30) + '*') -and -not $ui.BtnSpChangeLog.IsEnabled) $ui.TxtSpState.Text
+                $ui.TxtSpSite.Text = 'https://evil.example.com/sites/x'
+                & $click $ui.BtnSpSave
+                $refused = ((Get-AVDTuneSpSettings -Root $script:StateRoot).SiteUrl -eq '')
+                $ui.TxtSpSite.Text = $script:SpFake.SiteUrl; $ui.ChkSpFinish.IsChecked = $false
+                & $click $ui.BtnSpSave
+                Test-Smoke 'SharePoint: the site is saved (a foreign host is refused) and the upload buttons are open' ($refused -and (Get-AVDTuneSpSettings -Root $script:StateRoot).SiteUrl -eq $script:SpFake.SiteUrl -and $ui.BtnSpChangeLog.IsEnabled -and $ui.TxtSpState.Text -like "*$($script:SpFake.SiteUrl)*") $ui.TxtSpState.Text
+                & $click $ui.BtnSpChangeLog
+                Test-Smoke 'SharePoint: the change log upload is a writer job with a task' ($script:SpJob -and $script:SpJob.Kind -eq 'ChangeLog' -and (Get-AVDTuneRunningWriter) -eq 'SpJob') (Get-AVDTuneRunningWriter)
+                $script:SmokeSpStep = 1; return $false
+            }
+            1 {
+                $list = @($fake.Lists.Values | Where-Object { $_.Name -eq 'AVDTune Change Log' })
+                $total = @(Get-AVDTuneChangeLog -Root $script:StateRoot).Count
+                $sent = (@($fake.Bodies) -join ' ')
+                Test-Smoke 'SharePoint: the list "AVDTune Change Log" was created and holds every entry, nothing pending, no token in what was sent' ($list.Count -eq 1 -and $list[0].Items.Count -eq $total -and (Get-AVDTuneSpPending -Root $script:StateRoot).Pending -eq 0 -and $sent -notmatch 'fake-sp-token|eyJ[A-Za-z0-9_-]{10,}' -and @(Get-AVDTuneUiTasks | Where-Object { $_.Kind -eq 'sharepoint-changelog' -and $_.Status -eq 'succeeded' }).Count -ge 1) "$($list.Count) $(if ($list.Count) { $list[0].Items.Count }) of $total; $($ui.TxtSpState.Text)"
+                $script:SmokeSpAfter = $false
+                Start-SpJob 'ChangeLog' { $script:SmokeSpAfter = $true }   # the way the finish uses it (upload first, then the finish)
+                $script:SmokeSpStep = 2; return $false
+            }
+            2 {
+                Test-Smoke 'SharePoint: the upload before the finish runs its follow-up, a second upload sends nothing (idempotent)' ($script:SmokeSpAfter -and $script:SpLast -like ((T 'sp.done.changelog' 0 '*' '*').Split('*')[0] + '*')) $script:SpLast
+                & $click $ui.BtnSpSoftware
+                $script:SmokeSpStep = 3; return $false
+            }
+            3 {
+                $sw = @($fake.Lists.Values | Where-Object { $_.Name -eq 'AVDTune Software' })
+                $files = @($fake.Files.Keys | Where-Object { $_ -like "AVDTune/$ver/software/*" })
+                Test-Smoke 'SharePoint: the software list holds the recordings and the installed programs, the documentation and records of the recordings are in the library' ($sw.Count -eq 1 -and @($sw[0].Items | Where-Object { $_.Source -like 'Custom*' }).Count -ge 1 -and $files.Count -ge 2) "$($files -join ', ') $($script:SpLast)"
+                & $click $ui.BtnSpDocument
+                $script:SmokeSpStep = 4; return $false
+            }
+            4 {
+                $doc = Join-Path $script:StateRoot "documents\environment-$ver.html"
+                $html = if (Test-Path -LiteralPath $doc) { [IO.File]::ReadAllText($doc) } else { '' }
+                Test-Smoke 'SharePoint: the environment document is saved locally (encoded, a policy that loads nothing) and uploaded to the library' ($html -like '*Content-Security-Policy*' -and $html -notmatch '<script' -and $html -like '*Identity model*' -and $fake.Files.ContainsKey("AVDTune/$ver/environment.html")) $script:SpLast
+                $before = @((Get-AVDTuneRecordedApps -Root $script:StateRoot).Apps).Count
+                & $click $ui.BtnSpRemove
+                $after = @((Get-AVDTuneRecordedApps -Root $script:StateRoot).Apps).Count
+                Test-Smoke 'SharePoint: removing the uploaded records asks first, removes the confirmed ones and writes a change log entry' ($script:ConfirmAsked -like '*Example App*' -and $before -ge 1 -and $after -eq 0 -and @(Get-AVDTuneChangeLog -Root $script:StateRoot | Where-Object { $_.Component -eq 'sharepoint.records' }).Count -eq 1 -and (Get-AVDTuneRunningWriter) -eq '') "$before -> $after; $($script:SpLast)"
+                [void](Set-AVDTuneSpSettings -Root $script:StateRoot -SiteUrl '')
+                $ui.SegSession.IsChecked = $true
+                Show-Page 'Overview'
+                return $true
+            }
+        }
+        $true } }
     @{ Name = 'task bar'; Do = {
         # the flows of the earlier steps went through the one mechanism; wait (at most 30 s) until nothing runs any more
         if (-not $script:TaskStepStart) { $script:TaskStepStart = Get-Date }

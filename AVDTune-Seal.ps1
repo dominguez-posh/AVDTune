@@ -32,7 +32,7 @@ function Update-SealView {
         $t = New-Object System.Windows.Controls.TextBlock; $t.Text = [string][char]0x2022 + ' ' + $line; $t.TextWrapping = 'Wrap'; $t.Margin = '0,2,0,2'
         [void]$ui.PanelSealSteps.Children.Add($t)
     }
-    $ui.TxtSealLater.Text = 'Not part of this step yet: restart first and resume, DISM component cleanup, sending the change log to SharePoint, the imaging tool and snapshot housekeeping.'
+    $ui.TxtSealLater.Text = 'Not part of this step yet: restart first and resume, DISM component cleanup, the imaging tool and snapshot housekeeping. With "upload at the finish" on (Protocol page, change log) the change log goes to SharePoint before the finish starts.'
 }
 function Start-SealJob {
     foreach ($other in 'SealJob', 'UpdJob', 'BenchJob', 'ReadyJob', 'OverviewJob', 'FslJob', 'OptJob', 'OptRun') { if (Get-Variable -Scope Script -Name $other -ValueOnly -ErrorAction SilentlyContinue) { throw 'Another operation is still running.' } }
@@ -107,6 +107,8 @@ Add-Click $ui.BtnSealRun {
     $gate = Test-AVDTuneFinishGate -Root $script:StateRoot -Machine $script:Machine
     if (-not $gate.Allowed) { Update-SealView; throw "The finish is not allowed: $(@($gate.Reasons) -join ' ')" }
     if (-not (Confirm-Action (Get-AVDTuneFinishConfirmText -Root $script:StateRoot) 'Finish')) { return }
+    # #89: with the option on, the change log goes to SharePoint first, while the sign-in is still there (the finish removes the tokens); then the finish
+    if (Test-SpUploadAtFinish) { Start-SpJob 'ChangeLog' { Start-SealJob }; return }
     Start-SealJob
 }
 Add-Click $ui.BtnSealRepair {
