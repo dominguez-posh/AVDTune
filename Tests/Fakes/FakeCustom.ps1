@@ -6,6 +6,7 @@
 # Switches on .Store: FailWrite (a path or registry key part: the write throws), Tamper (library name -> other bytes: the download is different), ScriptMode
 # (sha256 -> 'Ok' | 'Broken' (test answers 7) | 'NoChange' (apply does nothing)).
 
+. (Join-Path $PSScriptRoot 'FakeShared.ps1')   # fakes that several runspaces use at once (#80)
 function New-AVDTuneFakeCustom {
     param([hashtable]$Seed = @{})
     $enc = New-Object Text.UTF8Encoding $false
@@ -127,7 +128,7 @@ function New-AVDTuneFakeCustom {
             'Undo' { $store.ScriptState[$Sha256] = $false; & $log "Script Undo $Sha256"; [pscustomobject]@{ ExitCode = 0; Output = '' } }
         }
     }.GetNewClosure()
-    [pscustomobject]$c
+    ConvertTo-AVDTuneFakeShared ([pscustomobject]$c)
 }
 
 function Get-AVDTuneFakeCustomLibrary {

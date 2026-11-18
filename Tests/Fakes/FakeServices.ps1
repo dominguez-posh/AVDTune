@@ -4,6 +4,7 @@
 # Every fake has .Store (state, switches for the error paths) and .Log (what was asked; never tokens or passwords).
 # All names, IDs and addresses below are made up.
 
+. (Join-Path $PSScriptRoot 'FakeShared.ps1')   # fakes that several runspaces use at once (#80)
 $script:FakeTenant = '11111111-2222-3333-4444-555555555555'
 $script:FakeSubscription = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'
 
@@ -167,7 +168,7 @@ function New-AVDTuneFakeAuth {
         }
         [pscustomobject]@{ Status = 404; Body = $null; Error = "fake: no route for $Method $Path" }
     }.GetNewClosure()
-    [pscustomobject]$a
+    ConvertTo-AVDTuneFakeShared ([pscustomobject]$a)
 }
 
 # ------------------------------------------------------------------ Azure Resource Manager
@@ -356,7 +357,7 @@ function New-AVDTuneFakeArm {
         }
         [pscustomobject]@{ Status = 404; Body = $null; Error = "fake: no route for $Method $p" }
     }.GetNewClosure()
-    [pscustomobject]$a
+    ConvertTo-AVDTuneFakeShared ([pscustomobject]$a)
 }
 
 # ------------------------------------------------------------------ LDAP
@@ -429,5 +430,5 @@ function New-AVDTuneFakeLdap {
         @()
     }.GetNewClosure()
     $a.Close = { param($Conn) [void]$store.Log.Add('Close') }.GetNewClosure()
-    [pscustomobject]$a
+    ConvertTo-AVDTuneFakeShared ([pscustomobject]$a)
 }

@@ -11,6 +11,7 @@
 # RedirectHops (chain of n redirects before the content), PageSize (Intune answers in pages with @odata.nextLink).
 # All names are made up.
 
+. (Join-Path $PSScriptRoot 'FakeShared.ps1')   # fakes that several runspaces use at once (#80)
 function New-AVDTuneFakeLibrary {
     $s = @{ Files = @{}; Notes = New-Object System.Collections.ArrayList; Offline = $false; IntuneOffline = $false; Tamper = @{}; Log = (New-Object System.Collections.ArrayList)
         Redirect = $false; RedirectTo = ''; RedirectEmpty = $false; RedirectRelative = $false; RedirectHops = 0; PageSize = 0; HopKey = '' }
@@ -81,7 +82,7 @@ function New-AVDTuneFakeLibrary {
         if ($prefix -eq '' -and $s.Files.Count -gt 0) { $seen['Protocols'] = @{ name = 'Protocols'; size = 0; folder = @{ childCount = 0 } } }
         & $answer 200 (& $enc @{ value = @($seen.Values) }) ''
     }.GetNewClosure()
-    [pscustomobject]$lib
+    ConvertTo-AVDTuneFakeShared ([pscustomobject]$lib)
 }
 
 function New-AVDTuneFakeZip {

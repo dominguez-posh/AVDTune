@@ -6,6 +6,7 @@
 #   Tickets (strings), TicketsError (text: klist cannot be run, KerberosTickets throws it), Defender (@{ Paths; Processes } or $null = not readable), Groups (name -> array of SIDs; a missing name = group not there), FrxMissing,
 #   MasterDomainSid (domain SID the master resolves for <NetBIOS>\Domain Admins; '' = cannot be resolved), LocalGroupAddFails (SIDs whose LocalGroupAdd throws).
 # All names and addresses are made up (example.test, contoso).
+. (Join-Path $PSScriptRoot 'FakeShared.ps1')   # fakes that several runspaces use at once (#80)
 function New-AVDTuneFakeFSLogix {
     param([hashtable]$Seed = @{})
     $s = @{
@@ -74,5 +75,5 @@ function New-AVDTuneFakeFSLogix {
     $a.MasterDomainSid = { param($NetBios) [void]$s.Log.Add("MasterDomainSid $NetBios"); [string]$s.MasterDomainSid }.GetNewClosure()
     $a.LocalGroupAdd = { param($Name, $Sid) [void]$s.Log.Add("LocalGroupAdd $Name $Sid"); if ($Sid -in @($s.LocalGroupAddFails)) { throw "fake: the group refuses $Sid" }; $s.Groups[$Name] = @($s.Groups[$Name]) + $Sid }.GetNewClosure()
     $a.LocalGroupRemove = { param($Name, $Sid) [void]$s.Log.Add("LocalGroupRemove $Name $Sid"); $s.Groups[$Name] = @($s.Groups[$Name] | Where-Object { $_ -ne $Sid }) }.GetNewClosure()
-    [pscustomobject]$a
+    ConvertTo-AVDTuneFakeShared ([pscustomobject]$a)
 }

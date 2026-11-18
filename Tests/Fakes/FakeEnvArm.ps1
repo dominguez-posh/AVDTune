@@ -9,6 +9,7 @@
 #   FailAsync (array of type ids whose operation ends Failed), NeverFinish (type ids whose operation stays InProgress), Busy (type ids that answer 409 AnotherOperationInProgress),
 #   Invalid (type ids that answer 400), NoHeaders ($true: asynchronous answers without headers, the caller has to poll the resource), ExtraRecords (record sets of the DNS zone besides SOA and ours),
 #   ForbidPermissions, ForbidRead (type ids whose GET answers 403)
+. (Join-Path $PSScriptRoot 'FakeShared.ps1')   # fakes that several runspaces use at once (#80)
 $script:EnvSub = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'
 function ConvertTo-EnvJson($Object) { if ($null -eq $Object) { return $null }; $Object | ConvertTo-Json -Depth 12 | ConvertFrom-Json }
 
@@ -142,5 +143,5 @@ function New-AVDTuneFakeEnvArm {
         }
         (& $resp $status $new $null '')
     }.GetNewClosure()
-    [pscustomobject]$a
+    ConvertTo-AVDTuneFakeShared ([pscustomobject]$a)
 }

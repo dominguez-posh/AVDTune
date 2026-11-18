@@ -5,6 +5,7 @@
 #   Installed (tags), User (@{ Ui; Culture; InputTip; GeoId } of the administrator), TimeZones, SourceKind ('Media'|'Local'|'Share'), SourceProblem (text: the folder is refused),
 #   CopyWritesGeo (a GeoId the copy writes instead of the user's, to test the check after undo), DismFails (exit code of the DISM call that names this text in its arguments, e.g. 'Handwriting' or 'Client-Language-Pack'), CopyFails, TzFails, Unsigned ($true = DISM signature wrong).
 # All names are made up.
+. (Join-Path $PSScriptRoot 'FakeShared.ps1')   # fakes that several runspaces use at once (#80)
 if (-not (Get-Command New-AVDTuneFakeUpdates -ErrorAction SilentlyContinue)) { . (Join-Path $PSScriptRoot 'FakeUpdates.ps1') }   # the DISM calls run through the fake update adapter
 function New-AVDTuneFakeLanguage {
     param([Parameter(Mandatory)]$Machine, [hashtable]$Seed = @{})
@@ -66,7 +67,7 @@ function New-AVDTuneFakeLanguage {
         if ($Tag -notin $s.Installed) { $s.Installed += $Tag }
         $r
     }.GetNewClosure()
-    [pscustomobject]$a
+    ConvertTo-AVDTuneFakeShared ([pscustomobject]$a)
 }
 
 # Seeds the registry values of the new-user side of the fake machine (HKEY_USERS\.DEFAULT, system locale, time zone) like a fresh Azure image in English

@@ -11,6 +11,7 @@
 # Round 2 fixes: Volumes and WorkLeftovers (what the leftover scan reports).
 # .Store holds the state, .Log what was asked (never a secret).
 
+. (Join-Path $PSScriptRoot 'FakeShared.ps1')   # fakes that several runspaces use at once (#80)
 function New-FakeDiskspdXml {
     # XML of the documented diskspd -Rxml layout: TimeSpan with TestTimeSeconds, the Latency buckets, and Thread/Target totals (made up; not captured from a real run)
     param([double]$Seconds = 12, [double]$ReadP50 = 0.1, [double]$ReadP99 = 0.3, [double]$WriteP50 = 0.5, [double]$WriteP99 = 1.5, [long]$ReadCount = 0, [long]$WriteCount = 0, [long]$ReadBytes = 0, [long]$WriteBytes = 0, [int]$Threads = 1)
@@ -246,5 +247,5 @@ function New-AVDTuneFakeBench {
         [pscustomobject]@{ Bytes = [long](800e6 / 8 * $Seconds * 1.2); Seconds = [double]$Seconds; Errors = 0 }
     }.GetNewClosure()
     $b.SystemFacts = { [pscustomobject]@{ CpuModel = 'Fake CPU 3.0 GHz'; VCpu = 8; RamGiB = 32.0; OsDiskSizeGiB = 128; Controller = 'SCSI'; MediaType = 'SSD' } }.GetNewClosure()
-    [pscustomobject]$b
+    ConvertTo-AVDTuneFakeShared ([pscustomobject]$b)
 }

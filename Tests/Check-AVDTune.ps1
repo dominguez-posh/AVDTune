@@ -947,6 +947,52 @@ try { $ps = [powershell]::Create(); $ps.Runspace = $rs; [void]$ps.AddScript($pro
     $note52 = @(Get-AVDTuneChangeLog -Root $r52 | Where-Object { $_.Category -eq 'Housekeeping' })
     Test-Check 'runs (#52): a change log note (not a change of the master) says how many were removed; a second run removes nothing' ($note52.Count -eq 1 -and $note52[0].Source -eq 'Note' -and $note52[0].Text -like '4 old*' -and (Remove-AVDTuneOldRuns -Root $r52 -Now $now52) -eq 0) $null
 
+    # ---------------------------------------------------------------- fakes shared by runspaces (#80)
+    # The GUI hands the fake machine to background workers in test mode. Two runspaces call its members 1000 times at the same time (with cmdlets inside
+    # the members); in a child process with a time limit, because bound closures hung there. Before the fix: a hang or "the store is not reachable".
+    $fm80 = New-AVDTuneFakeMachine
+    $bound80 = @($fm80.PSObject.Properties | Where-Object { $_.Value -is [scriptblock] -and $_.Value.Module })
+    Test-Check 'fakes (#80): no member of the fake machine is a closure bound to the runspace that made it' ($bound80.Count -eq 0) (@($bound80.Name) -join ', ')
+    $stress80 = Join-Path $tmp 'stress80.ps1'
+    $stressText = @'
+$ErrorActionPreference = 'Stop'
+$fakes = $args[0]
+. (Join-Path $fakes 'FakeMachine.ps1'); . (Join-Path $fakes 'FakeUpdates.ps1')
+$m = New-AVDTuneFakeMachine -Seed @{ Tasks = @(@{ Path = '\X\'; Name = 'T'; Enabled = $true }) }
+$u = New-AVDTuneFakeUpdates
+$work = {
+    param($m, $u, $tag, $n)
+    $errs = New-Object System.Collections.ArrayList
+    for ($i = 0; $i -lt $n; $i++) {
+        try {
+            & $m.RegSet 'HKLM:\SOFTWARE\Stress' "$tag$i" $i 'DWord'
+            if ((& $m.RegGet 'HKLM:\SOFTWARE\Stress' "$tag$i") -ne $i) { [void]$errs.Add("read back $tag$i") }
+            if (-not (& $m.RegKeyExists 'HKLM:\SOFTWARE\Stress')) { [void]$errs.Add("key $tag$i") }
+            if (@(& $m.TaskList '\X\').Count -ne 1) { [void]$errs.Add("tasks $tag$i") }
+            [void](& $m.Now); & $m.FileWrite "X:\Stress\$tag$i.txt" 'x'
+            if ((& $u.Stage "C:\in\$tag$i.msi" 'C:\r') -ne "C:\fake\staged\$tag$i.msi") { [void]$errs.Add("stage $tag$i") }
+        } catch { [void]$errs.Add($_.Exception.Message) }
+    }
+    , @($errs)
+}
+$ps = [powershell]::Create(); [void]$ps.AddScript($work).AddArgument($m).AddArgument($u).AddArgument('b').AddArgument(1000)
+$h = $ps.BeginInvoke()
+$mine = & $work $m $u 'a' 1000
+if (-not $h.AsyncWaitHandle.WaitOne(60000)) { 'HANG'; [Environment]::Exit(3) }
+$all = @(@($mine) + @($ps.EndInvoke($h)) | ForEach-Object { $_ } | Where-Object { $_ })
+"errors=$($all.Count) values=$(@(& $m.RegNames 'HKLM:\SOFTWARE\Stress').Count) files=$(@($m.Store.Files.Keys | Where-Object { $_ -like 'x:\stress\*' }).Count) first=$($all | Select-Object -First 1)"
+[Environment]::Exit(0)
+'@
+    [IO.File]::WriteAllText($stress80, $stressText)
+    $psi80 = New-Object System.Diagnostics.ProcessStartInfo (Join-Path ([Environment]::GetFolderPath('System')) 'WindowsPowerShell\v1.0\powershell.exe')
+    $psi80.Arguments = (@('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $stress80, (Join-Path $PSScriptRoot 'Fakes')) | ForEach-Object { ConvertTo-AVDTuneArgument $_ }) -join ' '
+    $psi80.UseShellExecute = $false; $psi80.CreateNoWindow = $true; $psi80.RedirectStandardOutput = $true; $psi80.RedirectStandardError = $true
+    $p80 = [System.Diagnostics.Process]::Start($psi80)
+    $err80 = $p80.StandardError.ReadToEndAsync(); $out80 = $p80.StandardOutput.ReadToEndAsync()
+    if (-not $p80.WaitForExit(120000)) { $p80.Kill(); [void]$p80.WaitForExit(5000) }
+    $res80 = ([string]$out80.Result).Trim()
+    Test-Check 'fakes (#80): two runspaces call fake members 1000 times each at the same time: no hang, no error, every write is there' ($p80.ExitCode -eq 0 -and $res80 -match '^errors=0 values=2000 files=2000 ') "exit $($p80.ExitCode): $res80 $($err80.Result)"
+
     # ---------------------------------------------------------------- the real machine, read only
     $real = New-AVDTuneMachine
     $rw = Get-AVDTuneWindowsInfo $real

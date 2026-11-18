@@ -7,6 +7,7 @@
 #   MsiProps (hashtable leaf -> properties of the MSI: ProductName, Manufacturer, ProductVersion), Exit (hashtable leaf or 'winget' -> exit code), NoEffect ($true = the program exits 0 and changes nothing), TeamsVersion, WebrtcVersion, MmrVersion, OneDriveVersion, Folders, Held (files held now).
 #   Session host cards (issue 77): UdpListening / FirewallUdp ($true, $false or $null = cannot be read), TeredoType, Files (full paths that exist, e.g. the Defender VDI onboarding scripts).
 # All names are made up; the addresses are of the real shape but point nowhere.
+. (Join-Path $PSScriptRoot 'FakeShared.ps1')   # fakes that several runspaces use at once (#80)
 . (Join-Path $PSScriptRoot 'FakeUpdates.ps1')
 function New-AVDTuneFakeVdi {
     param([Parameter(Mandatory)]$Machine, [hashtable]$Seed = @{})
@@ -99,5 +100,5 @@ function New-AVDTuneFakeVdi {
     $a.FirewallUdpIn = { param($Port) [void]$s.Log.Add("FirewallUdpIn $Port"); $s.FirewallUdp }.GetNewClosure()
     $a.TeredoType = { $s.TeredoType }.GetNewClosure()
     $a.FileVersion = { param($Path) if ($s.OneDrive) { $s.OneDriveVersion } else { $null } }.GetNewClosure()
-    [pscustomobject]$a
+    ConvertTo-AVDTuneFakeShared ([pscustomobject]$a)
 }
