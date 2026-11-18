@@ -396,6 +396,12 @@ function New-AVDTuneFakeLdap {
                 (& $entry "CN=AVD-Users,OU=Groups,OU=AVD,OU=Corp,$dn" @{ name = @('AVD-Users'); distinguishedName = @("CN=AVD-Users,OU=Groups,OU=AVD,OU=Corp,$dn"); objectSid = @(, (& $sid 1104)); groupType = @('-2147483646'); description = @('AVD users') })
                 (& $entry "CN=AVD-Admins,OU=Groups,OU=AVD,OU=Corp,$dn" @{ name = @('AVD-Admins'); distinguishedName = @("CN=AVD-Admins,OU=Groups,OU=AVD,OU=Corp,$dn"); objectSid = @(, (& $sid 1105)); groupType = @('-2147483646') })
                 (& $entry "CN=Mail-List,OU=Groups,OU=AVD,OU=Corp,$dn" @{ name = @('Mail-List'); distinguishedName = @("CN=Mail-List,OU=Groups,OU=AVD,OU=Corp,$dn"); objectSid = @(, (& $sid 1200)); groupType = @('2') }))
+            # print queues published in AD (printers page, #86): two of print1, one of print2, one with a name that is not a host name (left out)
+            printQueues = @(
+                (& $entry "CN=PRINT1-F1-Color,CN=PRINT1,OU=Servers,$dn" @{ serverName = @('print1.example.test'); shortServerName = @('PRINT1'); printerName = @('Floor 1 Color') })
+                (& $entry "CN=PRINT1-Labels,CN=PRINT1,OU=Servers,$dn" @{ serverName = @('print1.example.test'); shortServerName = @('PRINT1'); printerName = @('Label Printer') })
+                (& $entry "CN=PRINT2-A,CN=PRINT2,OU=Servers,$dn" @{ serverName = @('print2.example.test'); shortServerName = @('PRINT2'); printerName = @('A') })
+                (& $entry "CN=BAD-Q,CN=BAD,OU=Servers,$dn" @{ serverName = @('\\bad\share'); printerName = @('Q') }))
         }
     }
     foreach ($k in $Seed.Keys) { $store[$k] = $Seed[$k] }
@@ -427,6 +433,7 @@ function New-AVDTuneFakeLdap {
         if ($Filter -like '*crossRef*') { return @($store.Entries.netbios) }
         if ($Filter -like '*organizationalUnit*') { return @($store.Entries.ous) }
         if ($Filter -like '*objectClass=group*') { return @($store.Entries.groups) }
+        if ($Filter -like '*printQueue*') { return @($store.Entries.printQueues) }
         @()
     }.GetNewClosure()
     $a.Close = { param($Conn) [void]$store.Log.Add('Close') }.GetNewClosure()

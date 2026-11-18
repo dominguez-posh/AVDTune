@@ -120,6 +120,7 @@ $use = @{
     'AVDTune-Start.ps1' = 'Start-AVDTuneUiTask', 'Update-AVDTuneUiTask', 'Complete-AVDTuneUiTask', 'Invoke-UiTaskInline', '-TaskTitle'
     'AVDTune-UserExperience.ps1' = 'Invoke-UiTaskInline'
     'AVDTune-Custom.ps1' = 'Start-AVDTuneUiTask', 'Update-AVDTuneUiTask', 'Complete-AVDTuneUiTask'
+    'AVDTune-Printers.ps1' = 'Start-AVDTuneUiTask', 'Update-AVDTuneUiTask', 'Complete-AVDTuneUiTask'
     'Start-AVDTune.ps1' = 'Start-AVDTuneUiTask', 'Complete-AVDTuneUiTask', 'AVDTune-Tasks.ps1', 'AVDTune-TaskBar.ps1'
 }
 foreach ($file in $use.Keys) {
@@ -147,7 +148,7 @@ Test-Check 'the bar XAML uses DynamicResource only (follows the light/dark switc
 $writerStarts = @(
     @('AVDTune-Optimization.ps1', 'Start-OptChange'), @('AVDTune-FSLogix.ps1', 'Start-FslJob'), @('AVDTune-FSLogix.ps1', 'Assert-FslWrite'), @('AVDTune-Office.ps1', 'Start-OffJob'),
     @('AVDTune-Readiness.ps1', 'Start-ReadyJob'), @('AVDTune-Readiness.ps1', 'Start-ReadyFix'), @('AVDTune-UserExperience.ps1', 'Start-WatermarkChange'), @('AVDTune-AppMasking.ps1', 'Assert-MaskWrite'),
-    @('AVDTune-Updates.ps1', 'Start-UpdateRun'), @('AVDTune-Updates.ps1', 'Start-BlockChange'), @('AVDTune-Software.ps1', 'Start-SwRun'), @('AVDTune-Seal.ps1', 'Start-SealJob'), @('AVDTune-Benchmark.ps1', 'Start-BenchJob'), @('AVDTune-Benchmark.ps1', 'Start-BenchRepair'), @('AVDTune-Language.ps1', 'Start-LangJob'), @('AVDTune-Vdi.ps1', 'Start-VdiJob'), @('AVDTune-Release.ps1', 'Start-RelJob'), @('AVDTune-Custom.ps1', 'Start-CustJob'))
+    @('AVDTune-Updates.ps1', 'Start-UpdateRun'), @('AVDTune-Updates.ps1', 'Start-BlockChange'), @('AVDTune-Software.ps1', 'Start-SwRun'), @('AVDTune-Seal.ps1', 'Start-SealJob'), @('AVDTune-Benchmark.ps1', 'Start-BenchJob'), @('AVDTune-Benchmark.ps1', 'Start-BenchRepair'), @('AVDTune-Language.ps1', 'Start-LangJob'), @('AVDTune-Vdi.ps1', 'Start-VdiJob'), @('AVDTune-Release.ps1', 'Start-RelJob'), @('AVDTune-Custom.ps1', 'Start-CustJob'), @('AVDTune-Printers.ps1', 'Start-PrnJob'))
 $missingGuard = @()
 foreach ($w in $writerStarts) {
     $ast = [Management.Automation.Language.Parser]::ParseFile((Join-Path $repo $w[0]), [ref]$null, [ref]$null)
@@ -160,7 +161,7 @@ Test-Check 'writers (#66): every start of an operation that changes the master c
 $readOnlyJobs = @('OptJob', 'FslReadJob', 'MaskReadJob', 'JoinJob', 'OverviewJob', 'SwLastRun', 'UpdLastRun')
 $jobVars = @(Get-ChildItem -LiteralPath $repo -Filter '*.ps1' | Where-Object { $_.Name -like 'AVDTune-*.ps1' -or $_.Name -eq 'Start-AVDTune.ps1' } | ForEach-Object { [regex]::Matches([IO.File]::ReadAllText($_.FullName), '(?m)^\$script:(\w+(?:Job|Run)) = \$null') | ForEach-Object { $_.Groups[1].Value } } | Select-Object -Unique)
 $unlisted = @($jobVars | Where-Object { $_ -notin $script:WriterJobVariables -and $_ -notin $readOnlyJobs })
-Test-Check 'writers (#66): every job variable of a page is in WriterJobVariables or named as read only (Language, VDI included)' ($unlisted.Count -eq 0 -and 'LangJob' -in $script:WriterJobVariables -and 'VdiJob' -in $script:WriterJobVariables -and 'Latest' -in $script:WriterReadOnlyKinds.VdiJob -and 'CustJob' -in $script:WriterJobVariables -and (@($script:WriterReadOnlyKinds.CustJob) -join ',') -eq 'Status,Reach,Preview') ($unlisted -join ', ')
+Test-Check 'writers (#66): every job variable of a page is in WriterJobVariables or named as read only (Language, VDI included)' ($unlisted.Count -eq 0 -and 'LangJob' -in $script:WriterJobVariables -and 'VdiJob' -in $script:WriterJobVariables -and 'Latest' -in $script:WriterReadOnlyKinds.VdiJob -and 'CustJob' -in $script:WriterJobVariables -and (@($script:WriterReadOnlyKinds.CustJob) -join ',') -eq 'Status,Reach,Preview' -and 'PrnJob' -in $script:WriterJobVariables -and (@($script:WriterReadOnlyKinds.PrnJob) -join ',') -eq 'Servers,Read') ($unlisted -join ', ')
 
 # #66 (re-review): a new image version must not start while a job of the window changes the master (it may not have set the marker yet); the shutdown block goes only when no job is left
 $startText = Get-Content -Raw (Join-Path $repo 'Start-AVDTune.ps1')

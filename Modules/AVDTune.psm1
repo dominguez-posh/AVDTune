@@ -20,7 +20,7 @@ $script:ChangeTypes = @('Added', 'Changed', 'Updated', 'Removed', 'Note')
 # The version of the tool (file VERSION next to Modules\) is part of every change log entry
 $script:ToolVersion = ''
 try { $versionFile = Join-Path (Split-Path $PSScriptRoot -Parent) 'VERSION'; if (Test-Path -LiteralPath $versionFile) { $script:ToolVersion = ([IO.File]::ReadAllText($versionFile)).Trim() } } catch { }
-$script:StepSections = @('Setup', 'Updates', 'Software', 'Office', 'Optimization', 'FSLogix', 'AppMasking', 'VdiComponents', 'UserExperience', 'UpdateBlock', 'Benchmark', 'Seal', 'Language', 'Customizations')
+$script:StepSections = @('Setup', 'Updates', 'Software', 'Office', 'Optimization', 'FSLogix', 'AppMasking', 'VdiComponents', 'UserExperience', 'UpdateBlock', 'Benchmark', 'Seal', 'Language', 'Customizations', 'Printers')
 $script:StepModes = @('Test', 'Apply', 'Undo')
 
 #region elevation, root
