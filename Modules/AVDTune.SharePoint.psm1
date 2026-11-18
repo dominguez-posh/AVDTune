@@ -101,7 +101,14 @@ function Get-AVDTuneSpSent {
         foreach ($p in $r.PSObject.Properties) {
             if ($p.Name -cnotmatch '\A[0-9a-f]{12}/[0-9]{3}\z') { continue }
             $rec = Get-AVDTuneProp $p.Value 'Record'; $doc = Get-AVDTuneProp $p.Value 'Document'; $at = Get-AVDTuneProp $p.Value 'At'
-            if ($rec -is [string] -and $rec -cmatch '\A[0-9a-f]{64}\z' -and $doc -is [string] -and $doc -cmatch '\A[0-9a-f]{64}\z') { $records[$p.Name] = [pscustomobject]@{ Record = $rec; Document = $doc; At = [string]$at } }
+            $o = [pscustomobject]@{ Record = $rec; Document = $doc; At = [string]$at }
+            foreach ($k in 'Document', 'Record') {
+                $item = Get-AVDTuneProp $p.Value "${k}Item"; $size = Get-AVDTuneProp $p.Value "${k}Size"; $hash = Get-AVDTuneProp $p.Value "${k}Hash"
+                $o | Add-Member -NotePropertyName "${k}Item" -NotePropertyValue $(if ($item -is [string] -and $item -cmatch $script:ItemIdPattern) { $item } else { '' })
+                $o | Add-Member -NotePropertyName "${k}Size" -NotePropertyValue $(if ($size -is [int] -or $size -is [long]) { [int64]$size } else { [int64]-1 })
+                $o | Add-Member -NotePropertyName "${k}Hash" -NotePropertyValue $(if ($hash -is [string] -and $hash -cmatch '\A(sha256Hash|quickXorHash):[A-Za-z0-9+/=]{8,100}\z') { $hash } else { '' })
+            }
+            if ($rec -is [string] -and $rec -cmatch '\A[0-9a-f]{64}\z' -and $doc -is [string] -and $doc -cmatch '\A[0-9a-f]{64}\z') { $records[$p.Name] = $o }
         }
     }
     $docs = @{}
@@ -131,38 +138,60 @@ function Get-AVDTuneSpPending {
 
 #region texts: nothing secret leaves the master
 
+# One table of secret patterns (Finn's review of #89, B2/B3) for both uses: Protect-AVDTuneSpText replaces what it finds in a list text, Test-AVDTuneSpSecretFree refuses a
+# file in which one of them finds something. It covers the rules of Remove-AVDTuneRecordingSecrets (#87) and of the protocol cleaner of PackTune and more. Every replacement
+# is idempotent (a placeholder it wrote is not found again), so a text the recording or the protocol already cleaned is "secret free". Values are delimited by spaces,
+# quotes, commas and semicolons, so the closing quote of a JSON string stays where it is.
+$script:SpValue = '("[^"]*"|''[^'']*''|[^\s"'',;<>]+)'
+$script:SpSecretRules = @(
+    # a JWT (access or id token)
+    @('eyJ[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}(\.[A-Za-z0-9_\-]*)?', '(token removed)'),
+    # Authorization values
+    @('(?i)\b(bearer|basic)\s+[A-Za-z0-9._~+/=\-]{8,}', '$1 (removed)'),
+    # name = value and name: value (also "name": "value" of JSON); key only with "=" (a "Registry key: HKLM\..." stays)
+    @("(?i)\b(password|passwort|kennwort|pwd|pass|secret|client_?secret|token|access_?token|refresh_?token|apikey|api[_-]?key|accountkey|account_key|sharedaccesskey|sas|pin|serial|seriennummer|pidkey|product\s*key|licen[cs]e\s*key|lizenzschl(\u00fc|ue)ssel|schl(\u00fc|ue)ssel)""?\s*[=:]\s*(?!\((removed|key removed|token removed|not shown)\))$($script:SpValue)", '$1=(removed)'),
+    @("(?i)\bkey\s*=\s*(?!\((removed|key removed)\))$($script:SpValue)", 'key=(removed)'),
+    # parameters with the value after a space: -Password X, -ClientSecret X, /p X, /p:X, /pass X
+    @("(?i)(?<![\w-])(-(password|passwort|kennwort|pwd|secret|clientsecret|accesstoken|token|apikey|accountkey|pidkey|productkey|key))(\s+|:)(?!\(removed\))$($script:SpValue)", '$1 (removed)'),
+    @("(?i)(?<![\w/])(/(p|pw|pwd|pass|password))(\s+|:)(?!\(removed\))(?!/)$($script:SpValue)", '$1 (removed)'),
+    # net use \\server\share <password> /user:x and net use ... /user:x <password>
+    @("(?i)(\bnet(\.exe)?\s+use\s+[^\s/]+)\s+(?![/*]|\(removed\))$($script:SpValue)", '$1 (removed)'),
+    @("(?i)(\bnet(\.exe)?\s+use\b[^\r\n]*?/user:\S+)\s+(?![/*]|\(removed\))$($script:SpValue)", '$1 (removed)'),
+    # SAS and other secret query values (also a SAS without sig)
+    @('(?i)([?&](sig|token|code|key|access_token|sv|se|st|sp|spr|sr|srt|ss|si|skoid|sktid|skt|ske|sks|skv|sdd)=)(?!\(removed\))[^&\s"''<>]+', '$1(removed)'),
+    # an Entra client secret (contains ~)
+    @('(?<![\w~.-])[A-Za-z0-9_.\-]{3,8}~[A-Za-z0-9_.~\-]{20,}', '(removed)'),
+    # a product key (upper case and digits in groups, at least one digit); a GUID and hyphenated words stay
+    @('(?-i)\b(?=[A-Z0-9-]*\d)(?![0-9A-F]{8}-[0-9A-F]{4}-)[A-Z0-9]{4,8}(-[A-Z0-9]{4,8}){3,}\b', '(key removed)'),
+    # base64 with padding (a storage key: 88 characters ending ==)
+    @('[A-Za-z0-9+/]{30,}={1,2}', '(removed)'),
+    # a long run of mixed upper case, lower case and digits (keys, tokens); hex hashes and names with hyphens stay
+    @('\b(?=[A-Za-z0-9+/_]*[0-9])(?=[A-Za-z0-9+/_]*[A-Z])(?=[A-Za-z0-9+/_]*[a-z])[A-Za-z0-9+/_]{40,}', '(removed)')
+)
+
+function Invoke-AVDTuneSpSecretRules {
+    # Pure. The text with every rule of the table applied; $null when a rule ran into its timeout (the caller fails closed)
+    param([AllowEmptyString()][string]$Text)
+    $t = $Text
+    foreach ($r in $script:SpSecretRules) { try { $t = [regex]::Replace($t, $r[0], $r[1], [Text.RegularExpressions.RegexOptions]::None, [TimeSpan]::FromSeconds(2)) } catch { return $null } }
+    $t
+}
+
 function Protect-AVDTuneSpText {
-    <# Pure. A text for a list column: tokens, bearer values, passwords, keys, signatures and long key-like strings out, control characters out, length limited. #>
+    <# Pure. A text for a list column: everything the secret table finds is replaced, control characters out, length limited. #>
     param([AllowEmptyString()][string]$Text, [int]$MaxLength = 255)
     if (-not $Text) { return '' }
-    $t = $Text
-    $rules = @(
-        @('eyJ[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}(\.[A-Za-z0-9_\-]*)?', '(token removed)'),
-        @('(?i)\b(bearer|basic)\s+[A-Za-z0-9._~+/=\-]{8,}', '$1 (removed)'),
-        @('(?i)\b(password|passwort|kennwort|pwd|secret|client_secret|token|access_token|refresh_token|apikey|api[_-]?key|accountkey|sharedaccesskey|sas|product\s*key|licen[cs]e\s*key|lizenzschl(\u00fc|ue)ssel|schl(\u00fc|ue)ssel|serial)\s*[=:]\s*("[^"]*"|''[^'']*''|\S+)', '$1=(removed)'),
-        @('(?i)([?&](sig|token|code|key|access_token|sv|se|sp)=)[^&\s]+', '$1(removed)'),
-        # a product key (upper case and digits in groups, at least one digit); a GUID and hyphenated words stay
-        @('(?-i)\b(?=[A-Z0-9-]*\d)(?![0-9A-F]{8}-[0-9A-F]{4}-)[A-Z0-9]{4,8}(-[A-Z0-9]{4,8}){3,}\b', '(key removed)'),
-        @('[A-Za-z0-9+/]{30,}={1,2}', '(removed)'),
-        # a long run of mixed upper case, lower case and digits (keys, tokens); hex hashes and names with hyphens stay
-        @('\b(?=[A-Za-z0-9+_]*[0-9])(?=[A-Za-z0-9+_]*[A-Z])(?=[A-Za-z0-9+_]*[a-z])[A-Za-z0-9+_]{40,}', '(removed)')
-    )
-    foreach ($r in $rules) { try { $t = [regex]::Replace($t, $r[0], $r[1], [Text.RegularExpressions.RegexOptions]::None, $script:RegexTimeout) } catch { return '(removed)' } }
+    $t = Invoke-AVDTuneSpSecretRules $Text
+    if ($null -eq $t) { return '(removed)' }
     Remove-AVDTuneControlCharacters $t $MaxLength
 }
 
 function Test-AVDTuneSpSecretFree {
-    <# Pure. A file that is uploaded as it is: $true when nothing in it looks like a token, a bearer value, a password or key assignment or a SAS signature (fail closed: a regex timeout is $false). #>
+    <# Pure. A file that is uploaded as it is: $true only when the secret table finds nothing in it (the same table as Protect-AVDTuneSpText; a timeout is $false). #>
     param([AllowEmptyString()][string]$Text)
     if (-not $Text) { return $true }
-    $patterns = @(
-        'eyJ[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}',
-        '(?i)\bbearer\s+[A-Za-z0-9._~+/=\-]{16,}',
-        '(?i)\b(password|passwort|kennwort|client_secret|refresh_token|access_token|accountkey|sharedaccesskey)\b\s*"?\s*[=:]\s*"?(?!\((removed|not shown)\))[^\s"'',;<]{4,}',   # a value the cleaners already replaced is no secret
-        '(?i)[?&]sig=[A-Za-z0-9%+/=]{16,}'
-    )
-    foreach ($p in $patterns) { try { if ([regex]::IsMatch($Text, $p, 'None', [TimeSpan]::FromSeconds(2))) { return $false } } catch { return $false } }
-    $true
+    $t = Invoke-AVDTuneSpSecretRules $Text
+    ($null -ne $t -and $t -ceq $Text)
 }
 
 #endregion
@@ -186,12 +215,23 @@ function Test-AVDTuneSpUrl {
     @{ Ok = $true; Reason = '' }
 }
 
+function Get-AVDTuneSpErrorResponse {
+    # The answer behind a failed GetResponse(): PowerShell wraps the WebException into a MethodInvocationException, so the inner exception is read first (like
+    # Session.psm1), then the exception itself. Without it 429/503/504 and 401/403 would never be seen as such (review B1).
+    param($Exception)
+    if ($null -eq $Exception) { return $null }
+    $r = Get-AVDTuneProp (Get-AVDTuneProp $Exception 'InnerException') 'Response'
+    if (-not $r) { $r = Get-AVDTuneProp $Exception 'Response' }
+    $r
+}
+
 function Invoke-AVDTuneSpHttp {
     <#
         The real transport: ONE request with method, headers and body bytes, no automatic redirect, TLS 1.2 added (never overwritten). Returns Status, Headers (RetryAfter),
-        Stream and Close. NOT exercised by the checks (they use the fake transport): to be tried against a real test site.
+        Stream and Close. Not sent by the checks (they use the fake transport); -GetResponse replaces only the call $req.GetResponse() so the checks can make it throw
+        like .NET does (review B1). To be tried against a real test site.
     #>
-    param([Parameter(Mandatory)][string]$Method, [Parameter(Mandatory)][string]$Url, [hashtable]$Headers = @{}, [byte[]]$Body, [string]$ContentType)
+    param([Parameter(Mandatory)][string]$Method, [Parameter(Mandatory)][string]$Url, [hashtable]$Headers = @{}, [byte[]]$Body, [string]$ContentType, [scriptblock]$GetResponse)
     [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
     $req = [System.Net.HttpWebRequest]::Create($Url)
     $req.Method = $Method; $req.AllowAutoRedirect = $false; $req.Timeout = 60000; $req.ReadWriteTimeout = 120000
@@ -201,9 +241,9 @@ function Invoke-AVDTuneSpHttp {
         $s = $req.GetRequestStream(); try { $s.Write($Body, 0, $Body.Length) } finally { $s.Dispose() }
     }
     elseif ($Method -ne 'GET') { $req.ContentLength = 0 }
-    try { $resp = $req.GetResponse() }
+    try { $resp = if ($GetResponse) { & $GetResponse $req } else { $req.GetResponse() } }
     catch {
-        $resp = Get-AVDTuneProp $_.Exception 'Response'
+        $resp = Get-AVDTuneSpErrorResponse $_.Exception
         if (-not $resp) { throw "Microsoft Graph cannot be reached: $($_.Exception.Message)" }
     }
     $r = $resp
@@ -293,9 +333,14 @@ function Get-AVDTuneSpAll {
     # Every row of a collection: follows @odata.nextLink (each checked by Invoke-AVDTuneSpRequest), at most -MaxPages pages (more is an error, not a silent cut)
     param([Parameter(Mandatory)]$Context, [Parameter(Mandatory)][string]$Url, [int]$MaxPages = 100)
     $rows = New-Object System.Collections.ArrayList
+    # a nextLink must stay on the same collection (review B4): the same path (decoded, Graph may encode the commas of a site id), only another query
+    $norm = { param($u) [uri]::UnescapeDataString(($u -split '\?', 2)[0]).ToLowerInvariant() }
+    $base = & $norm $Url
     $next = $Url
     for ($page = 0; $next; $page++) {
         if ($page -ge $MaxPages) { throw "The collection has more than $MaxPages pages: stopped." }
+        if ($page -gt 0 -and -not (Test-AVDTuneSpUrl $next).Ok) { throw "Refused request to Microsoft Graph: $((Test-AVDTuneSpUrl $next).Reason)." }
+        if ($page -gt 0 -and (& $norm $next) -cne $base) { throw 'Graph returned a nextLink to another collection: refused.' }
         $a = Invoke-AVDTuneSpRequest -Context $Context -Url $next
         foreach ($v in @(Get-AVDTuneProp $a 'value')) { if ($null -ne $v) { [void]$rows.Add($v) } }
         $next = [string](Get-AVDTuneProp $a '@odata.nextLink')
@@ -441,9 +486,20 @@ function Send-AVDTuneSpFile {
     $a = Invoke-AVDTuneSpRequest -Context $Context -Method PUT -Url "$($script:GraphV1)/drives/$drive/root:/${path}:/content" -Bytes $Bytes -ContentType $ContentType
     $id = [string](Get-AVDTuneProp $a 'id')
     if ($id -cnotmatch $script:ItemIdPattern) { throw 'Microsoft Graph returned an item id that is not valid: refused.' }
-    $b = Invoke-AVDTuneSpRequest -Context $Context -Url "$($script:GraphV1)/drives/$drive/items/${id}?`$select=id,size"
+    $b = Get-AVDTuneSpItemState -Context $Context -ItemId $id
+    [pscustomobject]@{ Id = $id; Path = ($path -replace '/', '\'); Size = $b.Size; Hash = $b.Hash; Confirmed = [bool]($b.Id -ceq $id -and $b.Size -eq $Bytes.Length) }
+}
+
+function Get-AVDTuneSpItemState {
+    <# The item of the library as Graph has it now: Id, Size (-1 when missing) and Hash (quickXorHash, or sha256Hash where Graph gives it; '' when none). #>
+    param([Parameter(Mandatory)]$Context, [Parameter(Mandatory)][string]$ItemId)
+    if ($ItemId -cnotmatch $script:ItemIdPattern) { throw 'The item id is not valid: refused.' }
+    $drive = Resolve-AVDTuneSpDrive $Context
+    $b = Invoke-AVDTuneSpRequest -Context $Context -Url "$($script:GraphV1)/drives/$drive/items/${ItemId}?`$select=id,size,file"
     $size = Get-AVDTuneProp $b 'size'
-    [pscustomobject]@{ Id = $id; Path = ($path -replace '/', '\'); Size = $size; Confirmed = [bool](($size -is [int] -or $size -is [long]) -and [int64]$size -eq $Bytes.Length -and [string](Get-AVDTuneProp $b 'id') -ceq $id) }
+    $hashes = Get-AVDTuneProp (Get-AVDTuneProp $b 'file') 'hashes'
+    $h = ''; foreach ($n in 'sha256Hash', 'quickXorHash') { $v = Get-AVDTuneProp $hashes $n; if ($v -is [string] -and $v -match '\A[A-Za-z0-9+/=]{8,100}\z') { $h = "${n}:$v"; break } }
+    [pscustomobject]@{ Id = [string](Get-AVDTuneProp $b 'id'); Size = $(if ($size -is [int] -or $size -is [long]) { [int64]$size } else { [int64]-1 }); Hash = $h }
 }
 
 function Get-AVDTuneSpFileHash([string]$Path) {
@@ -542,8 +598,8 @@ function Send-AVDTuneSpSoftware {
                     $u1 = Send-AVDTuneSpFile -Context $Context -Segments @($ImageVersion, 'software', "$($app.Id)-$num.html") -Bytes $doc.Bytes -ContentType 'text/html'
                     $u2 = Send-AVDTuneSpFile -Context $Context -Segments @($ImageVersion, 'software', "$($app.Id)-$num.json") -Bytes $rec.Bytes -ContentType 'application/json'
                     $files += 2
-                    if ($u1.Confirmed -and $u2.Confirmed) { $sent.Records[$key] = [pscustomobject]@{ Record = $rec.Sha256; Document = $doc.Sha256; At = (Get-Date).ToString('o') }; $confirmed++ }
-                    else { [void]$problems.Add("$key`: the upload could not be confirmed (size read back differs).") }
+                    if ($u1.Confirmed -and $u2.Confirmed -and $u1.Hash -and $u2.Hash) { $sent.Records[$key] = [pscustomobject]@{ Record = $rec.Sha256; Document = $doc.Sha256; At = (Get-Date).ToString('o'); DocumentItem = $u1.Id; DocumentSize = [int64]$u1.Size; DocumentHash = $u1.Hash; RecordItem = $u2.Id; RecordSize = [int64]$u2.Size; RecordHash = $u2.Hash }; $confirmed++ }
+                    else { [void]$problems.Add("$key`: the upload could not be confirmed (size read back differs or Graph gave no hash).") }
                 }
                 catch { [void]$problems.Add("$key`: not uploaded ($(Remove-AVDTuneControlCharacters $_.Exception.Message 200)).") }
             }
@@ -554,7 +610,7 @@ function Send-AVDTuneSpSoftware {
 }
 
 function Get-AVDTuneSpRemovableRecords {
-    <# Read only: the recordings whose upload was confirmed and whose files are unchanged since (SHA256 of record.json and documentation.html as uploaded). #>
+    <# Read only, local: the recordings whose upload was confirmed and whose files are unchanged since (SHA256 of record.json and documentation.html as uploaded). Remove-AVDTuneSpUploadedRecords asks SharePoint again. #>
     param([string]$Root = (Get-AVDTuneRoot), $Recorded)
     $sent = Get-AVDTuneSpSent -Root $Root
     $out = New-Object System.Collections.ArrayList
@@ -568,7 +624,7 @@ function Get-AVDTuneSpRemovableRecords {
                 if ((Get-AVDTuneSpFileHash (Join-Path $r.Folder 'documentation.html')) -cne $sent.Records[$key].Document) { continue }
             }
             catch { continue }
-            [void]$out.Add([pscustomobject]@{ Key = $key; AppId = $app.Id; Name = [string]$r.App.Name; Version = [string]$r.App.Version; Folder = [string]$r.Folder })
+            [void]$out.Add([pscustomobject]@{ Key = $key; AppId = $app.Id; Name = [string]$r.App.Name; Version = [string]$r.App.Version; Folder = [string]$r.Folder; Sent = $sent.Records[$key] })
         }
     }
     $out.ToArray()
@@ -577,9 +633,12 @@ function Get-AVDTuneSpRemovableRecords {
 function Remove-AVDTuneSpUploadedRecords {
     <#
         Removes the local records whose upload is confirmed and unchanged (Get-AVDTuneSpRemovableRecords), each folder with Remove-AVDTuneTreeSafe (links removed as links,
-        never followed), the app folder too when it is empty then. Not after the version is finished (Sealed). A change log entry names how many. Returns Removed, Failed.
+        never followed), the app folder too when it is empty then. Before each removal both items are read in SharePoint again: size and hash must be what Graph
+        gave at the upload (review B5), otherwise the record stays. Not after the version is finished (Sealed). A change log entry names how many. Returns Removed, Failed.
+        No LastChange (review B7, decided so): the records are AVDTune's own documentation in the state folder, not a setting of the master; the snapshot gate
+        compares changes of the master. The removal still needs the central lock, is refused after the finish and is in the change log.
     #>
-    param([string]$Root = (Get-AVDTuneRoot), $Recorded, [string]$User)
+    param([Parameter(Mandatory)]$Context, [string]$Root = (Get-AVDTuneRoot), $Recorded, [string]$User)
     if (Test-AVDTuneSealed -Root $Root) { throw 'The image version is finished: start a new version first.' }
     $base = [IO.Path]::GetFullPath((Join-Path $Root 'software\custom')).TrimEnd('\') + '\'
     $removed = New-Object System.Collections.ArrayList; $failed = New-Object System.Collections.ArrayList
@@ -587,6 +646,14 @@ function Remove-AVDTuneSpUploadedRecords {
         $folder = [IO.Path]::GetFullPath($r.Folder)
         if (-not $folder.StartsWith($base, [StringComparison]::OrdinalIgnoreCase)) { [void]$failed.Add("$($r.Key): not below the state folder"); continue }
         try {
+            $ok = $true
+            foreach ($k in 'Document', 'Record') {
+                $item = $r.Sent."${k}Item"
+                if (-not $item -or -not $r.Sent."${k}Hash") { $ok = $false; break }
+                $now = Get-AVDTuneSpItemState -Context $Context -ItemId $item
+                if ($now.Id -cne $item -or $now.Size -ne $r.Sent."${k}Size" -or $now.Hash -cne $r.Sent."${k}Hash") { $ok = $false; break }
+            }
+            if (-not $ok) { [void]$failed.Add("$($r.Key): the copy in SharePoint is not the one uploaded (missing, other size or hash), kept"); continue }
             $res = Remove-AVDTuneTreeSafe -Path $folder
             if (-not $res.Gone) { [void]$failed.Add("$($r.Key): $($res.Left) entries left"); continue }
             [void]$removed.Add($r.Key)
@@ -719,7 +786,7 @@ function Send-AVDTuneSpEnvironmentDocument {
 #endregion
 
 Export-ModuleMember -Function Get-AVDTuneSpSettings, Set-AVDTuneSpSettings, Test-AVDTuneSpSiteUrl, Get-AVDTuneSpSent, Save-AVDTuneSpSent, Get-AVDTuneSpPending, Protect-AVDTuneSpText,
-Test-AVDTuneSpSecretFree, Test-AVDTuneSpUrl, Invoke-AVDTuneSpHttp, Get-AVDTuneSpRetryWait, New-AVDTuneSpContext, Close-AVDTuneSpContext, Invoke-AVDTuneSpRequest, Get-AVDTuneSpAll,
+Test-AVDTuneSpSecretFree, Invoke-AVDTuneSpSecretRules, Get-AVDTuneSpErrorResponse, Get-AVDTuneSpItemState, Test-AVDTuneSpUrl, Invoke-AVDTuneSpHttp, Get-AVDTuneSpRetryWait, New-AVDTuneSpContext, Close-AVDTuneSpContext, Invoke-AVDTuneSpRequest, Get-AVDTuneSpAll,
 Test-AVDTuneSpSiteId, Resolve-AVDTuneSpSite, Resolve-AVDTuneSpDrive, Initialize-AVDTuneSpList, Get-AVDTuneSpListKeys, Add-AVDTuneSpListItem, ConvertTo-AVDTuneSpChangeLogFields,
 Send-AVDTuneSpChangeLog, Send-AVDTuneSpFile, Get-AVDTuneSpSoftwareRows, Send-AVDTuneSpSoftware, Get-AVDTuneSpRemovableRecords, Remove-AVDTuneSpUploadedRecords, ConvertTo-AVDTuneSpRows,
 Get-AVDTuneEnvironmentDocumentData, ConvertTo-AVDTuneEnvironmentDocument, Save-AVDTuneEnvironmentDocument, Send-AVDTuneSpEnvironmentDocument

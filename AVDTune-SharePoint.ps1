@@ -2,7 +2,7 @@
 # Shown with the change log view: the site of the environment (config\sharepoint.json), the upload of the change log, of the software list and of the environment
 # document, the option "upload at the finish" and the removal of local records whose upload is confirmed. Without a site the card says so and the document is made
 # locally only. Uploads change nothing on the master, but they are long runs: the job is a writer job (SpJob in WriterJobVariables) and starts after
-# Assert-NoOtherWriter -AllowSealed (a finished version can still be uploaded). The removal of records changes AVDTune's state: not after the finish, under the central lock.
+# Assert-NoOtherWriter -AllowSealed (a finished version can still be uploaded). The removal of records changes AVDTune's state: not after the finish, as the same writer job (Assert-NoOtherWriter without -AllowSealed), after SharePoint confirms its copy again.
 # The token is taken on the UI thread (the sign-in belongs to it), handed to the one job as a string and dropped. Every text comes from the language files (T 'sp.*').
 # Test mode: the fake Graph of Tests\Fakes\FakeSharePoint.ps1 (shared with the runspace) and the window's fake machine; nothing goes to the network.
 
@@ -40,6 +40,12 @@ try {
             $r = Send-AVDTuneSpSoftware -Context $ctx -Root $Root -ImageVersion $version -Recorded $rec.Apps -Installed (Get-AVDTuneInstalledSoftware -Machine $m) -Computer $Computer -Progress $Sync
             $r | Add-Member -NotePropertyName Notes -NotePropertyValue @($rec.Notes) -PassThru
         }
+        'Remove' {
+            if (-not $ctx) { throw 'No SharePoint site or no sign-in.' }
+            $Sync.Text = 'verify'
+            $rec = & $recorded
+            Remove-AVDTuneSpUploadedRecords -Context $ctx -Root $Root -Recorded $rec.Apps -User $User
+        }
         'Document' {
             $Sync.Text = 'read'
             $rec = & $recorded
@@ -66,7 +72,8 @@ function Get-SpToken {
 
 function Start-SpJob([string]$Kind, [scriptblock]$After) {
     if ($script:SpJob) { throw (T 'sp.err.busy') }
-    Assert-NoOtherWriter -AllowSealed   # uploads change nothing on the master; the central list keeps them apart from the runs that do (#49)
+    # uploads change nothing on the master; the central list keeps them apart from the runs that do (#49). The removal of records is refused after the finish.
+    if ($Kind -eq 'Remove') { Assert-NoOtherWriter } else { Assert-NoOtherWriter -AllowSealed }
     $settings = Get-AVDTuneSpSettings -Root $script:StateRoot
     if (-not $settings.SiteUrl -and $Kind -ne 'Document') { throw (T 'sp.err.nosite') }
     $token = if ($settings.SiteUrl) { Get-SpToken } else { '' }
@@ -111,6 +118,11 @@ function Complete-SpJob {
                 $summary = T 'sp.done.software' $result.Sent $result.Skipped $result.Files $result.Confirmed
                 if (@($result.Problems).Count) { $failed = $true; $summary += ' ' + (T 'sp.problems' ((@($result.Problems) | ForEach-Object { Remove-PackTuneProtocolSecrets $_ 200 }) -join ' ')) }
             }
+            'Remove' {
+                $summary = T 'sp.remove.done' @($result.Removed).Count $(if (@($result.Failed).Count) { (@($result.Failed) | ForEach-Object { Remove-PackTuneProtocolSecrets $_ 200 }) -join ' ' } else { '-' })
+                if (@($result.Failed).Count) { $failed = $true }
+                $script:CswStatus = $null   # the custom software card reads its list again
+            }
             'Document' {
                 $summary = T 'sp.done.document' $result.Document.Path
                 if ($result.Upload -and $result.Upload.Confirmed) { $summary += ' ' + (T 'sp.done.document.up' $result.Upload.Path) }
@@ -133,20 +145,14 @@ function Complete-SpJob {
 }
 $script:Timer.Add_Tick({ try { Complete-SpJob } catch { Show-Error $_.Exception.Message } })
 
-# ---------------------------------------------------------------- the removal of uploaded records (on the window thread, under the central lock)
+# ---------------------------------------------------------------- the removal of uploaded records (asked on the window thread, done by the writer job SpJob)
 function Remove-SpRecords {
     $rec = Get-AVDTuneRecordedApps -Root $script:StateRoot
     $list = @(Get-AVDTuneSpRemovableRecords -Root $script:StateRoot -Recorded $rec.Apps)
     if ($list.Count -eq 0) { Show-Toast (T 'sp.remove.none'); return }
     if (-not (Confirm-Action (T 'sp.remove.ask' $list.Count ((@($list | ForEach-Object { "$($_.Name) $($_.Version) ($($_.Key))" })) -join "`n")) (T 'sp.title'))) { return }
-    $hold = Enter-AVDTuneWriter -Kind 'sharepoint-remove' -Title (T 'sp.remove.title')
-    try { $r = Remove-AVDTuneSpUploadedRecords -Root $script:StateRoot -Recorded $rec.Apps -User ([string]$env:USERNAME) } finally { Exit-AVDTuneWriter $hold }
-    $summary = T 'sp.remove.done' @($r.Removed).Count $(if (@($r.Failed).Count) { @($r.Failed) -join ' ' } else { '-' })
-    [void](Add-AVDTuneProtocolNote -Protocol $script:Protocol -Group 'software' -Subject $summary); Save-Protocol
-    $script:SpLast = $summary
-    $script:CswStatus = $null   # the custom software card reads its list again
-    Show-Toast $summary
-    Update-SpView
+    # a writer job like the uploads (the central lock while it runs, #49): it reads both items in SharePoint again before a record goes (review B5)
+    Start-SpJob 'Remove'
 }
 
 # ---------------------------------------------------------------- the card
@@ -193,7 +199,7 @@ function Update-SpView {
     if ($script:SpLast) { $lines += $script:SpLast }
     $ui.TxtSpState.Text = $lines -join "`r`n"
     foreach ($b in $ui.BtnSpChangeLog, $ui.BtnSpSoftware) { $b.IsEnabled = [bool]($s.SiteUrl -and -not $script:SpJob) }
-    $ui.BtnSpRemove.IsEnabled = -not $script:SpJob -and -not (Test-AVDTuneSealed -Root $script:StateRoot)
+    $ui.BtnSpRemove.IsEnabled = [bool]($s.SiteUrl -and -not $script:SpJob -and -not (Test-AVDTuneSealed -Root $script:StateRoot))
 }
 
 function Show-SpCard([bool]$Visible) {

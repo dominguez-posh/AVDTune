@@ -746,7 +746,7 @@
   "title.theme.name": "Zwischen hell und dunkel umschalten",
   "title.theme.tip": "Hell oder dunkel",
   "sp.title": "SharePoint der Umgebung",
-  "sp.hint": "Change-Log, Softwareliste und Umgebungsdokument gehen auf die SharePoint-Site dieser Umgebung (Listen \"AVDTune Change Log\" und \"AVDTune Software\", Ordner AVDTune der Dokumentbibliothek). Die lokalen Dateien bleiben die Quelle; gesendet wird nur, was die Liste noch nicht hat. Tokens, Kennwörter und Schlüssel werden nie hochgeladen.",
+  "sp.hint": "Change-Log, Softwareliste und Umgebungsdokument gehen auf die SharePoint-Site dieser Umgebung (Listen \"AVDTune Change Log\" und \"AVDTune Software\", Ordner AVDTune der Dokumentbibliothek). Die lokalen Dateien bleiben die Quelle; gesendet wird nur, was die Liste noch nicht hat. Tokens, Kennwörter und Schlüssel werden nie hochgeladen. Machen Sie die Site nur für Administratoren lesbar: Das Umgebungsdokument nennt Ressourcen, Domäne und OU, Druckserver und Benutzernamen.",
   "sp.site": "SharePoint-Site der Umgebung",
   "sp.atfinish": "Change-Log vor dem Abschließen hochladen (Aufräumen und Abschließen)",
   "sp.btn.save": "Speichern",
@@ -766,6 +766,8 @@
   "sp.task.document": "Umgebungsdokument wird erstellt",
   "sp.task.start": "Start",
   "sp.step.read": "Lokale Daten werden gelesen",
+  "sp.step.verify": "Kopien in SharePoint werden geprüft",
+  "sp.task.remove": "Hochgeladene Records werden entfernt",
   "sp.step.list": "Liste auf der Site wird geprüft",
   "sp.step.entries": "Eintrag {0} von {1}",
   "sp.step.rows": "Zeile {0} von {1}",
@@ -781,7 +783,7 @@
   "sp.failed.confirm": "Der Upload konnte nicht bestätigt werden (die zurückgelesene Größe weicht ab).",
   "sp.finish.ask": "Der Upload vor dem Abschließen hat nicht geklappt:\n{0}\n\nDie Einträge bleiben auf diesem Master und gehen mit dem nächsten Upload hoch. Trotzdem abschließen?",
   "sp.remove.none": "Kein lokaler Record hat einen bestätigten Upload, der seitdem unverändert ist.",
-  "sp.remove.ask": "{0} lokale(n) Record(s) eigener Software von diesem Master entfernen? Ihr Upload auf SharePoint ist bestätigt und sie haben sich seitdem nicht geändert:\n{1}\n\nDie Dokumentation bleibt in der Bibliothek; lokal ist sie weg.",
+  "sp.remove.ask": "{0} lokale(n) Record(s) eigener Software von diesem Master entfernen? Ihr Upload auf SharePoint ist bestätigt und sie haben sich seitdem nicht geändert:\n{1}\n\nVor dem Entfernen prüft AVDTune in SharePoint, dass die Kopie noch die hochgeladene ist (Größe und Hash). Die Dokumentation bleibt in der Bibliothek; lokal ist sie weg.",
   "sp.remove.title": "Hochgeladene Records werden entfernt",
   "sp.remove.done": "{0} lokale(r) Record(s) entfernt. Nicht entfernt: {1}"
 }

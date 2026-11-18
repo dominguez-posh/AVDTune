@@ -1508,10 +1508,14 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
                 $doc = Join-Path $script:StateRoot "documents\environment-$ver.html"
                 $html = if (Test-Path -LiteralPath $doc) { [IO.File]::ReadAllText($doc) } else { '' }
                 Test-Smoke 'SharePoint: the environment document is saved locally (encoded, a policy that loads nothing) and uploaded to the library' ($html -like '*Content-Security-Policy*' -and $html -notmatch '<script' -and $html -like '*Identity model*' -and $fake.Files.ContainsKey("AVDTune/$ver/environment.html")) $script:SpLast
-                $before = @((Get-AVDTuneRecordedApps -Root $script:StateRoot).Apps).Count
+                $script:SmokeSpBefore = @((Get-AVDTuneRecordedApps -Root $script:StateRoot).Apps).Count
                 & $click $ui.BtnSpRemove
+                Test-Smoke 'SharePoint: removing the uploaded records asks first and runs as the writer job (it checks the copies in SharePoint)' ($script:ConfirmAsked -like '*Example App*' -and $script:SpJob -and $script:SpJob.Kind -eq 'Remove' -and (Get-AVDTuneRunningWriter) -eq 'SpJob') $script:ConfirmAsked
+                $script:SmokeSpStep = 5; return $false
+            }
+            5 {
                 $after = @((Get-AVDTuneRecordedApps -Root $script:StateRoot).Apps).Count
-                Test-Smoke 'SharePoint: removing the uploaded records asks first, removes the confirmed ones and writes a change log entry' ($script:ConfirmAsked -like '*Example App*' -and $before -ge 1 -and $after -eq 0 -and @(Get-AVDTuneChangeLog -Root $script:StateRoot | Where-Object { $_.Component -eq 'sharepoint.records' }).Count -eq 1 -and (Get-AVDTuneRunningWriter) -eq '') "$before -> $after; $($script:SpLast)"
+                Test-Smoke 'SharePoint: the records whose copy SharePoint confirms are removed, a change log entry names them' ($script:SmokeSpBefore -ge 1 -and $after -eq 0 -and @(Get-AVDTuneChangeLog -Root $script:StateRoot | Where-Object { $_.Component -eq 'sharepoint.records' }).Count -eq 1 -and (Get-AVDTuneRunningWriter) -eq '') "$($script:SmokeSpBefore) -> $after; $($script:SpLast)"
                 [void](Set-AVDTuneSpSettings -Root $script:StateRoot -SiteUrl '')
                 $ui.SegSession.IsChecked = $true
                 Show-Page 'Overview'

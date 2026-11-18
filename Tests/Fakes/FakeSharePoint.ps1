@@ -9,7 +9,10 @@
 # Switches in .Store: Offline (throws like a missing network), Throttle (the next n requests answer 429 with RetryAfter), RetryAfter (text of the header),
 # PageSize (collections answer in pages with @odata.nextLink), NextLinkTo (the first nextLink points there instead), Forbidden (403 to every write),
 # BadSiteId (the site lookup answers an id of another host), WrongSize (the read back size of an upload is one byte more), Redirect (a write answers 302),
-# DuplicateList (a second list of the change log name exists), Huge (an answer larger than 4 MB).
+# DuplicateList (a second list of the change log name exists), Huge (an answer larger than 4 MB), NoHash (items without file.hashes).
+# Item metadata carries file.hashes.quickXorHash (here: Base64 of the SHA1 of the content, made up), so a file changed in the store (.Files) has another hash.
+# New-AVDTuneFakeWebFailure gives a -GetResponse for Invoke-AVDTuneSpHttp that throws like .NET through PowerShell: a MethodInvocationException with an inner
+# WebException that carries the answer (status, Retry-After).
 # All names are made up.
 
 . $(if (Get-Command Resolve-AVDTuneTestScript -ErrorAction Ignore) { $fakeShared = Resolve-AVDTuneTestScript -Path (Join-Path $PSScriptRoot 'FakeShared.ps1') -AppRoot (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent); if (-not $fakeShared) { throw 'FakeShared.ps1 is not a file below the Tests folder of this copy.' }; $fakeShared } else { Join-Path $PSScriptRoot 'FakeShared.ps1' })   # fakes that several runspaces use at once (#80)
@@ -18,7 +21,7 @@ function New-AVDTuneFakeSharePoint {
     $siteHost = ([Uri]$SiteUrl).Host
     $siteName = ([Uri]$SiteUrl).AbsolutePath.Trim('/').Split('/')[1]
     $s = @{ Lists = [ordered]@{}; Files = @{}; Items = @{}; Log = (New-Object System.Collections.ArrayList); Bodies = (New-Object System.Collections.ArrayList); Waits = (New-Object System.Collections.ArrayList)
-        Offline = $false; Throttle = 0; RetryAfter = '7'; PageSize = 0; NextLinkTo = ''; Forbidden = $false; BadSiteId = $false; WrongSize = $false; Redirect = $false; DuplicateList = $false; Huge = $false
+        Offline = $false; Throttle = 0; RetryAfter = '7'; PageSize = 0; NextLinkTo = ''; Forbidden = $false; BadSiteId = $false; WrongSize = $false; Redirect = $false; DuplicateList = $false; Huge = $false; NoHash = $false
         SiteId = "$siteHost,$([guid]::NewGuid()),$([guid]::NewGuid())"; DriveId = 'b!fakeDrive0001AVDTune'; NextItem = 1 }
     $sp = [ordered]@{ Store = $s; Log = $s.Log; Token = 'fake-sp-token-CCC'; SiteUrl = $SiteUrl }
     $answer = { param($status, $obj, $retry) $bytes = New-Object byte[] 0; if ($null -ne $obj) { $bytes = [Text.Encoding]::UTF8.GetBytes(($obj | ConvertTo-Json -Depth 10 -Compress)) }; @{ Status = $status; Headers = @{ RetryAfter = [string]$retry }; Stream = (New-Object IO.MemoryStream (, [byte[]]$bytes)); Close = { } } }
@@ -99,7 +102,10 @@ function New-AVDTuneFakeSharePoint {
             $id = $Matches[1]
             if (-not $s.Items.ContainsKey($id)) { return (& $answer 404 @{ error = @{ code = 'itemNotFound' } } '') }
             $size = $s.Files[$s.Items[$id]].Length; if ($s.WrongSize) { $size++ }
-            return (& $answer 200 @{ id = $id; size = $size } '')
+            $sha1 = [Security.Cryptography.SHA1]::Create(); $qx = [Convert]::ToBase64String($sha1.ComputeHash([byte[]]$s.Files[$s.Items[$id]])); $sha1.Dispose()
+            $item = @{ id = $id; size = $size; file = @{ mimeType = 'application/octet-stream'; hashes = @{ quickXorHash = $qx } } }
+            if ($s.NoHash) { $item.file = @{ mimeType = 'application/octet-stream' } }
+            return (& $answer 200 $item '')
         }
         & $answer 404 @{ error = @{ code = 'itemNotFound' } } ''
     }.GetNewClosure()
@@ -112,4 +118,28 @@ function Add-AVDTuneFakeSpList {
     $id = [guid]::NewGuid().ToString()
     $SharePoint.Store.Lists[$id] = @{ Name = $Name; Columns = (New-Object System.Collections.ArrayList (, [object[]]$Columns)); Items = (New-Object System.Collections.ArrayList) }
     $id
+}
+
+if (-not ('AVDTuneFakeWebResponse' -as [type])) {
+    Add-Type -TypeDefinition @"
+using System.IO;
+using System.Net;
+public sealed class AVDTuneFakeWebResponse : WebResponse {
+    private readonly WebHeaderCollection headers = new WebHeaderCollection();
+    private readonly byte[] body;
+    public AVDTuneFakeWebResponse(int status, string retryAfter, string body) { StatusCode = status; if (retryAfter != null) { headers["Retry-After"] = retryAfter; } this.body = System.Text.Encoding.UTF8.GetBytes(body ?? ""); }
+    public int StatusCode { get; private set; }
+    public override WebHeaderCollection Headers { get { return headers; } }
+    public override Stream GetResponseStream() { return new MemoryStream(body); }
+    public override void Close() { }
+}
+"@
+}
+
+function New-AVDTuneFakeWebFailure {
+    # A -GetResponse for Invoke-AVDTuneSpHttp: throws a MethodInvocationException whose inner WebException carries a fake answer (as $req.GetResponse() does for 4xx/5xx)
+    param([int]$Status = 429, [string]$RetryAfter = '7', [string]$Body = '{"error":{"code":"TooManyRequests"}}')
+    $resp = New-Object AVDTuneFakeWebResponse ($Status, $RetryAfter, $Body)
+    $web = New-Object Net.WebException ("The remote server returned an error: ($Status).", $null, [Net.WebExceptionStatus]::ProtocolError, $resp)
+    { param($Request) throw (New-Object System.Management.Automation.MethodInvocationException ('Exception calling "GetResponse" with "0" argument(s)', $web)) }.GetNewClosure()
 }

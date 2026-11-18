@@ -50,6 +50,31 @@ try {
     $keep = 'Registry key: HKLM\SOFTWARE\Example; Exit code: 0; snapshot /subscriptions/11111111-2222-3333-4444-555555555555/resourceGroups/rg-avd/providers/Microsoft.Compute/snapshots/snap-avd-master-before-update; sha256 ' + ('ab12' * 16)
     Test-Check 'secret filter (counter-test): registry keys, exit codes, GUIDs, snapshot names with hyphens and hex hashes stay' ((Protect-AVDTuneSpText $keep 2000) -ceq $keep) (Protect-AVDTuneSpText $keep 2000)
     Test-Check 'secret check of whole files: a token, a bearer value, a password assignment or a SAS signature is found; a normal page passes' (-not (Test-AVDTuneSpSecretFree "x $jwt") -and -not (Test-AVDTuneSpSecretFree 'Bearer abcdefghijklmnopqrstuvwxyz') -and -not (Test-AVDTuneSpSecretFree '"password": "hunter22"') -and -not (Test-AVDTuneSpSecretFree '?sv=1&sig=AbCdEfGhIjKlMnOpQr') -and (Test-AVDTuneSpSecretFree '<html><td>Password policy</td><td>on</td></html>') -and (Test-AVDTuneSpSecretFree '"LicenseNotes": "server lic1, Passwort=(removed)"')) $null
+    # review B2: one table for list texts and whole files
+    $plain = @('pwd=Geheim1', 'secret: Geheim1', 'token=abcdef12', 'apikey=abcdef12', 'serial=1234-5678', 'pin=4711', 'PIDKEY=ABCD1-EFGH2-IJKL3-MNOP4-QRST5', 'https://contoso.blob.core.windows.net/c/f?sv=2024-11-04&se=2026-12-01&sp=r&sr=b', "AccountKey $storageKey", 'XXXX1-YYYY2-ZZZZ3-WWWW4-VVVV5')
+    $missed = @($plain | Where-Object { Test-AVDTuneSpSecretFree $_ })
+    Test-Check 'secret check (B2): pwd/secret/token/apikey/serial/pin, PIDKEY and a product key, a SAS without sig and a storage key (88 characters ==) are found' ($missed.Count -eq 0) ($missed -join ' | ')
+    $leaks = @($plain | Where-Object { $c = Protect-AVDTuneSpText $_ 500; $c -match 'Geheim1|abcdef12|1234-5678|4711|ABCD1|2024-11-04|XXXX1' -or $c -match [regex]::Escape($storageKey.Substring(0, 20)) })
+    Test-Check 'secret filter (B2): the same table cleans list texts' ($leaks.Count -eq 0) ($leaks -join ' | ')
+    # review B3: values after a space and Entra client secrets
+    $spaced = @('Set-Thing -Password Geheim1 -Force', 'setup.exe /S /p Geheim1', 'net use \\print1\share /user:dom\svc Geheim1', 'net use \\print1\share Geheim1 /user:dom\svc', 'app secret abc8Q~AbCdEfGhIjKlMnOpQrStUvWxYz0123')
+    $leaks = @($spaced | Where-Object { (Protect-AVDTuneSpText $_ 500) -match 'Geheim1|AbCdEfGhIj' })
+    Test-Check 'secret filter (B3): -Password X, /p X, net use with the password before or after /user:, an Entra client secret with ~' ($leaks.Count -eq 0 -and @($spaced | Where-Object { Test-AVDTuneSpSecretFree $_ }).Count -eq 0) (($spaced | ForEach-Object { Protect-AVDTuneSpText $_ 500 }) -join ' | ')
+    $again = @(@('Passwort=(removed)', '-Password (removed)', 'net use \\print1\share /user:dom\svc (removed)', '?sv=(removed)&sig=(removed)') | Where-Object { -not (Test-AVDTuneSpSecretFree $_) })
+    Test-Check 'secret table: what it replaced is not found again (a cleaned text passes)' ($again.Count -eq 0) ($again -join ' | ')
+    # review B1: an error answer comes wrapped by PowerShell (MethodInvocationException with an inner WebException)
+    $r429 = Invoke-AVDTuneSpHttp -Method GET -Url 'https://graph.microsoft.com/v1.0/sites' -GetResponse (New-AVDTuneFakeWebFailure -Status 429 -RetryAfter '9')
+    Test-Check 'transport (B1): the answer behind the wrapped WebException is read (status 429, Retry-After 9)' ($r429.Status -eq 429 -and $r429.Headers.RetryAfter -eq '9') "$($r429.Status) $($r429.Headers.RetryAfter)"
+    $outer = Get-AVDTuneSpErrorResponse ([pscustomobject]@{ InnerException = $null; Response = 'outer' })
+    Test-Check 'transport (B1): an exception with the answer on itself still works, one without any answer means not reachable' ($outer -eq 'outer' -and (Get-ThrownText { Invoke-AVDTuneSpHttp -Method GET -Url 'https://graph.microsoft.com/v1.0/sites' -GetResponse { throw 'no network' } }) -like '*cannot be reached*') $null
+    $waits = New-Object System.Collections.ArrayList
+    $c403 = New-AVDTuneSpContext -Token 't' -SiteUrl 'https://contoso.sharepoint.com/sites/AVD' -Transport { param($m, $u, $h, $b, $c) Invoke-AVDTuneSpHttp -Method $m -Url $u -Headers $h -GetResponse (New-AVDTuneFakeWebFailure -Status 403 -RetryAfter '' -Body '{"error":{"code":"accessDenied"}}') }
+    $c429 = New-AVDTuneSpContext -Token 't' -SiteUrl 'https://contoso.sharepoint.com/sites/AVD' -MaxRetries 2 -Sleep { param($x) [void]$waits.Add($x) } -Transport { param($m, $u, $h, $b, $c) Invoke-AVDTuneSpHttp -Method $m -Url $u -Headers $h -GetResponse (New-AVDTuneFakeWebFailure -Status 429 -RetryAfter '5') }
+    $t403 = Get-ThrownText { Invoke-AVDTuneSpRequest -Context $c403 -Url 'https://graph.microsoft.com/v1.0/sites' }
+    $t429 = Get-ThrownText { Invoke-AVDTuneSpRequest -Context $c429 -Url 'https://graph.microsoft.com/v1.0/sites' }
+    Test-Check 'transport (B1): through the real transport a 403 gets the Sites.Selected note and 429 is waited out with Retry-After' ($t403 -like '*403*accessDenied*Sites.Selected*' -and $t429 -like '*429*3 times*' -and ($waits -join ',') -eq '5,5') "$t403 | $t429 | $($waits -join ',')"
+    $modB1 = [IO.File]::ReadAllText((Join-Path $repo 'Modules\AVDTune.SharePoint.psm1'))
+    Test-Check 'transport (B1, static): the catch of GetResponse reads InnerException.Response first' ($modB1 -match "Get-AVDTuneProp \(Get-AVDTuneProp \`$Exception 'InnerException'\) 'Response'\s+if \(-not \`$r\) \{ \`$r = Get-AVDTuneProp \`$Exception 'Response' \}" -and $modB1 -match '\$resp = Get-AVDTuneSpErrorResponse \$_\.Exception') $null
     Test-Check 'Retry-After: seconds, an HTTP date, none (2, 4, ...) and the upper bound' ((Get-AVDTuneSpRetryWait '7' 0) -eq 7 -and (Get-AVDTuneSpRetryWait '' 0) -eq 2 -and (Get-AVDTuneSpRetryWait '' 1) -eq 4 -and (Get-AVDTuneSpRetryWait '99999' 0 -Max 120) -eq 120 -and (Get-AVDTuneSpRetryWait ([datetime]::UtcNow.AddSeconds(30).ToString('r')) 0) -in 29..31 -and (Get-AVDTuneSpRetryWait 'x' 0) -eq 2) $null
 
     # ---------------------------------------------------------------- settings
@@ -96,6 +121,9 @@ try {
     $sp6 = New-AVDTuneFakeSharePoint; $sp6.Store.PageSize = 1; [void](Add-AVDTuneFakeSpList -SharePoint $sp6 -Name 'Other'); [void](Add-AVDTuneFakeSpList -SharePoint $sp6 -Name 'Third'); $sp6.Store.NextLinkTo = 'https://evil.example.com/v1.0/sites?$skiptoken=1'
     $t = Get-ThrownText { Send-AVDTuneSpChangeLog -Context (New-Context $sp6) -Root $tmp }
     Test-Check 'paging (counter-test): a nextLink to another host is refused before any request goes there' ($t -like '*evil.example.com*not allowed*' -and @($sp6.Log | Where-Object { $_ -like '*skiptoken*' -or $_ -like 'POST*' }).Count -eq 0) $t
+    $sp6b = New-AVDTuneFakeSharePoint; $sp6b.Store.PageSize = 1; [void](Add-AVDTuneFakeSpList -SharePoint $sp6b -Name 'Other'); [void](Add-AVDTuneFakeSpList -SharePoint $sp6b -Name 'Third'); $sp6b.Store.NextLinkTo = 'https://graph.microsoft.com/v1.0/me/drive/root/children?$skiptoken=1'
+    $t = Get-ThrownText { Send-AVDTuneSpChangeLog -Context (New-Context $sp6b) -Root $tmp }
+    Test-Check 'paging (B4, counter-test): a nextLink on Graph but to another collection is refused' ($t -like '*another collection*' -and @($sp6b.Log | Where-Object { $_ -like '*/me/*' }).Count -eq 0) $t
     $sp7 = New-AVDTuneFakeSharePoint; $sp7.Store.BadSiteId = $true
     $t = Get-ThrownText { Send-AVDTuneSpChangeLog -Context (New-Context $sp7) -Root $tmp }
     Test-Check 'a site id of another host is refused, no list is read or created' ($t -like '*site id*' -and $sp7.Log.Count -eq 1) $t
@@ -136,12 +164,21 @@ try {
     Test-Check 'records (counter-test): an upload whose size read back differs is not confirmed and not removable' ($sw3.Confirmed -eq 0 -and (@($sw3.Problems) -join ' ') -like '*confirmed*' -and @(Get-AVDTuneSpRemovableRecords -Root $tmp -Recorded $apps).Count -eq 0) ($sw3.Problems -join ' ')
     $sw4 = Send-AVDTuneSpSoftware -Context (New-Context $sp12) -Root $tmp -ImageVersion $ver -Recorded @($apps[0]) -Installed @()
     Test-Check 'records: the upload again (replaces the file) confirms the changed record' ($sw4.Confirmed -eq 1 -and @(Get-AVDTuneSpRemovableRecords -Root $tmp -Recorded $apps).Count -eq 1) $null
+    $sp15 = New-AVDTuneFakeSharePoint; $sp15.Store.NoHash = $true
+    $sw5 = Send-AVDTuneSpSoftware -Context (New-Context $sp15) -Root $tmp -ImageVersion $ver -Recorded @($apps[0]) -Installed @()
+    Test-Check 'records (B5, counter-test): without a hash from Graph the upload is not confirmed' ($sw5.Confirmed -eq 0 -and (@($sw5.Problems) -join ' ') -like '*hash*') ($sw5.Problems -join ' ')
+    $sw4 = Send-AVDTuneSpSoftware -Context (New-Context $sp12) -Root $tmp -ImageVersion $ver -Recorded @($apps[0]) -Installed @()
+    $remoteKey = "AVDTune/$ver/software/aaaaaaaaaaaa-001.html"; $remoteSaved = $sp12.Store.Files[$remoteKey]
+    $sp12.Store.Files[$remoteKey] = [Text.Encoding]::UTF8.GetBytes('changed in SharePoint!')
+    $rk = Remove-AVDTuneSpUploadedRecords -Context (New-Context $sp12) -Root $tmp -Recorded $apps -User 'admin1'
+    Test-Check 'records (B5, counter-test): a copy changed in SharePoint after the upload (size or hash) keeps the local record' (@($rk.Removed).Count -eq 0 -and (@($rk.Failed) -join ' ') -like '*not the one uploaded*' -and (Test-Path -LiteralPath $recA.Folder)) "$($rk | Out-String)"
+    $sp12.Store.Files[$remoteKey] = $remoteSaved
     [void](Set-AVDTuneState -Root $tmp -Values @{ Sealed = $true })
-    Test-Check 'records: not removed after the finish (Sealed)' ((Get-ThrownText { Remove-AVDTuneSpUploadedRecords -Root $tmp -Recorded $apps -User 'admin1' }) -like '*finished*' -and (Test-Path -LiteralPath $recA.Folder)) $null
+    Test-Check 'records: not removed after the finish (Sealed)' ((Get-ThrownText { Remove-AVDTuneSpUploadedRecords -Context (New-Context $sp12) -Root $tmp -Recorded $apps -User 'admin1' }) -like '*finished*' -and (Test-Path -LiteralPath $recA.Folder)) $null
     [void](Set-AVDTuneState -Root $tmp -Values @{ Sealed = $false })
     $outside = Join-Path ([IO.Path]::GetTempPath()) ('avdtune-sp-out-' + [guid]::NewGuid().ToString('N')); [void](New-Item -ItemType Directory -Path $outside); [IO.File]::WriteAllText((Join-Path $outside 'keep.txt'), 'keep')
     $link = Join-Path $recA.Folder 'link'; cmd.exe /c mklink /J "$link" "$outside" | Out-Null
-    $rr = Remove-AVDTuneSpUploadedRecords -Root $tmp -Recorded $apps -User 'admin1'
+    $rr = Remove-AVDTuneSpUploadedRecords -Context (New-Context $sp12) -Root $tmp -Recorded $apps -User 'admin1'
     Test-Check 'records: the confirmed record is removed through Remove-AVDTuneTreeSafe (a link inside is removed as a link, its target stays), the empty app folder too, a change log entry names it' (@($rr.Removed).Count -eq 1 -and -not (Test-Path -LiteralPath (Split-Path $recA.Folder -Parent)) -and (Test-Path -LiteralPath (Join-Path $outside 'keep.txt')) -and (Test-Path -LiteralPath $recB.Folder) -and @(Get-AVDTuneChangeLog -Root $tmp | Where-Object { $_.Component -eq 'sharepoint.records' }).Count -eq 1) "$($rr | Out-String)"
     Remove-Item -LiteralPath $outside -Recurse -Force
 
@@ -170,11 +207,11 @@ try {
     Test-Check 'module: records are removed with Remove-AVDTuneTreeSafe, the document folder made with New-AVDTuneOwnFolder' ($mod -match 'Remove-AVDTuneTreeSafe -Path \$folder' -and $mod -match 'New-AVDTuneOwnFolder -Path \$dir' -and $mod -notmatch 'Remove-Item') $null
     $fakeText = [IO.File]::ReadAllText((Join-Path $PSScriptRoot 'Fakes\FakeSharePoint.ps1'))
     Test-Check 'fake: loads FakeShared and the factory ends with ConvertTo-AVDTuneFakeShared (#80: shared with a runspace), its blocks are unbound' ($fakeText -match "Resolve-AVDTuneTestScript -Path \(Join-Path \`$PSScriptRoot 'FakeShared\.ps1'\)" -and $fakeText -match 'ConvertTo-AVDTuneFakeShared \(\[pscustomobject\]\$sp\)' -and $null -eq $sp.Transport.Module) $null
-    $switches = @('Offline', 'Throttle', 'RetryAfter', 'PageSize', 'NextLinkTo', 'Forbidden', 'BadSiteId', 'WrongSize', 'Redirect', 'DuplicateList', 'Huge')
+    $switches = @('Offline', 'Throttle', 'RetryAfter', 'PageSize', 'NextLinkTo', 'Forbidden', 'BadSiteId', 'WrongSize', 'Redirect', 'DuplicateList', 'Huge', 'NoHash')
     $self = [IO.File]::ReadAllText($PSCommandPath)
     Test-Check 'fake: every switch is used by a check here' (@($switches | Where-Object { $self -notmatch "Store\.$_ = " }).Count -eq 0) (@($switches | Where-Object { $self -notmatch "Store\.$_ = " }) -join ', ')
     $page = [IO.File]::ReadAllText((Join-Path $repo 'AVDTune-SharePoint.ps1'))
-    Test-Check 'page: worker through New-AVDTunePowerShell after Assert-NoOtherWriter -AllowSealed, a task, the removal under Enter-AVDTuneWriter, texts from the language files' ($page -match 'New-AVDTunePowerShell' -and $page -match 'Assert-NoOtherWriter -AllowSealed' -and $page -match 'Start-AVDTuneUiTask' -and $page -match "Enter-AVDTuneWriter -Kind 'sharepoint-remove'" -and $page -match "T 'sp\." -and $page -notmatch 'GetNewClosure') $null
+    Test-Check 'page: worker through New-AVDTunePowerShell after Assert-NoOtherWriter -AllowSealed, a task, the removal as the same writer job without -AllowSealed, texts from the language files' ($page -match 'New-AVDTunePowerShell' -and $page -match 'Assert-NoOtherWriter -AllowSealed' -and $page -match 'Start-AVDTuneUiTask' -and $page -match 'if \(\$Kind -eq ''Remove''\) \{ Assert-NoOtherWriter \} else' -and $page -match "Start-SpJob 'Remove'" -and $page -match 'Remove-AVDTuneSpUploadedRecords -Context \$ctx' -and $page -match "T 'sp\." -and $page -notmatch 'GetNewClosure') $null
     $tasks = [IO.File]::ReadAllText((Join-Path $repo 'AVDTune-Tasks.ps1')); $seal = [IO.File]::ReadAllText((Join-Path $repo 'AVDTune-Seal.ps1'))
     Test-Check 'page: the upload is a writer job, and the finish uploads first when the option is on' ($tasks -match "'SpJob'\)" -and $seal -match "if \(Test-SpUploadAtFinish\) \{ Start-SpJob 'ChangeLog' \{ Start-SealJob \}; return \}") $null
 }

@@ -746,7 +746,7 @@
   "title.theme.name": "Switch between light and dark",
   "title.theme.tip": "Light or dark",
   "sp.title": "SharePoint of the environment",
-  "sp.hint": "The change log, the software list and the environment document go to the SharePoint site of this environment (lists \"AVDTune Change Log\" and \"AVDTune Software\", folder AVDTune of the document library). The local files stay the source; only entries the list does not have yet are sent. Tokens, passwords and keys are never uploaded.",
+  "sp.hint": "The change log, the software list and the environment document go to the SharePoint site of this environment (lists \"AVDTune Change Log\" and \"AVDTune Software\", folder AVDTune of the document library). The local files stay the source; only entries the list does not have yet are sent. Tokens, passwords and keys are never uploaded. Make the site readable for administrators only: the environment document names resources, domain and OU, print servers and user names.",
   "sp.site": "SharePoint site of the environment",
   "sp.atfinish": "Upload the change log before the finish (Cleanup and finish)",
   "sp.btn.save": "Save",
@@ -766,6 +766,8 @@
   "sp.task.document": "Creating the environment document",
   "sp.task.start": "Starting",
   "sp.step.read": "Reading the local data",
+  "sp.step.verify": "Checking the copies in SharePoint",
+  "sp.task.remove": "Removing uploaded records",
   "sp.step.list": "Checking the list on the site",
   "sp.step.entries": "Entry {0} of {1}",
   "sp.step.rows": "Row {0} of {1}",
@@ -781,7 +783,7 @@
   "sp.failed.confirm": "The upload could not be confirmed (the size read back differs).",
   "sp.finish.ask": "The upload before the finish did not go through:\n{0}\n\nThe entries stay on this master and go up with the next upload. Start the finish anyway?",
   "sp.remove.none": "No local record has a confirmed upload that is unchanged since.",
-  "sp.remove.ask": "Remove {0} local record(s) of custom software from this master? Their upload to SharePoint is confirmed and they did not change since:\n{1}\n\nThe documentation stays in the library; locally it is gone.",
+  "sp.remove.ask": "Remove {0} local record(s) of custom software from this master? Their upload to SharePoint is confirmed and they did not change since:\n{1}\n\nBefore each one is removed, AVDTune checks in SharePoint that its copy is still the one uploaded (size and hash). The documentation stays in the library; locally it is gone.",
   "sp.remove.title": "Removing uploaded records",
   "sp.remove.done": "{0} local record(s) removed. Not removed: {1}"
 }
