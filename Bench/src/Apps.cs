@@ -9,8 +9,10 @@ namespace AVDTune.Bench;
 /// that is below a Windows or Program Files folder (from Known Folders, never from the environment) and has the expected file name. Every program that is started goes into
 /// its own job object with a timeout; only windows of the job are closed (File Explorer: only the new folder window). Ready = the window class is there and visible (and
 /// WaitForInputIdle returned). Not UI Automation: the self-contained runtime has no managed wrapper for it without a third-party library.
-/// The programs are NOT started elevated (round 2 security review, finding 3): <see cref="RestrictedLauncher"/> gives them a standard-user token at Medium integrity, still inside the job object.
-/// Only their own work folder (<see cref="CreateUserFolder"/>) gets rights for that token, nothing else; TEMP and TMP of the children point into it.</summary>
+/// The programs are NOT started elevated (round 2 security review, finding 3) and not as the admin (issue #92): <see cref="IsolatedUser"/> makes a throw-away local standard user per run and
+/// starts them as that user, inside the job object (<c>--reduced-token</c> keeps the earlier reduced admin token of <see cref="RestrictedLauncher"/>). Only their own work folder
+/// (<see cref="CreateUserFolder"/>) gets rights for that user, nothing else; TEMP and TMP of the children point into it. The new user's profile is fresh, so every program is started once
+/// unmeasured before its cold and warm start (first-run work of the profile is not part of the measure).</summary>
 public static class Apps
 {
     public static readonly string[] Keys = { "word", "excel", "edge", "explorer", "powershell", "outlook", "teams" };
@@ -51,9 +53,9 @@ public static class Apps
     }
 
     /// <summary>Makes the folder in ONE atomic call with the protected ACL (<see cref="FolderTools.CreateExclusive"/>): an existing folder, file or link is an error, there is no check-then-create gap.</summary>
-    public static string CreateUserFolder(string path, FileSystemRights userRights = FileSystemRights.Modify)
+    public static string CreateUserFolder(string path, FileSystemRights userRights = FileSystemRights.Modify, SecurityIdentifier? user = null)
     {
-        var user = WindowsIdentity.GetCurrent().User ?? throw new InvalidOperationException("the user of this process is unknown");
+        user ??= WindowsIdentity.GetCurrent().User ?? throw new InvalidOperationException("the user of this process is unknown");
         FolderTools.CreateExclusive(path, UserFolderSecurity(user, userRights));
         return path;
     }
@@ -65,15 +67,15 @@ public static class Apps
     public static string ProfileDir(string work) => Path.Combine(work, "prof");
 
     /// <summary>Makes the work folder: the root and data\ read and execute, tmp\ and prof\ modify for the user of the programs.</summary>
-    public static void CreateWorkLayout(string work)
+    public static void CreateWorkLayout(string work, SecurityIdentifier? user = null)
     {
         // every folder is made atomically; the root and data\ are made writable first and tightened to read and execute right after, still before any program has been started (a process that runs
         // without the Administrators group - a non-elevated check run - could not make the sub folders in a root that it may only read)
-        var user = WindowsIdentity.GetCurrent().User ?? throw new InvalidOperationException("the user of this process is unknown");
-        CreateUserFolder(work, FileSystemRights.Modify);
-        CreateUserFolder(DataDir(work), FileSystemRights.Modify);
-        CreateUserFolder(TmpDir(work), FileSystemRights.Modify);
-        CreateUserFolder(ProfileDir(work), FileSystemRights.Modify);
+        user ??= WindowsIdentity.GetCurrent().User ?? throw new InvalidOperationException("the user of this process is unknown");
+        CreateUserFolder(work, FileSystemRights.Modify, user);
+        CreateUserFolder(DataDir(work), FileSystemRights.Modify, user);
+        CreateUserFolder(TmpDir(work), FileSystemRights.Modify, user);
+        CreateUserFolder(ProfileDir(work), FileSystemRights.Modify, user);
         new DirectoryInfo(DataDir(work)).SetAccessControl(UserFolderSecurity(user, FileSystemRights.ReadAndExecute));
         new DirectoryInfo(work).SetAccessControl(UserFolderSecurity(user, FileSystemRights.ReadAndExecute));   // tmp\ and prof\ are protected and keep their own rules
     }
@@ -115,22 +117,36 @@ public static class Apps
         return false;
     }
 
-    public static List<Measure> Run(Options o)
+    public static List<Measure> Run(Options o) => Run(o, out _);
+
+    /// <summary>As <see cref="Run(Options)"/>; <paramref name="info"/> says how the programs ran (isolatedUser: used, leftoversRemoved, cleanupProblem) for the info block of the result,
+    /// so AVDTune can warn when an account was left behind or one of an earlier run was removed (Finn's review of #92, M1).</summary>
+    public static List<Measure> Run(Options o, out Dictionary<string, object?>? info)
     {
+        info = null;
         var list = new List<Measure>();
         if (string.IsNullOrWhiteSpace(o.Dir) || !Directory.Exists(o.Dir)) return new() { Measure.Not("host.app.word.warm", "ms", false, "failed", "--dir (an existing work folder) is needed") };
         var work = Path.Combine(o.Dir, "apps-" + Guid.NewGuid().ToString("N").Substring(0, 12));
-        try { CreateWorkLayout(work); }
-        catch (Exception e) when (e is IOException or UnauthorizedAccessException or InvalidOperationException) { RemoveFolder(work); return new() { Measure.Not("host.app.word.warm", "ms", false, "failed", "the work folder of the programs could not be made: " + e.Message) }; }
+        var roots = DefaultRoots();
+        string? Path_(string key)
+        {
+            if (!o.AppPaths.TryGetValue(key, out var p)) return null;
+            return ValidateExe(key, p, roots) == null ? Path.GetFullPath(p) : null;
+        }
+        string Why(string key) => !o.AppPaths.TryGetValue(key, out var p) ? "not installed (AVDTune gave no path)" : "refused: " + ValidateExe(key, p, roots);
+        // the temporary user is made only when a program will be started (issue #92); a run without programs makes no account
+        IAppLauncher? launcher = null;
+        if (new[] { "word", "excel", "edge", "explorer", "powershell" }.Any(k => Path_(k) != null))
+        {
+            try { launcher = MakeLauncher(o); }
+            catch (Exception e) when (e is System.ComponentModel.Win32Exception or InvalidOperationException or UnauthorizedAccessException or IdentityNotMappedException)
+            { return FailedAll("the programs could not be started as a temporary standard user: " + e.Message); }
+        }
+        try { CreateWorkLayout(work, launcher?.Sid); }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or InvalidOperationException)
+        { RemoveFolder(work); (launcher as IDisposable)?.Dispose(); return new() { Measure.Not("host.app.word.warm", "ms", false, "failed", "the work folder of the programs could not be made: " + e.Message) }; }
         try
         {
-            var roots = DefaultRoots();
-            string? Path_(string key)
-            {
-                if (!o.AppPaths.TryGetValue(key, out var p)) return null;
-                return ValidateExe(key, p, roots) == null ? Path.GetFullPath(p) : null;
-            }
-            string Why(string key) => !o.AppPaths.TryGetValue(key, out var p) ? "not installed (AVDTune gave no path)" : "refused: " + ValidateExe(key, p, roots);
             bool cold = !o.NoCold;
             string? coldWhy = null;
             if (cold && !WindowTools.PurgeStandbyList(out var why)) { cold = false; coldWhy = "cold start not measured: " + why; }
@@ -149,17 +165,19 @@ public static class Apps
                 }
                 catch (Exception e) when (e is IOException or UnauthorizedAccessException)
                 { list.Add(Measure.Not($"host.app.{key}.cold", "ms", false, "failed", e.Message)); list.Add(Measure.Not($"host.app.{key}.warm", "ms", false, "failed", e.Message)); continue; }
+                bool primed = false;
+                if (launcher!.Isolated) primed = MeasureStart(key, "first", exe, work, docx, xlsx, folder, launcher).Status == "ok";   // first start of the new profile, not measured
                 if (!o.NoCold)
                 {
                     if (!cold) list.Add(Measure.Not($"host.app.{key}.cold", "ms", false, "skipped", coldWhy ?? "cold start not measured"));
-                    else { if (!WindowTools.PurgeStandbyList(out _)) { } list.Add(MeasureStart(key, "cold", exe, work, docx, xlsx, folder, o)); }
+                    else { if (!WindowTools.PurgeStandbyList(out _)) { } list.Add(Mark(MeasureStart(key, "cold", exe, work, docx, xlsx, folder, launcher), launcher, primed)); }
                 }
-                list.Add(MeasureStart(key, "warm", exe, work, docx, xlsx, folder, o));
+                list.Add(Mark(MeasureStart(key, "warm", exe, work, docx, xlsx, folder, launcher), launcher, primed));
             }
 
             var ps = Path_("powershell");
             if (ps == null) list.Add(Measure.Not("host.app.powershell.warm", "ms", false, "skipped", Why("powershell")));
-            else list.Add(MeasurePowerShell(ps, work));
+            else list.Add(Mark(MeasurePowerShell(ps, work, launcher!), launcher!, false));
 
             list.Add(Measure.Not("host.app.outlook.cold", "ms", false, "skipped", "classic Outlook with a test profile and mail file is not part of this version of the benchmark"));
             list.Add(Measure.Not("host.app.outlook.warm", "ms", false, "skipped", "classic Outlook with a test profile and mail file is not part of this version of the benchmark"));
@@ -169,20 +187,51 @@ public static class Apps
             if (o.NoSpeedometer) { /* no measure at all in a warm-up run */ }
             else if (o.Site == null) list.Add(Measure.Not("host.app.speedometer", "runs/min", true, "skipped", "no Speedometer copy (--site)"));
             else if (Path_("edge") is not { } edge) list.Add(Measure.Not("host.app.speedometer", "runs/min", true, "skipped", Why("edge")));
-            else list.Add(Speedometer.Run(o, edge, o.Site, work));
+            else list.Add(Mark(Speedometer.Run(o, edge, o.Site, work, launcher!), launcher!, false));
         }
-        finally { RemoveFolder(work); }
+        finally
+        {
+            (launcher as IDisposable)?.Dispose();   // ends the user's processes and removes profile and account before the work folder goes
+            RemoveFolder(work);
+            if (launcher is IsolatedUser iso) info = new Dictionary<string, object?> { ["isolatedUser"] = IsolatedInfo(iso.Leftovers, iso.CleanupProblem) };
+        }
         return list;
     }
 
-    private static Measure MeasureStart(string key, string phase, string exe, string work, string? docx, string? xlsx, string? folder, Options o)
+    /// <summary>The isolatedUser block of the result info (pure, so the shape is checked without an account).</summary>
+    public static Dictionary<string, object?> IsolatedInfo(IEnumerable<string> leftoversRemoved, string? cleanupProblem) => new()
+    { ["used"] = true, ["leftoversRemoved"] = leftoversRemoved.ToList(), ["cleanupProblem"] = cleanupProblem };
+
+    /// <summary>The launcher of a run: a new temporary standard user (default, issue #92), or the reduced admin token with <c>--reduced-token</c>.</summary>
+    private static IAppLauncher MakeLauncher(Options o) => o.ReducedToken ? new ReducedTokenLauncher() : IsolatedUser.Create();
+
+    /// <summary>Every application measure failed with one reason (nothing was started).</summary>
+    public static List<Measure> FailedAll(string reason)
+    {
+        var list = new List<Measure>();
+        foreach (var key in new[] { "word", "excel", "edge", "explorer" }) { list.Add(Measure.Not($"host.app.{key}.cold", "ms", false, "failed", reason)); list.Add(Measure.Not($"host.app.{key}.warm", "ms", false, "failed", reason)); }
+        list.Add(Measure.Not("host.app.powershell.warm", "ms", false, "failed", reason));
+        list.Add(Measure.Not("host.app.speedometer", "runs/min", true, "failed", reason));
+        return list;
+    }
+
+    /// <summary>Notes on a measure how the program ran: as the temporary user (isolatedUser) and whether the profile had its unmeasured first start (primed).</summary>
+    public static Measure Mark(Measure m, IAppLauncher launcher, bool primed)
+    {
+        if (m.Status != "ok") return m;
+        m.Detail["isolatedUser"] = launcher.Isolated;
+        if (launcher.Isolated && primed) m.Detail["primed"] = true;
+        return m;
+    }
+
+    private static Measure MeasureStart(string key, string phase, string exe, string work, string? docx, string? xlsx, string? folder, IAppLauncher launcher)
     {
         string id = $"host.app.{key}.{phase}";
         Log.Progress($"apps: {key} {phase}");
         try
         {
             LastLink = null;
-            var r = key == "explorer" ? StartExplorer(exe, folder!, work) : StartInJob(key, exe, work, docx, xlsx);
+            var r = key == "explorer" ? StartExplorer(exe, folder!, work, launcher) : StartInJob(key, exe, work, docx, xlsx, launcher);
             LastLink ??= FolderTools.FindLink(work);
             if (LastLink != null) return Measure.Not(id, "ms", false, "failed", "a link was found in the work folder after the run (not trusted): " + LastLink);
             if (r.Ms == null) return Measure.Not(id, "ms", false, "failed", r.Reason);
@@ -197,7 +246,7 @@ public static class Apps
     /// <summary>The first link found in the work folder right after a program has ended (before the profile is removed); the measure then fails.</summary>
     private static string? LastLink;
 
-    private static (double? Ms, string Reason, bool ViaShell) StartInJob(string key, string exe, string work, string? docx, string? xlsx)
+    private static (double? Ms, string Reason, bool ViaShell) StartInJob(string key, string exe, string work, string? docx, string? xlsx, IAppLauncher launcher)
     {
         using var job = new JobGroup(0, JobGroup.ApplicationUiLimits);
         string? profile = null;
@@ -215,7 +264,7 @@ public static class Apps
                     args.AddRange(EdgeArgs(profile, server.Origin + "/start.html")); break;
             }
             double t0 = Timing.Now();
-            using var p = RestrictedLauncher.Start(exe, RestrictedLauncher.BuildArguments(args), TmpDir(work), ChildEnvironment(TmpDir(work)), job);
+            using var p = launcher.Start(exe, RestrictedLauncher.BuildArguments(args), TmpDir(work), TmpDir(work), job);
             double deadline = t0 + TimeoutMs / 1000.0;
             bool ready = false;
             while (Timing.Now() < deadline)
@@ -262,12 +311,12 @@ public static class Apps
     /// <summary>File Explorer: with the reduced token explorer.exe hands the new folder window to the running shell of the session (Explorer opens "in the running process" and the one we started
     /// may end at once). The window is found by its unique folder title (the folder is ours), so the time is from the start to the window of the shell. The detail "viaRunningShell" says whether
     /// that happened. NOT verified on a real session yet (issue #17); when the started program cannot be made the measure fails with the reason, it never runs elevated.</summary>
-    private static (double? Ms, string Reason, bool ViaShell) StartExplorer(string exe, string folder, string work)
+    private static (double? Ms, string Reason, bool ViaShell) StartExplorer(string exe, string folder, string work, IAppLauncher launcher)
     {
         string title = Path.GetFileName(folder);
         using var job = new JobGroup(0, JobGroup.ApplicationUiLimits);
         double t0 = Timing.Now();
-        using var p = RestrictedLauncher.Start(exe, $"/n,\"{folder}\"", TmpDir(work), ChildEnvironment(TmpDir(work)), job);
+        using var p = launcher.Start(exe, $"/n,\"{folder}\"", TmpDir(work), TmpDir(work), job);
         double deadline = t0 + TimeoutMs / 1000.0;
         IntPtr hwnd = IntPtr.Zero; int pid = 0;
         while (Timing.Now() < deadline && hwnd == IntPtr.Zero)
@@ -288,7 +337,7 @@ public static class Apps
         finally { job.Terminate(); }
     }
 
-    private static Measure MeasurePowerShell(string exe, string work)
+    private static Measure MeasurePowerShell(string exe, string work, IAppLauncher launcher)
     {
         Log.Progress("apps: powershell warm");
         var times = new List<double>();
@@ -298,7 +347,7 @@ public static class Apps
             {
                 using var job = new JobGroup(0, JobGroup.ApplicationUiLimits);
                 double t0 = Timing.Now();
-                using var p = RestrictedLauncher.Start(exe, RestrictedLauncher.BuildArguments(new[] { "-NoProfile", "-NonInteractive", "-Command", "exit" }), TmpDir(work), ChildEnvironment(TmpDir(work)), job);
+                using var p = launcher.Start(exe, RestrictedLauncher.BuildArguments(new[] { "-NoProfile", "-NonInteractive", "-Command", "exit" }), TmpDir(work), TmpDir(work), job);
                 if (!p.WaitForExit(TimeoutMs)) return Measure.Not("host.app.powershell.warm", "ms", false, "failed", $"powershell.exe did not end in {TimeoutMs / 1000} s");
                 times.Add((Timing.Now() - t0) * 1000.0);
             }

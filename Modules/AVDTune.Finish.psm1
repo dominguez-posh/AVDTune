@@ -346,10 +346,15 @@ function Test-AVDTuneFinishGate {
         Allowed + Reasons (why not) + Notes (what does not block but should be read).
     #>
     [CmdletBinding()]
-    param([string]$Root = (Get-AVDTuneRoot))
+    param([string]$Root = (Get-AVDTuneRoot), $Machine)
     $reasons = New-Object System.Collections.ArrayList
     $notes = New-Object System.Collections.ArrayList
     $runId = ''
+    # #92 (Finn M1): no finish while a temporary benchmark user is on the master (the healthcheck may be older than the last benchmark, which is not a change)
+    if ($Machine -and $Machine.PSObject.Properties['BenchUsers']) {
+        $left = @(); try { $left = @(& $Machine.BenchUsers) } catch { [void]$reasons.Add("The temporary benchmark users could not be checked ($($_.Exception.Message)).") }
+        if ($left.Count -gt 0) { [void]$reasons.Add("Temporary benchmark user(s) left behind: $(@($left | ForEach-Object { $_.Name }) -join ', '). Remove them with the readiness fix and run the analysis again.") }
+    }
     if (-not (Test-AVDTuneWriteAllowed)) { [void]$reasons.Add('The snapshot gate is not confirmed: AVDTune is read only until a snapshot of today is confirmed on the Overview.') }
     $state = Get-AVDTuneState $Root
     $version = [string](Get-AVDTuneProp $state 'ImageVersion')
@@ -582,7 +587,7 @@ function Invoke-AVDTuneFinish {
         return [pscustomobject]@{ Status = 'WhatIf'; Results = $r; Message = 'Would run these steps.'; Reboot = $false; WhatIf = $true }
     }
     # directly before the first write: the gate again, from fresh files
-    $gate = Test-AVDTuneFinishGate -Root $Root
+    $gate = Test-AVDTuneFinishGate -Root $Root -Machine $Machine
     if (-not $gate.Allowed) { throw "The finish is not allowed: $($gate.Reasons -join ' ')" }
     # the steps are bound to the version and the healthcheck run that the gate has just accepted
     $version = [string]$gate.Version

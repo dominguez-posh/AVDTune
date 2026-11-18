@@ -676,6 +676,7 @@ $window.Add_Closed({
     $script:Timer.Stop()
     try { $script:SnapTimer.Stop() } catch { }
     try { if ($script:StartContext.Session) { Disconnect-AVDTuneSession $script:StartContext.Session } } catch { }   # tokens leave the memory with the window
+    try { Clear-AVDTuneSessionDcAccount } catch { }   # the domain account of the start sequence too (#75)
     if ($script:OverviewJob) { try { [void]$script:OverviewJob.PS.BeginStop($null, $null) } catch { } }
     if ($script:ReadyJob) { try { [void]$script:ReadyJob.PS.BeginStop($null, $null) } catch { } }
     try { Close-FslLatestLookup } catch { }   # the FSLogix page's background lookup of the newest release

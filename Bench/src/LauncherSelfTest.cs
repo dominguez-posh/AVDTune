@@ -59,8 +59,10 @@ public static class LauncherSelfTest
 
             try { Apps.CreateUserFolder(Path.Combine(dir, "tmp")); Add("a folder that exists is refused when it is made again", false); }
             catch (IOException) { Add("a folder that exists is refused when it is made again", true); }
+
+            IsolatedChecks(cmd, dir + "-iso", Add);
         }
-        finally { try { FolderTools.RemoveNoFollow(dir); } catch { } }
+        finally { try { FolderTools.RemoveNoFollow(dir); } catch { } try { FolderTools.RemoveNoFollow(dir + "-iso"); } catch { } }
         return r;
 
         void Check(string what, RestrictedLauncher.TokenFacts t)
@@ -73,6 +75,71 @@ public static class LauncherSelfTest
             var extra = RestrictedLauncher.ExtraPrivileges(t.Privileges);
             Add($"{what}: only standard-user privileges (TokenPrivileges)", extra.Count == 0, extra.Count == 0 ? string.Join(", ", t.Privileges) : "extra: " + string.Join(", ", extra));
         }
+    }
+
+    /// <summary>The temporary standard user of the application starts (issue #92): made with the prefix and the marker, only in Users, a program started as it in the job with a token that is
+    /// this user, not elevated, Medium; afterwards account, profile and the window station entries are gone. A crash (account left behind) is cleaned up by the next start; a look-alike account
+    /// without the marker is never touched.</summary>
+    private static void IsolatedChecks(string cmd, string dir, Action<string, bool, string> add)
+    {
+        IsolatedUser? u = null;
+        try
+        {
+            u = IsolatedUser.Create();
+            add("isolated user: made with the prefix and the marker", u.Name.StartsWith(IsolatedUser.Prefix, StringComparison.Ordinal) && IsolatedUser.AccountExists(u.Name), u.Name);
+            var groups = IsolatedUser.LocalGroups(u.Name);
+            uint exp = IsolatedUser.AccountExpiry(u.Name), nowSec = (uint)(DateTime.UtcNow - DateTime.UnixEpoch).TotalSeconds;
+            add("isolated user: the account expires a few hours after it was made (M2)", exp > nowSec && exp <= nowSec + (uint)IsolatedUser.Lifetime.TotalSeconds + 60, $"expires {exp}, now {nowSec}");
+            add("isolated user: member of Users only", groups.Count == 1 && new System.Security.Principal.NTAccount(groups[0]).Translate(typeof(System.Security.Principal.SecurityIdentifier)).Value == "S-1-5-32-545", string.Join(", ", groups));
+            add("isolated user: its profile is loaded (own folder)", u.ProfilePath != null && Directory.Exists(u.ProfilePath), u.ProfilePath ?? "no profile path");
+            add("isolated user: the window station and desktop have an entry for it while it runs", IsolatedUser.UiHasEntry(u.Sid), "");
+            Apps.CreateWorkLayout(dir, u.Sid);
+            using (var job = new JobGroup(0, JobGroup.ApplicationUiLimits))
+            {
+                using var p = u.Start(cmd, "/c ping -n 20 127.0.0.1 >nul", Apps.TmpDir(dir), Apps.TmpDir(dir), job);
+                _ = p.Handle;
+                Thread.Sleep(500);
+                bool running = !p.HasExited;
+                add("isolated user: the started program keeps running", running, running ? "" : $"it ended right after the start with exit code 0x{p.ExitCode:X8}");
+                if (running)
+                {
+                    add("isolated user: the started program is in the job object", job.Pids().Contains(p.Id), $"pid {p.Id}");
+                    var (facts, user) = u.ChildFacts(p.Handle);
+                    add("isolated user: the running child runs as the temporary user", user == u.Sid.Value, user);
+                    add("isolated user: the running child is not elevated, Medium or lower, no admin-like group, standard-user privileges only", RestrictedLauncher.TokenProblem(facts) == null, RestrictedLauncher.TokenProblem(facts) ?? string.Join(", ", facts.Privileges));
+                    job.Terminate();
+                    add("isolated user: ending the job ends the child", p.WaitForExit(5000), "");
+                }
+            }
+            string name = u.Name; var sid = u.Sid; string? profile = u.ProfilePath;
+            u.Dispose();
+            add("isolated user: after the run the account is deleted", !IsolatedUser.AccountExists(name), u.CleanupProblem ?? "");
+            add("isolated user: after the run the profile folder is deleted", profile == null || !Directory.Exists(profile), profile ?? "");
+            add("isolated user: after the run the window station and desktop have no entry for it", !IsolatedUser.UiHasEntry(sid), "");
+            u = null;
+
+            // crash: the account stays behind; the next start removes it
+            var crashed = IsolatedUser.Create();
+            string crashedName = crashed.Name; string? crashedProfile = crashed.ProfilePath;
+            crashed.Abandon();
+            add("leftover: an account of a crashed run is still there before the next start", IsolatedUser.AccountExists(crashedName), crashedName);
+            var done = IsolatedUser.CleanupLeftovers();
+            add("leftover: the next start removes the account and its profile", !IsolatedUser.AccountExists(crashedName) && (crashedProfile == null || !Directory.Exists(crashedProfile)), string.Join("; ", done));
+
+            // a look-alike with the prefix but without the marker is not ours
+            string other = IsolatedUser.NewName();
+            IsolatedUser.AddUser(other, "made by someone else", out IntPtr pw);
+            IsolatedUser.FreePassword(ref pw);
+            try
+            {
+                IsolatedUser.CleanupLeftovers();
+                add("leftover: an account with the prefix but another description is never touched", IsolatedUser.AccountExists(other), other);
+            }
+            finally { IsolatedUser.DeleteAccount(other); }
+        }
+        catch (System.ComponentModel.Win32Exception e) { add("isolated user: made, used and removed", false, $"error {e.NativeErrorCode}: {e.Message}"); }
+        catch (InvalidOperationException e) { add("isolated user: made, used and removed", false, e.Message); }
+        finally { u?.Dispose(); }
     }
 
     [System.Runtime.InteropServices.DllImport("kernel32.dll")] private static extern bool CloseHandle(IntPtr h);

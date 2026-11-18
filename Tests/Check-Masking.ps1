@@ -341,8 +341,8 @@ try {
     $saveFn = $page.Substring($page.IndexOf('function Invoke-MaskSave'), $page.IndexOf('function Remove-MaskSet') - $page.IndexOf('function Invoke-MaskSave'))
     $confirmAt = $saveFn.IndexOf('Confirm-Action'); $confirmedAt = $saveFn.IndexOf('$p.Confirmed = $true')
     Test-Check 'page: a group is only created after Confirm-Action that names group, OU and domain; -Confirmed is set after it, never before; a changed assignment is confirmed with old and new meaning' ($confirmAt -gt 0 -and $confirmAt -lt $confirmedAt -and $saveFn.Contains('Create the group') -and $saveFn.Contains('OU $($p.CreateGroup.OuDn)') -and $saveFn.Contains('domain $($p.Directory.DnsName)') -and $saveFn.Contains('$preview.AssignmentChange.Old') -and $saveFn.Contains('$preview.AssignmentChange.New') -and $saveFn.IndexOf('$p.ExpectedChange = ') -gt $saveFn.LastIndexOf('Confirm-Action')) $null
-    $pwOk = (([regex]::Matches($page, 'Assert-MaskWrite')).Count -ge 5) -and (([regex]::Matches($page, 'Invoke-MaskChange -Title')).Count -eq 6)
-    $pwClear = (([regex]::Matches($page, 'finally \{ if \(\$lc\) \{ & \$lc\.Close \}; \$ui\.PwdMask\.Clear\(\) \}')).Count -eq 3) -and $saveFn.IndexOf('try {') -lt $saveFn.IndexOf('Get-MaskRequest') -and $saveFn.IndexOf('try {') -lt $saveFn.IndexOf('return')
+    $pwOk = (([regex]::Matches($page, 'Assert-MaskWrite')).Count -ge 7) -and (([regex]::Matches($page, 'Invoke-MaskChange -Title')).Count -eq 8)
+    $pwClear = (([regex]::Matches($page, 'finally \{ if \(\$lc\) \{ & \$lc\.Close \}; \$ui\.PwdMask\.Clear\(\) \}')).Count -eq 4) -and $saveFn.IndexOf('try {') -lt $saveFn.IndexOf('Get-MaskRequest') -and $saveFn.IndexOf('try {') -lt $saveFn.IndexOf('return')
     $pwNoText = ($page -notmatch 'PwdMask\.Password\b') -and ($page -notmatch 'ConvertFrom-SecureString|SecureStringToBSTR|Marshal')
     $secureDisposed = $page.Contains('$secure.Dispose()') -and $page.Contains('$secure = $ui.PwdMask.SecurePassword') -and -not $page.Contains('-Password $ui.PwdMask.SecurePassword')
     Test-Check 'page: every change asks the write gate and runs as a task' ($pwOk) $null
@@ -597,6 +597,101 @@ try {
     # review 2 of #69: the drive letter of a rule path and the digits of a SID are ASCII only (Kelvin sign, Arabic-Indic digit)
     $arSid = 'S-1-5-21-1-2-' + [string][char]0x663
     Test-Check 'review69b ASCII: a rule folder with the Kelvin sign as drive letter is refused (C: is accepted); a SID with an Arabic-Indic digit is refused as group SID' ((Test-AVDTuneMaskingRulePath ($K + ':\Users\Public\Desktop') 'A.lnk') -ne '' -and (Test-AVDTuneMaskingRulePath 'C:\Users\Public\Desktop' 'A.lnk') -eq '' -and (Get-ThrownText { Get-AVDTuneShortcutChange -M $L.M -Row $l0[1] -Mode 'Only members of a group' -GroupSid $arSid -Directory $dirG }) -like 'Choose the group*') $null
+
+    # ---------------------------------------------------------------- issue 74: several rows in one run with one undo record; a collective rule set split per entry
+    Get-ChildItem (Join-Path $tmp 'config') -Filter 'masking-undo*.json' -ErrorAction SilentlyContinue | Remove-Item -Force
+    $B = New-Env -Seed $deskSeed -LdapSeed $ldapSeed
+    $lb = @(Get-AVDTuneMaskingList -M $B.M -Directory $dirG)
+    $chA = Get-AVDTuneShortcutChange -M $B.M -Row $lb[0] -Mode 'Nobody except administrators' -Directory $dirG
+    $chB = Get-AVDTuneShortcutChange -M $B.M -Row $lb[1] -Mode 'Only members of a group' -GroupSid 'S-1-5-21-1-2-3-1201' -Directory $dirG
+    $pvB = Save-AVDTuneMaskingRows -Machine $B.Machine -M $B.M -Root $tmp -Changes @($chA, $chB) -Ldap $B.Ldap -Conn c -WhatIf
+    Test-Check 'rows74 preview: two rows are previewed together (both rule sets), nothing is written' ($B.M.Store.Files.Count -eq 0 -and @($pvB.Results).Count -eq 4 -and -not (Test-Path (Get-AVDTuneMaskingUndoPath $tmp))) (($pvB.Results | ForEach-Object { "$($_.Id) $($_.Status)" }) -join '; ')
+    $svB = Save-AVDTuneMaskingRows -Machine $B.Machine -M $B.M -Root $tmp -Changes @($chA, $chB) -Ldap $B.Ldap -Conn c -User a -SnapshotId s
+    $recB = Read-AVDTuneJson (Get-AVDTuneMaskingUndoPath $tmp)
+    Test-Check 'rows74 save: two rows = two rule sets written in ONE run (4 files) with ONE undo record that holds the files of both' (@($svB.Results | Where-Object Status -eq 'Changed').Count -eq 4 -and $null -ne (Get-Written $B $chA.RuleSet 'fxr') -and (Get-Written $B $chB.RuleSet 'fxa') -like '*Sales Team*' -and @($recB.Files).Count -eq 4 -and @(Get-ChildItem (Join-Path $tmp 'config') -Filter 'masking-undo.*.json').Count -eq 0) $null
+    $uB = Undo-AVDTuneMaskingChange -Machine $B.Machine -M $B.M -Root $tmp -User a -SnapshotId s
+    Test-Check 'rows74 undo: one undo puts back all rows of the run together (both rule sets gone)' ($B.M.Store.Files.Count -eq 0 -and @($uB.Results | Where-Object Status -eq 'Failed').Count -eq 0 -and @($uB.Results).Count -eq 4) (($uB.Results | ForEach-Object { "$($_.Id) $($_.Status) $($_.Message)" }) -join '; ')
+    [void](Save-AVDTuneMaskingRows -Machine $B.Machine -M $B.M -Root $tmp -Changes @($chA, $chB) -Ldap $B.Ldap -Conn c -User a -SnapshotId s)
+    $lb2 = @(Get-AVDTuneMaskingList -M $B.M -Directory $dirG)
+    $chA2 = Get-AVDTuneShortcutChange -M $B.M -Row $lb2[0] -Mode 'Everyone' -Directory $dirG
+    $chB2 = Get-AVDTuneShortcutChange -M $B.M -Row $lb2[1] -Mode 'Only members of a group' -GroupSid 'S-1-5-21-1-2-3-1202' -Directory $dirG
+    $noExpB = Get-ThrownText { Save-AVDTuneMaskingRows -Machine $B.Machine -M $B.M -Root $tmp -Changes @($chA2, $chB2) -Ldap $B.Ldap -Conn c -User a -SnapshotId s }
+    Test-Check 'rows74: a changed assignment in one row without its confirmed Old and New stops the whole run before anything is written (the other row is not removed either)' ($noExpB -like '*would change*' -and $B.M.Store.Files.Count -eq 4 -and $null -ne (Get-Written $B $chA2.RuleSet 'fxr')) $noExpB
+    $pvB2 = Save-AVDTuneMaskingRows -Machine $B.Machine -M $B.M -Root $tmp -Changes @($chA2, $chB2) -Ldap $B.Ldap -Conn c -WhatIf
+    $expB = @{}; foreach ($a in @($pvB2.AssignmentChanges)) { $expB[$a.RuleSet] = @{ Old = $a.Old; New = $a.New } }
+    $svB2 = Save-AVDTuneMaskingRows -Machine $B.Machine -M $B.M -Root $tmp -Changes @($chA2, $chB2) -Ldap $B.Ldap -Conn c -ExpectedChanges $expB -User a -SnapshotId s
+    Test-Check 'rows74: the preview names the assignment change per rule set; with the confirmed change a remove and a save run together' (@($pvB2.AssignmentChanges).Count -eq 1 -and $pvB2.AssignmentChanges[0].RuleSet -eq $chB2.RuleSet -and $null -eq (Get-Written $B $chA2.RuleSet 'fxr') -and (Get-Written $B $chB2.RuleSet 'fxa') -like '*Staff*' -and @($svB2.Results | Where-Object Status -eq 'Failed').Count -eq 0) $null
+    $uB2 = Undo-AVDTuneMaskingChange -Machine $B.Machine -M $B.M -Root $tmp -User a -SnapshotId s
+    Test-Check 'rows74 undo: a run with a remove and a save is put back together (the removed rule set is back, the other has its old group again)' ($null -ne (Get-Written $B $chA2.RuleSet 'fxr') -and (Get-Written $B $chB2.RuleSet 'fxa') -like '*Sales Team*' -and @($uB2.Results | Where-Object Status -eq 'Failed').Count -eq 0) $null
+    $mkGroup = [pscustomobject]@{ Name = 'X.lnk'; RuleSet = 'Desktop-X'; Action = 'Save'; ExpectedSha = $null; SaveParams = @{ Name = 'Desktop-X'; Entries = @(@{ Folder = $pd; Name = 'X.lnk' }); Visibility = 'HiddenExceptGroups'; CreateGroup = @{ Kind = 'Local'; Name = 'AVDTune-App-X' } } }
+    $none = [pscustomobject]@{ Name = 'Y.lnk'; RuleSet = 'Desktop-Y'; Action = 'None' }
+    Test-Check 'rows74: no row with a change, the same rule set twice and a row that would create a group are refused; nothing is written' ((Get-ThrownText { Save-AVDTuneMaskingRows -Machine $B.Machine -M $B.M -Root $tmp -Changes @($none) -WhatIf }) -like '*No row*' -and (Get-ThrownText { Save-AVDTuneMaskingRows -Machine $B.Machine -M $B.M -Root $tmp -Changes @($chA, $chA) -WhatIf }) -like '*twice*' -and (Get-ThrownText { Save-AVDTuneMaskingRows -Machine $B.Machine -M $B.M -Root $tmp -Changes @($mkGroup) -WhatIf }) -like '*never creates a group*' -and $B.M.Store.Files.Count -eq 4) $null
+
+    $S = New-Env -Seed $deskSeed -LdapSeed $ldapSeed
+    [void](Save-AVDTuneRuleSet -Machine $S.Machine -M $S.M -Root $tmp -Name 'Public Desktop' -Entries @(@{ Folder = $pd; Name = 'App One.lnk' }, @{ Folder = $pd; Name = 'App Two.lnk' }) -Visibility Hidden -User a -SnapshotId s)
+    $fxaOld = Get-Written $S 'Public Desktop' 'fxa'
+    $ls0 = @(Get-AVDTuneMaskingList -M $S.M -Directory $dirG)
+    $spv = Split-AVDTuneRuleSet -Machine $S.Machine -M $S.M -Root $tmp -Name 'Public Desktop' -WhatIf
+    Test-Check 'split74 preview: one rule set per entry, named like the rows of the list; the rows were locked before; nothing is written' ((@($spv.Split.To) -join ',') -eq 'Desktop-App One,Desktop-App Two' -and $S.M.Store.Files.Count -eq 2 -and @($ls0 | Where-Object { $_.Name -in 'App One.lnk', 'App Two.lnk' -and -not $_.Editable }).Count -eq 2) (@($spv.Split.To) -join ',')
+    $noSha = Get-ThrownText { Split-AVDTuneRuleSet -Machine $S.Machine -M $S.M -Root $tmp -Name 'Public Desktop' -User a -SnapshotId s }
+    Test-Check 'split74: without the hashes of the preview nothing is written' ($noSha -like '*preview*' -and $S.M.Store.Files.Count -eq 2) $noSha
+    $ssv = Split-AVDTuneRuleSet -Machine $S.Machine -M $S.M -Root $tmp -Name 'Public Desktop' -ExpectedSha $spv.Split.Sha -User a -SnapshotId s
+    $ls1 = @(Get-AVDTuneMaskingList -M $S.M -Directory $dirG)
+    $one = Get-Written $S 'Desktop-App One' 'fxr'
+    Test-Check 'split74: each new rule set holds its one rule and the same assignment (bytes); the collective set is gone; the rows are editable with the same visibility' ((Get-Written $S 'Desktop-App One' 'fxa') -ceq $fxaOld -and (Get-Written $S 'Desktop-App Two' 'fxa') -ceq $fxaOld -and ([regex]::Matches($one, '0x00000222')).Count -eq 1 -and $one -like '*App One.lnk*' -and $null -eq (Get-Written $S 'Public Desktop' 'fxr') -and $null -eq (Get-Written $S 'Public Desktop' 'fxa') -and @($ls1 | Where-Object { $_.Name -in 'App One.lnk', 'App Two.lnk' -and $_.Editable -and $_.Mode -eq 'Nobody except administrators' }).Count -eq 2 -and @($ssv.Results | Where-Object Status -eq 'Failed').Count -eq 0) (($ssv.Results | ForEach-Object { "$($_.Id) $($_.Status) $($_.Message)" }) -join '; ')
+    $su = Undo-AVDTuneMaskingChange -Machine $S.Machine -M $S.M -Root $tmp -User a -SnapshotId s
+    Test-Check 'split74 undo: one undo puts the collective rule set back and removes the new ones' ((Get-Written $S 'Public Desktop' 'fxa') -ceq $fxaOld -and $null -eq (Get-Written $S 'Desktop-App One' 'fxr') -and $null -eq (Get-Written $S 'Desktop-App Two' 'fxa') -and $S.M.Store.Files.Count -eq 2) (($su.Results | ForEach-Object { "$($_.Id) $($_.Status) $($_.Message)" }) -join '; ')
+    $spv2 = Split-AVDTuneRuleSet -Machine $S.Machine -M $S.M -Root $tmp -Name 'Public Desktop' -WhatIf
+    $S.M.Store.Files["$rules\Public Desktop.fxa"] = ConvertTo-AVDTuneRuleBytes "1`t`r`n"
+    $chgd = Get-ThrownText { Split-AVDTuneRuleSet -Machine $S.Machine -M $S.M -Root $tmp -Name 'Public Desktop' -ExpectedSha $spv2.Split.Sha -User a -SnapshotId s }
+    Test-Check 'split74: a rule set that changed since the preview is not split' ($chgd -like '*changed since the preview*' -and $S.M.Store.Files.Count -eq 2) $chgd
+    $T = New-Env -Seed $deskSeed -LdapSeed $ldapSeed
+    [void](Save-AVDTuneRuleSet -Machine $T.Machine -M $T.M -Root $tmp -Name 'Public Desktop' -Entries @(@{ Folder = $pd; Name = 'App One.lnk' }, @{ Folder = $pd; Name = 'App Two.lnk' }) -Visibility Hidden -User a -SnapshotId s)
+    [void](Save-AVDTuneRuleSet -Machine $T.Machine -M $T.M -Root $tmp -Name 'Desktop-App Two' -Entries @(@{ Folder = $pd; Name = 'Old.lnk' }) -Visibility Hidden -User a -SnapshotId s)
+    [void](Save-AVDTuneRuleSet -Machine $T.Machine -M $T.M -Root $tmp -Name 'Mixed74' -Entries @(@{ Folder = $pd; Name = 'App One.lnk' }, @{ Folder = 'C:\Some'; Name = 'file.exe' }) -Visibility Hidden -User a -SnapshotId s)
+    [void](Save-AVDTuneRuleSet -Machine $T.Machine -M $T.M -Root $tmp -Name 'Single74' -Entries @(@{ Folder = $pd; Name = 'Old.lnk' }) -Visibility Hidden -User a -SnapshotId s)
+    $before = $T.M.Store.Files.Count
+    $ex = Get-ThrownText { Split-AVDTuneRuleSet -Machine $T.Machine -M $T.M -Root $tmp -Name 'Public Desktop' -WhatIf }
+    $out = Get-ThrownText { Split-AVDTuneRuleSet -Machine $T.Machine -M $T.M -Root $tmp -Name 'Mixed74' -WhatIf }
+    $sg = Get-ThrownText { Split-AVDTuneRuleSet -Machine $T.Machine -M $T.M -Root $tmp -Name 'Single74' -WhatIf }
+    Test-Check 'split74: refused when a target rule set exists already, when a rule is not on the Public Desktop and when there is only one rule; nothing is written' ($ex -like "*'Desktop-App Two' exists already*" -and $out -like '*not on the Public Desktop*' -and $sg -like '*fewer than two*' -and $T.M.Store.Files.Count -eq $before) "$ex | $out | $sg"
+    $pg74 = [IO.File]::ReadAllText((Join-Path $repo 'AVDTune-AppMasking.ps1'))
+    $rowsFn = $pg74.Substring($pg74.IndexOf('function Invoke-MaskRows'), $pg74.IndexOf('function Split-MaskSet') - $pg74.IndexOf('function Invoke-MaskRows'))
+    $splitFn = $pg74.Substring($pg74.IndexOf('function Split-MaskSet'), [regex]::Match($pg74, '(?m)^Build-MaskPage\r?\nAdd-Click').Index - $pg74.IndexOf('function Split-MaskSet'))
+    $r1 = $rowsFn.IndexOf('Assert-MaskWrite'); $r2 = $rowsFn.IndexOf('Confirm-Action'); $r3 = $rowsFn.LastIndexOf('Get-MaskLdap'); $r4 = $rowsFn.IndexOf('Invoke-MaskChange')
+    Test-Check 'page74: "Save all changes" saves after the write gate and one confirmation with old and new of every row; the DC connection of the write path comes after it; one task; the password box is cleared in finally; the preview returns before the gate' ($r1 -gt 0 -and $r1 -lt $r2 -and $r2 -lt $r3 -and $r3 -lt $r4 -and $rowsFn.IndexOf('-WhatIf') -lt $r1 -and $rowsFn.Contains('-ExpectedChanges $exp') -and $rowsFn.Contains('finally { if ($lc) { & $lc.Close }; $ui.PwdMask.Clear() }') -and $pg74.Contains('$ui.BtnMaskSaveAll = New-MaskButton') -and $pg74.Contains('[void](Set-AVDTuneWriterButton $ui.BtnMaskSaveAll)')) $null
+    Test-Check 'page74: "Split per entry" asks the write gate, previews, confirms with the new names and hands the hashes of the preview on' ($splitFn.IndexOf('Assert-MaskWrite') -gt 0 -and $splitFn.IndexOf('Assert-MaskWrite') -lt $splitFn.IndexOf('Confirm-Action') -and $splitFn.Contains('-ExpectedSha $sha') -and $splitFn.Contains('Invoke-MaskChange') -and $pg74.Contains("New-MaskButton 'Split per entry'")) $null
+
+    # ---------------------------------------------------------------- issue 75: the domain account of the start sequence, in memory for this session, only for a pinned server
+    $pw75 = New-Object System.Security.SecureString; foreach ($ch in 'Example-Pass1'.ToCharArray()) { $pw75.AppendChar($ch) }
+    Clear-AVDTuneSessionDcAccount
+    $empty75 = Get-AVDTuneSessionDcAccount -Pins @{ 'dc1.example.test' = 'ab' }
+    Set-AVDTuneSessionDcAccount -Server 'dc1.example.test' -User 'EXAMPLE\admin' -Password $pw75
+    $pw75.Dispose()   # the caller's own copy: the kept one does not depend on it
+    $unpinned = Get-AVDTuneSessionDcAccount -Pins @{}
+    $otherPin = Get-AVDTuneSessionDcAccount -Pins @{ 'dc2.example.test' = 'ab' }
+    $emptyPin = Get-AVDTuneSessionDcAccount -Pins @{ 'dc1.example.test' = '' }
+    $info75 = Get-AVDTuneSessionDcAccount -Pins @{ 'DC1.example.test'.ToLowerInvariant() = 'ab' } -Info
+    $got75 = Get-AVDTuneSessionDcAccount -Pins @{ 'dc1.example.test' = 'ab' }
+    $len75 = $got75.Password.Length; $got75.Password.Dispose()
+    $again75 = Get-AVDTuneSessionDcAccount -Pins @{ 'dc1.example.test' = 'ab' }
+    Test-Check 'dc75: the account of the start sequence is offered only for its pinned server (no pin, another server, an empty pin: nothing); -Info has no password; every call gives a new copy the caller disposes' ($null -eq $empty75 -and $null -eq $unpinned -and $null -eq $otherPin -and $null -eq $emptyPin -and $info75.User -eq 'EXAMPLE\admin' -and $info75.Server -eq 'dc1.example.test' -and -not $info75.PSObject.Properties['Password'] -and $len75 -eq 13 -and $again75.Password.Length -eq 13) "len=$len75"
+    $again75.Password.Dispose()
+    $badSet = Get-ThrownText { $x = New-Object System.Security.SecureString; $x.AppendChar('a'); Set-AVDTuneSessionDcAccount -Server 'dc1 example' -User 'EXAMPLE\admin' -Password $x }
+    $afterBad = Get-AVDTuneSessionDcAccount -Pins @{ 'dc1.example.test' = 'ab' }
+    Test-Check 'dc75: an invalid server is refused and the old account is not replaced by it' ($badSet -like '*not kept*' -and $afterBad.Server -eq 'dc1.example.test') $badSet
+    $afterBad.Password.Dispose()
+    Clear-AVDTuneSessionDcAccount
+    Test-Check 'dc75: Clear forgets the account (window closed, failed sign-in with it)' ($null -eq (Get-AVDTuneSessionDcAccount -Pins @{ 'dc1.example.test' = 'ab' })) $null
+    $dirSrc = [IO.File]::ReadAllText((Join-Path $repo 'Modules\AVDTune.Directory.psm1'))
+    $region75 = $dirSrc.Substring($dirSrc.IndexOf('#region account of the start sequence'), $dirSrc.IndexOf('Export-ModuleMember') - $dirSrc.IndexOf('#region account of the start sequence'))
+    $startSrc = [IO.File]::ReadAllText((Join-Path $repo 'AVDTune-Start.ps1'))
+    $shellSrc = [IO.File]::ReadAllText((Join-Path $repo 'Start-AVDTune.ps1'))
+    $pg75 = [IO.File]::ReadAllText((Join-Path $repo 'AVDTune-AppMasking.ps1'))
+    $ldapFn = $pg75.Substring($pg75.IndexOf('function Get-MaskLdap'), $pg75.IndexOf('function Invoke-MaskChange') - $pg75.IndexOf('function Get-MaskLdap'))
+    $iConn = $startSrc.IndexOf("        'Connected' {"); $iSet = $startSrc.IndexOf('Set-AVDTuneSessionDcAccount -Server $server -User $user -Password $f.Secure'); $iDisp = $startSrc.IndexOf('$f.PasswordBox.Clear(); $f.Secure.Dispose(); $f.Secure = $null')
+    Test-Check 'dc75 (source): kept only after a successful read of the start sequence, before its own copy is disposed; forgotten when the window closes; the kept password is copied and read only, never written or turned into text' ($iConn -gt 0 -and $iSet -gt $iConn -and $iSet -lt $iDisp -and $shellSrc.Contains('try { Clear-AVDTuneSessionDcAccount } catch { }') -and $region75.Contains('$copy = $Password.Copy(); $copy.MakeReadOnly()') -and $region75 -notmatch 'ConvertFrom-SecureString|SecureStringToBSTR|Marshal|Write-AVDTune|Set-Content|Out-File|Add-Content|Add-StartProtocol|Register-StepResult') $null
+    Test-Check 'dc75 (source): App Masking takes the kept account only when its password box is empty, with the pins of the environment, disposes the copy in finally, and forgets the account when the sign-in with it fails or throws (N3)' ($ldapFn.Contains('if ($secure.Length -eq 0) {') -and $ldapFn.Contains('Get-AVDTuneSessionDcAccount -Pins $pins') -and $ldapFn.Contains('-Pins $pins') -and $ldapFn.Contains('finally { $secure.Dispose() }') -and $ldapFn.Contains("if (`$r.Status -ne 'Connected' -and `$fromStart) { Clear-AVDTuneSessionDcAccount") -and $pg75.Contains('Get-AVDTuneSessionDcAccount -Pins (Get-AVDTuneDcPins (Get-AVDTuneEnvironment $script:StateRoot)) -Info') -and $ldapFn.Contains('catch { if ($fromStart) { Clear-AVDTuneSessionDcAccount; Update-MaskDcHint }; throw }') -and $ldapFn.IndexOf('catch { if ($fromStart)') -lt $ldapFn.IndexOf('finally { $secure.Dispose() }')) $null
 }
 finally {
     Close-AVDTuneWriteGate

@@ -16,6 +16,7 @@ function New-AVDTuneFakeMachine {
         Paths = @(@($Seed.Paths) | Where-Object { $_ }); Dirs = $(if ($Seed.Dirs) { $Seed.Dirs } else { @{} }); Hotfixes = @(@($Seed.Hotfixes) | Where-Object { $_ }); NetAdapters = @(@($Seed.NetAdapters) | Where-Object { $_ })
         Files = @{}; Folders = @{}; Acl = $(if ($Seed.Acl) { $Seed.Acl } else { @{} }); Pnp = @(@($Seed.Pnp) | Where-Object { $_ }); Arch = $(if ($Seed.Arch) { $Seed.Arch } else { 'AMD64' }); Tpm = $(if ($Seed.ContainsKey('Tpm')) { $Seed.Tpm } else { $null })
         Firmware = $(if ($Seed.ContainsKey('Firmware')) { $Seed.Firmware } else { $null })
+        BenchUsers = @(@($Seed.BenchUsers) | Where-Object { $_ }); BenchUserRemoveFails = [bool]$Seed.BenchUserRemoveFails   # #92: temporary benchmark users left behind (Name, Sid, Profile, Account); removal that fails (profile in use)
     }
     $win = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion'
     $office = 'HKLM:\SOFTWARE\Microsoft\Office\ClickToRun\Configuration'
@@ -185,6 +186,13 @@ function New-AVDTuneFakeMachine {
         [void]$store.Hive.Log.Add('reg unload HKU\AVDTune_DefaultUser')
         if ($store.Hive.StuckUnloads -gt 0) { $store.Hive.StuckUnloads--; return 1 }
         $store.Hive.Loaded = $false; $store.Hive.Unloads++; 0
+    }.GetNewClosure()
+    $m.BenchUsers = { @($store.BenchUsers) }.GetNewClosure()
+    $m.BenchUserRemove = {
+        param($Sid)
+        [void]$store.Log.Add("BenchUserRemove $Sid")
+        if ($store.BenchUserRemoveFails) { throw 'The profile of avdtb-0123456789ab is in use: restart the master, then remove it.' }
+        $store.BenchUsers = @($store.BenchUsers | Where-Object { $_.Sid -ne $Sid })
     }.GetNewClosure()
     ConvertTo-AVDTuneFakeShared ([pscustomobject]$m)
 }

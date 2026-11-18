@@ -447,5 +447,40 @@ function New-AVDTuneLdapAdapter {
 
 #endregion
 
-Export-ModuleMember -Function Test-AVDTuneIpAddress, Get-AVDTuneLdapRiskText, Test-AVDTuneDcServer, Test-AVDTuneDomainUser, New-AVDTuneLdapOptions, Assert-AVDTuneLdapOptions, ConvertTo-AVDTuneLdapFilterValue, Connect-AVDTuneDirectory,
+#region account of the start sequence (#75)
+
+# The domain account of the start sequence, kept for this session only: server, account and a read-only copy of the password (SecureString). Never written to a file, the protocol or a text;
+# disposed by Clear-AVDTuneSessionDcAccount (window closed, failed sign-in with it, a new sign-in in the start sequence).
+$script:SessionDcAccount = $null
+
+function Set-AVDTuneSessionDcAccount {
+    <# Keeps the account after a successful sign-in in the start sequence. The password is copied (the caller disposes its own) and made read only; an older account is disposed. #>
+    param([Parameter(Mandatory)][string]$Server, [Parameter(Mandatory)][string]$User, [Parameter(Mandatory)][System.Security.SecureString]$Password)
+    if (-not (Test-AVDTuneDcServer $Server) -or -not (Test-AVDTuneDomainUser $User) -or $Password.Length -eq 0) { throw 'The account of the start sequence is not kept: server, account or password is not valid.' }
+    Clear-AVDTuneSessionDcAccount
+    $copy = $Password.Copy(); $copy.MakeReadOnly()
+    $script:SessionDcAccount = [pscustomobject]@{ Server = $Server; User = $User; Password = $copy }
+}
+
+function Get-AVDTuneSessionDcAccount {
+    <#
+        The account of the start sequence for a connection, or $null: only when its server is pinned in -Pins (server -> SHA-256, Get-AVDTuneDcPins), so the password goes only to the
+        domain controller whose certificate the administrator pinned. -Info returns Server and User without the password; otherwise Password is a NEW copy that the caller disposes.
+    #>
+    param([hashtable]$Pins = @{}, [switch]$Info)
+    $a = $script:SessionDcAccount
+    if (-not $a) { return $null }
+    if (-not $Pins.ContainsKey($a.Server.ToLowerInvariant()) -or -not [string]$Pins[$a.Server.ToLowerInvariant()]) { return $null }
+    if ($Info) { return [pscustomobject]@{ Server = $a.Server; User = $a.User } }
+    [pscustomobject]@{ Server = $a.Server; User = $a.User; Password = $a.Password.Copy() }
+}
+
+function Clear-AVDTuneSessionDcAccount {
+    if ($script:SessionDcAccount) { try { $script:SessionDcAccount.Password.Dispose() } catch { } }
+    $script:SessionDcAccount = $null
+}
+
+#endregion
+
+Export-ModuleMember -Function Set-AVDTuneSessionDcAccount, Get-AVDTuneSessionDcAccount, Clear-AVDTuneSessionDcAccount, Test-AVDTuneIpAddress, Get-AVDTuneLdapRiskText, Test-AVDTuneDcServer, Test-AVDTuneDomainUser, New-AVDTuneLdapOptions, Assert-AVDTuneLdapOptions, ConvertTo-AVDTuneLdapFilterValue, Connect-AVDTuneDirectory,
     Disconnect-AVDTuneDirectory, Get-AVDTuneDirectoryInfo, Save-AVDTuneDirectoryInfo, ConvertTo-AVDTuneSid, Get-AVDTuneOuTree, Get-AVDTuneLevelName, New-AVDTuneLdapAdapter, Get-AVDTuneJoinState, Test-AVDTuneJoinDomainName

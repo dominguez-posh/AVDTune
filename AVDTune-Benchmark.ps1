@@ -75,6 +75,12 @@ function Complete-BenchJob {
     elseif ($result) {
         $script:BenchLast = $result.Result
         $ui.TxtBenchState.Text = "Finished: $($result.Summary)"
+        # #92 (Finn M1): a temporary benchmark user that was left behind or removed is said on the page and in the protocol
+        $userWarn = @(@($result.Warnings) | Where-Object { [string]$_ -like '*Temporary benchmark user*' })
+        if ($userWarn.Count -gt 0) {
+            $ui.TxtBenchState.Text += "`nWarning: " + ($userWarn -join "`n")
+            [void](Add-AVDTuneProtocolNote -Protocol $script:Protocol -Group 'benchmark' -Subject ('Warning: ' + ($userWarn -join ' ')))
+        }
         Show-Toast "Benchmark finished: $($result.Summary)"
         Complete-AVDTuneUiTask $job.Task -Summary "Benchmark finished: $($result.Summary)"
         [void](Add-AVDTuneProtocolNote -Protocol $script:Protocol -Group 'benchmark' -Subject $result.Summary)

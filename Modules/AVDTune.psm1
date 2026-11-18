@@ -534,7 +534,49 @@ function New-AVDTuneMachine {
     $m.HiveLoaded = { $k = [Microsoft.Win32.Registry]::Users.OpenSubKey('AVDTune_DefaultUser'); if ($k) { $k.Close(); $true } else { $false } }
     $run = $m.Run   # the one program start of the adapter (child environment, timeout)
     $m.HiveUnload = { [int](& $run (Join-Path (Get-AVDTuneSystemFolder System) 'reg.exe') @('unload', 'HKU\AVDTune_DefaultUser') 60).ExitCode }.GetNewClosure()
+    # Temporary standard users of the benchmark that a crash left behind (#92, Finn M1): found and removed before the finish
+    $m.BenchUsers = { Get-AVDTuneBenchUserLeftovers }
+    $m.BenchUserRemove = { param($Sid) Remove-AVDTuneBenchUserLeftover -Sid $Sid }
     [pscustomobject]$m
+}
+
+$script:BenchUserMarker = 'AVDTune benchmark: temporary standard user, removed after the run'   # the description AVDTune.Bench.exe gives the account (Bench\src\IsolatedUser.cs, Marker)
+
+function Get-AVDTuneBenchUserLeftovers {
+    <#
+        Accounts of the benchmark's temporary standard user (#92) that are still there: local accounts named avdtb-<12 hex digits> WITH AVDTune's marker as description (an account of that
+        name without the marker is not AVDTune's and is never listed), and profiles of that folder name whose account is gone. Name, Sid, Profile (folder or ''), Account (exists).
+    #>
+    $pat = '\Aavdtb-[0-9a-f]{12}\z'
+    $users = @(Get-LocalUser -ErrorAction Stop | Where-Object { [string]$_.Name -cmatch $pat -and [string]$_.Description -ceq $script:BenchUserMarker })
+    $profiles = @(Get-CimInstance -ClassName Win32_UserProfile -ErrorAction Stop)
+    $known = @($users | ForEach-Object { $_.SID.Value })
+    $out = @(foreach ($u in $users) {
+            $sid = $u.SID.Value; $pr = @($profiles | Where-Object { [string]$_.SID -eq $sid })[0]
+            [pscustomobject]@{ Name = [string]$u.Name; Sid = $sid; Profile = $(if ($pr) { [string]$pr.LocalPath } else { '' }); Account = $true }
+        })
+    foreach ($pr in $profiles) {
+        $leaf = Split-Path ([string]$pr.LocalPath) -Leaf
+        if ($leaf -cnotmatch '\Aavdtb-[0-9a-f]{12}(\.[A-Za-z0-9_-]{1,32})?\z' -or [string]$pr.SID -in $known) { continue }
+        $acct = $null; try { $acct = (New-Object System.Security.Principal.SecurityIdentifier ([string]$pr.SID)).Translate([System.Security.Principal.NTAccount]) } catch { }
+        if ($acct) { continue }   # the account exists without the marker: not AVDTune's
+        $out += [pscustomobject]@{ Name = $leaf; Sid = [string]$pr.SID; Profile = [string]$pr.LocalPath; Account = $false }
+    }
+    @($out)
+}
+
+function Remove-AVDTuneBenchUserLeftover {
+    <# Removes one of Get-AVDTuneBenchUserLeftovers by SID (read again: only what is still listed): the profile (Win32_UserProfile, folder and registry), then the account. A loaded profile stops it. #>
+    param([Parameter(Mandatory)][string]$Sid)
+    if ($Sid -cnotmatch '\AS-1-5-21-[0-9]{1,10}-[0-9]{1,10}-[0-9]{1,10}-[0-9]{1,10}\z') { throw "'$Sid' is not a local account SID." }
+    $item = @(Get-AVDTuneBenchUserLeftovers | Where-Object { $_.Sid -ceq $Sid })[0]
+    if (-not $item) { return }
+    $pr = @(Get-CimInstance -ClassName Win32_UserProfile -Filter "SID='$Sid'" -ErrorAction Stop)[0]
+    if ($pr) {
+        if ([bool]$pr.Loaded) { throw "The profile of $($item.Name) is in use: restart the master, then remove it." }
+        Remove-CimInstance -InputObject $pr -ErrorAction Stop
+    }
+    if ($item.Account) { Remove-LocalUser -SID $Sid -ErrorAction Stop }
 }
 
 function Invoke-AVDTuneDefaultHiveUnload {
@@ -2678,7 +2720,7 @@ function Get-AVDTuneOverview {
 
 #endregion
 
-Export-ModuleMember -Function Move-AVDTuneFileReplace, Get-AVDTuneDcFromNtDomain, Get-AVDTuneSystemFolder, Get-AVDTuneSystemModulePath, Set-AVDTuneSafeModulePath, Test-AVDTuneModulePathStable, Assert-AVDTuneModulePathStable, Get-AVDTuneModulePathProblems, New-AVDTunePowerShell, New-AVDTuneRunspacePool, Get-AVDTuneChocolateyRoot, Get-AVDTuneChildTool, Initialize-AVDTuneToolTemp, Get-AVDTuneChildEnvironment, Get-AVDTuneProfilePath, Get-AVDTuneHklmValue, New-AVDTuneChildStartInfo, Invoke-AVDTuneChildProcess, Invoke-AVDTuneProgram, Open-AVDTuneSystemProgram, New-AVDTuneDownloadFolder, New-AVDTuneOwnFolder, Test-AVDTuneOwnFolder, New-AVDTuneAdminFile, Set-AVDTuneProcessTemp, Initialize-AVDTuneTempParent, Test-AVDTuneWindowsSignature, Test-AVDTuneSystemProgramPath, Get-AVDTuneProp, Get-AVDTuneWebResponse, Test-AVDTuneElevated, Get-AVDTuneRoot, Test-AVDTuneDefaultRoot, Test-AVDTuneTestMode, Resolve-AVDTuneTestScript, Get-AVDTuneLongPath, Get-AVDTuneTestModeRefusal, Confirm-AVDTuneAction, ConvertTo-AVDTuneArgument, New-AVDTuneMachine, Invoke-AVDTuneMachine, Invoke-AVDTuneDefaultHiveUnload, Remove-AVDTuneTreeSafe,
+Export-ModuleMember -Function Get-AVDTuneBenchUserLeftovers, Remove-AVDTuneBenchUserLeftover, Move-AVDTuneFileReplace, Get-AVDTuneDcFromNtDomain, Get-AVDTuneSystemFolder, Get-AVDTuneSystemModulePath, Set-AVDTuneSafeModulePath, Test-AVDTuneModulePathStable, Assert-AVDTuneModulePathStable, Get-AVDTuneModulePathProblems, New-AVDTunePowerShell, New-AVDTuneRunspacePool, Get-AVDTuneChocolateyRoot, Get-AVDTuneChildTool, Initialize-AVDTuneToolTemp, Get-AVDTuneChildEnvironment, Get-AVDTuneProfilePath, Get-AVDTuneHklmValue, New-AVDTuneChildStartInfo, Invoke-AVDTuneChildProcess, Invoke-AVDTuneProgram, Open-AVDTuneSystemProgram, New-AVDTuneDownloadFolder, New-AVDTuneOwnFolder, Test-AVDTuneOwnFolder, New-AVDTuneAdminFile, Set-AVDTuneProcessTemp, Initialize-AVDTuneTempParent, Test-AVDTuneWindowsSignature, Test-AVDTuneSystemProgramPath, Get-AVDTuneProp, Get-AVDTuneWebResponse, Test-AVDTuneElevated, Get-AVDTuneRoot, Test-AVDTuneDefaultRoot, Test-AVDTuneTestMode, Resolve-AVDTuneTestScript, Get-AVDTuneLongPath, Get-AVDTuneTestModeRefusal, Confirm-AVDTuneAction, ConvertTo-AVDTuneArgument, New-AVDTuneMachine, Invoke-AVDTuneMachine, Invoke-AVDTuneDefaultHiveUnload, Remove-AVDTuneTreeSafe,
     New-AVDTuneStateSecurity, Initialize-AVDTuneState, Read-AVDTuneAclInfo, Get-AVDTuneStateSecurityProblems, Move-AVDTuneStateToQuarantine, New-AVDTuneProtectedFolder, Assert-AVDTuneStateSecurity, Get-AVDTuneStateSecurityReport, Get-AVDTuneState, Set-AVDTuneState, Test-AVDTuneImageVersion, Get-AVDTuneNextImageVersion, Start-AVDTuneImageVersion,
     Add-AVDTuneRun, Get-AVDTuneRun, Remove-AVDTuneOldRuns, Get-AVDTuneEnvInterrupted, Get-AVDTuneEnvHealthRow, Get-AVDTuneLastChange, Get-AVDTuneChangeTimes, Get-AVDTuneChangeMarker, Invoke-AVDTuneStateLock, Get-AVDTuneChangeStopError, Test-AVDTuneSealed, Assert-AVDTuneNotSealed, Test-AVDTuneChangeInProgress, Assert-AVDTuneNoForeignChange, Resolve-AVDTuneStaleChange, Start-AVDTuneChange, Stop-AVDTuneChange, Get-AVDTuneSnapshotClockBufferMinutes, ConvertTo-AVDTuneUtc, Get-AVDTuneSnapshotWindow, Test-AVDTuneSnapshotInWindow,New-AVDTuneStep, Invoke-AVDTuneStep, New-AVDTuneStepFromData, Get-AVDTuneStepCatalog, Invoke-AVDTune,
     Add-AVDTuneChangeLogEntry, Get-AVDTuneChangeLog, Get-AVDTuneChangeLogVersions, ConvertTo-AVDTuneChangeLogDocument, Export-AVDTuneChangeLog,

@@ -984,16 +984,34 @@ function Get-AVDTuneBenchShare {
 
 function Get-AVDTuneBenchShareHost([string]$Unc) { if ($Unc -match '^\\\\([^\\]+)\\') { $Matches[1] } else { '' } }
 
+function Get-AVDTuneBenchIsolatedWarnings {
+    <# The warnings of the temporary standard user of the application starts (#92, Finn M1) from the info block of an 'apps' result: an account that could not be removed, and accounts of an
+       earlier run that were removed now. Texts only from the measure program's result, as data. #>
+    param($Result)
+    $iu = Get-AVDTuneProp (Get-AVDTuneProp $Result 'info') 'isolatedUser'
+    if (-not $iu) { return @() }
+    $out = @()
+    $prob = [string](Get-AVDTuneProp $iu 'cleanupProblem')
+    if ($prob) { $out += "Temporary benchmark user not removed completely: $prob. It is removed at the next benchmark start or with the readiness fix; Finish refuses while it is there." }
+    $left = @(@(Get-AVDTuneProp $iu 'leftoversRemoved') | Where-Object { $_ } | ForEach-Object { [string]$_ })
+    if ($left.Count -gt 0) { $out += "Temporary benchmark user of an earlier run found and removed: $($left -join '; ')." }
+    @($out)
+}
+
 function Invoke-AVDTuneBenchApps {
-    # Application starts and Speedometer (design 1.1). Warm-up: no cold start, no Speedometer; quick: no cold start, one Speedometer iteration. The program paths are checked by the adapter
-    param([Parameter(Mandatory)]$Bench, [Parameter(Mandatory)][string]$WorkDir, [ValidateSet('Full', 'Quick')][string]$Mode = 'Full', [switch]$WarmUp, [string]$SiteDir, [scriptblock]$Progress)
+    # Application starts and Speedometer (design 1.1). Warm-up: no cold start, no Speedometer; quick: no cold start, one Speedometer iteration. The program paths are checked by the adapter.
+    # -Warnings collects the warnings of the temporary standard user (Get-AVDTuneBenchIsolatedWarnings).
+    param([Parameter(Mandatory)]$Bench, [Parameter(Mandatory)][string]$WorkDir, [ValidateSet('Full', 'Quick')][string]$Mode = 'Full', [switch]$WarmUp, [string]$SiteDir, [scriptblock]$Progress,
+        [System.Collections.ArrayList]$Warnings)
     if ($Progress) { & $Progress 'Applications: starts' $null }
     $cliArgs = @('--quiet', '--dir', $WorkDir)
     if ($WarmUp -or $Mode -eq 'Quick') { $cliArgs += '--no-cold' }
     if ($WarmUp) { $cliArgs += '--no-speedometer' }
     if ($Mode -eq 'Quick') { $cliArgs += @('--speed-iterations', '1') }
     if ($SiteDir -and (Test-Path -LiteralPath (Join-Path $SiteDir 'index.html'))) { $cliArgs += @('--site', $SiteDir) }
-    ConvertFrom-AVDTuneBenchOutput (& $Bench.RunApps 'apps' $cliArgs)
+    $raw = & $Bench.RunApps 'apps' $cliArgs
+    if ($null -ne $Warnings) { foreach ($w in @(Get-AVDTuneBenchIsolatedWarnings $raw)) { [void]$Warnings.Add($w) } }
+    ConvertFrom-AVDTuneBenchOutput $raw
 }
 
 function Invoke-AVDTuneBenchGpu {
@@ -1269,7 +1287,7 @@ function Invoke-AVDTuneBenchRun {
         [ValidateSet('Full', 'Quick')][string]$Mode = 'Full', [switch]$WarmUp, [switch]$Sustained, [scriptblock]$Progress, [string]$Share, [string]$SiteDir)
     $scale = if ($WarmUp) { 0.4 } else { 1.0 }
     $diskSeconds = if ($WarmUp -or $Mode -eq 'Quick') { [int]$Config.diskspd.secondsShort } else { [int]$Config.diskspd.seconds }
-    $all = @(); $errors = @()
+    $all = @(); $errors = @(); $warn = New-Object System.Collections.ArrayList
     try { $all += @(Invoke-AVDTuneBenchDisk -Bench $Bench -Config $Config -Root $Root -WorkDir $WorkDir -DiskspdPath $DiskspdPath -Seconds $diskSeconds -Scale $scale -Progress $Progress) } catch { $errors += "disk: $($_.Exception.Message)" }
     $cpuArgs = @('--quiet', '--scale', ([string]$scale).Replace(',', '.'))
     if ($Sustained -and -not $WarmUp -and $Mode -eq 'Full') { $cpuArgs += '--sustained' }
@@ -1283,13 +1301,13 @@ function Invoke-AVDTuneBenchRun {
         catch { $errors += "${cmd}: $($_.Exception.Message)" }
     }
     try { $all += @(Invoke-AVDTuneBenchNetwork -Bench $Bench -Config $Config -Mode $(if ($WarmUp) { 'Quick' } else { $Mode }) -Progress $Progress) } catch { $errors += "network: $($_.Exception.Message)" }
-    try { $all += @(Invoke-AVDTuneBenchApps -Bench $Bench -WorkDir $WorkDir -Mode $Mode -WarmUp:$WarmUp -SiteDir $SiteDir -Progress $Progress) } catch { $errors += "applications: $($_.Exception.Message)" }
+    try { $all += @(Invoke-AVDTuneBenchApps -Bench $Bench -WorkDir $WorkDir -Mode $Mode -WarmUp:$WarmUp -SiteDir $SiteDir -Progress $Progress -Warnings $warn) } catch { $errors += "applications: $($_.Exception.Message)" }
     $gpuInfo = $null; $gpuPresent = $false
     try { $g = Invoke-AVDTuneBenchGpu -Bench $Bench -Scale $(if ($WarmUp -or $Mode -eq 'Quick') { 0.4 } else { 1.0 }) -Progress $Progress; $gpuInfo = $g.Info; $gpuPresent = $g.Present; $all += @($g.Measures) } catch { $errors += "gpu: $($_.Exception.Message)" }
     if ($Share) {
         try { $all += @(Invoke-AVDTuneBenchFslogix -Bench $Bench -Config $Config -Share $Share -WorkDir $WorkDir -DiskspdPath $DiskspdPath -Mode $Mode -WarmUp:$WarmUp -Progress $Progress) } catch { $errors += "fslogix: $($_.Exception.Message)" }
     }
-    [pscustomobject]@{ Measures = @($all); Errors = @($errors); GpuInfo = $gpuInfo; GpuPresent = $gpuPresent }
+    [pscustomobject]@{ Measures = @($all); Errors = @($errors); Warnings = @($warn); GpuInfo = $gpuInfo; GpuPresent = $gpuPresent }
 }
 
 #endregion
@@ -1879,6 +1897,7 @@ function Invoke-AVDTuneBenchmark {
         & $say 'Warm-up run (not counted) ...' 10
         $warm = Invoke-AVDTuneBenchRun -Bench $Bench -Config $config -Root $Root -WorkDir $work -DiskspdPath $diskspd -Mode $Mode -WarmUp -Share $Share -SiteDir $siteDir -Progress ({ param($t, $p) & $say "Warm-up: $t" $null }.GetNewClosure())
         $errors += @($warm.Errors | ForEach-Object { "warm-up $_" })
+        $warnings += @($warm.Warnings | ForEach-Object { "warm-up: $_" })
         $results = @()
         $gpuInfo = $null
         for ($r = 1; $r -le $runs; $r++) {
@@ -1888,6 +1907,7 @@ function Invoke-AVDTuneBenchmark {
             $results += , @($run.Measures)
             if ($run.GpuPresent) { $gpuInfo = $run.GpuInfo }
             $errors += @($run.Errors | ForEach-Object { "run $r $_" })
+            $warnings += @($run.Warnings | ForEach-Object { "run ${r}: $_" })
         }
         $capacityBlock = $null
         if ($Capacity) {
@@ -2012,7 +2032,7 @@ function Get-AVDTuneBenchmarkSummaryText {
 
 #endregion
 
-Export-ModuleMember -Function Get-AVDTuneBenchShare, Get-AVDTuneBenchShareHost, Invoke-AVDTuneBenchApps, Invoke-AVDTuneBenchGpu, Invoke-AVDTuneBenchFslogix, Invoke-AVDTuneBenchCapacity, Compare-AVDTuneCapacity, Get-AVDTuneVersionSortKey, Get-AVDTuneBenchmarkVersionResults, Get-AVDTunePreviousVersionResult, Get-AVDTuneBenchDelta, New-AVDTuneBenchmarkReport, Save-AVDTuneBenchmarkReport, Get-AVDTuneAppProgramPath, Invoke-AVDTuneVhdCycle, Get-AVDTuneBenchCategorySet, Get-AVDTuneBenchRound, Get-AVDTuneBenchmarkConfig, Initialize-AVDTuneBenchTemp, Get-AVDTuneBenchmarkReference, Get-AVDTuneBenchCategoryKey, Get-AVDTuneBenchMedian, Get-AVDTuneBenchCv, Get-AVDTuneBenchIndex,
+Export-ModuleMember -Function Get-AVDTuneBenchShare, Get-AVDTuneBenchShareHost, Get-AVDTuneBenchIsolatedWarnings, Invoke-AVDTuneBenchApps, Invoke-AVDTuneBenchGpu, Invoke-AVDTuneBenchFslogix, Invoke-AVDTuneBenchCapacity, Compare-AVDTuneCapacity, Get-AVDTuneVersionSortKey, Get-AVDTuneBenchmarkVersionResults, Get-AVDTunePreviousVersionResult, Get-AVDTuneBenchDelta, New-AVDTuneBenchmarkReport, Save-AVDTuneBenchmarkReport, Get-AVDTuneAppProgramPath, Invoke-AVDTuneVhdCycle, Get-AVDTuneBenchCategorySet, Get-AVDTuneBenchRound, Get-AVDTuneBenchmarkConfig, Initialize-AVDTuneBenchTemp, Get-AVDTuneBenchmarkReference, Get-AVDTuneBenchCategoryKey, Get-AVDTuneBenchMedian, Get-AVDTuneBenchCv, Get-AVDTuneBenchIndex,
     Get-AVDTuneBenchGeometricMean, Get-AVDTuneBenchWeightedGeometricMean, Get-AVDTuneBenchPercentile, Get-AVDTuneBenchmarkScores, ConvertFrom-AVDTuneDiskspdXml, New-AVDTuneBenchAdapter,
     Get-AVDTuneDiskspd, Test-AVDTuneBenchmarkPreconditions, Wait-AVDTuneUpdateIdle, Get-AVDTuneBenchmarkJournalPath, Get-AVDTuneBenchmarkRestoreScriptPath, New-AVDTuneBenchmarkRestoreScript,
     Start-AVDTuneBenchmarkQuiet, Stop-AVDTuneBenchmarkQuiet, Get-AVDTuneBenchmarkCrash, Repair-AVDTuneBenchmarkCrash, Test-AVDTuneBenchmarkClean, Get-AVDTuneBenchRestoreAction, Remove-AVDTuneDiskspdCache, Invoke-AVDTuneBenchDisk, Invoke-AVDTuneBenchNetwork,

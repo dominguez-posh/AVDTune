@@ -214,6 +214,7 @@ foreach ($pf in Get-ChildItem -LiteralPath $repo -Filter 'AVDTune-*.ps1') {
 Test-Check 'writers (#50 review): every page function that starts a writer job calls Assert-NoOtherWriter (Start-OptRun, Start-SwJob, Start-UpdJob included)' ($unguarded.Count -eq 0) ($unguarded -join ', ')
 # #50 review: the module writers outside Start-AVDTuneChange refuse a finished version themselves (masking, benchmark quiet mode, environment apply and undo)
 $guardFns = @(@('AVDTune.Masking.psm1', 'Save-AVDTuneRuleSet'), @('AVDTune.Masking.psm1', 'Remove-AVDTuneRuleSet'), @('AVDTune.Masking.psm1', 'Undo-AVDTuneMaskingChange'), @('AVDTune.Masking.psm1', 'Add-AVDTuneComfortShortcut'),
+    @('AVDTune.Masking.psm1', 'Save-AVDTuneMaskingRows'), @('AVDTune.Masking.psm1', 'Split-AVDTuneRuleSet'),
     @('AVDTune.Benchmark.psm1', 'Start-AVDTuneBenchmarkQuiet'), @('AVDTune.Environment.psm1', 'Invoke-AVDTuneEnvApply'), @('AVDTune.Environment.psm1', 'Invoke-AVDTuneEnvUndo'))
 $noGuard = @(foreach ($g in $guardFns) {
         $mAst = [Management.Automation.Language.Parser]::ParseFile((Join-Path $repo "Modules\$($g[0])"), [ref]$null, [ref]$null)

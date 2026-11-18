@@ -15,7 +15,7 @@ function Set-SealBusy([bool]$Busy) {
     $window.Cursor = $(if ($Busy) { [System.Windows.Input.Cursors]::AppStarting } else { $null })
 }
 function Update-SealView {
-    $gate = Test-AVDTuneFinishGate -Root $script:StateRoot
+    $gate = Test-AVDTuneFinishGate -Root $script:StateRoot -Machine $script:Machine
     $crash = Get-AVDTuneFinishCrash -Root $script:StateRoot
     $state = Get-AVDTuneState $script:StateRoot
     $pair = if ($script:SealJob) { @('AccentSubtle', 'Primary', 'Running') } elseif ($crash) { @('ErrorBg', 'Danger', 'Interrupted') } elseif ([bool]$state.Sealed) { @('SuccessBg', 'Success', 'Finished') } elseif ($gate.Allowed) { @('SuccessBg', 'Success', 'Allowed') } else { @('WarningBg', 'Warning', 'Locked') }
@@ -39,7 +39,7 @@ function Start-SealJob {
     Assert-NoOtherWriter   # the central list too (release, language, VDI, Office, software jobs, #49)
     if ($script:SignInBusy) { throw 'A sign-in is running: start the finish when it is done.' }   # the finish uses its session (#49)
     # the gate again, directly before the first write, on the UI thread (a change between display and click blocks here)
-    $gate = Test-AVDTuneFinishGate -Root $script:StateRoot
+    $gate = Test-AVDTuneFinishGate -Root $script:StateRoot -Machine $script:Machine
     if (-not $gate.Allowed) { Update-SealView; throw "The finish is not allowed: $(@($gate.Reasons) -join ' ')" }
     $wg = Get-AVDTuneWriteGate
     $task = Start-AVDTuneUiTask -Kind 'finish' -Title 'Cleanup and finish' -Step 'Starting'
@@ -104,7 +104,7 @@ function Complete-SealJob {
 $script:Timer.Add_Tick({ try { Complete-SealJob } catch { Show-Error $_.Exception.Message } })
 
 Add-Click $ui.BtnSealRun {
-    $gate = Test-AVDTuneFinishGate -Root $script:StateRoot
+    $gate = Test-AVDTuneFinishGate -Root $script:StateRoot -Machine $script:Machine
     if (-not $gate.Allowed) { Update-SealView; throw "The finish is not allowed: $(@($gate.Reasons) -join ' ')" }
     if (-not (Confirm-Action (Get-AVDTuneFinishConfirmText -Root $script:StateRoot) 'Finish')) { return }
     Start-SealJob

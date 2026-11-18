@@ -1218,6 +1218,16 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         $click = { param($b) $b.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent))) }
         & $click $ui.BtnMaskUndo
         Test-Smoke 'Undo puts the last change (Notes) back; the first row keeps its group' ($script:MaskFake.M.Store.Files.Count -eq 2 -and $script:MaskRowUi['Notes.lnk'].Mode.SelectedItem -eq 'Everyone' -and $script:MaskRowUi['Contoso App.lnk'].Mode.SelectedItem -eq 'Only members of a group') $script:MaskFake.M.Store.Files.Count
+        # #74: several rows in one change, one undo for all of them
+        $script:MaskRowUi['Notes.lnk'].Mode.SelectedItem = 'Nobody except administrators'
+        $script:MaskRowUi['Contoso App.lnk'].Mode.SelectedItem = 'Everyone'
+        $script:ConfirmAsked = ''
+        & $click $ui.BtnMaskSaveAll
+        $mk = @($script:MaskFake.M.Store.Files.Keys)
+        Test-Smoke 'Save all changes (#74): both changed rows in one change after one confirmation that names both' ($script:ConfirmAsked -like '*Save 2 row(s) in one change*Contoso App.lnk*Notes.lnk*' -and $mk.Count -eq 2 -and @($mk | Where-Object { $_ -like '*Desktop-Notes.f*' }).Count -eq 2) ($mk -join ', ')
+        & $click $ui.BtnMaskUndo
+        $mk = @($script:MaskFake.M.Store.Files.Keys)
+        Test-Smoke 'one Undo puts both rows of "Save all changes" back (#74)' ($mk.Count -eq 2 -and @($mk | Where-Object { $_ -like '*Desktop-Contoso App.f*' }).Count -eq 2 -and $script:MaskRowUi['Notes.lnk'].Mode.SelectedItem -eq 'Everyone' -and $script:MaskRowUi['Contoso App.lnk'].Mode.SelectedItem -eq 'Only members of a group') ($mk -join ', ')
         if ($script:SmokeMaskGateOpened) { Close-AVDTuneWriteGate }
         Show-Page 'Overview'
         $true } }
