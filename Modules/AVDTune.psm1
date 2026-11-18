@@ -2128,6 +2128,51 @@ function Get-AVDTuneRun {
     @($files | ForEach-Object { Read-AVDTuneJson $_.FullName })
 }
 
+$script:RunRecordNamePattern = '^(\d{8}-\d{6})-[0-9a-f]{4}\.json$'
+function Remove-AVDTuneOldRuns {
+    <#
+        Housekeeping of runs\ (#52): every start adds a readiness record and nothing removed them. Only AVDTune's own analysis records are removed: a file named
+        like a run id that AVDTune makes (yyyyMMdd-HHmmss-xxxx.json, no link) whose head says Kind Start, Manual or Healthcheck (pure analysis, no change of the
+        master; Erstanalyse, fixes and every run with changes stay: they are the history of the versions and their change times). Records that the state
+        names (LastRunId, the readiness record, the healthcheck of a version) stay. Of the rest the newest -Keep stay; older than -Days is removed as well.
+        Deleted through Remove-AVDTuneTreeSafe (handles, a link is never followed). Returns the number removed; a change log note (no change of the master) when > 0.
+    #>
+    param([string]$Root = (Get-AVDTuneRoot), [int]$Keep = 200, [int]$Days = 180, [datetime]$Now = (Get-Date), [string]$User)
+    $folder = Join-Path $Root 'runs'
+    $dir = New-Object IO.DirectoryInfo $folder
+    if (-not $dir.Exists -or ($dir.Attributes -band [IO.FileAttributes]::ReparsePoint)) { return 0 }
+    $state = Read-AVDTuneJson (Join-Path $Root 'state.json')
+    $named = @([string](Get-AVDTuneProp $state 'LastRunId'), [string](Get-AVDTuneProp (Get-AVDTuneProp $state 'Readiness') 'RunId')) + @(@(Get-AVDTuneProp $state 'Versions') | Where-Object { $_ } | ForEach-Object { [string](Get-AVDTuneProp $_ 'HealthcheckRunId') })
+    $kindRx = New-Object Text.RegularExpressions.Regex('"Plan"\s*:\s*"Readiness analysis \((Start|Manual|Healthcheck)\)"\s*,\s*"Kind"\s*:\s*"(Start|Manual|Healthcheck)"', [Text.RegularExpressions.RegexOptions]::None, [TimeSpan]::FromMilliseconds(200))
+    $nameRx = New-Object Text.RegularExpressions.Regex($script:RunRecordNamePattern, [Text.RegularExpressions.RegexOptions]::None, [TimeSpan]::FromMilliseconds(200))
+    $candidates = New-Object System.Collections.ArrayList
+    foreach ($f in $dir.GetFiles('*.json')) {
+        $mName = $nameRx.Match($f.Name)
+        if (-not $mName.Success -or ($f.Attributes -band [IO.FileAttributes]::ReparsePoint) -or $f.BaseName -in $named) { continue }
+        $at = [datetime]::MinValue
+        if (-not [datetime]::TryParseExact($mName.Groups[1].Value, 'yyyyMMdd-HHmmss', [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::None, [ref]$at)) { continue }
+        # only the head is read (Id, Plan and Kind come first): a full parse of hundreds of records would hold the start
+        $head = ''
+        try { $s = $f.OpenRead(); try { $buf = New-Object byte[] 400; $n = $s.Read($buf, 0, $buf.Length); $head = [Text.Encoding]::UTF8.GetString($buf, 0, $n) } finally { $s.Dispose() } } catch { continue }
+        if (-not $kindRx.IsMatch($head)) { continue }
+        [void]$candidates.Add([pscustomobject]@{ File = $f; At = $at })
+    }
+    $sorted = @($candidates | Sort-Object At -Descending)
+    $cut = $Now.AddDays(-$Days)
+    $removed = 0
+    for ($i = 0; $i -lt $sorted.Count; $i++) {
+        if ($i -lt $Keep -and $sorted[$i].At -ge $cut) { continue }
+        $f = $sorted[$i].File
+        try { [void](Remove-AVDTuneTreeSafe -Path $f.FullName) } catch { }   # in use or a link further up: it stays, the next start tries again
+        $f.Refresh(); if (-not $f.Exists) { $removed++ }
+    }
+    $version = [string](Get-AVDTuneProp $state 'ImageVersion')
+    if ($removed -gt 0 -and (Test-AVDTuneImageVersion $version)) {
+        [void](Add-AVDTuneChangeLogEntry -Root $Root -Version $version -Category 'Housekeeping' -Component 'Run records' -ChangeType Note -Text "$removed old readiness analysis record(s) removed from runs (kept: the newest $Keep of the last $Days days, every record with changes and every record the state names)." -User $User)
+    }
+    $removed
+}
+
 #endregion
 
 #region write gate
@@ -2600,7 +2645,7 @@ function Get-AVDTuneOverview {
 
 Export-ModuleMember -Function Move-AVDTuneFileReplace, Get-AVDTuneDcFromNtDomain, Get-AVDTuneSystemFolder, Get-AVDTuneSystemModulePath, Set-AVDTuneSafeModulePath, Test-AVDTuneModulePathStable, Assert-AVDTuneModulePathStable, Get-AVDTuneModulePathProblems, New-AVDTunePowerShell, New-AVDTuneRunspacePool, Get-AVDTuneChocolateyRoot, Get-AVDTuneChildTool, Initialize-AVDTuneToolTemp, Get-AVDTuneChildEnvironment, Get-AVDTuneProfilePath, Get-AVDTuneHklmValue, New-AVDTuneChildStartInfo, Invoke-AVDTuneChildProcess, Invoke-AVDTuneProgram, Open-AVDTuneSystemProgram, New-AVDTuneDownloadFolder, New-AVDTuneOwnFolder, Test-AVDTuneOwnFolder, New-AVDTuneAdminFile, Set-AVDTuneProcessTemp, Initialize-AVDTuneTempParent, Test-AVDTuneWindowsSignature, Test-AVDTuneSystemProgramPath, Get-AVDTuneProp, Get-AVDTuneWebResponse, Test-AVDTuneElevated, Get-AVDTuneRoot, Test-AVDTuneDefaultRoot, Test-AVDTuneTestMode, Resolve-AVDTuneTestScript, Get-AVDTuneLongPath, Get-AVDTuneTestModeRefusal, Confirm-AVDTuneAction, ConvertTo-AVDTuneArgument, New-AVDTuneMachine, Invoke-AVDTuneMachine, Invoke-AVDTuneDefaultHiveUnload, Remove-AVDTuneTreeSafe,
     New-AVDTuneStateSecurity, Initialize-AVDTuneState, Read-AVDTuneAclInfo, Get-AVDTuneStateSecurityProblems, Move-AVDTuneStateToQuarantine, New-AVDTuneProtectedFolder, Assert-AVDTuneStateSecurity, Get-AVDTuneStateSecurityReport, Get-AVDTuneState, Set-AVDTuneState, Test-AVDTuneImageVersion, Get-AVDTuneNextImageVersion, Start-AVDTuneImageVersion,
-    Add-AVDTuneRun, Get-AVDTuneRun, Get-AVDTuneLastChange, Get-AVDTuneChangeTimes, Get-AVDTuneChangeMarker, Invoke-AVDTuneStateLock, Get-AVDTuneChangeStopError, Test-AVDTuneSealed, Assert-AVDTuneNotSealed, Test-AVDTuneChangeInProgress, Assert-AVDTuneNoForeignChange, Resolve-AVDTuneStaleChange, Start-AVDTuneChange, Stop-AVDTuneChange, Get-AVDTuneSnapshotClockBufferMinutes, ConvertTo-AVDTuneUtc, Get-AVDTuneSnapshotWindow, Test-AVDTuneSnapshotInWindow,New-AVDTuneStep, Invoke-AVDTuneStep, New-AVDTuneStepFromData, Get-AVDTuneStepCatalog, Invoke-AVDTune,
+    Add-AVDTuneRun, Get-AVDTuneRun, Remove-AVDTuneOldRuns, Get-AVDTuneLastChange, Get-AVDTuneChangeTimes, Get-AVDTuneChangeMarker, Invoke-AVDTuneStateLock, Get-AVDTuneChangeStopError, Test-AVDTuneSealed, Assert-AVDTuneNotSealed, Test-AVDTuneChangeInProgress, Assert-AVDTuneNoForeignChange, Resolve-AVDTuneStaleChange, Start-AVDTuneChange, Stop-AVDTuneChange, Get-AVDTuneSnapshotClockBufferMinutes, ConvertTo-AVDTuneUtc, Get-AVDTuneSnapshotWindow, Test-AVDTuneSnapshotInWindow,New-AVDTuneStep, Invoke-AVDTuneStep, New-AVDTuneStepFromData, Get-AVDTuneStepCatalog, Invoke-AVDTune,
     Add-AVDTuneChangeLogEntry, Get-AVDTuneChangeLog, Get-AVDTuneChangeLogVersions, ConvertTo-AVDTuneChangeLogDocument, Export-AVDTuneChangeLog,
     Get-AVDTuneWindowsInfo, Get-AVDTuneOfficeInfo, Get-AVDTuneSourceImage, Get-AVDTuneHealth, Get-AVDTuneOverview, Write-AVDTuneFile, Read-AVDTuneJson,
     Open-AVDTuneWriteGate, Close-AVDTuneWriteGate, Set-AVDTuneWriteBlock, Clear-AVDTuneWriteBlock, Get-AVDTuneWriteBlock, Get-AVDTuneWriteGate, Test-AVDTuneWriteAllowed, Remove-AVDTuneControlCharacters, ConvertTo-AVDTuneTestResult,

@@ -924,6 +924,28 @@ try { $ps = [powershell]::Create(); $ps.Runspace = $rs; [void]$ps.AddScript($pro
     $docs = Join-Path ([Environment]::GetFolderPath('MyDocuments')) 'WindowsPowerShell\Modules'
     Test-Check 'module path (#73): a powershell.exe child with the child environment keeps the system path; without PSModulePath Windows would put the Documents folder first (red)' ($withPath.Out -match ('(?m)^PATH=' + [regex]::Escape($sysModules) + '\r?$') -and $withoutPath.Out -match ('(?m)^PATH=' + [regex]::Escape($docs) + ';')) "$($withPath.Out) / $($withoutPath.Out) $($withPath.Err)"
 
+    # ---------------------------------------------------------------- #52: housekeeping of runs\ (only own analysis records, retention, named ones stay)
+    $r52 = Join-Path $tmp 'issue52'; [void](Initialize-AVDTuneState -Root $r52); [void](Start-AVDTuneImageVersion -Root $r52 -Date ([datetime]'2026-11-01') -User 'admin1')
+    $now52 = [datetime]'2026-11-18 12:00'
+    $mk52 = { param([datetime]$At, [string]$Kind, [string]$Plan, $Results)
+        $id = $At.ToString('yyyyMMdd-HHmmss', [Globalization.CultureInfo]::InvariantCulture) + '-' + [guid]::NewGuid().ToString('N').Substring(0, 4)
+        [void](Add-AVDTuneRun -Root $r52 -Run ([pscustomobject][ordered]@{ Id = $id; Plan = $Plan; Kind = $Kind; Started = $At.ToString('o'); Ended = $At.ToString('o'); User = 'admin1'; SnapshotId = ''; WhatIf = $false; Results = @($Results) }))
+        $id }
+    $recent = @(for ($i = 0; $i -lt 203; $i++) { & $mk52 ($now52.AddMinutes(-10 * $i)) 'Start' 'Readiness analysis (Start)' @() })
+    $oldStart = & $mk52 ($now52.AddDays(-200)) 'Start' 'Readiness analysis (Start)' @()
+    $oldNamed = & $mk52 ($now52.AddDays(-201)) 'Healthcheck' 'Readiness analysis (Healthcheck)' @()
+    $oldFirst = & $mk52 ($now52.AddDays(-202)) 'Erstanalyse' 'Readiness analysis (Erstanalyse)' @()
+    $oldChange = & $mk52 ($now52.AddDays(-203)) $null 'Software' @([pscustomobject]@{ Id = 'x'; Status = 'Changed' })
+    [IO.File]::WriteAllText((Join-Path $r52 'runs\notes.json'), '{"Plan": "Readiness analysis (Start)", "Kind": "Start"}')
+    [void](Set-AVDTuneState -Root $r52 -Values @{ LastRunId = $oldNamed })
+    $gone52 = Remove-AVDTuneOldRuns -Root $r52 -Now $now52 -User 'admin1'
+    $left52 = @(Get-ChildItem -LiteralPath (Join-Path $r52 'runs') -File | ForEach-Object { $_.BaseName })
+    $oldestRecentGone = @($recent[200..202] | Where-Object { $_ -in $left52 }).Count -eq 0 -and @($recent[0..199] | Where-Object { $_ -notin $left52 }).Count -eq 0
+    Test-Check 'runs (#52): the newest 200 analysis records stay, older ones and those over 180 days go (4 removed)' ($gone52 -eq 4 -and $oldestRecentGone -and $oldStart -notin $left52) "removed=$gone52 left=$($left52.Count)"
+    Test-Check 'runs (#52): a record the state names, the first analysis, a run with changes and a foreign file stay' ($oldNamed -in $left52 -and $oldFirst -in $left52 -and $oldChange -in $left52 -and 'notes' -in $left52) ($left52.Count)
+    $note52 = @(Get-AVDTuneChangeLog -Root $r52 | Where-Object { $_.Category -eq 'Housekeeping' })
+    Test-Check 'runs (#52): a change log note (not a change of the master) says how many were removed; a second run removes nothing' ($note52.Count -eq 1 -and $note52[0].Source -eq 'Note' -and $note52[0].Text -like '4 old*' -and (Remove-AVDTuneOldRuns -Root $r52 -Now $now52) -eq 0) $null
+
     # ---------------------------------------------------------------- the real machine, read only
     $real = New-AVDTuneMachine
     $rw = Get-AVDTuneWindowsInfo $real

@@ -428,6 +428,9 @@ try {
 }
 catch { [void](Add-AVDTuneProtocolNote -Protocol $script:Protocol -Group 'other' -Subject "Default user profile could not be checked at the start: $($_.Exception.Message)") }
 foreach ($refused in (Get-AVDTuneTestModeRefusal)) { [void](Add-AVDTuneProtocolNote -Protocol $script:Protocol -Group 'other' -Subject "Test mode refused ($($refused.Time)): $($refused.Reason)") }
+# #52: old readiness analysis records in runs are removed (the newest 200 of the last 180 days stay; records with changes and those the state names always stay)
+try { $oldRuns = Remove-AVDTuneOldRuns -Root $script:StateRoot -User ([string]$env:USERNAME); if ($oldRuns -gt 0) { [void](Add-AVDTuneProtocolNote -Protocol $script:Protocol -Group 'other' -Subject "$oldRuns old readiness analysis record(s) removed from runs") } }
+catch { [void](Add-AVDTuneProtocolNote -Protocol $script:Protocol -Group 'other' -Subject "Old run records could not be removed: $($_.Exception.Message)") }
 $script:LastCopied = ''
 function Set-ProtocolImage {
     $state = Get-AVDTuneState $script:StateRoot
