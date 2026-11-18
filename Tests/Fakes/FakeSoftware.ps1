@@ -12,10 +12,14 @@
 # All names are made up.
 
 . $(if (Get-Command Resolve-AVDTuneTestScript -ErrorAction Ignore) { $fakeShared = Resolve-AVDTuneTestScript -Path (Join-Path $PSScriptRoot 'FakeShared.ps1') -AppRoot (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent); if (-not $fakeShared) { throw 'FakeShared.ps1 is not a file below the Tests folder of this copy.' }; $fakeShared } else { Join-Path $PSScriptRoot 'FakeShared.ps1' })   # fakes that several runspaces use at once (#80), through the test script gate when the module is loaded
+# Real Graph IDs (#95): a drive ID is 'b!' + 64 base64url characters, a site ID is host,site-guid,web-guid. Made up, in the shape of the real ones.
+$script:AVDTuneFakeDriveId = 'b!fAkE0dRiVe1iD2fOr3tHe4cHeCkS5oNlY6nOt7a8rEaL9tEnAnT-_contoso01ab'
+$script:AVDTuneFakeSiteId = 'contoso.sharepoint.com,11111111-2222-3333-4444-555555555555,66666666-7777-8888-9999-000000000000'
 function New-AVDTuneFakeLibrary {
+    $driveId = $script:AVDTuneFakeDriveId; $siteId = $script:AVDTuneFakeSiteId; $driveRx = [regex]::Escape($driveId); $siteRx = [regex]::Escape($siteId)
     $s = @{ Files = @{}; Notes = New-Object System.Collections.ArrayList; Offline = $false; IntuneOffline = $false; Tamper = @{}; Log = (New-Object System.Collections.ArrayList)
         Redirect = $false; RedirectTo = ''; RedirectEmpty = $false; RedirectRelative = $false; RedirectHops = 0; PageSize = 0; HopKey = '' }
-    $lib = [ordered]@{ Store = $s; Log = $s.Log; SitesToken = 'fake-sites-token-AAA'; GraphToken = 'fake-graph-token-BBB'; SiteUrl = 'https://contoso.sharepoint.com/sites/PackTune'; Library = 'PackTune Packages' }
+    $lib = [ordered]@{ DriveId = $driveId; SiteId = $siteId; Store = $s; Log = $s.Log; SitesToken = 'fake-sites-token-AAA'; GraphToken = 'fake-graph-token-BBB'; SiteUrl = 'https://contoso.sharepoint.com/sites/PackTune'; Library = 'PackTune Packages' }
     $answer = { param($status, $bytes, $location) @{ Status = $status; Headers = @{ Location = $location }; Stream = (New-Object IO.MemoryStream (, [byte[]]$bytes)); Close = { } } }
     $enc = { param($o) , [Text.Encoding]::UTF8.GetBytes(($o | ConvertTo-Json -Depth 8 -Compress)) }
     $empty = [byte[]]@()
@@ -51,13 +55,13 @@ function New-AVDTuneFakeLibrary {
             if ($s.PageSize -gt 0 -and ($skip + $s.PageSize) -lt $all.Count) { $body['@odata.nextLink'] = "https://graph.microsoft.com/v1.0/deviceAppManagement/mobileApps?`$skip=$($skip + $s.PageSize)" }
             return (& $answer 200 (& $enc $body) '')
         }
-        if ($path -match '^/sites/([^/:]+):/sites/([A-Za-z0-9._-]+)$') { if ($Matches[1] -ne 'contoso.sharepoint.com' -or $Matches[2] -ne 'PackTune') { return (& $answer 404 $empty '') }; return (& $answer 200 (& $enc @{ id = 'site-1'; displayName = 'PackTune'; webUrl = $lib.SiteUrl }) '') }
-        if ($path -match '^/sites/site-1/drives$') { return (& $answer 200 (& $enc @{ value = @(@{ id = 'drive-1'; name = $lib.Library; webUrl = "$($lib.SiteUrl)/lib" }) }) '') }
+        if ($path -match '^/sites/([^/:]+):/sites/([A-Za-z0-9._-]+)$') { if ($Matches[1] -ne 'contoso.sharepoint.com' -or $Matches[2] -ne 'PackTune') { return (& $answer 404 $empty '') }; return (& $answer 200 (& $enc @{ id = $siteId; displayName = 'PackTune'; webUrl = $lib.SiteUrl }) '') }
+        if ($path -match "^/sites/$siteRx/drives`$") { return (& $answer 200 (& $enc @{ value = @(@{ id = $driveId; name = $lib.Library; webUrl = "$($lib.SiteUrl)/lib" }) }) '') }
         $decode = { param($t) [uri]::UnescapeDataString($t) }
         $names = $null; $content = $false
-        if ($path -match '^/drives/drive-1/root/children$') { $names = @() }
-        elseif ($path -match '^/drives/drive-1/root:/(.+):/children$') { $names = @(($Matches[1] -split '/') | ForEach-Object { & $decode $_ }) }
-        elseif ($path -match '^/drives/drive-1/root:/(.+):/content$') { $names = @(($Matches[1] -split '/') | ForEach-Object { & $decode $_ }); $content = $true }
+        if ($path -match "^/drives/$driveRx/root/children`$") { $names = @() }
+        elseif ($path -match "^/drives/$driveRx/root:/(.+):/children`$") { $names = @(($Matches[1] -split '/') | ForEach-Object { & $decode $_ }) }
+        elseif ($path -match "^/drives/$driveRx/root:/(.+):/content`$") { $names = @(($Matches[1] -split '/') | ForEach-Object { & $decode $_ }); $content = $true }
         if ($null -eq $names) { return (& $answer 404 $empty '') }
         if ($content) {
             $key = $names -join '/'
