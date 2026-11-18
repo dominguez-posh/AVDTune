@@ -41,6 +41,7 @@ function Start-BenchJob([string]$Mode, [string]$Kind, [string]$SystemName = '', 
             else { $m = New-AVDTuneMachine; $b = New-AVDTuneBenchAdapter }
             $progress = { param($t, $p) $Sync.Text = $t; if ($null -ne $p) { $Sync.Percent = [int]$p } }
             $named = @{}; if ($Kind -eq 'benchmark-only') { $named.SystemName = $SystemName; $named.Notes = $Notes }   # plan 6b: name and notes only in that mode
+            Invoke-AVDTuneBenchmark -Machine $m -Bench $b -Root $Root -Mode $Mode -Kind $Kind -User $User -Progress $progress -SkipIdleCheck:$skipIdle @named
         }).AddArgument($script:AppRoot).AddArgument($(if ($script:TestMode) { $script:TestInfo.FakeScript } else { '' })).AddArgument($script:BenchFakeScript).AddArgument($script:StateRoot).AddArgument($Mode).AddArgument($Kind).AddArgument($sync).AddArgument([string]$env:USERNAME).AddArgument($script:BenchFakeSeed).AddArgument($(if ($script:TestMode) { $script:Machine } else { $null })).AddArgument($SystemName).AddArgument($Notes)
     $task = Start-AVDTuneUiTask -Kind 'benchmark' -Title "Benchmark ($($Mode.ToLower()) run)" -Step 'Starting' -Percent 0   # no Retry: a run pauses Windows Update and the indexer and is started on the page after its confirmation
     $script:BenchJob = @{ PS = $ps; Handle = $ps.BeginInvoke(); Mode = $Mode; Sync = $sync; Task = $task }
