@@ -240,7 +240,7 @@ function Update-MaskView {
     $walk = $null; $walk = { param($nodes, $depth) foreach ($n in @($nodes)) { if ($n) { [void]$ous.Add(([string]$n.Dn)); & $walk @($n.Children) ($depth + 1) } } }
     if ($dir) { & $walk @($dir.OuTree) 0 }
     $ui.CmbMaskOu.ItemsSource = @($ous); if ($ui.CmbMaskOu.SelectedIndex -lt 0 -and $ous.Count -gt 0) { $ui.CmbMaskOu.SelectedIndex = 0 }
-    if (-not $ui.TxtMaskDc.Text -and $caps.AdGroups) { $a = Get-MaskAnswers; $ui.TxtMaskDc.Text = [string](Get-AVDTuneProp $a 'DomainController') }
+    if (-not $ui.TxtMaskDc.Text -and $caps.AdGroups) { $e = $null; try { $e = Get-AVDTuneEnvironment $script:StateRoot } catch { }; $ui.TxtMaskDc.Text = [string](Get-AVDTuneProp (Get-AVDTuneProp $e 'Dc') 'Server') }   # the server of the start sequence (environment.json Dc.Server); the answers only say which kind of DC
     if (-not $ui.TxtMaskGroup.Text) { try { $ui.TxtMaskGroup.Text = Get-AVDTuneAppGroupName -Prefix $settings.Prefix -Name $ui.TxtMaskName.Text } catch { } }
     $ui.TxtMaskEntra.Text = (Get-AVDTuneEntraGroupInfo).Text + ' Source: ' + (Get-AVDTuneEntraGroupInfo).Source
     $short = Get-AVDTuneComfortShortcuts -M (Get-MaskAdapter)

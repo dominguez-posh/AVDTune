@@ -237,7 +237,7 @@ function Get-AVDTuneFSLogixGroupChoices {
     <# Groups to pick for the lists. With a domain controller (Directory info of the start sequence, config\directory.json): the groups with SIDs. Without: a hint. #>
     param([string]$Root = (Get-AVDTuneRoot), $Answers)
     $dir = Read-AVDTuneJson (Join-Path $Root 'config\directory.json')
-    $dc = $Answers -and [string](Get-AVDTuneProp $Answers 'DomainController') -notin '', 'None'
+    $dc = $Answers -and [string](Get-AVDTuneProp $Answers 'Dc') -notin '', 'None'
     if ($dir -and (Get-AVDTuneProp $dir 'Directory')) {
         return [pscustomobject]@{ Source = 'Directory'; Groups = @(@($dir.Directory.Groups) | Where-Object { $_ } | ForEach-Object { [pscustomobject]@{ Name = [string]$_.Name; Sid = [string]$_.Sid } }); Hint = '' }
     }
@@ -286,7 +286,7 @@ function Get-AVDTuneFSLogixRecommendedLists {
         is used and the Notice says it could not be checked.
     #>
     param([string]$Root = (Get-AVDTuneRoot), $Answers, $F)
-    $dc = [string](Get-AVDTuneProp $Answers 'DomainController')
+    $dc = [string](Get-AVDTuneProp $Answers 'Dc')
     $sid = ''; $dns = ''; $netbios = ''
     $dir = $null; try { $dir = Read-AVDTuneJson (Join-Path $Root 'config\directory.json') } catch { }
     $d = if ($dir) { Get-AVDTuneProp $dir 'Directory' } else { $null }

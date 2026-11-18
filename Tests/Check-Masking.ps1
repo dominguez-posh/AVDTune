@@ -13,6 +13,9 @@ Import-Module (Join-Path $repo 'Modules\AVDTune.Updates.psm1') -Force
 Import-Module (Join-Path $repo 'Modules\AVDTune.FSLogix.psm1') -Force
 Import-Module (Join-Path $repo 'Modules\AVDTune.Directory.psm1') -Force
 Import-Module (Join-Path $repo 'Modules\AVDTune.Masking.psm1') -Force
+Import-Module (Join-Path $repo 'Modules\AVDTune.Start.psm1') -Force
+# answers exactly as the pages get them from the start sequence (Get-AVDTuneEnvironmentAnswers: key Dc, no DomainController)
+function New-RealAnswers([string]$Dc) { Get-AVDTuneEnvironmentAnswers ([pscustomobject]@{ Answers = [pscustomobject]@{ Dc = $Dc } }) }
 . (Join-Path $PSScriptRoot 'Fakes\FakeMachine.ps1')
 . (Join-Path $PSScriptRoot 'Fakes\FakeMasking.ps1')
 
@@ -70,7 +73,14 @@ try {
     Test-Check 'names: the group name is <prefix>-App-<name>; a bad prefix or name fails' ((Get-AVDTuneAppGroupName 'AVD' 'Google Chrome') -eq 'AVD-App-Google-Chrome' -and (Test-Throws { Get-AVDTuneAppGroupName 'A,B' 'x' }) -and (Test-Throws { Get-AVDTuneAppGroupName '' 'x' })) $null
     Test-Check 'paths: folder and file name of a rule: ".." / wildcards / device names / control characters / path in the name are refused' ((Test-AVDTuneMaskingRulePath $pd 'A.lnk') -eq '' -and (Test-AVDTuneMaskingRulePath 'C:\Users\Public\Desktop' 'A.lnk') -eq '' -and (Test-AVDTuneMaskingRulePath "$pd\..\x" 'A.lnk') -ne '' -and (Test-AVDTuneMaskingRulePath $pd '*.lnk') -ne '' -and (Test-AVDTuneMaskingRulePath $pd '..\A.lnk') -ne '' -and (Test-AVDTuneMaskingRulePath $pd 'NUL') -ne '' -and (Test-AVDTuneMaskingRulePath $pd "A`t.lnk") -ne '' -and (Test-AVDTuneMaskingRulePath '\\srv\share' 'A.lnk') -ne '' -and (Test-AVDTuneMaskingRulePath 'relative\x' 'A.lnk') -ne '' -and (Test-AVDTuneMaskingRulePath $pd 'A.lnk ') -ne '' -and (Test-AVDTuneMaskingRulePath "$pd*" 'A.lnk') -ne '') $null
     Test-Check 'OU: only an OU of the domain controller (exact DN, case-insensitive) is accepted' ((Test-AVDTuneOuDn $ouDn $dirInfo.OuTree) -and (Test-AVDTuneOuDn $ouDn.ToLowerInvariant() $dirInfo.OuTree) -and -not (Test-AVDTuneOuDn "OU=Evil,$dn" $dirInfo.OuTree) -and -not (Test-AVDTuneOuDn "CN=x,$ouDn" $dirInfo.OuTree) -and -not (Test-AVDTuneOuDn '' $dirInfo.OuTree) -and -not (Test-AVDTuneOuDn "$ouDn`r`n" $dirInfo.OuTree)) $null
-    Test-Check 'environment: with a domain controller AD groups are offered, Entra only gets no AD groups (Learn: no cloud-only assignments) and says why' ((Get-AVDTuneMaskingCapabilities ([pscustomobject]@{ DomainController = '10.0.0.10' })).AdGroups -and -not (Get-AVDTuneMaskingCapabilities ([pscustomobject]@{ DomainController = 'None' })).AdGroups -and (Get-AVDTuneMaskingCapabilities ([pscustomobject]@{ DomainController = 'None' })).Note -like '*Entra*') $null
+    Test-Check 'environment: with a domain controller AD groups are offered, Entra only gets no AD groups (Learn: no cloud-only assignments) and says why' ((Get-AVDTuneMaskingCapabilities ((New-RealAnswers 'AdDsAzure'))).AdGroups -and -not (Get-AVDTuneMaskingCapabilities ((New-RealAnswers 'None'))).AdGroups -and (Get-AVDTuneMaskingCapabilities ((New-RealAnswers 'None'))).Note -like '*Entra*') $null
+    $realAns = New-RealAnswers 'AdDsOnPrem'
+    $pageText = [IO.File]::ReadAllText((Join-Path $repo 'AVDTune-AppMasking.ps1'))
+    Test-Check 'environment (answer keys): the answers of the start sequence carry Dc (no DomainController); AD on premises and Entra Domain Services offer AD groups; the page takes the server from environment.json Dc.Server' (-not $realAns.PSObject.Properties['DomainController'] -and (Get-AVDTuneMaskingCapabilities $realAns).AdGroups -and (Get-AVDTuneMaskingCapabilities (New-RealAnswers 'EntraDs')).AdGroups -and -not (Get-AVDTuneMaskingCapabilities (Get-AVDTuneEnvironmentAnswers $null)).AdGroups -and $pageText -match "Get-AVDTuneProp \(Get-AVDTuneProp \`$e 'Dc'\) 'Server'" -and $pageText -notmatch "'DomainController'") $null
+    $knownKeys = @((Get-AVDTuneEnvironmentDefaults).PSObject.Properties.Name)
+    $readKeys = @(Get-ChildItem -LiteralPath (Join-Path $repo 'Modules') -Filter '*.psm1' | ForEach-Object { [regex]::Matches([IO.File]::ReadAllText($_.FullName), "Get-AVDTuneProp \`$Answers '([A-Za-z]+)'|\`$Answers\.([A-Za-z]+)\b") } | ForEach-Object { if ($_.Groups[1].Success) { $_.Groups[1].Value } else { $_.Groups[2].Value } } | Sort-Object -Unique)
+    $unknownKeys = @($readKeys | Where-Object { $_ -notin $knownKeys })
+    Test-Check 'environment (answer keys): every module reads only answer keys the start sequence has' ($unknownKeys.Count -eq 0) ($unknownKeys -join ', ')
     Set-AVDTuneMaskingSettings -Root $tmp -Prefix 'Corp1'
     Test-Check 'settings: the prefix is saved and validated' ((Get-AVDTuneMaskingSettings -Root $tmp).Prefix -eq 'Corp1' -and (Test-Throws { Set-AVDTuneMaskingSettings -Root $tmp -Prefix 'a b;' }) -and (Get-AVDTuneMaskingSettings -Root $tmp).Prefix -eq 'Corp1') $null
 

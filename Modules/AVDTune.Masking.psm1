@@ -252,7 +252,7 @@ function Set-AVDTuneMaskingSettings {
 function Get-AVDTuneMaskingCapabilities {
     <# Which group kinds the environment allows (Learn: assignments do not support Entra cloud-only accounts; they need a domain controller). #>
     param($Answers)
-    $dc = $Answers -and [string](Get-AVDTuneProp $Answers 'DomainController') -notin '', 'None'
+    $dc = $Answers -and [string](Get-AVDTuneProp $Answers 'Dc') -notin '', 'None'
     [pscustomobject]@{
         AdGroups = [bool]$dc; LocalGroups = $true; Everyone = $true
         Note = $(if ($dc) { 'AD groups (created in an OU you choose, after your confirmation) or a local group of the master (not verified on a VM).' } else { 'No domain controller in this environment: Microsoft states that rule set assignments do not support Entra ID cloud-only accounts. Only "hidden for everyone" is offered; a local group is possible but not verified on a VM.' })
