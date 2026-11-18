@@ -48,6 +48,8 @@ $script:DefenderParams = @{
     MAPSReporting = @{ Type = 'int'; Allowed = @(1, 2); RestoreMax = 2 }; CloudBlockLevel = @{ Type = 'int'; Allowed = @(2, 4, 6); RestoreMax = 6 }; CloudExtendedTimeout = @{ Type = 'int'; Min = 1; Max = 50; RestoreMax = 50 }
     ScanAvgCPULoadFactor = @{ Type = 'int'; Min = 5; Max = 100; RestoreMax = 100 }; SignatureUpdateInterval = @{ Type = 'int'; Min = 1; Max = 24; RestoreMax = 24 }; DisableCatchupQuickScan = @{ Type = 'bool'; Only = $false }
     CheckForSignaturesBeforeRunningScan = @{ Type = 'bool'; Only = $true }; UILockdown = @{ Type = 'bool'; Only = $true }
+    # #41: a UNC path the administrator enters on the page (Input UncPath); the data holds '' for it. Undo may give back '' (no path: Remove-MpPreference -SharedSignaturesPath).
+    SharedSignaturesPath = @{ Type = 'unc' }
     LowThreatDefaultAction = @{ Type = 'int'; Allowed = @(2, 3); RestoreAllowed = $script:ThreatActionEnum; NoZero = $true }; ModerateThreatDefaultAction = @{ Type = 'int'; Allowed = @(2, 3); RestoreAllowed = $script:ThreatActionEnum; NoZero = $true }
     HighThreatDefaultAction = @{ Type = 'int'; Allowed = @(2, 3); RestoreAllowed = $script:ThreatActionEnum; NoZero = $true }; SevereThreatDefaultAction = @{ Type = 'int'; Allowed = @(2, 3); RestoreAllowed = $script:ThreatActionEnum; NoZero = $true }
 }
@@ -346,11 +348,27 @@ function Test-OptDefenderUnset([string]$Parameter, $Value) {
     $d = $script:DefenderParams[$Parameter]
     $d.ContainsKey('NoZero') -and ((Test-OptInt $Value) -or $Value -is [byte] -or $Value -is [uint32] -or $Value -is [int16] -or $Value -is [uint16]) -and [int64]$Value -eq 0
 }
+function Test-AVDTuneUncPath($Path) {
+    <# #41: a plain UNC path \\server\share[\folder...]: host name or IPv4 (letters, digits, - and .), share and folder names without wildcards, ':', '@' (no credentials, no WebDAV),
+       no '\\?\' or '\\.\' device paths, no '.' or '..' segments, at most 260 characters. Format only: whether the share can be read is checked when the entry is applied. #>
+    if ($Path -isnot [string] -or $Path.Length -lt 5 -or $Path.Length -gt 260) { return $false }
+    if (-not (Test-OptText $Path 5 260)) { return $false }   # no control characters
+    if (-not (Test-OptPattern $Path '\A\\\\[A-Za-z0-9](?:[A-Za-z0-9-]{0,62})(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,62}))*\\[A-Za-z0-9_.$-][A-Za-z0-9_.$ -]{0,79}(?:\\[A-Za-z0-9_.$(){} -]{1,120})*\z')) { return $false }
+    foreach ($seg in $Path.Substring(2).Split('\')) { if ($seg -match '^\.+$' -or $seg.EndsWith(' ') -or $seg.EndsWith('.')) { return $false } }
+    $true
+}
+function ConvertTo-OptUncCompare($Value) { if ($null -eq $Value -or ($Value -is [string] -and $Value -eq '') -or ($Value -isnot [string])) { '' } else { $Value.TrimEnd('\').ToLowerInvariant() } }
 function Get-OptDefenderProblem {
     # Set: only a protecting value. -Restore (Undo): the type and the range of the setting, the value is the one that was there before.
     param([string]$Parameter, $Value, [switch]$Restore)
     if (@($script:DefenderParams.Keys) -cnotcontains $Parameter) { return 'the Defender setting is not on the list.' }
     $d = $script:DefenderParams[$Parameter]
+    if ($d.Type -eq 'unc') {
+        if ($Value -isnot [string]) { return "the value of $Parameter must be text (a UNC path)." }
+        if ($Restore -and $Value -eq '') { return $null }   # there was no path before: Undo removes it
+        if (-not (Test-AVDTuneUncPath $Value)) { return "the value of $Parameter must be a UNC path like \\server\share\folder (no credentials, no wildcards, no device path)." }
+        return $null
+    }
     if ($d.Type -eq 'bool') {
         if ($Value -isnot [bool]) { return "the value of $Parameter must be true or false (a real boolean)." }
         if (-not $Restore -and $d.ContainsKey('Only') -and $Value -ne $d.Only) { return "$Parameter may only be set to $($d.Only.ToString().ToLowerInvariant()) (the other value weakens protection)." }
@@ -389,7 +407,7 @@ function Get-OptEntryProblem {
         'ServiceStartup' { Get-OptServiceProblem ([string]$Entry.Name) }
         'TaskDisabled' { Get-OptTaskProblem ([string]$Entry.TaskPath) ([string]$Entry.TaskName) }
         'AppxRemove' { Get-OptAppxProblem ([string]$Entry.PackageName) }
-        'DefenderPref' { Get-OptDefenderProblem -Parameter ([string]$Entry.Parameter) -Value $Entry.Value }
+        'DefenderPref' { if ((Get-AVDTuneProp $Entry 'Input') -eq 'UncPath' -and [string]$Entry.Parameter -ceq 'SharedSignaturesPath' -and $Entry.Value -is [string] -and $Entry.Value -eq '') { $null } else { Get-OptDefenderProblem -Parameter ([string]$Entry.Parameter) -Value $Entry.Value } }
         'UserHive' {
             $p = Get-OptHiveProblem -Path ([string]$Entry.Path) -Name $Entry.Name
             if ($p) { $p } else { Get-OptHiveValueProblem -Path ([string]$Entry.Path) -Name ([string]$Entry.Name) -Type (Get-AVDTuneProp $Entry 'Type') -Value (Get-AVDTuneProp $Entry 'Value') }
@@ -427,7 +445,7 @@ function ConvertTo-OptEntry {
     if ((Get-AVDTuneProp $Raw 'Irreversible') -is [bool] -and ([bool](Get-AVDTuneProp $Raw 'Irreversible')) -ne ([string]$kind -eq 'AppxRemove')) { [void]$errors.Add("${label}: Irreversible must be true exactly for AppxRemove.") }
     $e = [ordered]@{ Id = [string]$id; Category = [string]$cat; Kind = [string]$kind; Title = [string](Get-AVDTuneProp $Raw 'Title'); Why = [string](Get-AVDTuneProp $Raw 'Why'); Source = [string](Get-AVDTuneProp $Raw 'Source')
         Origin = [string]$origin; Risk = [string]$risk; Default = [bool](Get-AVDTuneProp $Raw 'Default'); Reboot = [bool](Get-AVDTuneProp $Raw 'Reboot'); Irreversible = ([string]$kind -eq 'AppxRemove')
-        Path = $null; Name = $null; Type = $null; Value = $null; OnlyIfKeyExists = $false; Startup = $null; TaskPath = $null; TaskName = $null; PackageName = $null; Parameter = $null }
+        Path = $null; Name = $null; Type = $null; Value = $null; OnlyIfKeyExists = $false; Startup = $null; TaskPath = $null; TaskName = $null; PackageName = $null; Parameter = $null; Input = $null }
     switch ([string]$kind) {
         'Registry' {
             $path = Get-AVDTuneProp $Raw 'Path'; $name = Get-AVDTuneProp $Raw 'Name'; $type = Get-AVDTuneProp $Raw 'Type'; $value = Get-AVDTuneProp $Raw 'Value'
@@ -474,11 +492,13 @@ function ConvertTo-OptEntry {
             else {
                 $d = $script:DefenderParams[[string]$param]
                 if ($d.Type -eq 'bool') { if ($value -isnot [bool]) { [void]$errors.Add("${label}: Value of $param must be true or false (a real boolean).") } }
+                elseif ($d.Type -eq 'unc') { if (-not ($value -is [string] -and $value -eq '')) { [void]$errors.Add("${label}: Value of $param must be '' (the path is entered on the page, never stored in the data).") } }
                 elseif (-not (Test-OptInt $value)) { [void]$errors.Add("${label}: Value of $param must be a whole number.") }
                 elseif ($d.ContainsKey('Allowed') -and ([int64]$value -notin $d.Allowed)) { [void]$errors.Add("${label}: Value of $param must be one of $($d.Allowed -join ', ').") }
                 elseif ($d.ContainsKey('Min') -and ([int64]$value -lt $d.Min -or [int64]$value -gt $d.Max)) { [void]$errors.Add("${label}: Value of $param must be from $($d.Min) to $($d.Max).") }
             }
-            $e.Parameter = [string]$param; $e.Value = $(if ($value -is [bool]) { $value } elseif (Test-OptInt $value) { [int64]$value } else { $null })
+            $e.Parameter = [string]$param; $e.Value = $(if ($value -is [bool]) { $value } elseif (Test-OptInt $value) { [int64]$value } elseif ($value -is [string] -and $value -eq '') { '' } else { $null })
+            if ([string]$param -ceq 'SharedSignaturesPath') { $e.Input = 'UncPath' }
         }
     }
     if ($errors.Count -eq 0) { $problem = Get-OptEntryProblem ([pscustomobject]$e); if ($problem) { [void]$errors.Add("${label}: $problem") } }
@@ -808,8 +828,22 @@ function Add-AVDTuneOptimizationMachineMembers {
             param($Name, $Value, $Restore = $false)
             if ($Name -cnotin $defenderNames) { throw 'Defender setting is not on the list.' }
             $problem = Get-OptDefenderProblem -Parameter $Name -Value $Value -Restore:([bool]$Restore); if ($problem) { throw "Refused: $problem" }
+            if ($Name -ceq 'SharedSignaturesPath' -and $Value -eq '') { Remove-MpPreference -SharedSignaturesPath -ErrorAction Stop; return }   # Undo to "no path" (#41; the switch is on Learn, Remove-MpPreference)
             $splat = @{ $Name = $Value }
             Set-MpPreference @splat -ErrorAction Stop
+        }.GetNewClosure()
+        UncReadable = {
+            # #41: can the share of the shared security intelligence be read (as the elevated administrator; Defender reads it as the computer account), and does it hold
+            # at least one {GUID} folder (the layout of Learn's unpack script)? No credentials: the current logon only. Returns @{ Ok; GuidFolders; Error }.
+            param($Path)
+            if (-not (Test-AVDTuneUncPath $Path)) { throw 'Refused: not a valid UNC path.' }
+            try {
+                $di = New-Object IO.DirectoryInfo ([string]$Path)
+                if (-not $di.Exists) { return @{ Ok = $false; GuidFolders = 0; Error = 'The share or folder does not exist or cannot be reached.' } }
+                $n = @($di.EnumerateDirectories('{*}') | Select-Object -First 200 | Where-Object { Test-OptPattern $_.Name '^\{[0-9A-Fa-f]{8}-(?:[0-9A-Fa-f]{4}-){3}[0-9A-Fa-f]{12}\}$' }).Count
+                @{ Ok = $true; GuidFolders = $n; Error = '' }
+            }
+            catch { @{ Ok = $false; GuidFolders = 0; Error = $_.Exception.Message } }
         }.GetNewClosure()
         RegInfo = {
             # Value as it is stored (not expanded) with its kind, read through the registry key (never through a property object: names like PSPath cannot clash)
@@ -841,7 +875,7 @@ function Add-AVDTuneOptimizationMachineMembers {
             finally { $pk.Close() }
         }.GetNewClosure()
     }
-    foreach ($name in 'AppxState', 'AppxRemove', 'MpGet', 'MpSet', 'RegInfo', 'RegKeyRemoveEmpty', 'HiveInfo', 'HiveKeyExists', 'HiveSet', 'HiveRemove', 'HiveKeyRemoveEmpty', 'HiveUnmount') {
+    foreach ($name in 'AppxState', 'AppxRemove', 'MpGet', 'MpSet', 'UncReadable', 'RegInfo', 'RegKeyRemoveEmpty', 'HiveInfo', 'HiveKeyExists', 'HiveSet', 'HiveRemove', 'HiveKeyRemoveEmpty', 'HiveUnmount') {
         if ($null -ne $Machine.PSObject.Properties[$name]) { continue }
         if ($Machine.Kind -ne 'Real') { throw "The machine adapter has no member '$name'." }
         $Machine | Add-Member -NotePropertyName $name -NotePropertyValue $real[$name]
@@ -866,7 +900,7 @@ function New-AVDTuneOptimizationStep {
         machine adapter and the backup file; nothing of the entry is evaluated as code. An entry that breaks the limits of the list is refused here as well
         (not only when the data is read), so an entry made by hand cannot get around them.
     #>
-    param([Parameter(Mandatory)]$Entry, [Parameter(Mandatory)][string]$Root)
+    param([Parameter(Mandatory)]$Entry, [Parameter(Mandatory)][string]$Root, [string]$InputValue = '')
     $problem = Get-OptEntryProblem $Entry
     if ($problem) { throw "Entry $($Entry.Id) refused: $problem" }
     $id = $Entry.Id
@@ -1004,6 +1038,34 @@ function New-AVDTuneOptimizationStep {
         }
         'DefenderPref' {
             $param = $Entry.Parameter; $want = $Entry.Value
+            if ((Get-AVDTuneProp $Entry 'Input') -eq 'UncPath') {
+                # #41: the path comes from the page; without one the row only says whether a path is set (Apply refuses, Undo works)
+                if ($InputValue -and -not (Test-AVDTuneUncPath $InputValue)) { throw "Entry $id refused: the path is not a valid UNC path." }
+                $want = $InputValue
+                $present = { param($m) try { [void](& $m.MpGet $param); $true } catch { if (Test-OptDefenderAbsent $_) { $false } else { throw } } }.GetNewClosure()
+                $test = { param($m) $v = ConvertTo-OptUncCompare (& $m.MpGet $param); @{ Compliant = $(if ($want) { $v -ne '' -and $v -eq (ConvertTo-OptUncCompare $want) } else { $v -ne '' }); State = $(if ($v) { [string](& $m.MpGet $param) } else { 'no path set' }) } }.GetNewClosure()
+                $apply = {
+                    param($m)
+                    if (-not $want) { throw 'Enter the UNC path of the share first. Nothing was set.' }
+                    $rd = & $m.UncReadable $want
+                    if (-not $rd.Ok) { throw "The share cannot be read, nothing was set (with no readable share Defender gets no updates from its other sources): $($rd.Error)" }
+                    if ([int]$rd.GuidFolders -lt 1) { throw 'The share holds no {GUID} folder with an unpacked update yet (see the update job on Learn). Nothing was set: Defender would get no updates.' }
+                    $v = & $m.MpGet $param
+                    [void](Save-AVDTuneOptimizationBackup -Root $Root -Id $id -Record @{ Kind = 'DefenderPref'; Parameter = $param; Unset = $false; Value = $(if ($v -is [string]) { $v } else { '' }); At = (& $m.Now).ToString('o') })
+                    & $m.MpSet $param $want $false
+                }.GetNewClosure()
+                $undo = {
+                    param($m)
+                    $b = Get-AVDTuneOptimizationBackup -Root $Root -Id $id
+                    if ($null -eq $b) { throw 'There is no saved earlier value for this entry (AVDTune did not set it), so there is nothing to undo.' }
+                    if ((Get-AVDTuneProp $b 'Kind') -cne 'DefenderPref' -or [string](Get-AVDTuneProp $b 'Parameter') -cne $param) { throw 'The saved earlier value does not belong to this entry (kind or setting differ).' }
+                    $old = Get-AVDTuneProp $b 'Value'; if ($null -eq $old) { $old = '' }
+                    $problem = Get-OptDefenderProblem -Parameter $param -Value $old -Restore
+                    if ($problem) { throw "The saved earlier value is damaged: $problem" }
+                    & $m.MpSet $param $old $true
+                }.GetNewClosure()
+                break
+            }
             # only "Defender is not there" counts as not present; any other error (a policy, a damaged WMI) is thrown and the row says "cannot be read" (#66)
             $present = { param($m) try { $null -ne (& $m.MpGet $param) } catch { if (Test-OptDefenderAbsent $_) { $false } else { throw } } }.GetNewClosure()
             $test = { param($m) $v = & $m.MpGet $param; @{ Compliant = ($null -ne $v -and (ConvertTo-OptCompare $v) -eq (ConvertTo-OptCompare $want)); State = $(if ($null -eq $v) { 'not available' } else { [string](ConvertTo-OptCompare $v) }) } }.GetNewClosure()
@@ -1081,7 +1143,7 @@ function Get-AVDTuneOptimizationStatus {
         catch { $failed = $true; $msg = $_.Exception.Message; $state = 'cannot be read' }
         [void]$rows.Add([pscustomobject]@{
                 Id = $e.Id; Category = $e.Category; Kind = $e.Kind; Title = $e.Title; Why = $e.Why; Source = $e.Source; Origin = $e.Origin; Risk = $e.Risk; Default = $e.Default; Reboot = $e.Reboot
-                Irreversible = $e.Irreversible; Present = $present; Compliant = $compliant; State = $state; HasBackup = ($backups.ContainsKey($e.Id) -and -not $e.Irreversible); Failed = $failed; Message = $msg
+                Irreversible = $e.Irreversible; Input = (Get-AVDTuneProp $e 'Input'); Present = $present; Compliant = $compliant; State = $state; HasBackup = ($backups.ContainsKey($e.Id) -and -not $e.Irreversible); Failed = $failed; Message = $msg
             })
     }
     }
@@ -1103,7 +1165,7 @@ function Invoke-AVDTuneOptimization {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)]$Machine, [string]$Root = (Get-AVDTuneRoot), [string]$DataPath = $script:DataFile, [Parameter(Mandatory)][AllowEmptyCollection()][string[]]$Ids,
-        [ValidateSet('Apply', 'Undo')][string]$Mode = 'Apply', [switch]$ConfirmIrreversible, [string]$User, [string]$SnapshotId, [switch]$WhatIf
+        [ValidateSet('Apply', 'Undo')][string]$Mode = 'Apply', [switch]$ConfirmIrreversible, [string]$User, [string]$SnapshotId, [switch]$WhatIf, [hashtable]$Inputs = @{}
     )
     $data = Read-AVDTuneOptimizationData -Path $DataPath
     if (-not $data.Valid) { throw ('The optimization data is not valid, nothing is applied: ' + (@($data.Errors | Select-Object -First 3) -join ' ')) }
@@ -1112,8 +1174,14 @@ function Invoke-AVDTuneOptimization {
     $selected = @($Ids | Where-Object { $_ } | Select-Object -Unique)
     if ($selected.Count -eq 0) { throw 'No entry is selected.' }
     foreach ($id in $selected) { if (-not $byId.ContainsKey($id)) { throw "Unknown entry '$id'." } }
+    # #41: a value the administrator entered (only for entries with Input, only valid ones); an Apply of such an entry without its value changes nothing at all
+    foreach ($k in @($Inputs.Keys)) {
+        if (-not $byId.ContainsKey([string]$k) -or (Get-AVDTuneProp $byId[[string]$k] 'Input') -ne 'UncPath') { throw "Entry '$k' takes no input." }
+        if (-not (Test-AVDTuneUncPath $Inputs[$k])) { throw "The path for '$($byId[[string]$k].Title)' is not a valid UNC path (\\server\share\folder, no credentials). Nothing was changed." }
+    }
+    if ($Mode -eq 'Apply') { foreach ($id in $selected) { if ((Get-AVDTuneProp $byId[$id] 'Input') -eq 'UncPath' -and -not $Inputs.ContainsKey($id)) { throw "Enter the path for '$($byId[$id].Title)' first. Nothing was changed." } } }
     [void](Add-AVDTuneOptimizationMachineMembers -Machine $Machine)
-    $items = @($selected | ForEach-Object { New-AVDTuneOptimizationStep -Entry $byId[$_] -Root $Root })
+    $items = @($selected | ForEach-Object { New-AVDTuneOptimizationStep -Entry $byId[$_] -Root $Root -InputValue $(if ($Inputs.ContainsKey($_)) { [string]$Inputs[$_] } else { '' }) })
     if ($Mode -eq 'Apply' -and -not $WhatIf -and -not $ConfirmIrreversible) {
         $pending = @($items | Where-Object { $_.Entry.Irreversible -and (& $_.Present $Machine) -and -not (ConvertTo-AVDTuneTestResult (& $_.Step.Test $Machine)).Compliant })
         if ($pending.Count -gt 0) { throw "$($pending.Count) AppX removal(s) cannot be undone and need their own confirmation (ConfirmIrreversible). Nothing was changed." }
@@ -1190,7 +1258,7 @@ function Invoke-AVDTuneOptimization {
         foreach ($r in $changed) {
             $e = $byId[$r.Id]
             $type = if ($Mode -eq 'Undo') { 'Changed' } elseif ($e.Kind -eq 'AppxRemove') { 'Removed' } else { 'Changed' }
-            $text = if ($Mode -eq 'Undo') { "Undone: $($e.Title)" } else { $e.Title }
+            $text = if ($Mode -eq 'Undo') { "Undone: $($e.Title)" } elseif ($Inputs.ContainsKey($r.Id)) { "$($e.Title): $($Inputs[$r.Id])" } else { $e.Title }
             [void](Add-AVDTuneChangeLogEntry -Root $Root -Version $state.ImageVersion -Category 'Optimization' -Component $e.Id -ChangeType $type -Text $text -User $User -SnapshotId $SnapshotId -RunId $run.Id -Source Step)
         }
         foreach ($r in $failed) {
@@ -1205,5 +1273,5 @@ function Invoke-AVDTuneOptimization {
 
 Export-ModuleMember -Function Get-AVDTuneOptimizationDataPath, Read-AVDTuneOptimizationData, Get-AVDTuneOptimizationPresetIds, Get-AVDTuneOptimizationCategoryLabel, Get-AVDTuneOptimizationCategoryOrder,
     Add-AVDTuneOptimizationMachineMembers, New-AVDTuneOptimizationStep, Get-AVDTuneOptimizationStatus, Test-OptDefenderAbsent, ConvertTo-OptInt32, Invoke-AVDTuneOptimization,
-    Get-AVDTuneOptimizationBackup, Save-AVDTuneOptimizationBackup, Remove-AVDTuneOptimizationBackup, ConvertTo-OptScalar, ConvertTo-OptCompare, Test-OptInt, Test-OptText, Test-OptPattern, Get-OptRegistryProblem, Get-OptServiceProblem, Get-OptTaskProblem, Get-OptAppxProblem, Get-OptDefenderProblem, Get-OptEntryProblem, Get-OptCreatedKeys, Assert-OptRegistryAccess, Get-OptRegistryKeyProblem, Get-OptRegistryValueProblem, Get-OptRestoreProblem, Test-OptDefenderUnset, ConvertTo-OptDWordRead, ConvertTo-OptDWordWrite, Test-OptRegPathSyntax, Test-OptRegNameSyntax,
+    Get-AVDTuneOptimizationBackup, Save-AVDTuneOptimizationBackup, Remove-AVDTuneOptimizationBackup, ConvertTo-OptScalar, ConvertTo-OptCompare, Test-OptInt, Test-OptText, Test-OptPattern, Get-OptRegistryProblem, Get-OptServiceProblem, Get-OptTaskProblem, Get-OptAppxProblem, Get-OptDefenderProblem, Get-OptEntryProblem, Test-AVDTuneUncPath, ConvertTo-OptUncCompare, Get-OptCreatedKeys, Assert-OptRegistryAccess, Get-OptRegistryKeyProblem, Get-OptRegistryValueProblem, Get-OptRestoreProblem, Test-OptDefenderUnset, ConvertTo-OptDWordRead, ConvertTo-OptDWordWrite, Test-OptRegPathSyntax, Test-OptRegNameSyntax,
     Get-AVDTuneDefaultHiveName, Get-AVDTuneDefaultHivePath, Mount-AVDTuneDefaultHive, Dismount-AVDTuneDefaultHive, Get-OptHiveCreatedKeys, Assert-OptHiveAccess, Test-OptHivePathSyntax, Test-OptHiveNameSyntax, Get-OptHiveProblem, Get-OptHiveKeyProblem, Get-OptHiveValueProblem

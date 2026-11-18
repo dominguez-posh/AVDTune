@@ -2184,6 +2184,21 @@
                         "Value":  1
                     },
                     {
+                        "Id":  "optimization.defender-shared-signatures",
+                        "Category":  "Defender",
+                        "Kind":  "DefenderPref",
+                        "Title":  "Defender: security intelligence updates from a file share",
+                        "Why":  "Microsoft VDI guidance: the shared security intelligence feature. Defender on the VMs takes its updates from a file share where a management machine has unpacked them, instead of unpacking every package itself. Enter the share (\\\\server\\share\\folder); AVDTune checks that it can be read and holds an unpacked update folder before it sets the path. WARNING: with the path set Defender no longer uses its other update sources (Set-MpPreference), so the share must stay filled. The update job that downloads and unpacks the packages runs on the management machine, not on this master; AVDTune does not build it. The VMs read the share as their computer account: give Authenticated Users (or the computers) read on share and NTFS. Not tried on a live host yet.",
+                        "Source":  "https://learn.microsoft.com/en-us/defender-endpoint/deployment-vdi-microsoft-defender-antivirus",
+                        "Origin":  "learn-defender-vdi",
+                        "Risk":  "Medium",
+                        "Default":  false,
+                        "Reboot":  false,
+                        "Irreversible":  false,
+                        "Parameter":  "SharedSignaturesPath",
+                        "Value":  ""
+                    },
+                    {
                         "Id":  "optimization.defender-local-admin-merge-off",
                         "Category":  "Defender",
                         "Kind":  "DefenderPref",

@@ -1218,6 +1218,8 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         # read behind the open write gate only (loading writes log files into the profile); with the gate closed the rows say so and nothing is loaded
         $hiveOk = if (Test-AVDTuneWriteAllowed) { @($hiveRows | Where-Object Failed).Count -eq 0 -and $script:Machine.Store.Hive.Loads -ge 1 } else { @($hiveRows | Where-Object { -not $_.Failed -or $_.Message -notlike '*write gate*' }).Count -eq 0 -and $script:Machine.Store.Hive.Loads -eq 0 }
         Test-Smoke 'Optimization: the default user profile rows (#40) are read from the simulated hive behind the write gate, which is unloaded again' ($hiveRows.Count -ge 3 -and $hiveOk -and -not $script:Machine.Store.Hive.Loaded) "rows=$($hiveRows.Count) loads=$($script:Machine.Store.Hive.Loads) loaded=$($script:Machine.Store.Hive.Loaded) gate=$(Test-AVDTuneWriteAllowed)"
+        $ssBox = $ui.OptInputBoxes['optimization.defender-shared-signatures']
+        Test-Smoke 'Optimization (#41): the shared security intelligence row has the UNC input with its name for screen readers, empty while no path is set' ($ssBox -and [System.Windows.Automation.AutomationProperties]::GetName($ssBox) -like 'UNC path for*' -and $ssBox.Text -eq '' -and $ssBox.MaxLength -eq 260) $null
         Save-SmokeShot '56-page-optimization'
         Show-Page 'Overview'
         $true } }

@@ -960,6 +960,40 @@ try {
     $real = New-AVDTuneMachine; [void](Add-AVDTuneOptimizationMachineMembers -Machine $real)
     Test-Check 'real machine: gets the four members, refuses a Defender setting that is not on the list and an AppX name with a wildcard before any cmdlet runs' ((@('AppxState', 'AppxRemove', 'MpGet', 'MpSet') | Where-Object { $null -eq $real.PSObject.Properties[$_] }).Count -eq 0 -and (Test-Throws { & $real.MpGet 'DisableRealtimeMonitoring' }) -and (Test-Throws { & $real.MpSet 'DisableRealtimeMonitoring' $true }) -and (Test-Throws { & $real.AppxState '*' }) -and (Test-Throws { & $real.AppxRemove 'Microsoft.*' })) $null
 
+    # ---------------------------------------------------------------- #41: Defender SharedSignaturesPath with an input and the readability check
+    $ssId = 'optimization.defender-shared-signatures'
+    $ssE = @((Read-AVDTuneOptimizationData).Entries | Where-Object Id -eq $ssId)[0]
+    Test-Check '#41 data: the entry is shipped off by default, with the path as input (never a stored value) and the Learn source' ($ssE -and -not $ssE.Default -and $ssE.Input -eq 'UncPath' -and $ssE.Value -eq '' -and $ssE.Source -like '*deployment-vdi-microsoft-defender-antivirus' -and $ssE.Why -like '*no longer uses its other update sources*' -and $ssE.Why -like '*management machine*') $null
+    $goodUnc = @('\\fileserver\mdatp$\wdav-update', '\\fs01.corp.example\share', '\\10.0.0.5\share\a b\{00000000-0000-0000-0000-000000000000}')
+    $badUnc = @('', 'C:\updates', '\\?\UNC\fs\share', '\\.\pipe\x', '\\fs\share\..\x', '\\user:pw@fs\share', '\\fs@SSL\share', '\\fs\sh*re', "\\fs\share`n", '\\fs', '\\fs\', 'https://fs/share', '\\fs\share\.', ('\\fs\' + ('a' * 300)), '\\-fs\share', 7)
+    Test-Check '#41 UNC: valid paths pass, credentials, device paths, wildcards, dot segments, newlines and non-strings are refused (counter-test)' ((@($goodUnc | Where-Object { -not (Test-AVDTuneUncPath $_) }).Count -eq 0) -and (@($badUnc | Where-Object { Test-AVDTuneUncPath $_ }).Count -eq 0)) (@($badUnc | Where-Object { Test-AVDTuneUncPath $_ }) -join ' | ')
+    $ms = New-AVDTuneFakeMachine; [void](Add-AVDTuneOptimizationFakeMembers $ms)
+    $share = '\\fileserver\mdatp$\wdav-update'
+    Open-AVDTuneWriteGate -SnapshotId 'snap-41' -ConfirmedBy 'admin1'
+    $st41 = Get-AVDTuneOptimizationStatus -Machine $ms -Root $state
+    $row41 = @($st41.Rows | Where-Object Id -eq $ssId)[0]
+    Test-Check '#41 status: without a path set the row is present, not in place, says so and carries the input kind' ($row41.Present -and -not $row41.Compliant -and $row41.State -eq 'no path set' -and $row41.Input -eq 'UncPath') $row41.State
+    Test-Check '#41 apply without the path: refused before anything changes' ((Test-Throws { Invoke-AVDTuneOptimization -Machine $ms -Root $state -Ids @($ssId) -User 'admin1' -SnapshotId 's' }) -and $ms.Store.Mp['SharedSignaturesPath'] -eq '') $null
+    Test-Check '#41 apply with a path that is not a UNC path or for an entry without input: refused, nothing set (counter-test)' ((Test-Throws { Invoke-AVDTuneOptimization -Machine $ms -Root $state -Ids @($ssId) -Inputs @{ $ssId = '\\user:pw@fs\share' } -User 'admin1' -SnapshotId 's' }) -and (Test-Throws { Invoke-AVDTuneOptimization -Machine $ms -Root $state -Ids @($ssId) -Inputs @{ 'optimization.defender-pua-block' = $share } -User 'admin1' -SnapshotId 's' }) -and $ms.Store.Mp['SharedSignaturesPath'] -eq '') $null
+    $r41 = Invoke-AVDTuneOptimization -Machine $ms -Root $state -Ids @($ssId) -Inputs @{ $ssId = $share } -User 'admin1' -SnapshotId 's'
+    Test-Check '#41 the share cannot be read: Failed with the reason, the path is not set (counter-test)' ((Get-R $r41 $ssId).Status -eq 'Failed' -and (Get-R $r41 $ssId).Message -like '*cannot be read*' -and $ms.Store.Mp['SharedSignaturesPath'] -eq '' -and @($ms.Store.Log | Where-Object { $_ -like 'UncReadable*' }).Count -ge 1) (Get-R $r41 $ssId).Message
+    $ms.Store.Unc[$share.ToLowerInvariant()] = @{ Ok = $true; GuidFolders = 0; Error = '' }
+    $r41b = Invoke-AVDTuneOptimization -Machine $ms -Root $state -Ids @($ssId) -Inputs @{ $ssId = $share } -User 'admin1' -SnapshotId 's'
+    Test-Check '#41 a readable share without an unpacked {GUID} update folder: Failed, the path is not set (Defender would get no updates)' ((Get-R $r41b $ssId).Status -eq 'Failed' -and (Get-R $r41b $ssId).Message -like '*GUID*' -and $ms.Store.Mp['SharedSignaturesPath'] -eq '') (Get-R $r41b $ssId).Message
+    $ms.Store.Unc[$share.ToLowerInvariant()] = @{ Ok = $true; GuidFolders = 2; Error = '' }
+    $r41c = Invoke-AVDTuneOptimization -Machine $ms -Root $state -Ids @($ssId) -Inputs @{ $ssId = $share } -User 'admin1' -SnapshotId 's'
+    $log41 = @(Get-AVDTuneChangeLog -Root $state | Where-Object Component -eq $ssId)
+    Test-Check '#41 a readable share with an update folder: the path is set, the earlier value (none) is saved, the change log names the path' ((Get-R $r41c $ssId).Status -eq 'Changed' -and $ms.Store.Mp['SharedSignaturesPath'] -eq $share -and (Get-AVDTuneOptimizationBackup -Root $state -Id $ssId).Value -eq '' -and $log41.Count -ge 1 -and $log41[-1].Text -like "*$share") (Get-R $r41c $ssId).Message
+    $st41b = Get-AVDTuneOptimizationStatus -Machine $ms -Root $state
+    Test-Check '#41 status after Apply: in place, the state shows the path, Undo is possible' ((@($st41b.Rows | Where-Object Id -eq $ssId)[0]).Compliant -and (@($st41b.Rows | Where-Object Id -eq $ssId)[0]).State -eq $share -and (@($st41b.Rows | Where-Object Id -eq $ssId)[0]).HasBackup) $null
+    $u41 = Invoke-AVDTuneOptimization -Machine $ms -Root $state -Ids @($ssId) -Mode Undo -User 'admin1' -SnapshotId 's'
+    Test-Check '#41 Undo gives back "no path" through the restore path (Remove-MpPreference in the real member) and releases the backup' ((Get-R $u41 $ssId).Status -eq 'Reverted' -and $ms.Store.Mp['SharedSignaturesPath'] -eq '' -and @($ms.Store.Log | Where-Object { $_ -eq 'MpSet SharedSignaturesPath= restore=True' }).Count -eq 1 -and $null -eq (Get-AVDTuneOptimizationBackup -Root $state -Id $ssId)) (@($ms.Store.Log) -join ' | ')
+    Test-Check '#41 Defender check: a path is refused on set unless it is a UNC path, "" only as a restore' ((Get-OptDefenderProblem -Parameter 'SharedSignaturesPath' -Value '') -and $null -eq (Get-OptDefenderProblem -Parameter 'SharedSignaturesPath' -Value '' -Restore) -and (Get-OptDefenderProblem -Parameter 'SharedSignaturesPath' -Value 5 -Restore) -and $null -eq (Get-OptDefenderProblem -Parameter 'SharedSignaturesPath' -Value $share)) $null
+    $realU = New-AVDTuneMachine; [void](Add-AVDTuneOptimizationMachineMembers -Machine $realU)
+    Test-Check '#41 the real members refuse a path that is not a UNC path before any cmdlet or network access' ((Test-Throws { & $realU.UncReadable 'C:\Windows' }) -and (Test-Throws { & $realU.UncReadable '\\user:pw@fs\share' }) -and (Test-Throws { & $realU.MpSet 'SharedSignaturesPath' 'C:\x' })) $null
+    $modOpt = Get-Content (Join-Path $repo 'Modules\AVDTune.Optimization.psm1') -Raw
+    Test-Check '#41 the real readability check uses the current logon only (no credentials, no net use, no New-PSDrive)' ($modOpt -notmatch 'net\.exe|net use|New-PSDrive|New-SmbMapping|-Credential|PSCredential|NetworkCredential') $null
+
     # ---------------------------------------------------------------- hygiene
     foreach ($f in 'Modules\AVDTune.Optimization.psm1', 'AVDTune-Optimization.ps1', 'data\optimization.json', 'Tests\Fakes\FakeOptimization.ps1', 'NOTICE') {
         $p = Join-Path $repo $f
