@@ -172,9 +172,18 @@ function Start-EnvJob([string]$Kind, [hashtable]$A) {
     }
     $sync = [hashtable]::Synchronized(@{ Text = '' })
     $ps = New-AVDTunePowerShell
-    [void]$ps.AddScript($script:EnvWorkerText).AddArgument($script:AppRoot).AddArgument($script:StateRoot).AddArgument($Kind).AddArgument($A).AddArgument($(if ($writes) { Get-AVDTuneWriteGate } else { $null })).AddArgument($sync).AddArgument($(if ($script:TestMode) { $script:EnvFake } else { $null })).AddArgument($(if ($script:TestMode) { Get-TestScript 'FakeEnvArm.ps1' } else { $null }))
-    $task = Start-AVDTuneUiTask -Kind "environment-$($Kind.ToLower())" -Title $script:EnvJobText[$Kind][0] -Step $script:EnvJobText[$Kind][1]
-    $script:EnvJob = @{ PS = $ps; Handle = $ps.BeginInvoke(); Kind = $Kind; Sync = $sync; Task = $task; A = $A }
+    $task = $null
+    try {
+        [void]$ps.AddScript($script:EnvWorkerText).AddArgument($script:AppRoot).AddArgument($script:StateRoot).AddArgument($Kind).AddArgument($A).AddArgument($(if ($writes) { Get-AVDTuneWriteGate } else { $null })).AddArgument($sync).AddArgument($(if ($script:TestMode) { $script:EnvFake } else { $null })).AddArgument($(if ($script:TestMode) { Get-TestScript 'FakeEnvArm.ps1' } else { $null }))
+        $task = Start-AVDTuneUiTask -Kind "environment-$($Kind.ToLower())" -Title $script:EnvJobText[$Kind][0] -Step $script:EnvJobText[$Kind][1]
+        $script:EnvJob = @{ PS = $ps; Handle = $ps.BeginInvoke(); Kind = $Kind; Sync = $sync; Task = $task; A = $A }
+    }
+    catch {
+        # nothing started: the runspace and the token go at once, a task that was shown ends failed (#44 review)
+        $ps.Dispose(); $A.Token = $null
+        if ($task) { Complete-AVDTuneUiTask $task -Failed -Summary $_.Exception.Message }
+        throw
+    }
     if ($writes) { Set-ShutdownBlock $true }
     Set-EnvBusy $true
 }
@@ -183,7 +192,6 @@ function Complete-EnvJob {
     if (-not $job) { return }
     if (-not $job.Handle.IsCompleted) { if ([string]$job.Sync.Text -eq 'interrupted') { Update-AVDTuneUiTask $job.Task -Step 'Closing a run that stopped in the middle (GET only)' }; return }
     $script:EnvJob = $null
-    if ($job.Kind -notin $script:EnvReadKinds) { Set-ShutdownBlock $false }
     $res = $null; $err = ''
     try {
         $out = @($job.PS.EndInvoke($job.Handle))
@@ -191,8 +199,13 @@ function Complete-EnvJob {
         $res = $out | Select-Object -Last 1
     }
     catch { $err = $_.Exception.Message }
-    finally { $job.PS.Dispose(); $job.A.Token = $null }   # the token lives only as long as the job
-    Set-EnvBusy $false
+    finally {
+        # always, whatever failed above or here: the token lives only as long as the job, the runspace goes, the shutdown block and the buttons are released (#44 review)
+        $job.A.Token = $null
+        try { $job.PS.Dispose() } catch { }
+        try { if ($job.Kind -notin $script:EnvReadKinds) { Set-ShutdownBlock $false } } catch { }
+        try { Set-EnvBusy $false } catch { }
+    }
     if ($res -and @($res.Closed).Count -gt 0) {
         $text = T 'env.interrupted.closed' ((@($res.Closed | ForEach-Object { "$($_.Id): $($_.Status) ($($_.Message))" }) -join '; '))
         [void](Add-AVDTuneProtocolNote -Protocol $script:Protocol -Group 'other' -Subject $text); Save-Protocol

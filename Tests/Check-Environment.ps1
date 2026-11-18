@@ -392,7 +392,7 @@ try {
     $onUi = @([regex]::Matches($outside, '(Get-AVDTuneEnvPlan|Invoke-AVDTuneEnvApply|Get-AVDTuneEnvUndoPlan|Invoke-AVDTuneEnvUndo|Resolve-AVDTuneEnvInterrupted|New-AVDTuneArmAdapter) ') | ForEach-Object { $_.Groups[1].Value })
     $startEnv = [regex]::Match($envPage, '(?s)function Start-EnvJob.*?\r?\n\}').Value
     $tasksText = [IO.File]::ReadAllText((Join-Path $repo 'AVDTune-Tasks.ps1'))
-    Test-Check 'runspace (#44): no Azure call of the page runs on the window thread; Start-EnvJob uses New-AVDTunePowerShell, a task, the shutdown block, the write gate and Assert-NoOtherWriter for Apply and Undo; EnvJob is a writer (Plan, UndoPlan read only)' ($envWorker -and $onUi.Count -eq 0 -and $startEnv -match 'New-AVDTunePowerShell' -and $startEnv -match 'Start-AVDTuneUiTask' -and $startEnv -match 'Set-ShutdownBlock \$true' -and $startEnv -match 'Assert-NoOtherWriter' -and $startEnv -match 'Test-AVDTuneWriteAllowed' -and $startEnv -match 'Get-AVDTuneWriteGate' -and $tasksText -match "'PrnJob', 'EnvJob'\)" -and $tasksText -match "EnvJob = @\('Plan', 'UndoPlan'\)" -and $envPage -match 'finally \{ \$job\.PS\.Dispose\(\); \$job\.A\.Token = \$null \}') ($onUi -join ', ')
+    Test-Check 'runspace (#44): no Azure call of the page runs on the window thread; Start-EnvJob uses New-AVDTunePowerShell, a task, the shutdown block, the write gate and Assert-NoOtherWriter for Apply and Undo; EnvJob is a writer (Plan, UndoPlan read only)' ($envWorker -and $onUi.Count -eq 0 -and $startEnv -match 'New-AVDTunePowerShell' -and $startEnv -match 'Start-AVDTuneUiTask' -and $startEnv -match 'Set-ShutdownBlock \$true' -and $startEnv -match 'Assert-NoOtherWriter' -and $startEnv -match 'Test-AVDTuneWriteAllowed' -and $startEnv -match 'Get-AVDTuneWriteGate' -and $tasksText -match "'PrnJob', 'EnvJob'\)" -and $tasksText -match "EnvJob = @\('Plan', 'UndoPlan'\)" -and $envPage -match '\$job\.A\.Token = \$null') ($onUi -join ', ')
     # the worker text in a fresh runspace with exactly its own imports (no "is not recognized"), against one fake ARM, all four kinds after each other
     $rsRoot = New-Root; $roots += $rsRoot
     $rsArm = New-AVDTuneFakeEnvArm -Seed @{ Polls = 0 }
@@ -419,6 +419,34 @@ try {
     Test-Check 'runspace (#44): the worker runs Plan, Apply, UndoPlan and Undo in a fresh runspace with its own imports and the write gate handed over: no error, the plan has 10 changes, apply Changed, undo takes back' (-not $wPlan.Err -and $wPlan.Out.Result.Changes -eq 10 -and $wApply -and -not $wApply.Err -and $wApply.Out.Result.Status -eq 'Changed' -and $wUndoPlan -and -not $wUndoPlan.Err -and $wUndoPlan.Out.Result.Count -gt 0 -and $wUndo -and -not $wUndo.Err -and $wUndo.Out.Result.Status -notin 'Failed', 'Refused' -and $wPlan.Step -eq 'azure') "plan=$($wPlan.Err)$($wPlan.Out.Result.Changes) apply=$($wApply.Err)$($wApply.Out.Result.Status) undoplan=$($wUndoPlan.Err)$($wUndoPlan.Out.Result.Count) undo=$($wUndo.Err)$($wUndo.Out.Result.Status) $($wUndo.Out.Result.Message)"
     $wNoGate = & $runWorker 'Apply' @{ Token = $tok; Spec = $good; Identity = 'EntraKerberos'; Identities = 'CloudOnly'; Hash = 'x'; User = 'Test User'; SnapshotId = 'snap1' } $null
     Test-Check 'runspace (#44): without the gate handed over the worker''s apply is refused (the runspace has its own module state, counter-test)' (($wNoGate.Err -like '*gate*') -or ($wNoGate.Out.Result.Status -in 'Refused', 'Failed')) "$($wNoGate.Err) $($wNoGate.Out.Result.Status)"
+    # #44 review: a start that fails after the runspace was made disposes it and drops the token; an end that fails releases token, runspace, shutdown block and buttons
+    & {   # a child scope: the stubs below do not leak into the rest of the check
+        $envAst = [Management.Automation.Language.Parser]::ParseInput($envPage, [ref]$null, [ref]$null)
+        foreach ($fnName in 'Start-EnvJob', 'Complete-EnvJob') { Invoke-Expression ($envAst.Find({ param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $fnName }, $true).Extent.Text) }
+        $script:EnvReadKinds = @('Plan', 'UndoPlan'); $script:EnvJob = $null; $script:EnvWorkerText = '1'; $script:EnvJobText = @{ Apply = @('t', 's') }; $script:TestMode = $false
+        $script:Calls = New-Object System.Collections.ArrayList
+        function Test-AVDTuneWriteAllowed { $true }
+        function Assert-NoOtherWriter { }
+        function New-AVDTunePowerShell { $script:RevPs = [powershell]::Create(); $script:RevPs }
+        function Start-AVDTuneUiTask { throw 'task list broken' }
+        function Complete-AVDTuneUiTask { [void]$script:Calls.Add('task-failed') }
+        function Set-ShutdownBlock([bool]$On) { [void]$script:Calls.Add("shutdown-$On") }
+        function Set-EnvBusy([bool]$Busy) { [void]$script:Calls.Add("busy-$Busy") }
+        function Start-OverviewRefresh { }
+        $revA = @{ Token = 'tok-review' }
+        $revThrown = Get-Thrown { Start-EnvJob 'Apply' $revA }
+        $revDisposed = Test-Throws { [void]$script:RevPs.AddScript('1') }
+        Test-Check 'review (#44): Start-EnvJob that fails at the task disposes the runspace, drops the token, sets no job and no shutdown block (counter-test)' ($revThrown -eq 'task list broken' -and $revDisposed -and $null -eq $revA.Token -and -not $script:EnvJob -and $script:Calls -notcontains 'shutdown-True') "thrown=$revThrown disposed=$revDisposed calls=$($script:Calls -join ',')"
+        $script:Calls.Clear(); $script:RevDispose = 0
+        $fakePs = [pscustomobject]@{}
+        $fakePs | Add-Member ScriptMethod EndInvoke { param($h) throw 'runspace broken' }
+        $fakePs | Add-Member ScriptMethod Dispose { $script:RevDispose++; throw 'dispose broken' }   # counter-test: a failing dispose must not keep token, block or buttons
+        $ui = @{ TxtEnvResult = [pscustomobject]@{ Text = '' } }
+        $revJobA = @{ Token = 'tok-review2' }
+        $script:EnvJob = @{ PS = $fakePs; Handle = [pscustomobject]@{ IsCompleted = $true }; Kind = 'Apply'; Sync = @{ Text = '' }; Task = @{}; A = $revJobA }
+        $revEndErr = Get-Thrown { Complete-EnvJob }
+        Test-Check 'review (#44): Complete-EnvJob after a failing end releases token, runspace, shutdown block and buttons and reports the error' (-not $revEndErr -and $null -eq $revJobA.Token -and $script:RevDispose -eq 1 -and $script:Calls -contains 'shutdown-False' -and $script:Calls -contains 'busy-False' -and $script:Calls -contains 'task-failed' -and $ui.TxtEnvResult.Text -like '*runspace broken*' -and -not $script:EnvJob) "err=$revEndErr dispose=$($script:RevDispose) calls=$($script:Calls -join ',') text=$($ui.TxtEnvResult.Text)"
+    }
     # #45 review: the run is closed under the state lock and not while another AVDTune process changes the master or a wizard run of this process is carried out
     $root = New-Root; $roots += $root
     $arm = New-AVDTuneFakeEnvArm

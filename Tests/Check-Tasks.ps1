@@ -267,5 +267,31 @@ $rowFiles = @{ 'AVDTune-Software.ps1' = 1; 'AVDTune-Vdi.ps1' = 1; 'AVDTune-Custo
 $noRow = @($rowFiles.Keys | Where-Object { ([regex]::Matches([IO.File]::ReadAllText((Join-Path $repo $_)), 'Set-AVDTuneWriterButton \$')).Count -lt $rowFiles[$_] })
 Test-Check 'central lock (#49.3): watermark, benchmark repair, finish repair and new version hold the lock; the write buttons of code rows (software, VDI, customizations, readiness, Office, masking) get the lock command' ($noInline.Count -eq 0 -and $noRow.Count -eq 0 -and 'BtnMaskLogoff' -in $script:WriterButtons) "inline: $($noInline -join ', ') rows: $($noRow -join ', ')"
 
+# #49 review: closing the window waits for every writer (all of WriterJobVariables and a held lock), not only update, benchmark and finish; the timer closes it afterwards
+$startAst2 = [Management.Automation.Language.Parser]::ParseInput((Get-Content -Raw (Join-Path $repo 'Start-AVDTune.ps1')), [ref]$null, [ref]$null)
+foreach ($fnName in 'Get-CloseHoldReason', 'Invoke-CloseWhenDone') { Invoke-Expression ($startAst2.Find({ param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $fnName }, $true).Extent.Text) }
+$script:Closed = 0; $script:ErrShown = ''
+$window = [pscustomobject]@{}; $window | Add-Member ScriptMethod Close { $script:Closed++ }
+function Show-Error([string]$Text) { $script:ErrShown = $Text }
+$holdFree = -not (Get-CloseHoldReason)
+$heldBy = @{}
+foreach ($jv in $script:WriterJobVariables) {
+    Set-Variable -Scope Script -Name $jv -Value @{ Kind = 'Apply' }
+    $heldBy[$jv] = [bool](Get-CloseHoldReason)
+    Set-Variable -Scope Script -Name $jv -Value $null
+}
+$notHeld = @($heldBy.Keys | Where-Object { -not $heldBy[$_] })
+$hClose = Enter-AVDTuneWriter -Kind 'demo' -Title 'Inline'
+$heldByLock = (Get-CloseHoldReason) -eq 'shell.close.writer'
+$script:CloseWhenDone = $true; $script:CloseAskedAt = Get-Date
+Invoke-CloseWhenDone; $waited = ($script:Closed -eq 0 -and $script:CloseWhenDone)
+Exit-AVDTuneWriter $hClose
+Invoke-CloseWhenDone; $closedAfter = ($script:Closed -eq 1 -and -not $script:CloseWhenDone)
+$script:CloseWhenDone = $true; $script:CloseAskedAt = (Get-Date).AddSeconds(-1)
+$tFail = Start-AVDTuneUiTask -Kind 'demo' -Title 'Failing writer'; Complete-AVDTuneUiTask $tFail -Failed -Summary 'boom'
+Invoke-CloseWhenDone; $keptOnFail = ($script:Closed -eq 1 -and -not $script:CloseWhenDone -and $script:ErrShown -eq 'shell.close.failed')
+$mainText = Get-Content -Raw (Join-Path $repo 'Start-AVDTune.ps1')
+Test-Check 'closing (#49 review): every writer job of WriterJobVariables (writing kind) and a held lock keep the window open; it closes on the timer when none is left, not after a task that failed meanwhile' ($holdFree -and $notHeld.Count -eq 0 -and $heldByLock -and $waited -and $closedAfter -and $keptOnFail -and $mainText -match '\$what = Get-CloseHoldReason' -and $mainText -match 'Add_Tick\(\{ try \{ Invoke-CloseWhenDone \}') "free=$holdFree notHeld=$($notHeld -join ',') lock=$heldByLock waited=$waited closed=$closedAfter fail=$keptOnFail"
+
 if ($script:failed -gt 0) { throw "$script:failed check(s) failed." }
 'Check-Tasks: all checks passed.'

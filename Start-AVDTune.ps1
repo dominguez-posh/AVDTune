@@ -596,15 +596,37 @@ Add-Click $ui.BtnClose { $window.Close() }
 
 # Closing during an update operation would end the process in the middle of it: the finally block of the maintenance mode would not run and the
 # update block would stay lifted. So the window stays open; it closes by itself when the operation is done (Complete-UpdJob).
+# #49 review: the same for every writer (each job of WriterJobVariables that changes the master, and a held Enter-AVDTuneWriter lock); the window timer closes it
+# when none is left, unless a task failed after the close was asked for (the administrator sees the error first).
 $script:CloseWhenDone = $false
+$script:CloseAskedAt = $null
+function Get-CloseHoldReason {
+    # what keeps the window open, '' when nothing does
+    if ($script:SealJob) { return (T 'shell.close.finish') }
+    if ($script:BenchJob) { return (T 'shell.close.bench') }
+    if ($script:UpdJob) { if ($script:UpdJob.Kind -eq 'Scan') { return (T 'shell.close.scan') } else { return (T 'shell.close.update') } }
+    $w = Get-AVDTuneRunningWriter
+    if ($w) { return (T 'shell.close.writer' $w) }
+    ''
+}
 $window.Add_Closing({
     param($src, $e)
-    if (-not $script:UpdJob -and -not $script:BenchJob -and -not $script:SealJob) { return }
+    $what = Get-CloseHoldReason
+    if (-not $what) { return }
     $e.Cancel = $true
+    if (-not $script:CloseWhenDone) { $script:CloseAskedAt = Get-Date }
     $script:CloseWhenDone = $true
-    $what = if ($script:SealJob) { T 'shell.close.finish' } elseif ($script:BenchJob) { T 'shell.close.bench' } elseif ($script:UpdJob.Kind -eq 'Scan') { T 'shell.close.scan' } else { T 'shell.close.update' }
     Show-Toast (T 'shell.close.toast' $what)
 })
+function Invoke-CloseWhenDone {
+    # one tick of the window timer: close when the close was held and no writer is left; a task that failed since then stops the close
+    if (-not $script:CloseWhenDone -or (Get-CloseHoldReason)) { return }
+    $failedSince = @(Get-AVDTuneUiTasks | Where-Object { $_.Status -eq 'failed' -and $_.Finished -and $script:CloseAskedAt -and [datetime]$_.Finished -ge $script:CloseAskedAt })
+    $script:CloseWhenDone = $false
+    if ($failedSince.Count -gt 0) { Show-Error (T 'shell.close.failed' $failedSince[0].Title); return }
+    $window.Close()
+}
+$script:Timer.Add_Tick({ try { Invoke-CloseWhenDone } catch { } })
 
 # Log off or shut down during an update operation would end it the same way: Windows is asked to wait (SessionEnding is cancelled) and shows
 # the reason (ShutdownBlockReasonCreate) while an operation runs. Start-UpdJob and Complete-UpdJob switch the reason on and off.
