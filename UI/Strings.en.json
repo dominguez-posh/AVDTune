@@ -1,6 +1,7 @@
 {
   "common.close": "Close",
   "csw.ask.record": "Install and record {0} {1} on this master?\nInstaller: {2} ({3} bytes)\nSHA256: {4}\nArguments: {6}\nTimeout: {5} s\nThe installer opens its own windows; click through it as usual. AVDTune compares programs, files, registry, services and shortcuts before and after. The install goes into the change log.",
+  "csw.ask.warnings": "Please check:\n{0}",
   "csw.btn.new": "New software",
   "csw.btn.new.tip": "Empty the form for a new app",
   "csw.btn.record": "Install and record",
@@ -24,7 +25,7 @@
   "csw.field.version": "Version",
   "csw.form.cleaned": "Something that looked like a key or password was taken out of the notes.",
   "csw.form.new": "New software",
-  "csw.form.secrets": "No licence keys and no passwords in these fields: AVDTune takes out what looks like one.",
+  "csw.form.secrets": "No licence keys and no passwords in these fields: AVDTune takes them out of the notes and refuses them in the arguments. Keys come later through the vault.",
   "csw.form.update": "Record an update of {0}",
   "csw.inst.no": "not installed",
   "csw.inst.unknown": "no detection rule",

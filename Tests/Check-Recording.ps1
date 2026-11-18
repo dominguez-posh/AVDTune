@@ -60,6 +60,26 @@ try {
     $sigWrong = @(foreach ($k in $sigs.Keys) { if ((Test-AVDTuneRecordingSignature @{ Status = $k; Subject = 'CN=X' }).Ok -ne $sigs[$k]) { $k } })
     Test-Check 'signature: a broken or unreadable signature stops the installer; unsigned or not trusted is allowed with a note (the pin is the anchor)' ($sigWrong.Count -eq 0 -and (Test-AVDTuneRecordingSignature @{ Status = 'NotSigned' }).Text -like '*SHA256*') ($sigWrong -join ', ')
 
+    # ---------------------------------------------------------------- what the arguments may do (review #87, 1 and 2)
+    $pf = @('C:\Program Files', 'C:\Program Files (x86)')
+    $argOk = { param($inst, $text) $x = Test-AVDTuneRecordingArguments -Installer $inst -Arguments $text -ProgramFolders $pf; $x.Errors.Count -eq 0 }
+    $goodMsi = '/qn /qb- /passive /norestart ALLUSERS=1 INSTALLDIR="C:\Program Files\Example App" SERVER_PORT=27000'
+    $badMsi = @('TRANSFORMS=custom.mst', 'PATCH=fix.msp', '/p fix.msp', '/a', '/x', '/y', '/z', '/j', '/fa', '/l*v C:\Program Files\x.log', '/update fix.msp', '/uninstall', '/package x.msi', 'INSTALLDIR=\\srv\share\app', 'INSTALLDIR=C:\Data\App', 'installdir=C:\Program Files\x', 'INSTALLDIR=C:\Program Files\..\Windows', 'INSTALLDIR=C:\PROGRA~1\x', 'SETUP.EXE')
+    $msiWrong = @(foreach ($t in $badMsi) { if (& $argOk 'a.msi' $t) { $t } })
+    Test-Check 'msi arguments: only /qn /qb /qb- /quiet /passive /norestart and PROPERTY=value; TRANSFORMS, PATCH, /p /a /x /y /z /j /f /l* /update /uninstall /package, UNC values, paths outside Program Files and lower-case properties are refused (counter-tests)' ((& $argOk 'a.msi' $goodMsi) -and $msiWrong.Count -eq 0) ($msiWrong -join ' | ')
+    $exeUnc = Test-AVDTuneRecordingArguments -Installer 'a.exe' -Arguments '/D=\\srv\share\app' -ProgramFolders $pf
+    $exeOut = Test-AVDTuneRecordingArguments -Installer 'a.exe' -Arguments '/S /D=C:\Data\App' -ProgramFolders $pf
+    $exeIn = Test-AVDTuneRecordingArguments -Installer 'a.exe' -Arguments '/S "/D=C:\Program Files\App"' -ProgramFolders $pf
+    Test-Check 'exe arguments: a UNC path is refused, a path outside Program Files is a warning, one inside is fine' ($exeUnc.Errors.Count -eq 1 -and $exeOut.Errors.Count -eq 0 -and $exeOut.Warnings.Count -eq 1 -and $exeIn.Errors.Count -eq 0 -and $exeIn.Warnings.Count -eq 0) "$($exeUnc.Errors) / $($exeOut.Warnings)"
+    $secretArgs = @(@('a.msi', 'PIDKEY=ABCDE-12345-FGHIJ-67890-KLMNO'), @('a.msi', 'SERIALNUMBER=123456'), @('a.msi', 'LICENSEKEY=abc'), @('a.msi', 'PASSWORD=geheim'), @('a.exe', '/password=geheim'), @('a.exe', '--token=abc'), @('a.exe', '/S /K=ABCDE-12345-FGHIJ-67890-KLMNO'), @('a.exe', '/S eyJhbGciOiJIUzI1NiJ9abcdefghijklmnopqrstuvwxyz0123'))
+    $secWrong = @(foreach ($s in $secretArgs) { $x = Test-AVDTuneRecordingArguments -Installer $s[0] -Arguments $s[1] -ProgramFolders $pf; if (-not (@($x.Errors) -like '*vault*')) { $s[1] } })
+    $fs = $form.Clone(); $fs.Arguments = 'PIDKEY=ABCDE-12345-FGHIJ-67890-KLMNO'
+    $fsr = ConvertTo-AVDTuneRecordingApp -Raw $fs -FromForm -Library $lib
+    Test-Check 'arguments with a key or password (PIDKEY, SERIALNUMBER, LICENSEKEY, PASSWORD, /password=, tokens) are refused with the vault hint, not cleaned' ($secWrong.Count -eq 0 -and -not $fsr.Valid -and $fsr.App.Arguments -ceq $fs.Arguments) ($secWrong -join ' | ')
+    $sm = @{ Parse = @(@('S-1-5-32-544', 'S-1-5-18'), @('S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464')); Name = @(@('S-1-5-32-544', 'S-1-5-21-1-2-3-1001'), @('S-1-5-11'), @(''), @()) }
+    $smWrong = @(foreach ($k in $sm.Keys) { foreach ($o in $sm[$k]) { if ((Get-AVDTuneRecordingShortcutMode -Owners $o) -ne $k) { "$k<-$($o -join ',')" } } })
+    Test-Check 'shortcuts (review #87, 4): opened only when folder and file belong to Administrators, SYSTEM or TrustedInstaller; otherwise only the name' ($smWrong.Count -eq 0) ($smWrong -join ' | ')
+
     # ---------------------------------------------------------------- comparison and proposal (pure)
     $b = @{ Programs = @{ 'k1' = [pscustomobject]@{ DisplayName = 'A'; DisplayVersion = '1' } }; Files = @{ 'C:\a' = 'f|1|1'; 'C:\b' = 'f|1|1' }; Registry = @{}; Services = @{}; Shortcuts = @{}; Truncated = @() }
     $a = @{ Programs = @{ 'k1' = [pscustomobject]@{ DisplayName = 'A'; DisplayVersion = '2' } }; Files = @{ 'C:\a' = 'f|2|2'; 'C:\c' = 'f|1|1' }; Registry = @{}; Services = @{ 'svc' = 'Start=2' }; Shortcuts = @{}; Truncated = @('Registry') }
@@ -80,8 +100,8 @@ try {
     # ---------------------------------------------------------------- the recording
     $mach = New-AVDTuneFakeMachine
     $r = New-AVDTuneFakeRecording -Seed @{ Programs = @{ 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\Old' = @{ DisplayName = 'Old'; DisplayVersion = '1' } }; Files = @{ 'C:\Program Files\Old\old.exe' = 'f|1|1' }
-        Effects = @{ ($sha['example-app.msi']) = @{ ExitCode = 0; Programs = @{ $ukey = @{ DisplayName = 'Example App <script>alert(1)</script>'; DisplayVersion = '5.2.0' } }; Files = @{ 'C:\Program Files\Example\app.exe' = 'f|9|9' }; Services = @{ 'ExampleSvc' = 'Start=2;Type=16;ImagePath=C:\Program Files\Example\svc.exe' }; Shortcuts = @{ 'C:\Users\Public\Desktop\Example.lnk' = 'C:\Program Files\Example\app.exe' } }
-            ($sha['example-app-2.msi']) = @{ ExitCode = 3010; Programs = @{ $ukey = @{ DisplayName = 'Example App'; DisplayVersion = '5.3.0' } }; Remove = @('C:\Program Files\Old\old.exe') }
+        Effects = @{ ($sha['example-app.msi']) = @{ ExitCode = 0; Programs = @{ $ukey = @{ DisplayName = 'Example App <script>alert(1)</script>'; DisplayVersion = '5.2.0' } }; Files = @{ 'C:\Program Files\Example\app.exe' = 'f|9|9' }; Services = @{ 'ExampleSvc' = 'Start=2;Type=16;ImagePath=C:\Program Files\Example\svc.exe /password=svcSecret77' }; Shortcuts = @{ 'C:\Users\Public\Desktop\Example.lnk' = 'C:\Program Files\Example\app.exe --token=lnkSecret88' }; Output = 'installed, licence key: AAAAA-BBBBB-CCCCC-DDDDD-EEEEE' }
+            ($sha['example-app-2.msi']) = @{ ExitCode = 3010; Programs = @{ $ukey = @{ DisplayName = 'Example App'; DisplayVersion = '5.3.0'; UninstallString = "MsiExec.exe /X$guid"; QuietUninstallString = 'setup.exe /uninstall /key=QQQQQ-WWWWW-EEEEE-RRRRR-TTTTT' } }; Remove = @('C:\Program Files\Old\old.exe') }
             ($sha['vendor-setup.exe']) = @{ ExitCode = 1603 } } }
     $ctx = @{ Fake = $true }
     $gateText = Get-ThrownText { Invoke-AVDTuneRecording -Machine $mach -R $r -C $c -App $ok.App -Root $tmp -Context $ctx }
@@ -106,6 +126,14 @@ try {
     $again = Get-ThrownText { Invoke-AVDTuneRecording -Machine $mach -R $r -C $c -App $app -Root $tmp -Context $ctx }
     $upd = $app.PSObject.Copy(); $upd.Installer = 'example-app-2.msi'; $upd.Sha256 = $sha['example-app-2.msi']; $upd.Version = '5.3'
     $u = Invoke-AVDTuneRecording -Machine $mach -R $r -C $c -App $upd -Root $tmp -Context $ctx -Kind Update -User 'admin1'
+    $json1 = [IO.File]::ReadAllText((Join-Path $res.Folder 'record.json')) + [IO.File]::ReadAllText((Join-Path $u.Folder 'record.json')) + [IO.File]::ReadAllText((Join-Path $u.Folder 'documentation.html'))
+    $prog = @($u.Record.Changes.Programs.Changed)[0].After
+    Test-Check 'secrets (review #87, 3): service command lines, shortcut targets, uninstall strings and the installer output lose keys and passwords before they are stored; a product code (GUID) stays' ($json1 -notmatch 'svcSecret77|lnkSecret88|AAAAA-BBBBB|QQQQQ-WWWWW' -and $rec.Output -notlike '*AAAAA*' -and $prog.UninstallString -ceq "MsiExec.exe /X$guid" -and $prog.QuietUninstallString -like 'setup.exe /uninstall /key=(removed)*') "$($prog.UninstallString) | $($prog.QuietUninstallString) | $($rec.Output)"
+    $bad2 = $app.PSObject.Copy(); $bad2.Installer = 'example-app-2.msi'; $bad2.Sha256 = $sha['example-app-2.msi']; $bad2.Arguments = 'TRANSFORMS=a.mst'
+    $n1 = $r.Store.Installs.Count
+    $reTxt = Get-ThrownText { Invoke-AVDTuneRecording -Machine $mach -R $r -C $c -App $bad2 -Root $tmp -Context $ctx -Kind Update }
+    $storedOld = ConvertFrom-AVDTuneRecordingRecord -Json ((Get-Content -LiteralPath (Join-Path $res.Folder 'record.json') -Raw | ConvertFrom-Json) | ForEach-Object { $_.App.Arguments = 'TRANSFORMS=a.mst'; $_ }) -AppId $app.Id -Number 1
+    Test-Check 'update (review #87, 1): arguments taken over are checked again (TRANSFORMS refused, nothing installed); a stored record keeps its arguments as history' ($reTxt -like '*TRANSFORMS*' -and $r.Store.Installs.Count -eq $n1 -and $storedOld.App.Arguments -eq 'TRANSFORMS=a.mst') $reTxt
     $listed = Get-AVDTuneRecordingStatus -R $r -Root $tmp
     $mine = @($listed.Apps | Where-Object { $_.Id -eq $app.Id })
     Test-Check 'update: a second install of the same app is refused; the update (3010 = done, restart pending) is number 002 and the list shows both, newest first, with the installed version; a removed file is listed' ($again -like '*record an update*' -and $u.Record.Result -eq 'Changed' -and (Split-Path $u.Folder -Leaf) -eq '002' -and $mine.Count -eq 1 -and @($mine[0].Versions).Count -eq 2 -and $mine[0].Latest.Number -eq 2 -and $mine[0].Installed -eq $true -and $mine[0].InstalledVersion -eq '5.3.0' -and $u.Record.Changes.Programs.Counts.Changed -eq 1 -and $u.Record.Changes.Files.Removed[0].Key -eq 'C:\Program Files\Old\old.exe') "$again / $($mine[0].InstalledVersion)"
@@ -113,6 +141,10 @@ try {
     # refusals at run time: exit code, broken signature, a held file that does not match the pin, a timeout
     $exeRec = Invoke-AVDTuneRecording -Machine $mach -R $r -C $c -App $exeApp -Root $tmp -Context $ctx
     Test-Check 'refusal: an installer that ends with 1603 is a failed step and a failed record, the folder is unstaged' ($exeRec.Run.Results[0].Status -eq 'Failed' -and $exeRec.Run.Results[0].Message -like '*1603*' -and $exeRec.Record.Result -eq 'Failed' -and $r.Store.Staged.Count -eq 0) $exeRec.Run.Results[0].Message
+    $exe2 = (ConvertTo-AVDTuneRecordingApp -Raw (@{ Name = 'Vendor Tool Two'; Installer = 'vendor-setup.exe'; Arguments = '/S' }) -FromForm -Library $lib).App
+    [void](Invoke-AVDTuneRecording -Machine $mach -R $r -C $c -App $exe2 -Root $tmp -Context $ctx)
+    $exeRuns = @($r.Store.Installs | Where-Object { $_.Tool -eq 'installer' })
+    Test-Check 'TEMP (review #87, 5): every .exe recording gets its own TEMP folder inside its own download folder' ($exeRuns.Count -eq 2 -and $exeRuns[0].TempDir -like "$tmp\temp\rec-*\tmp" -and $exeRuns[0].TempDir -ne $exeRuns[1].TempDir -and $exeRuns[0].TempDir.StartsWith((Split-Path $exeRuns[0].Path -Parent) + '\')) (($exeRuns | ForEach-Object { $_.TempDir }) -join ' | ')
     $n0 = $r.Store.Installs.Count
     $r.Store.Signature[$sha['vendor-setup.exe']] = @{ Status = 'HashMismatch'; Subject = '' }
     $s2 = (ConvertTo-AVDTuneRecordingApp -Raw (@{ Name = 'Signed Tool'; Installer = 'vendor-setup.exe' }) -FromForm -Library $lib).App
@@ -149,7 +181,7 @@ try {
     $real = New-AVDTuneRecordingAdapter
     Test-Check 'real adapter: built with every block of the fake' (@(@('Snapshot', 'Stage', 'Hold', 'Release', 'Install', 'Unstage', 'ReadProgram', 'FileExists') | Where-Object { $real.$_ -isnot [scriptblock] -or $r.$_ -isnot [scriptblock] }).Count -eq 0) $null
     $modText = [IO.File]::ReadAllText((Join-Path $repo 'Modules\AVDTune.Recording.psm1'))
-    Test-Check 'real adapter: msiexec through Invoke-AVDTuneSoftwareTool (lock, signature, hold), an .exe through Invoke-AVDTuneProgram in the lock, staged with New-AVDTuneDownloadFolder, removed with Remove-AVDTuneTreeSafe, held with read sharing only' ($modText -match "Invoke-AVDTuneSoftwareTool -U \`$u -Tool 'msiexec.exe'" -and $modText -match 'Invoke-AVDTuneLocked -U \$u -Script \{ Invoke-AVDTuneProgram -File \$Path' -and $modText -match "New-AVDTuneDownloadFolder -Root \`$Root -Prefix 'rec'" -and $modText -match 'Remove-AVDTuneTreeSafe -Path \$Folder' -and $modText -match '\[IO\.FileShare\]::Read\)' -and $modText -notmatch 'Start-Process|Invoke-Expression') $null
+    Test-Check 'real adapter: msiexec through Invoke-AVDTuneSoftwareTool (lock, signature, hold), an .exe through Invoke-AVDTuneChildProcess in the lock with its own TEMP, a foreign .lnk only by name, staged with New-AVDTuneDownloadFolder, removed with Remove-AVDTuneTreeSafe, held with read sharing only' ($modText -match "Invoke-AVDTuneSoftwareTool -U \`$u -Tool 'msiexec.exe'" -and $modText -match 'Invoke-AVDTuneLocked -U \$u -Script \{ Invoke-AVDTuneChildProcess -FileName \$Path -Arguments \$line -TimeoutMs \(\$TimeoutSeconds \* 1000\) -CleanEnvironment -TempDir \$TempDir -Tool apps -WaitForTree' -and $modText -match "New-AVDTuneOwnFolder -Path \`$temp" -and $modText -match 'Get-AVDTuneRecordingShortcutMode -Owners \$own\) -ne ''Parse''\) \{ \$s\.Shortcuts\[\$p\] = "\(not opened' -and $modText -match "New-AVDTuneDownloadFolder -Root \`$Root -Prefix 'rec'" -and $modText -match 'Remove-AVDTuneTreeSafe -Path \$Folder' -and $modText -match '\[IO\.FileShare\]::Read\)' -and $modText -notmatch 'Start-Process|Invoke-Expression') $null
     $fakeText = [IO.File]::ReadAllText((Join-Path $PSScriptRoot 'Fakes\FakeRecording.ps1'))
     $fakeCode = ($fakeText -split "`n" | Where-Object { $_ -notmatch '^\s*#' }) -join "`n"
     Test-Check 'fake: the closures use language constructs only (no ForEach-Object, Where-Object, Join-Path: called from a runspace)' ($fakeCode -notmatch 'ForEach-Object|Where-Object|Join-Path') $null

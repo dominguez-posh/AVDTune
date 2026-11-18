@@ -47,8 +47,9 @@ function Remove-AVDTuneRecordingSecrets {
     $t = $Text
     $rules = @(
         @('(?i)\b(password|passwort|kennwort|pwd|pass|secret|token|pin|key|schl(ü|ue)ssel|licen[cs]e\s*key|lizenzschl(ü|ue)ssel|serial|seriennummer)\s*[=:]\s*\S+', '$1=(removed)'),
-        @('\b[A-Za-z0-9]{4,8}(-[A-Za-z0-9]{4,8}){3,}\b', '(key removed)'),
-        @('\b[A-Za-z0-9+/_\-]{32,}={0,2}', '(removed)')
+        # a GUID (product code, {xxxxxxxx-xxxx-...}) is no key: it stays (uninstall strings, keys of the registry)
+        @('\b(?![0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-)[A-Za-z0-9]{4,8}(-[A-Za-z0-9]{4,8}){3,}\b', '(key removed)'),
+        @('\b(?![0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}\b)[A-Za-z0-9+/_\-]{32,}={0,2}', '(removed)')
     )
     foreach ($r in $rules) { try { $t = [regex]::Replace($t, $r[0], $r[1], [Text.RegularExpressions.RegexOptions]::None, $script:RegexTimeout) } catch { return [pscustomobject]@{ Text = ''; Cleaned = $true } } }
     [pscustomobject]@{ Text = $t; Cleaned = ($t -cne $Text) }
@@ -60,7 +61,7 @@ function ConvertTo-AVDTuneRecordingApp {
         from the state: types must be exact). -Library (the files of the manifest) pins Sha256 from the manifest when the form names a library file.
         Returns Valid, Errors, App, Cleaned.
     #>
-    param([Parameter(Mandatory)]$Raw, [switch]$FromForm, [object[]]$Library)
+    param([Parameter(Mandatory)]$Raw, [switch]$FromForm, [object[]]$Library, [switch]$Stored)
     $errors = New-Object System.Collections.ArrayList
     $get = { param($n) Get-AVDTuneProp $Raw $n }
     if ($Raw -is [System.Collections.IDictionary]) { $get = { param($n) if ($Raw.Contains($n)) { $Raw[$n] } else { $null } }.GetNewClosure() }
@@ -92,8 +93,49 @@ function ConvertTo-AVDTuneRecordingApp {
     elseif ($Library) { $hit = @(foreach ($l in $Library) { if ($l -and $l.Name -ceq $a.Installer) { $l } }); if ($hit.Count -eq 1) { $a.Sha256 = [string]$hit[0].Sha256 } }
     if ($a.Sha256 -notmatch '\A[0-9a-fA-F]{64}\z') { [void]$errors.Add('Installer: the SHA256 of the library file is missing (read the library first).') } else { $a.Sha256 = $a.Sha256.ToLowerInvariant() }
     if (-not (Test-AVDTuneCustomMatch $a.Arguments $script:ArgPattern 512) -or (@($a.Arguments.ToCharArray() | Where-Object { $_ -eq [char]34 }).Count % 2) -ne 0) { [void]$errors.Add('Arguments: at most 512 letters, digits, spaces and _ . , : ; / = + @ ( ) \ '' " - with closed quotes.') }
+    # the rules for what the arguments may do (review #87): checked for every new recording, also for the arguments "Record update" takes over; a stored record
+    # (-Stored, history) keeps the arguments it was made with as data
+    $warnings = @()
+    if (-not $Stored -and $errors.Count -eq 0) { $ar = Test-AVDTuneRecordingArguments -Installer $a.Installer -Arguments $a.Arguments; foreach ($e in $ar.Errors) { [void]$errors.Add($e) }; $warnings = @($ar.Warnings) }
     if ($a.TimeoutSeconds -lt 60 -or $a.TimeoutSeconds -gt 14400) { [void]$errors.Add('Timeout: 60 to 14400 seconds.') }
-    [pscustomobject]@{ Valid = ($errors.Count -eq 0); Errors = @($errors); App = [pscustomobject]$a; Cleaned = $cleaned }
+    [pscustomobject]@{ Valid = ($errors.Count -eq 0); Errors = @($errors); App = [pscustomobject]$a; Cleaned = $cleaned; Warnings = @($warnings) }
+}
+
+function Test-AVDTuneRecordingArguments {
+    <#
+        Pure apart from the program folders (-ProgramFolders, default Program Files and Program Files (x86)). What the arguments of an installer may do (review #87):
+          * .msi: only the switches /qn /qb /qb- /quiet /passive /norestart and NAME=value with NAME of [A-Z0-9_]; TRANSFORMS and PATCH (they load more code) and every
+            other switch (/p /a /x /y /z /j /f /l* /update /uninstall /package ...) are refused; a value that starts with \\ (UNC) is refused, a path value only below the
+            program folders.
+          * .exe: no UNC path anywhere; a path outside the program folders is a warning.
+          * both: nothing that looks like a key or a password (PIDKEY, SERIALNUMBER, LICENSEKEY, PASSWORD, /password=, token patterns): refused, not cleaned; a key
+            comes later through the vault.
+        Returns Errors and Warnings.
+    #>
+    param([Parameter(Mandatory)][string]$Installer, [AllowEmptyString()][string]$Arguments, [string[]]$ProgramFolders)
+    if (-not $ProgramFolders) { $ProgramFolders = @((Get-AVDTuneSystemFolder ProgramFiles), (Get-AVDTuneSystemFolder ProgramFilesX86)) }
+    $errors = New-Object System.Collections.ArrayList; $warnings = New-Object System.Collections.ArrayList
+    $inPrograms = { param($p) if ($p -match '\.\.|~\d') { return $false }; foreach ($f in $ProgramFolders) { if ($f -and $p.StartsWith($f.TrimEnd([char]92) + '\', [StringComparison]::OrdinalIgnoreCase)) { return $true } }; $false }
+    $secret = '(?i)(\A|[/\-\s])(PIDKEY|SERIALNUMBER|SERIAL|LICENSEKEY|LICENSE_KEY|LICENCEKEY|PRODUCTKEY|PRODUCT_KEY|PASSWORD|PASSWD|PWD|PASS|SECRET|TOKEN|APIKEY|API_KEY)\s*[=:]'
+    $msi = [IO.Path]::GetExtension($Installer) -ieq '.msi'
+    foreach ($t in @(Split-AVDTuneRecordingArguments $Arguments)) {
+        $show = Remove-AVDTuneControlCharacters $t 60
+        if ((Test-AVDTuneCustomMatch $t $secret 600) -or (Remove-AVDTuneRecordingSecrets $t).Cleaned) { [void]$errors.Add("Arguments: '$(($t -split '[=:]')[0])' looks like a key or password. Keys and passwords do not belong in the arguments; they will come later through the vault."); continue }
+        if ($msi) {
+            if ($t -match '\A[/-]') { if ($t -notin '/qn', '/qb', '/qb-', '/quiet', '/passive', '/norestart') { [void]$errors.Add("Arguments: the msiexec switch '$show' is not allowed (only /qn /qb /qb- /quiet /passive /norestart).") }; continue }
+            $m = [regex]::Match($t, '\A([A-Z0-9_]{1,64})=(.*)\z', [Text.RegularExpressions.RegexOptions]::None, $script:RegexTimeout)
+            if (-not $m.Success) { [void]$errors.Add("Arguments: '$show' is neither an allowed switch nor PROPERTY=value (property in capitals, digits and _)."); continue }
+            if ($m.Groups[1].Value -in 'TRANSFORMS', 'PATCH') { [void]$errors.Add("Arguments: $($m.Groups[1].Value) is not allowed (it loads more code into the install).") ; continue }
+            $v = $m.Groups[2].Value
+            if ($v.StartsWith('\\') -or $v.StartsWith('//')) { [void]$errors.Add("Arguments: $($m.Groups[1].Value) points to a network path; not allowed.") }
+            elseif ($v -match '\A[A-Za-z]:' -and -not (& $inPrograms $v)) { [void]$errors.Add("Arguments: the path of $($m.Groups[1].Value) must lie below Program Files.") }
+        }
+        else {
+            if ($t.Contains('\\') -or $t.Contains('//')) { [void]$errors.Add("Arguments: '$show' contains a network path; not allowed."); continue }
+            foreach ($p in [regex]::Matches($t, '[A-Za-z]:\\[^"]*', [Text.RegularExpressions.RegexOptions]::None, $script:RegexTimeout)) { if (-not (& $inPrograms $p.Value)) { [void]$warnings.Add("Arguments: $($p.Value) lies outside Program Files: check that the installer may write there.") } }
+        }
+    }
+    [pscustomobject]@{ Errors = @($errors); Warnings = @($warnings) }
 }
 
 function Split-AVDTuneRecordingArguments {
@@ -161,6 +203,44 @@ function Compare-AVDTuneRecordingSnapshot {
     }
     $out['Truncated'] = @($cut)
     [pscustomobject]$out
+}
+
+function Protect-AVDTuneRecordingSnapshot {
+    <#
+        Pure. Before anything of a snapshot is compared and stored (review #87): the command lines of services, the targets and arguments of shortcuts and the
+        uninstall strings of programs lose what looks like a key, a password or a token (Remove-AVDTuneRecordingSecrets). Returns the cleaned snapshot.
+    #>
+    param([Parameter(Mandatory)]$Snapshot)
+    $out = @{ Truncated = @(Get-AVDTuneRecordingProp $Snapshot 'Truncated') }
+    foreach ($area in $script:Areas) {
+        $src = Get-AVDTuneRecordingProp $Snapshot $area; $dst = @{}
+        if ($src) {
+            foreach ($k in @($src.Keys)) {
+                $v = $src[$k]
+                if ($area -eq 'Programs') {
+                    $o = [ordered]@{}; foreach ($n in 'DisplayName', 'DisplayVersion', 'Publisher', 'UninstallString', 'QuietUninstallString') { $o[$n] = [string](Get-AVDTuneRecordingProp $v $n) }
+                    foreach ($n in 'UninstallString', 'QuietUninstallString') { $o[$n] = (Remove-AVDTuneRecordingSecrets $o[$n]).Text }
+                    $v = [pscustomobject]$o
+                }
+                elseif ($area -in 'Services', 'Shortcuts' -and $v -is [string]) { $v = (Remove-AVDTuneRecordingSecrets $v).Text }
+                $dst[$k] = $v
+            }
+        }
+        $out[$area] = $dst
+    }
+    $out
+}
+
+function Get-AVDTuneRecordingShortcutMode {
+    <#
+        Pure. A shortcut is opened (WScript.Shell, target and arguments) only when its folder and the file belong to Administrators, SYSTEM or TrustedInstaller;
+        a shortcut someone else prepared is only listed by its name (review #87). Returns Parse or Name.
+    #>
+    param([string[]]$Owners)
+    $trusted = @('S-1-5-32-544', 'S-1-5-18', 'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464')
+    foreach ($o in @($Owners)) { if (-not $o -or $o -notin $trusted) { return 'Name' } }
+    if (@($Owners).Count -eq 0) { return 'Name' }
+    'Parse'
 }
 
 function Get-AVDTuneRecordingProposal {
@@ -248,7 +328,7 @@ function ConvertFrom-AVDTuneRecordingRecord {
     param([Parameter(Mandatory)]$Json, [Parameter(Mandatory)][string]$AppId, [Parameter(Mandatory)][int]$Number)
     if ((Get-AVDTuneProp $Json 'Schema') -ne 1) { throw 'unknown schema' }
     if ([string](Get-AVDTuneProp $Json 'AppId') -cne $AppId -or (Get-AVDTuneProp $Json 'Number') -ne $Number -or (Get-AVDTuneProp $Json 'Number') -isnot [int]) { throw 'id or number does not match its folder' }
-    $app = ConvertTo-AVDTuneRecordingApp -Raw (Get-AVDTuneProp $Json 'App')
+    $app = ConvertTo-AVDTuneRecordingApp -Raw (Get-AVDTuneProp $Json 'App') -Stored
     if (-not $app.Valid) { throw ($app.Errors -join ' ') }
     if ($app.App.Id -cne $AppId) { throw 'the app id does not match' }
     $kind = Get-AVDTuneProp $Json 'Kind'; if ($kind -cnotin 'Install', 'Update') { throw 'unknown kind' }
@@ -333,7 +413,7 @@ function Invoke-AVDTuneRecording {
     $owner = Start-AVDTuneChange -Root $Root
     try {
         & $say 'snapshot'
-        $before = & $R.Snapshot $lim
+        $before = Protect-AVDTuneRecordingSnapshot (& $R.Snapshot $lim)
         $fetch = New-AVDTuneCustomFetch -C $C -Root $Root -Context $Context
         $state = @{ Done = $false; ExitCode = $null; Signature = ''; Output = '' }
         $rr = $R; $root = $Root
@@ -347,10 +427,10 @@ function Invoke-AVDTuneRecording {
                     $sig = Test-AVDTuneRecordingSignature $hold.Signature
                     $state.Signature = $sig.Text
                     if (-not $sig.Ok) { throw "$($sig.Text) It is not started." }
-                    $res = & $rr.Install $st.Path (Get-AVDTuneRecordingCommand -App $a -Path $st.Path) $a.TimeoutSeconds
+                    $res = & $rr.Install $st.Path (Get-AVDTuneRecordingCommand -App $a -Path $st.Path) $a.TimeoutSeconds $st.TempDir
                 }
                 finally { & $rr.Release $hold }
-                $state.ExitCode = [int]$res.ExitCode; $state.Output = Remove-AVDTuneControlCharacters ([string]$res.Output) 2000
+                $state.ExitCode = [int]$res.ExitCode; $state.Output = (Remove-AVDTuneRecordingSecrets (Remove-AVDTuneControlCharacters ([string]$res.Output) 2000)).Text
                 if ($state.ExitCode -eq -1) { throw "The installer did not end within $($a.TimeoutSeconds) seconds: it was ended with its whole process tree." }
                 if ($state.ExitCode -notin 0, 3010, 1641) { throw "The installer ended with exit code $($state.ExitCode)." }
                 $state.Done = $true
@@ -363,7 +443,7 @@ function Invoke-AVDTuneRecording {
         & $say 'install'
         $run = Invoke-AVDTune -Plan ([pscustomobject]@{ Name = "Custom software $($a.Name)"; Steps = @($step.Id) }) -Catalog @($step) -Machine $Machine -Root $Root -User $User -SnapshotId $SnapshotId
         & $say 'compare'
-        $after = & $R.Snapshot $lim
+        $after = Protect-AVDTuneRecordingSnapshot (& $R.Snapshot $lim)
         $changes = Compare-AVDTuneRecordingSnapshot -Before $before -After $after -Max ([int]$lim.ListPerArea)
         $prop = Get-AVDTuneRecordingProposal -App $a -Changes $changes
         $res0 = @($run.Results)[0]
@@ -471,6 +551,9 @@ function New-AVDTuneRecordingAdapter {
         $shell = New-Object -ComObject WScript.Shell
         try {
             foreach ($p in @($lt.Map.Keys | Where-Object { $_ -match '(?i)\.lnk\z' -and $lt.Map[$_] -like 'f|*' } | Select-Object -First $Limits.Shortcuts)) {
+                # a shortcut in a folder (or a file) of another owner is listed by its name only, never opened (review #87)
+                $own = @(foreach ($x in @((Split-Path $p -Parent), $p)) { try { (Get-Acl -LiteralPath $x -ErrorAction Stop).GetOwner([Security.Principal.SecurityIdentifier]).Value } catch { '' } })
+                if ((Get-AVDTuneRecordingShortcutMode -Owners $own) -ne 'Parse') { $s.Shortcuts[$p] = "(not opened: owner $(($own | Select-Object -Unique) -join ', '))"; continue }
                 $l = $shell.CreateShortcut($p); $s.Shortcuts[$p] = Remove-AVDTuneControlCharacters ("$($l.TargetPath) $($l.Arguments)".Trim()) 400; [void][Runtime.InteropServices.Marshal]::ReleaseComObject($l)
             }
         }
@@ -485,7 +568,8 @@ function New-AVDTuneRecordingAdapter {
         $dest = Join-Path $dir $Name
         $in = [IO.File]::Open($Cached, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
         try { $out = New-AVDTuneAdminFile -Path $dest; try { $in.CopyTo($out); $out.Flush($true) } finally { $out.Dispose() } } finally { $in.Dispose() }
-        @{ Path = $dest; Folder = $dir }
+        $temp = Join-Path $dir 'tmp'; New-AVDTuneOwnFolder -Path $temp   # the own TEMP of this recording (review #87), removed with the download folder
+        @{ Path = $dest; Folder = $dir; TempDir = $temp }
     }
     $a.Hold = {
         # Held open with read sharing only until Release (no swap between the check and the end of the run); the hash through that handle, then the signature
@@ -501,16 +585,19 @@ function New-AVDTuneRecordingAdapter {
     $a.Release = { param($Hold) if ($Hold -and $Hold.Stream) { $Hold.Stream.Dispose() } }
     $a.Install = {
         # Inside the lock Global\PackTune: an .msi through the checked msiexec of System32, an .exe with its full path through the central start (job object, timeout, whole tree)
-        param($Path, $Command, $TimeoutSeconds)
+        # with a clean environment (profile apps: a profile for installers with windows) and TEMP/TMP in the own folder of this recording (review #87)
+        param($Path, $Command, $TimeoutSeconds, $TempDir)
         $u = New-AVDTuneUpdateAdapter
         if ($Command.Tool -eq 'msiexec.exe') {
             $r = Invoke-AVDTuneSoftwareTool -U $u -Tool 'msiexec.exe' -Arguments $Command.Arguments -TimeoutSeconds $TimeoutSeconds
             if (-not $r.Ok) { throw $r.Error }
             return [pscustomobject]@{ ExitCode = [int]$r.ExitCode; Output = [string]$r.Output }
         }
-        $got = Invoke-AVDTuneLocked -U $u -Script { Invoke-AVDTuneProgram -File $Path -Arguments $Command.Arguments -TimeoutSeconds $TimeoutSeconds -WaitForTree }
+        if (-not $TempDir) { throw 'The installer has no own TEMP folder: not started.' }
+        $line = (@($Command.Arguments | ForEach-Object { ConvertTo-AVDTuneArgument ([string]$_) }) -join ' ')
+        $got = Invoke-AVDTuneLocked -U $u -Script { Invoke-AVDTuneChildProcess -FileName $Path -Arguments $line -TimeoutMs ($TimeoutSeconds * 1000) -CleanEnvironment -TempDir $TempDir -Tool apps -WaitForTree }
         if (-not $got.Ok) { throw "Not started: $($got.Error)" }
-        [pscustomobject]@{ ExitCode = [int]$got.Value.ExitCode; Output = [string]$got.Value.Output }
+        [pscustomobject]@{ ExitCode = $(if ($got.Value.TimedOut) { -1 } else { [int]$got.Value.ExitCode }); Output = [string]$got.Value.Output + [string]$got.Value.Error }
     }.GetNewClosure()   # like RunScript of the customizations: a step-like block (called only from the step of Invoke-AVDTuneRecording, under its marker); only exported functions inside (#78)
     $a.Unstage = { param($Folder) if ($Folder -and (Test-Path -LiteralPath $Folder)) { [void](Remove-AVDTuneTreeSafe -Path $Folder) } }
     $a.ReadProgram = { param($Key) Read-AVDTuneRecordingProgram $Key }
@@ -520,7 +607,7 @@ function New-AVDTuneRecordingAdapter {
 
 #endregion
 
-Export-ModuleMember -Function Get-AVDTuneRecordingProp, Remove-AVDTuneRecordingSecrets, ConvertTo-AVDTuneRecordingApp, Split-AVDTuneRecordingArguments, Get-AVDTuneRecordingCommand, Test-AVDTuneRecordingSignature,
+Export-ModuleMember -Function Get-AVDTuneRecordingProp, Test-AVDTuneRecordingArguments, Protect-AVDTuneRecordingSnapshot, Get-AVDTuneRecordingShortcutMode, Remove-AVDTuneRecordingSecrets, ConvertTo-AVDTuneRecordingApp, Split-AVDTuneRecordingArguments, Get-AVDTuneRecordingCommand, Test-AVDTuneRecordingSignature,
     Get-AVDTuneRecordingLimits, Get-AVDTuneRecordingValueText, Compare-AVDTuneRecordingSnapshot, Get-AVDTuneRecordingProposal, ConvertTo-AVDTuneRecordingHtml,
     Get-AVDTuneRecordingRoot, New-AVDTuneRecordingFolder, Save-AVDTuneRecordingRecord, ConvertFrom-AVDTuneRecordingRecord, Get-AVDTuneRecordedApps, Get-AVDTuneRecordingStatus,
     Invoke-AVDTuneRecording, Get-AVDTuneRecordingFileTree, Get-AVDTuneRecordingRegistryTree, Read-AVDTuneRecordingProgram, New-AVDTuneRecordingAdapter

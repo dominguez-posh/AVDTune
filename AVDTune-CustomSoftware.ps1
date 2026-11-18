@@ -18,7 +18,7 @@ $script:CswFakeC = $null; $script:CswFakeR = $null
 if ($script:TestMode) {
     . (Get-TestScript 'FakeRecording.ps1')   # FakeCustom.ps1 is loaded by the Customizations page
     $script:CswFakeC = New-AVDTuneFakeCustom -Seed @{ Library = @{ 'example-app.msi' = 'Example App 5.2 (fake MSI)'; 'example-app-5.3.msi' = 'Example App 5.3 (fake MSI)' } }
-    $cswKey = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{0F0E0D0C-0B0A-0908-0706-050403020100}'
+    $cswKey = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{' + [guid]::NewGuid().ToString().ToUpperInvariant() + '}'   # a fake product code made at the start (no fixed id in the product files)
     $script:CswFakeR = New-AVDTuneFakeRecording -Seed @{ Effects = @{
             (& $script:CswFakeC.Sha $script:CswFakeC.Store.Library['example-app.msi']) = @{ ExitCode = 0; Programs = @{ $cswKey = @{ DisplayName = 'Example App'; DisplayVersion = '5.2.0'; Publisher = 'Example Vendor' } }; Files = @{ 'C:\Program Files\Example App\app.exe' = 'f|1|1' }; Shortcuts = @{ 'C:\Users\Public\Desktop\Example App.lnk' = 'C:\Program Files\Example App\app.exe' } }
             (& $script:CswFakeC.Sha $script:CswFakeC.Store.Library['example-app-5.3.msi']) = @{ ExitCode = 3010; Programs = @{ $cswKey = @{ DisplayName = 'Example App'; DisplayVersion = '5.3.0'; Publisher = 'Example Vendor' } } }
@@ -189,6 +189,7 @@ function Invoke-CswRecord {
     $file = @(Get-CswFiles | Where-Object { $_.Name -ceq $a.Installer })[0]
     $ask = T 'csw.ask.record' $a.Name $a.Version $a.Installer $file.Size $a.Sha256 $a.TimeoutSeconds $(if ($a.Arguments) { $a.Arguments } else { '-' })
     if ($chk.Cleaned) { $ask += "`n`n" + (T 'csw.form.cleaned') }
+    if (@($chk.Warnings).Count) { $ask += "`n`n" + (T 'csw.ask.warnings' (@($chk.Warnings) -join "`n")) }
     if (-not (Confirm-Action $ask (T 'csw.card.title'))) { return }
     Start-CswJob 'Record' $a $script:CswMode.Kind
 }
@@ -202,6 +203,9 @@ function Set-CswUpdate([string]$Id) {
     foreach ($f in 'Name', 'Vendor', 'Contact', 'Arguments', 'Dependencies', 'LicenseNotes') { $script:CswForm[$f].Text = [string]$l.$f }
     $script:CswForm['TimeoutSeconds'].Text = [string]$l.TimeoutSeconds
     $script:CswMode = @{ Kind = 'Update'; Id = $Id; Name = [string]$l.Name }
+    # the arguments taken over are checked again against today's rules (review #87): what is not allowed any more is named at once (and refused when recording)
+    $ar = Test-AVDTuneRecordingArguments -Installer ([string]$l.Installer) -Arguments ([string]$l.Arguments)
+    $ui.TxtCswErrors.Text = (@($ar.Errors) + @($ar.Warnings)) -join "`r`n"
     Update-CswView
 }
 

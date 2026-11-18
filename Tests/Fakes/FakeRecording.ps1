@@ -2,9 +2,9 @@
 # Shortcuts) in memory, a staging folder per run, and installers whose effect is seeded per SHA256. Nothing here touches the computer it runs on.
 # Dot-source this file, then: $r = New-AVDTuneFakeRecording [-Seed @{ ... }]
 # Seed keys (all optional): Programs (key -> @{ DisplayName; DisplayVersion; Publisher; UninstallString; QuietUninstallString }), Files, Registry, Services, Shortcuts
-# (key -> text), Effects (sha256 -> @{ ExitCode; Programs; Files; Registry; Services; Shortcuts (added or changed, same shapes); Remove (keys of any area) }).
+# (key -> text), Effects (sha256 -> @{ ExitCode; Output; Programs; Files; Registry; Services; Shortcuts (added or changed, same shapes); Remove (keys of any area) }).
 # Switches on .Store: Signature (sha256 -> @{ Status; Subject }; default Valid, CN=Example Vendor), Mismatch (sha256 -> $true: the held file does not match the pin),
-# Truncate (an area name: every snapshot reports it as cut). Logged: Installs (Path, Tool, Arguments, Timeout), Staged (open folders), Unstaged, Holds, Releases.
+# Truncate (an area name: every snapshot reports it as cut). Logged: Installs (Path, Tool, Arguments, Timeout, TempDir), Staged (open folders), Unstaged, Holds, Releases.
 # The closures use language constructs only (no ForEach-Object, Where-Object, Join-Path): the GUI smoke calls them from a runspace.
 
 function New-AVDTuneFakeRecording {
@@ -29,7 +29,7 @@ function New-AVDTuneFakeRecording {
         $folder = "$Root\temp\rec-fake$n"
         $path = "$folder\$Name"
         $store.Staged[$folder] = $true; $store.StagedSha[$path] = $Sha256
-        @{ Path = $path; Folder = $folder }
+        @{ Path = $path; Folder = $folder; TempDir = "$folder\tmp" }
     }.GetNewClosure()
     $r.Hold = {
         param($Path, $Sha256)
@@ -40,14 +40,14 @@ function New-AVDTuneFakeRecording {
     }.GetNewClosure()
     $r.Release = { param($Hold) $store.Releases++ }.GetNewClosure()
     $r.Install = {
-        param($Path, $Command, $TimeoutSeconds)
+        param($Path, $Command, $TimeoutSeconds, $TempDir)
         $sha = $store.StagedSha[$Path]
-        [void]$store.Installs.Add([pscustomobject]@{ Path = $Path; Tool = $Command.Tool; Arguments = @($Command.Arguments); Timeout = $TimeoutSeconds })
+        [void]$store.Installs.Add([pscustomobject]@{ Path = $Path; Tool = $Command.Tool; Arguments = @($Command.Arguments); Timeout = $TimeoutSeconds; TempDir = $TempDir })
         $e = if ($sha -and $store.Effects.ContainsKey($sha)) { $store.Effects[$sha] } else { @{ ExitCode = 0 } }
         $code = if ($null -ne $e['ExitCode']) { [int]$e['ExitCode'] } else { 0 }
         foreach ($a in $areas) { if ($e[$a]) { foreach ($k in $e[$a].Keys) { $v = $e[$a][$k]; if ($v -is [hashtable]) { $v = [pscustomobject]$v }; $store[$a][[string]$k] = $v } } }
         foreach ($k in @($e['Remove'])) { if ($k) { foreach ($a in $areas) { $store[$a].Remove([string]$k) } } }
-        [pscustomobject]@{ ExitCode = $code; Output = "fake installer $code" }
+        [pscustomobject]@{ ExitCode = $code; Output = $(if ($e['Output']) { [string]$e['Output'] } else { "fake installer $code" }) }
     }.GetNewClosure()
     $r.Unstage = { param($Folder) if ($store.Staged.ContainsKey($Folder)) { $store.Staged.Remove($Folder); $store.Unstaged++ } }.GetNewClosure()
     $r.ReadProgram = { param($Key) if ($store.Programs.ContainsKey($Key)) { $store.Programs[$Key] } else { $null } }.GetNewClosure()

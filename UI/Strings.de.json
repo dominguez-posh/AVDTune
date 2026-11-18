@@ -1,6 +1,7 @@
 {
   "common.close": "Schließen",
   "csw.ask.record": "{0} {1} auf diesem Master installieren und aufzeichnen?\nInstaller: {2} ({3} Bytes)\nSHA256: {4}\nArgumente: {6}\nZeitlimit: {5} s\nDer Installer öffnet seine eigenen Fenster; klicken Sie ihn wie gewohnt durch. AVDTune vergleicht Programme, Dateien, Registry, Dienste und Verknüpfungen vorher und nachher. Die Installation kommt ins Change-Log.",
+  "csw.ask.warnings": "Bitte prüfen:\n{0}",
   "csw.btn.new": "Neue Software",
   "csw.btn.new.tip": "Das Formular für eine neue App leeren",
   "csw.btn.record": "Installieren und aufzeichnen",
@@ -24,7 +25,7 @@
   "csw.field.version": "Version",
   "csw.form.cleaned": "Etwas, das wie ein Schlüssel oder Passwort aussah, wurde aus den Hinweisen entfernt.",
   "csw.form.new": "Neue Software",
-  "csw.form.secrets": "Keine Lizenzschlüssel und keine Passwörter in diese Felder: AVDTune entfernt, was danach aussieht.",
+  "csw.form.secrets": "Keine Lizenzschlüssel und keine Passwörter in diese Felder: AVDTune entfernt sie aus den Hinweisen und lehnt sie in den Argumenten ab. Schlüssel kommen später über den Vault.",
   "csw.form.update": "Update von {0} erfassen",
   "csw.inst.no": "nicht installiert",
   "csw.inst.unknown": "keine Erkennungsregel",
