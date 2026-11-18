@@ -1314,6 +1314,47 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
             }
         }
         $true } }
+    @{ Name = 'custom software (#87)'; Do = {
+        # the card of the Software page reads and records in the background; every step waits until no custom software job runs (the fakes are shared with the runspace)
+        if ($script:CswJob) { return $false }
+        $click = { param($b) $b.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent))) }
+        $fake = $script:CswFakeR.Store
+        switch ([int]$script:SmokeCswStep) {
+            0 {
+                if (-not (Test-AVDTuneWriteAllowed)) { Open-AVDTuneWriteGate -SnapshotId 'snap-smoke' -ConfirmedBy 'Alex Example'; $script:SmokeCswGate = $true }
+                $script:SmokeCswStep = 1; Show-Page 'Software'; if (-not $script:CswJob) { Start-CswJob 'Status' }; $window.UpdateLayout(); return $false   # a fresh read: the task list keeps only the newest tasks
+            }
+            1 {
+                Test-Smoke 'Custom software: the card on the Software page reads the library installers and the (empty) list as a task' ($ui.CardCsw -and $script:CswLibrary.State -eq 'Ready' -and @(Get-CswFiles).Count -eq 2 -and @($script:CswStatus.Apps).Count -eq 0 -and [string]$ui.PanelCswApps.Children[0].Text -eq (T 'csw.empty') -and @(Get-AVDTuneUiTasks | Where-Object { $_.Kind -eq 'customsoftware-status' -and $_.Status -eq 'succeeded' }).Count -ge 1) "$($script:CswLibrary.State) $(@(Get-CswFiles).Count) apps=$(@($script:CswStatus.Apps).Count) card=$([bool]$ui.CardCsw) first=$([string]$ui.PanelCswApps.Children[0].Text) tasks=$(@(Get-AVDTuneUiTasks | Where-Object { $_.Kind -like 'customsoftware*' } | ForEach-Object { $_.Status }) -join ',')"
+                $script:CswForm['Name'].Text = 'Example App'; $script:CswForm['Vendor'].Text = 'Example Vendor'; $script:CswForm['Version'].Text = '5.2'; $script:CswForm['Installer'].SelectedItem = 'example-app.msi'
+                $script:CswForm['LicenseNotes'].Text = 'Licence server lic1, Passwort: geheim123'; $script:CswForm['Arguments'].Text = 'ALLUSERS=1 & calc'
+                & $click $ui.BtnCswRecord
+                Test-Smoke 'Custom software: arguments with & are refused in the form with the reason, nothing starts' ($ui.TxtCswErrors.Text -like '*Arguments*' -and -not $script:CswJob -and $fake.Installs.Count -eq 0) $ui.TxtCswErrors.Text
+                $script:CswForm['Arguments'].Text = 'ALLUSERS=1'
+                & $click $ui.BtnCswRecord
+                Test-Smoke 'Custom software: the recording asks first (installer, SHA256), cleans the licence notes and runs as a writer job' ($script:ConfirmAsked -like '*example-app.msi*' -and $script:ConfirmAsked -match '[0-9a-f]{64}' -and $script:CswForm['LicenseNotes'].Text -notlike '*geheim123*' -and $script:CswJob -and $script:CswJob.Kind -eq 'Record' -and (Get-AVDTuneRunningWriter) -eq 'CswJob') $script:ConfirmAsked
+                $script:SmokeCswStep = 2; return $false
+            }
+            2 {
+                $apps = @($script:CswStatus.Apps)
+                Test-Smoke 'Custom software: installed through msiexec, recorded with detection rule, listed as installed 5.2.0, change log entry' ($fake.Installs.Count -eq 1 -and $fake.Installs[0].Tool -eq 'msiexec.exe' -and $apps.Count -eq 1 -and $apps[0].Installed -eq $true -and $apps[0].InstalledVersion -eq '5.2.0' -and $apps[0].Latest.Detection.Kind -eq 'Uninstall' -and $apps[0].Latest.App.LicenseNotes -notlike '*geheim123*' -and @(Get-AVDTuneChangeLog -Root $script:StateRoot | Where-Object { $_.Component -like 'software.custom-*' }).Count -ge 1 -and $fake.Staged.Count -eq 0) $ui.TxtCswState.Text
+                Save-SmokeShot '87-software-custom'
+                $upd = $null; foreach ($g in $ui.PanelCswApps.Children) { if ($g -is [System.Windows.Controls.Grid]) { foreach ($b in $g.Children[2].Children) { if ([string]$b.Content -eq (T 'csw.btn.update')) { $upd = $b } } } }
+                & $click $upd
+                Test-Smoke 'Custom software: "Record update" fills the form with the details of the app and switches to update mode' ($script:CswMode.Kind -eq 'Update' -and $script:CswForm['Name'].Text -eq 'Example App' -and $ui.TxtCswMode.Text -eq (T 'csw.form.update' 'Example App')) $ui.TxtCswMode.Text
+                $script:CswForm['Version'].Text = '5.3'; $script:CswForm['Installer'].SelectedItem = 'example-app-5.3.msi'
+                & $click $ui.BtnCswRecord
+                $script:SmokeCswStep = 3; return $false
+            }
+            3 {
+                $app = @($script:CswStatus.Apps)[0]
+                Test-Smoke 'Custom software: the update is the second recording, the list shows both and the installed 5.3.0' (@($script:CswStatus.Apps).Count -eq 1 -and @($app.Versions).Count -eq 2 -and $app.Latest.Kind -eq 'Update' -and $app.InstalledVersion -eq '5.3.0' -and $script:CswMode.Kind -eq 'Install') "$(@($app.Versions).Count) $($app.InstalledVersion) $($ui.TxtCswState.Text)"
+                if ($script:SmokeCswGate) { Close-AVDTuneWriteGate }
+                Show-Page 'Overview'
+                return $true
+            }
+        }
+        $true } }
     @{ Name = 'task bar'; Do = {
         # the flows of the earlier steps went through the one mechanism; wait (at most 30 s) until nothing runs any more
         if (-not $script:TaskStepStart) { $script:TaskStepStart = Get-Date }

@@ -86,6 +86,7 @@ if ($script:ModulePathProblems.Count -gt 0) {
 }
 foreach ($part in 'Trust', 'Session', 'Snapshot', 'Directory', 'Start', 'UpdateBlock', 'Updates', 'Readiness', 'Watermark', 'Benchmark', 'Shortcut', 'FSLogix', 'Storage', 'Software', 'Office', 'Vdi', 'Masking', 'Finish', 'Environment', 'Optimization', 'Language') { Import-Module (Join-Path $PSScriptRoot "Modules\AVDTune.$part.psm1") -Force }
 Import-Module (Join-Path $PSScriptRoot 'Modules\AVDTune.Custom.psm1') -Force   # customizations (#85): after Software and Masking, which it uses
+Import-Module (Join-Path $PSScriptRoot 'Modules\AVDTune.Recording.psm1') -Force   # custom software with recording (#87): after Custom, whose library fetch it uses
 Import-Module (Join-Path $PSScriptRoot 'Modules\AVDTune.Printers.psm1') -Force   # printer drivers from a print server (#86): after Custom, whose registry adapter it uses
 Import-Module (Join-Path $PSScriptRoot 'Modules\AVDTune.Release.psm1') -Force
 # Test runs of several checkouts can run at the same time: one test mutex per test state folder
@@ -287,7 +288,7 @@ function Show-Page([string]$Key) {
     elseif ($Key -eq 'UserExperience') { Update-WatermarkView }
     elseif ($Key -eq 'Benchmark') { Update-BenchmarkView }
     elseif ($Key -eq 'FSLogix') { Update-FslView }
-    elseif ($Key -eq 'Software') { Show-SoftwarePage }
+    elseif ($Key -eq 'Software') { Show-SoftwarePage; Show-CswCard }
     elseif ($Key -eq 'Office') { Update-OffView }
     elseif ($Key -eq 'VdiComponents') { Update-VdiView }
     elseif ($Key -eq 'AppMasking') { Update-MaskView }
@@ -536,6 +537,7 @@ $script:ReadyFakeArm = $(if ($script:TestMode) { $script:Services.Arm } else { $
 . (Join-Path $PSScriptRoot 'AVDTune-Vdi.ps1')   # the VDI components page (issue 56): its own XAML and module
 . (Join-Path $PSScriptRoot 'AVDTune-AppMasking.ps1')
 . (Join-Path $PSScriptRoot 'AVDTune-Custom.ps1')   # the Customizations page (#85): shortcuts, fonts, own steps; uses the Software and App Masking pages
+. (Join-Path $PSScriptRoot 'AVDTune-CustomSoftware.ps1')   # the custom software card of the Software page (#87); uses the Customizations and App Masking helpers
 . (Join-Path $PSScriptRoot 'AVDTune-Printers.ps1')   # the Printers page (#86): printer drivers from a print server; uses the App Masking and Software helpers
 . (Join-Path $PSScriptRoot 'AVDTune-Seal.ps1')
 . (Join-Path $PSScriptRoot 'AVDTune-Environment.ps1')
