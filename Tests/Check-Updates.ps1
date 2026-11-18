@@ -279,10 +279,11 @@ try {
     $me = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
     $allowed = @('S-1-5-32-544', 'S-1-5-18', $me)
     Test-Check 'real adapter (#79): the staged copy lies under <root>\temp in a folder created with its own protected ACL, the copy has an explicit protected admin-only ACL, and both are removed afterwards' ($sameText -and $staged -like "$tmp\temp\*\README.md" -and $sacl.AreAccessRulesProtected -and $facl.AreAccessRulesProtected -and @($own | Where-Object { $_ -notin $allowed }).Count -eq 0 -and @($fown | Where-Object { $_ -notin $allowed }).Count -eq 0 -and $own -contains 'S-1-5-32-544' -and $fown -contains 'S-1-5-32-544' -and -not (Test-Path -LiteralPath (Split-Path $staged -Parent))) "$staged | folder: $($own -join ',') | file: $($fown -join ',')"
-    # a copy still in use (the tool has just ended) is removed by the retry
+    # a copy still in use (the tool has just ended) is removed by the retry; held only 0.5 s after the flag (the retries take about 3 s: a slow job process under load
+    # must not hold it past them, #51)
     $busy = & $real.Stage (Join-Path $repo 'README.md') $tmp
     $flag = Join-Path $tmp 'busy.flag'
-    $holder = Start-Job -ScriptBlock { param($f, $flag) $s = [IO.File]::Open($f, 'Open', 'Read', 'None'); Set-Content -LiteralPath $flag -Value 1; Start-Sleep -Milliseconds 1500; $s.Dispose() } -ArgumentList $busy, $flag
+    $holder = Start-Job -ScriptBlock { param($f, $flag) $s = [IO.File]::Open($f, 'Open', 'Read', 'None'); Set-Content -LiteralPath $flag -Value 1; Start-Sleep -Milliseconds 500; $s.Dispose() } -ArgumentList $busy, $flag
     try {
         $until = (Get-Date).AddSeconds(30); while (-not (Test-Path -LiteralPath $flag) -and (Get-Date) -lt $until) { Start-Sleep -Milliseconds 100 }
         & $real.Unstage $busy
