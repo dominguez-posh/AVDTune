@@ -608,6 +608,8 @@ function Invoke-DomainConnect {
             $script:StartContext.Directory = $info; $script:StartContext.DirectorySecurity = $r.Security
             $script:StartContext.Failures.Remove('Domain')
             Add-StartProtocol "Domain controller read ($server)" "$($info.DnsName) ($($info.NetBiosName)), $($info.OuCount) OUs, $(@($info.Groups).Count) groups, site $($info.Site); $($r.Security)"
+            # #75: the account stays in memory for this session (App Masking uses it for the pinned server; never written); a server without a pin (LDAP 389) is never offered it
+            try { Set-AVDTuneSessionDcAccount -Server $server -User $user -Password $f.Secure } catch { Clear-AVDTuneSessionDcAccount }
             $f.PasswordBox.Clear(); $f.Secure.Dispose(); $f.Secure = $null
             Show-DirectorySummary $info $r.Security
             Set-StageMessage (T 'stage.dom.read') 'ok'

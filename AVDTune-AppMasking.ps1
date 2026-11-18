@@ -111,6 +111,7 @@ function Build-MaskPage {
     [void]$c2.Panel.Children.Add((New-MaskLabeled 'Domain account' $ui.TxtMaskUser))
     $ui.PwdMask = New-Object System.Windows.Controls.PasswordBox; $ui.PwdMask.Padding = '8,6'; [System.Windows.Automation.AutomationProperties]::SetName($ui.PwdMask, 'Password of the domain account')
     [void]$c2.Panel.Children.Add((New-MaskLabeled 'Password (used once, not saved)' $ui.PwdMask))
+    $ui.TxtMaskDcSession = New-MaskText '' 'Hint' '0,2,0,6'; [void]$c2.Panel.Children.Add($ui.TxtMaskDcSession)
     $ui.TxtMaskCaps = New-MaskText '' 'Hint' '0,6,0,0'; [void]$c2.Panel.Children.Add($ui.TxtMaskCaps)
     $row2 = New-Object System.Windows.Controls.StackPanel; $row2.Orientation = 'Horizontal'; $row2.Margin = '0,10,0,0'
     $ui.BtnMaskPreview = New-MaskButton 'Preview' 'Show what would be written, nothing is changed'
@@ -230,6 +231,12 @@ function New-MaskListRow($Row, $Choices, $Entra) {
     $entry
 }
 
+function Update-MaskDcHint {
+    # #75: says whether the account of the start sequence is there for this session (server and account only, never the password)
+    $i = $null; try { $i = Get-AVDTuneSessionDcAccount -Pins (Get-AVDTuneDcPins (Get-AVDTuneEnvironment $script:StateRoot)) -Info } catch { }
+    $ui.TxtMaskDcSession.Text = $(if ($i) { "Signed in to the domain in the start sequence as $($i.User) on $($i.Server): leave the password empty to use that account (kept in memory for this session only, never saved)." } else { 'Not signed in to the domain in the start sequence in this session: enter the account and its password here.' })
+}
+
 function Update-MaskView {
     # Static parts at once, the list after the background read
     Build-MaskPage
@@ -248,6 +255,7 @@ function Update-MaskView {
     if (-not $ui.TxtMaskDc.Text -and $caps.AdGroups) { $e = $null; try { $e = Get-AVDTuneEnvironment $script:StateRoot } catch { }; $ui.TxtMaskDc.Text = [string](Get-AVDTuneProp (Get-AVDTuneProp $e 'Dc') 'Server') }   # the server of the start sequence (environment.json Dc.Server); the answers only say which kind of DC
     if (-not $ui.TxtMaskGroup.Text) { try { $ui.TxtMaskGroup.Text = Get-AVDTuneAppGroupName -Prefix $settings.Prefix -Name $ui.TxtMaskName.Text } catch { } }
     $ui.TxtMaskEntra.Text = (Get-AVDTuneEntraGroupInfo).Text + ' Source: ' + (Get-AVDTuneEntraGroupInfo).Source
+    Update-MaskDcHint
     $short = Get-AVDTuneComfortShortcuts -M (Get-MaskAdapter)
     $ui.TxtMaskLogoffNote.Text = [string]$short[0].Note
     Start-MaskReadJob
@@ -297,17 +305,26 @@ function Show-MaskList($Dir, [string]$Err) {
 }
 
 function Get-MaskLdap {
-    # A connection for one change: the domain account of the form, pinned LDAPS only (nothing is sent without a pin; the start sequence pins it). Returns Ldap, Conn, Dispose.
+    # A connection for one change, pinned LDAPS only (nothing is sent without a pin; the start sequence pins it). Returns Ldap, Conn, Dispose.
+    # Account: the one typed in the form; with an empty password box the account of the start sequence (#75: server, account and password kept in memory for this session, only for
+    # its pinned server, never written). Without either, the form asks as before.
     $server = $ui.TxtMaskDc.Text.Trim(); $user = $ui.TxtMaskUser.Text.Trim()
     if ($script:TestMode) { return [pscustomobject]@{ Ldap = $script:MaskFake.Ldap; Conn = 'c'; Close = { } } }
     $secure = $ui.PwdMask.SecurePassword   # a copy: disposed as soon as the connection is made or has failed
+    $fromStart = $false
     try {
-        if ($secure.Length -eq 0) { throw 'Enter the domain account and its password for the connection to the domain controller.' }
-        $ldap = New-AVDTuneLdapAdapter
         $e = Get-AVDTuneEnvironment $script:StateRoot
-        $r = Connect-AVDTuneDirectory -Ldap $ldap -Server $server -User $user -Password $secure -Pins (Get-AVDTuneDcPins $e)
+        $pins = Get-AVDTuneDcPins $e
+        if ($secure.Length -eq 0) {
+            $acct = Get-AVDTuneSessionDcAccount -Pins $pins
+            if (-not $acct) { throw 'Enter the domain account and its password for the connection to the domain controller (or sign in to the domain in the start sequence: its account is then used for this session).' }
+            $secure.Dispose(); $secure = $acct.Password; $server = $acct.Server; $user = $acct.User; $fromStart = $true
+        }
+        $ldap = New-AVDTuneLdapAdapter
+        $r = Connect-AVDTuneDirectory -Ldap $ldap -Server $server -User $user -Password $secure -Pins $pins
     }
     finally { $secure.Dispose() }
+    if ($r.Status -ne 'Connected' -and $fromStart) { Clear-AVDTuneSessionDcAccount; Update-MaskDcHint }   # the kept account did not work: it is forgotten, the form asks
     if ($r.Status -ne 'Connected') { throw "No connection to the domain controller ($($r.Status)): $($r.Message) Pin the certificate and connect in the start sequence first." }
     $conn = $r.Connection
     [pscustomobject]@{ Ldap = $ldap; Conn = $conn; Close = { Disconnect-AVDTuneDirectory -Ldap $ldap -Connection $conn }.GetNewClosure() }

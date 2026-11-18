@@ -661,6 +661,37 @@ try {
     $r1 = $rowsFn.IndexOf('Assert-MaskWrite'); $r2 = $rowsFn.IndexOf('Confirm-Action'); $r3 = $rowsFn.LastIndexOf('Get-MaskLdap'); $r4 = $rowsFn.IndexOf('Invoke-MaskChange')
     Test-Check 'page74: "Save all changes" saves after the write gate and one confirmation with old and new of every row; the DC connection of the write path comes after it; one task; the password box is cleared in finally; the preview returns before the gate' ($r1 -gt 0 -and $r1 -lt $r2 -and $r2 -lt $r3 -and $r3 -lt $r4 -and $rowsFn.IndexOf('-WhatIf') -lt $r1 -and $rowsFn.Contains('-ExpectedChanges $exp') -and $rowsFn.Contains('finally { if ($lc) { & $lc.Close }; $ui.PwdMask.Clear() }') -and $pg74.Contains('$ui.BtnMaskSaveAll = New-MaskButton') -and $pg74.Contains('[void](Set-AVDTuneWriterButton $ui.BtnMaskSaveAll)')) $null
     Test-Check 'page74: "Split per entry" asks the write gate, previews, confirms with the new names and hands the hashes of the preview on' ($splitFn.IndexOf('Assert-MaskWrite') -gt 0 -and $splitFn.IndexOf('Assert-MaskWrite') -lt $splitFn.IndexOf('Confirm-Action') -and $splitFn.Contains('-ExpectedSha $sha') -and $splitFn.Contains('Invoke-MaskChange') -and $pg74.Contains("New-MaskButton 'Split per entry'")) $null
+
+    # ---------------------------------------------------------------- issue 75: the domain account of the start sequence, in memory for this session, only for a pinned server
+    $pw75 = New-Object System.Security.SecureString; foreach ($ch in 'Example-Pass1'.ToCharArray()) { $pw75.AppendChar($ch) }
+    Clear-AVDTuneSessionDcAccount
+    $empty75 = Get-AVDTuneSessionDcAccount -Pins @{ 'dc1.example.test' = 'ab' }
+    Set-AVDTuneSessionDcAccount -Server 'dc1.example.test' -User 'EXAMPLE\admin' -Password $pw75
+    $pw75.Dispose()   # the caller's own copy: the kept one does not depend on it
+    $unpinned = Get-AVDTuneSessionDcAccount -Pins @{}
+    $otherPin = Get-AVDTuneSessionDcAccount -Pins @{ 'dc2.example.test' = 'ab' }
+    $emptyPin = Get-AVDTuneSessionDcAccount -Pins @{ 'dc1.example.test' = '' }
+    $info75 = Get-AVDTuneSessionDcAccount -Pins @{ 'DC1.example.test'.ToLowerInvariant() = 'ab' } -Info
+    $got75 = Get-AVDTuneSessionDcAccount -Pins @{ 'dc1.example.test' = 'ab' }
+    $len75 = $got75.Password.Length; $got75.Password.Dispose()
+    $again75 = Get-AVDTuneSessionDcAccount -Pins @{ 'dc1.example.test' = 'ab' }
+    Test-Check 'dc75: the account of the start sequence is offered only for its pinned server (no pin, another server, an empty pin: nothing); -Info has no password; every call gives a new copy the caller disposes' ($null -eq $empty75 -and $null -eq $unpinned -and $null -eq $otherPin -and $null -eq $emptyPin -and $info75.User -eq 'EXAMPLE\admin' -and $info75.Server -eq 'dc1.example.test' -and -not $info75.PSObject.Properties['Password'] -and $len75 -eq 13 -and $again75.Password.Length -eq 13) "len=$len75"
+    $again75.Password.Dispose()
+    $badSet = Get-ThrownText { $x = New-Object System.Security.SecureString; $x.AppendChar('a'); Set-AVDTuneSessionDcAccount -Server 'dc1 example' -User 'EXAMPLE\admin' -Password $x }
+    $afterBad = Get-AVDTuneSessionDcAccount -Pins @{ 'dc1.example.test' = 'ab' }
+    Test-Check 'dc75: an invalid server is refused and the old account is not replaced by it' ($badSet -like '*not kept*' -and $afterBad.Server -eq 'dc1.example.test') $badSet
+    $afterBad.Password.Dispose()
+    Clear-AVDTuneSessionDcAccount
+    Test-Check 'dc75: Clear forgets the account (window closed, failed sign-in with it)' ($null -eq (Get-AVDTuneSessionDcAccount -Pins @{ 'dc1.example.test' = 'ab' })) $null
+    $dirSrc = [IO.File]::ReadAllText((Join-Path $repo 'Modules\AVDTune.Directory.psm1'))
+    $region75 = $dirSrc.Substring($dirSrc.IndexOf('#region account of the start sequence'), $dirSrc.IndexOf('Export-ModuleMember') - $dirSrc.IndexOf('#region account of the start sequence'))
+    $startSrc = [IO.File]::ReadAllText((Join-Path $repo 'AVDTune-Start.ps1'))
+    $shellSrc = [IO.File]::ReadAllText((Join-Path $repo 'Start-AVDTune.ps1'))
+    $pg75 = [IO.File]::ReadAllText((Join-Path $repo 'AVDTune-AppMasking.ps1'))
+    $ldapFn = $pg75.Substring($pg75.IndexOf('function Get-MaskLdap'), $pg75.IndexOf('function Invoke-MaskChange') - $pg75.IndexOf('function Get-MaskLdap'))
+    $iConn = $startSrc.IndexOf("        'Connected' {"); $iSet = $startSrc.IndexOf('Set-AVDTuneSessionDcAccount -Server $server -User $user -Password $f.Secure'); $iDisp = $startSrc.IndexOf('$f.PasswordBox.Clear(); $f.Secure.Dispose(); $f.Secure = $null')
+    Test-Check 'dc75 (source): kept only after a successful read of the start sequence, before its own copy is disposed; forgotten when the window closes; the kept password is copied and read only, never written or turned into text' ($iConn -gt 0 -and $iSet -gt $iConn -and $iSet -lt $iDisp -and $shellSrc.Contains('try { Clear-AVDTuneSessionDcAccount } catch { }') -and $region75.Contains('$copy = $Password.Copy(); $copy.MakeReadOnly()') -and $region75 -notmatch 'ConvertFrom-SecureString|SecureStringToBSTR|Marshal|Write-AVDTune|Set-Content|Out-File|Add-Content|Add-StartProtocol|Register-StepResult') $null
+    Test-Check 'dc75 (source): App Masking takes the kept account only when its password box is empty, with the pins of the environment, disposes the copy in finally, and forgets the account when the sign-in with it fails' ($ldapFn.Contains('if ($secure.Length -eq 0) {') -and $ldapFn.Contains('Get-AVDTuneSessionDcAccount -Pins $pins') -and $ldapFn.Contains('-Pins $pins') -and $ldapFn.Contains('finally { $secure.Dispose() }') -and $ldapFn.Contains("if (`$r.Status -ne 'Connected' -and `$fromStart) { Clear-AVDTuneSessionDcAccount") -and $pg75.Contains('Get-AVDTuneSessionDcAccount -Pins (Get-AVDTuneDcPins (Get-AVDTuneEnvironment $script:StateRoot)) -Info')) $null
 }
 finally {
     Close-AVDTuneWriteGate
