@@ -202,7 +202,7 @@ function Build-CustPage {
     [void]$root.Children.Add($row)
     $ui.TxtCustState = New-MaskText '' 'Hint' '0,8,0,0'; [void]$root.Children.Add($ui.TxtCustState)
     $ui.TxtCustLibrary = New-MaskText '' 'Hint' '0,4,0,0'; [void]$root.Children.Add($ui.TxtCustLibrary)
-    foreach ($k in 'Shortcuts', 'Fonts', 'Steps') {
+    foreach ($k in 'Shortcuts', 'WebApps', 'Fonts', 'Steps') {   # web apps (#88): an own list, the same Test/Apply/Undo
         $card = New-MaskCard (T "cust.card.$($k.ToLower())") (T "cust.card.$($k.ToLower()).hint")
         $p = New-Object System.Windows.Controls.StackPanel; $p.Margin = '0,8,0,0'; [void]$card.Panel.Children.Add($p)
         $ui["PanelCust$k"] = $p
@@ -251,7 +251,8 @@ function Update-CustForm {
             'Principal' { New-CustCombo $ch.Principals $label $true }
             'IconSource' { New-CustCombo @('Target', 'Library') $label }
             'Undo' { New-CustCombo @('No', 'Yes') $label }
-            'IconFile' { New-CustCombo (Get-CustLibraryFiles @('.ico')) $label }
+            'WindowMode' { New-CustCombo $ch.WindowModes $label }
+            'IconFile' { if ($kind -eq 'WebApp') { New-CustCombo (@('') + @(Get-CustLibraryFiles @('.ico', '.png'))) $label } else { New-CustCombo (Get-CustLibraryFiles @('.ico')) $label } }   # a web app may go without an icon
             'File' { New-CustCombo (Get-CustLibraryFiles $(switch ($kind) { 'Font' { @('.ttf', '.otf') } 'Script' { @('.ps1') } default { @('.txt', '.ini', '.xml', '.json', '.cfg', '.config', '.ico', '.png', '.jpg', '.bmp', '.reg', '.pdf', '.url') } })) $label }
             'Visibility' {
                 $cb = New-CustCombo @() $label
@@ -344,7 +345,7 @@ function Update-CustView {
     if (-not $script:CustUiBuilt) { return }
     $lib = $script:CustLibrary
     $ui.TxtCustLibrary.Text = if ($script:CustLibraryError) { T 'cust.lib.error' $script:CustLibraryError } elseif ($lib) { "$(T 'cust.lib.state') $($lib.Message)$(if (@($lib.Notes).Count) { ' ' + (@($lib.Notes) -join ' ') })" } else { T 'cust.lib.none' }
-    foreach ($p in $ui.PanelCustShortcuts, $ui.PanelCustFonts, $ui.PanelCustSteps) { $p.Children.Clear() }
+    foreach ($p in $ui.PanelCustShortcuts, $ui.PanelCustWebApps, $ui.PanelCustFonts, $ui.PanelCustSteps) { $p.Children.Clear() }
     $st = $script:CustStatus
     if (-not $st) { [void]$ui.PanelCustSteps.Children.Add((New-MaskText (T 'cust.notread') 'Hint')); return }
     if ($st.Problem) { $ui.TxtCustState.Text = $st.Problem }
@@ -360,7 +361,7 @@ function Update-CustView {
         $undo = $null; if ($r.Undo) { $undo = New-MaskButton (T 'cust.btn.undo') (T 'cust.btn.undo.tip' $r.Title); $undo.Add_Click({ param($src) try { Invoke-CustUndo (Get-CustRow ([string]$src.DataContext)) $false } catch { Show-Error $_.Exception.Message } }) }
         $rm = New-MaskButton (T 'cust.btn.remove') (T 'cust.btn.remove.tip' $r.Title); $rm.Add_Click({ param($src) try { Invoke-CustUndo (Get-CustRow ([string]$src.DataContext)) $true } catch { Show-Error $_.Exception.Message } })
         foreach ($b in $apply, $undo, $rm) { if ($b) { $b.IsEnabled = -not $busy; $b.DataContext = [string]$r.Id; [void](Set-AVDTuneWriterButton $b) } }
-        $panel = switch ($r.Kind) { 'Shortcut' { $ui.PanelCustShortcuts } 'Font' { $ui.PanelCustFonts } default { $ui.PanelCustSteps } }
+        $panel = switch ($r.Kind) { 'Shortcut' { $ui.PanelCustShortcuts } 'WebApp' { $ui.PanelCustWebApps } 'Font' { $ui.PanelCustFonts } default { $ui.PanelCustSteps } }
         [void]$panel.Children.Add((New-CustRow ([string]$r.Status) "$(T "cust.kind.$($r.Kind.ToLower())"): $($r.Title)" ($detail -join ' ') @($apply, $undo, $rm)))
     }
     foreach ($x in @($st.Invalid)) {
@@ -368,7 +369,7 @@ function Update-CustView {
         $rm.Add_Click({ param($src) try { $id = [string]$src.DataContext; if (Confirm-Action (T 'cust.ask.removeinvalid' $id) (T 'nav.customizations')) { Remove-AVDTuneCustomItem -Root $script:StateRoot -Id $id -Force; Start-CustJob 'Status' } } catch { Show-Error $_.Exception.Message } })
         [void]$ui.PanelCustSteps.Children.Add((New-CustRow 'Invalid' "$($x.Kind): $($x.Name)" (@($x.Errors) -join ' ') @($rm)))
     }
-    foreach ($p in @(@($ui.PanelCustShortcuts, 'shortcuts'), @($ui.PanelCustFonts, 'fonts'), @($ui.PanelCustSteps, 'steps'))) { if ($p[0].Children.Count -eq 0) { [void]$p[0].Children.Add((New-MaskText (T "cust.empty.$($p[1])") 'Hint')) } }
+    foreach ($p in @(@($ui.PanelCustShortcuts, 'shortcuts'), @($ui.PanelCustWebApps, 'webapps'), @($ui.PanelCustFonts, 'fonts'), @($ui.PanelCustSteps, 'steps'))) { if ($p[0].Children.Count -eq 0) { [void]$p[0].Children.Add((New-MaskText (T "cust.empty.$($p[1])") 'Hint')) } }
     if ($ui.CmbCustKind.SelectedIndex -ge 0 -and $script:CustForm.Count -gt 0 -and @($script:CustForm.Keys | Where-Object { $_ -in 'File', 'IconFile' }).Count -gt 0 -and $script:CustForm[@($script:CustForm.Keys | Where-Object { $_ -in 'File', 'IconFile' })[0]].Items.Count -eq 0) { Update-CustForm }
 }
 

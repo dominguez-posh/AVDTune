@@ -2,7 +2,7 @@
 # and library scripts, all in memory. Nothing here touches the computer it runs on. Writes are logged in .Store.Log.
 # Dot-source this file, then: $c = New-AVDTuneFakeCustom [-Seed @{ ... }]
 # Seed keys (all optional): Files (path -> text or bytes), Folders (array), Rules (folder -> array of @{ Sid; Rights; Inherited }), Registry ('path|name' -> @{ Value; Kind }), Reachable (array of paths that answer, also UNC),
-# Library (name -> text or bytes: the files of AVDTune-Assets), Shortcuts (path -> @{ Target; Arguments; Icon; WorkingDirectory; Description }), Links (array of paths that are links).
+# Library (name -> text or bytes: the files of AVDTune-Assets), Shortcuts (path -> @{ Target; Arguments; Icon; WorkingDirectory; Description; AppUserModelId }), Links (array of paths that are links).
 # Switches on .Store: FailWrite (a path or registry key part: the write throws), Tamper (library name -> other bytes: the download is different), ScriptMode
 # (sha256 -> 'Ok' | 'Broken' (test answers 7) | 'NoChange' (apply does nothing)).
 
@@ -35,7 +35,8 @@ function New-AVDTuneFakeCustom {
         param($Name)
         switch ($Name) {
             'PublicDesktop' { 'C:\Users\Public\Desktop' } 'StartMenu' { 'C:\ProgramData\Microsoft\Windows\Start Menu\Programs' } 'Fonts' { 'C:\Windows\Fonts' }
-            'Hosts' { 'C:\Windows\System32\drivers\etc\hosts' } 'PublicIcons' { 'C:\ProgramData\AVDTune-Public\Icons' } default { throw "Unknown folder $Name." }
+            'Hosts' { 'C:\Windows\System32\drivers\etc\hosts' } 'PublicIcons' { 'C:\ProgramData\AVDTune-Public\Icons' }
+            'Edge' { 'C:\Program Files (x86)\Microsoft\Edge\Application' } default { throw "Unknown folder $Name." }
         }
     }
     $c.RegGet = { param($Path, $Name) $k = "$Path|$Name".ToLowerInvariant(); if ($store.Registry.ContainsKey($k)) { $store.Registry[$k] } else { $null } }.GetNewClosure()
@@ -96,11 +97,11 @@ function New-AVDTuneFakeCustom {
     $c.DirRemoveEmpty = { param($Path) $k = ([string]$Path).ToLowerInvariant(); $busy = @($store.Files.Keys | Where-Object { $_.StartsWith($k + '\') }).Count + @($store.Folders.Keys | Where-Object { $_.StartsWith($k + '\') }).Count; if ($busy -eq 0) { $store.Folders.Remove($k); & $log "DirRemoveEmpty $Path" } }.GetNewClosure()
     $c.ShortcutRead = { param($Path) $k = ([string]$Path).ToLowerInvariant(); if ($store.Shortcuts.ContainsKey($k)) { $store.Shortcuts[$k] } else { $null } }.GetNewClosure()
     $c.ShortcutWrite = {
-        param($Path, $Target, $Arguments, $Icon, $WorkingDirectory, $Description)
+        param($Path, $Target, $Arguments, $Icon, $WorkingDirectory, $Description, $AppUserModelId)
         & $fail $Path
         $k = ([string]$Path).ToLowerInvariant()
         if ($store.Links.ContainsKey((Split-Path $k -Parent))) { throw "The folder of $Path is not safe (link): no shortcut was written." }
-        $store.Shortcuts[$k] = [pscustomobject]@{ Target = $Target; Arguments = $Arguments; Icon = $Icon; WorkingDirectory = $WorkingDirectory; Description = $Description }; & $log "ShortcutWrite $Path"
+        $store.Shortcuts[$k] = [pscustomobject]@{ Target = $Target; Arguments = $Arguments; Icon = $Icon; WorkingDirectory = $WorkingDirectory; Description = $Description; AppUserModelId = [string]$AppUserModelId }; & $log "ShortcutWrite $Path"
     }.GetNewClosure()
     $c.ShortcutDelete = { param($Path) & $fail $Path; $store.Shortcuts.Remove(([string]$Path).ToLowerInvariant()); & $log "ShortcutDelete $Path" }.GetNewClosure()
     $c.Reachable = { param($Path) $k = ([string]$Path).ToLowerInvariant(); $store.Reachable.ContainsKey($k) -or $store.Files.ContainsKey($k) -or $store.Folders.ContainsKey($k) }.GetNewClosure()

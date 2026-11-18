@@ -24,6 +24,9 @@ param([string]$Root, [string]$DenyListPath)
 
 # GUIDs that are public and may appear in code and docs (lower case). Every entry says what it is.
 $script:AllowedGuids = @{
+    '886d8eeb-8cf2-4446-8d02-cdba1dbdcf99' = 'IID_IPropertyStore (propsys.h), AppUserModelID of a web app shortcut (#88)'
+    '9f4c2855-9f79-4b39-a8d0-e1d42de1d5f3' = 'FMTID of PKEY_AppUserModel_ID (propkey.h), AppUserModelID of a web app shortcut (#88)'
+    '00021401-0000-0000-c000-000000000046' = 'CLSID_ShellLink (shlguid.h), the .lnk object whose property store gets the AppUserModelID (#88)'
     '86ca1aa0-34aa-4e8b-a509-50c905bae2a2' = 'Windows 11 shell CLSID whose empty InprocServer32 brings back the classic context menu (Microsoft Q&A, optimization list #40)'
     'ae6d2014-e692-45fa-a88b-ee552567cdc1' = 'Path of the public FSLogix download on download.microsoft.com (target of aka.ms/fslogix_download), used by the network benchmark'
     'ec984aec-a0f9-47e9-901f-71415a66345b' = 'VIRTUAL_STORAGE_TYPE_VENDOR_MICROSOFT (virtdisk.h), vendor of the VHDX type for the profile container test'

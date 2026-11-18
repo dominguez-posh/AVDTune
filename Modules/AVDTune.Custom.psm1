@@ -23,8 +23,9 @@ Import-Module (Join-Path $PSScriptRoot 'AVDTune.Updates.psm1')
 Import-Module (Join-Path $PSScriptRoot 'AVDTune.Software.psm1')
 Import-Module (Join-Path $PSScriptRoot 'AVDTune.FSLogix.psm1')   # Test-AVDTuneBroadSid (one list of broad groups, #83)
 Import-Module (Join-Path $PSScriptRoot 'AVDTune.Masking.psm1')
+Import-Module (Join-Path $PSScriptRoot 'AVDTune.WebApp.psm1') -Global   # web apps (#88, plan 3a): URL, Edge policy list, launch of the shortcut; global because the GetNewClosure steps resolve commands there (#78), also in the job runspaces
 
-$script:Kinds = @('Shortcut', 'Font', 'Registry', 'Ini', 'Hosts', 'Folder', 'FileCopy', 'Script')
+$script:Kinds = @('Shortcut', 'Font', 'Registry', 'Ini', 'Hosts', 'Folder', 'FileCopy', 'Script', 'WebApp')
 $script:Fields = @{
     Shortcut = @('Name', 'Location', 'Target', 'Arguments', 'WorkingDirectory', 'IconSource', 'IconFile', 'IconSha256', 'IconIndex', 'Visibility')
     Font     = @('Name', 'File', 'Sha256')
@@ -34,6 +35,7 @@ $script:Fields = @{
     Folder   = @('Name', 'Path', 'Principal', 'Rights')
     FileCopy = @('Name', 'File', 'Sha256', 'Destination')
     Script   = @('Name', 'File', 'Sha256', 'TimeoutSeconds', 'Undo')
+    WebApp   = @('Name', 'StartUrl', 'ManifestId', 'AppId', 'WindowMode', 'Location', 'IconFile', 'IconSha256', 'Visibility')   # later a PackTune package of the kind 'webapp' (#88)
 }
 $script:IntFields = @('IconIndex', 'TimeoutSeconds')
 $script:BoolFields = @('Undo')
@@ -301,6 +303,25 @@ function ConvertTo-AVDTuneCustomItem {
             if ($i.Sha256 -notmatch '\A[0-9a-f]{64}\z') { [void]$errors.Add('Script: the SHA256 of the library file is missing (read the library first).') }
             if ($i.TimeoutSeconds -lt 10 -or $i.TimeoutSeconds -gt 7200) { [void]$errors.Add('Timeout: 10 to 7200 seconds.') }
         }
+        'WebApp' {
+            # web app (#88, plan 3a): the name becomes the file name of the shortcuts; URLs https only; the app id only as Edge writes it (edge://apps)
+            if (-not (Test-AVDTuneCustomMatch $i.Name '\A[A-Za-z0-9][A-Za-z0-9 ._&()+-]{0,79}\z' 80) -or $i.Name -match '[. ]\z' -or $i.Name.Split('.')[0].ToUpperInvariant() -in $script:Reserved) { [void]$errors.Add('Name: letters, digits, space and . _ & ( ) + - (it becomes the file name of the shortcut).') }
+            $ue = Test-AVDTuneWebAppUrl $i.StartUrl 'Start URL'; if ($ue) { [void]$errors.Add($ue) }
+            if ($i.ManifestId) {
+                $me = Test-AVDTuneWebAppUrl $i.ManifestId 'Manifest id'
+                if ($me) { [void]$errors.Add($me) } elseif (-not $ue -and (Get-AVDTuneWebAppOrigin $i.ManifestId) -cne (Get-AVDTuneWebAppOrigin $i.StartUrl)) { [void]$errors.Add('Manifest id: the same origin (https://host:port) as the start URL.') }
+            }
+            if ($i.AppId -and -not (Test-AVDTuneCustomMatch $i.AppId '\A[a-p]{32}\z' 32)) { [void]$errors.Add('App id: empty or the 32 letters a to p that edge://apps shows for the installed app.') }
+            if ($i.WindowMode -cnotin @(Get-AVDTuneWebAppWindowModes)) { [void]$errors.Add('Window mode: Window or Tab.') }
+            if ($i.Location -cnotin $script:Locations) { [void]$errors.Add('Location: Desktop, StartMenu or Both.') }
+            if ($i.IconFile) {
+                $h = & $lib $i.IconFile @('.ico', '.png') 'Icon'; if ($h) { $i.IconSha256 = $h }
+                if ($i.IconSha256 -notmatch '\A[0-9a-f]{64}\z') { [void]$errors.Add('Icon: the SHA256 of the library file is missing (read the library first).') }
+            }
+            else { $i.IconSha256 = '' }
+            if ($i.Visibility -and $i.Visibility -cne 'Admins' -and -not (Test-AVDTuneCustomMatch $i.Visibility '\AS-1-[0-9]{1,3}(-[0-9]{1,10}){1,14}\z' 200)) { [void]$errors.Add('Visible for: everyone, administrators only or a group (SID).') }
+            if ($i.Visibility -and $i.Location -eq 'StartMenu') { [void]$errors.Add('Visible for: App Masking rules are set for the Public Desktop only; choose Desktop or Both.') }
+        }
     }
     foreach ($k in 'Sha256', 'IconSha256') { if ($i.Contains($k) -and $i[$k]) { $i[$k] = ([string]$i[$k]).ToLowerInvariant() } }
     [pscustomobject]@{ Valid = ($errors.Count -eq 0); Errors = @($errors); Item = [pscustomobject]$i }
@@ -468,6 +489,7 @@ function Get-AVDTuneCustomTitle($Item) {
         'Folder' { "Folder $($Item.Path) with $($Item.Rights) for $($Item.Principal)" }
         'FileCopy' { "File $($Item.File) to $($Item.Destination)" }
         'Script' { "Script $($Item.File)" }
+        'WebApp' { "Web app $($Item.Name) ($($Item.StartUrl), $($Item.Location))" }
     }
 }
 
@@ -519,6 +541,14 @@ function Get-AVDTuneCustomBefore {
             @{ Existed = [bool]$d.Exists; Rules = $own }
         }
         'Font' { $r = & $C.RegGet $script:FontKey (Get-AVDTuneCustomFontValueName $Item); @{ FileExisted = ($null -ne (& $C.FileHash (Join-Path (& $C.Folder 'Fonts') $Item.File))); ValueExisted = [bool]$r; Value = $(if ($r) { [string]$r.Value } else { '' }) } }
+        'WebApp' {
+            # the whole value of WebAppInstallForceList as it was and the exact text of the entry of this URL in it (undo puts back exactly that)
+            $pk = Get-AVDTuneWebAppPolicyLocation
+            $r = & $C.RegGet $pk.Key $pk.Value
+            $old = ''
+            if ($r -and [string]$r.Kind -eq 'String') { try { $hit = Find-AVDTuneWebAppPolicyEntry -Entries (ConvertFrom-AVDTuneWebAppPolicy ([string]$r.Value)) -Url $Item.StartUrl; if ($hit.Count -eq 1) { $old = [string]$hit[0].Raw } } catch { } }
+            @{ Existed = [bool]$r; Text = $(if ($r) { [string]$r.Value } else { '' }); OldEntry = $old }
+        }
         default { @{} }
     }
 }
@@ -623,8 +653,44 @@ function New-AVDTuneCustomStep {
                 foreach ($p in $paths) { & $C.ShortcutWrite $p $i.Target $i.Arguments $icon $i.WorkingDirectory $desc } }.GetNewClosure()
             $undo = { param($m) foreach ($p in $paths) { $s = & $C.ShortcutRead $p; if ($s -and $s.Description -ceq $desc) { & $C.ShortcutDelete $p } } }.GetNewClosure()
         }
+        'WebApp' {
+            # Edge installs the app from WebAppInstallForceList (only the entry of this start URL is AVDTune's); the shortcuts start it (Get-AVDTuneWebAppLaunch)
+            $launch = Get-AVDTuneWebAppLaunch -Item $i -EdgeFolder (& $C.Folder 'Edge')
+            $paths = @(Get-AVDTuneCustomShortcutPaths -Item $i -C $C)
+            $desc = "$($script:Marker) $($i.Id)"
+            $ext = if ($i.IconFile) { [IO.Path]::GetExtension($i.IconFile).ToLowerInvariant() } else { '' }
+            $iconCopy = if ($ext) { Join-Path (& $C.Folder 'PublicIcons') ($i.IconSha256.Substring(0, 16) + $ext) } else { '' }
+            $needCopy = ($ext -eq '.ico' -or ($ext -eq '.png' -and (Get-AVDTuneWebAppSpike).CustomIcon))   # a .png is only for custom_icon (not verified, spike)
+            $icon = if ($ext -eq '.ico') { "$iconCopy,0" } else { "$($launch.Target),0" }
+            $entry = New-AVDTuneWebAppPolicyEntry -Item $i -IconPath $(if ($needCopy) { $iconCopy } else { '' })
+            $pk = Get-AVDTuneWebAppPolicyLocation
+            $own = Get-AVDTuneWebAppEntryText $entry
+            $readPolicy = { $r = & $C.RegGet $pk.Key $pk.Value; if (-not $r) { return '' }; if ([string]$r.Kind -ne 'String') { throw "$($pk.Key)\$($pk.Value) is $($r.Kind), not REG_SZ: not changed." }; [string]$r.Value }.GetNewClosure()
+            $test = { param($m) $miss = @()
+                try { if (-not (Test-AVDTuneWebAppPolicyHas -Current (& $readPolicy) -Entry $entry)) { $miss += 'Edge policy' } } catch { $miss += "Edge policy ($($_.Exception.Message))" }
+                foreach ($p in $paths) { $s = & $C.ShortcutRead $p; if (-not ($s -and $s.Target -ieq $launch.Target -and $s.Arguments -ceq $launch.Arguments -and $s.Icon -ieq $icon -and $s.Description -ceq $desc -and [string](Get-AVDTuneProp $s 'AppUserModelId') -ceq $launch.AppUserModelId)) { $miss += (Split-Path (Split-Path $p -Parent) -Leaf) } }
+                @{ Compliant = ($miss.Count -eq 0); State = $(if ($miss.Count) { 'missing or different: ' + ($miss -join ', ') } elseif ($launch.Installed) { 'in place (installed app)' } else { 'in place (app window, app id not known)' }) } }.GetNewClosure()
+            $apply = { param($m)
+                foreach ($p in $paths) { $s = & $C.ShortcutRead $p; if ($s -and $s.Description -cne $desc) { throw "$p exists and was not made by AVDTune for this item: it is not replaced." } }
+                $cur = & $readPolicy
+                $new = Merge-AVDTuneWebAppPolicy -Current $cur -Entry $entry   # throws for a foreign entry of this URL before anything is written
+                if ($needCopy) {   # the icon first: a missing or tampered icon stops the step before the policy is written (review #88)
+                    $h = & $C.FileHash $iconCopy
+                    if ($null -ne $h -and $h -ne $i.IconSha256) { throw "$iconCopy exists with other content." }
+                    if ($null -eq $h) { & $C.CopyFile (& $get $i.IconFile $i.IconSha256) $iconCopy 'UsersRead' }
+                }
+                if ($new -cne $cur) { & $C.RegSet $pk.Key $pk.Value $new 'String' }
+                foreach ($p in $paths) { & $C.ShortcutWrite $p $launch.Target $launch.Arguments $icon '' $desc $launch.AppUserModelId } }.GetNewClosure()
+            $b = if ($Before) { $Before } else { @{ Existed = $false; Text = ''; OldEntry = '' } }   # without a record: only the own entry is taken out
+            $undo = { param($m)
+                foreach ($p in $paths) { $s = & $C.ShortcutRead $p; if ($s -and $s.Description -ceq $desc) { & $C.ShortcutDelete $p } }
+                $r = & $C.RegGet $pk.Key $pk.Value
+                if (-not $r -or [string]$r.Kind -ne 'String' -or [string]$b.OldEntry -ceq $own) { return }   # the same entry was there before AVDTune: it stays
+                $u = Get-AVDTuneWebAppPolicyUndo -Current ([string]$r.Value) -Own $own -OldExisted ([bool]$b.Existed) -OldText ([string]$b.Text)
+                if ($u.Remove) { & $C.RegRemove $pk.Key $pk.Value } elseif ($u.Text -cne [string]$r.Value) { & $C.RegSet $pk.Key $pk.Value $u.Text 'String' } }.GetNewClosure()
+        }
         'Script' {
-            $run = { param($mode) $path = & $get $i.File $i.Sha256; & $C.RunScript $path $i.Sha256 $mode $i.TimeoutSeconds }.GetNewClosure()
+            $run ={ param($mode) $path = & $get $i.File $i.Sha256; & $C.RunScript $path $i.Sha256 $mode $i.TimeoutSeconds }.GetNewClosure()
             $test = { param($m) $r = & $run 'Test'; if ($r.ExitCode -notin 0, 1) { throw "The script answered the test with exit code $($r.ExitCode) (0 = in place, 1 = missing)." }; @{ Compliant = ($r.ExitCode -eq 0); State = "exit code $($r.ExitCode)" } }.GetNewClosure()
             $apply = { param($m) $r = & $run 'Apply'; if ($r.ExitCode -ne 0) { throw "The script ended with exit code $($r.ExitCode)." } }.GetNewClosure()
             if ($i.Undo) { $undo = { param($m) $r = & $run 'Undo'; if ($r.ExitCode -ne 0) { throw "The undo of the script ended with exit code $($r.ExitCode)." } }.GetNewClosure() }
@@ -787,14 +853,14 @@ function Get-AVDTuneCustomPreview {
 function Get-AVDTuneCustomMaskingRequest {
     # Pure: what the App Masking mechanism (#69) is asked for after a Desktop shortcut was made: the file name on the Public Desktop, the mode and the group SID; $null when nothing is asked
     param([Parameter(Mandatory)]$Item)
-    if ($Item.Kind -ne 'Shortcut' -or -not $Item.Visibility -or $Item.Location -notin 'Desktop', 'Both') { return $null }
+    if ($Item.Kind -notin 'Shortcut', 'WebApp' -or -not $Item.Visibility -or $Item.Location -notin 'Desktop', 'Both') { return $null }
     if ($Item.Visibility -eq 'Admins') { return [pscustomobject]@{ FileName = "$($Item.Name).lnk"; Mode = 'Nobody except administrators'; GroupSid = '' } }
     [pscustomobject]@{ FileName = "$($Item.Name).lnk"; Mode = 'Only members of a group'; GroupSid = $Item.Visibility }
 }
 
 function Get-AVDTuneCustomKinds { @($script:Kinds) }
 function Get-AVDTuneCustomFields([string]$Kind) { @($script:Fields[$Kind]) }
-function Get-AVDTuneCustomChoices { [pscustomobject]@{ Locations = @($script:Locations); ValueTypes = @($script:ValueTypes); Rights = @($script:Rights.Keys); Principals = @($script:PrincipalAlias.Keys) } }
+function Get-AVDTuneCustomChoices { [pscustomobject]@{ Locations = @($script:Locations); WindowModes = @(Get-AVDTuneWebAppWindowModes); ValueTypes = @($script:ValueTypes); Rights = @($script:Rights.Keys); Principals = @($script:PrincipalAlias.Keys) } }
 
 #endregion
 
@@ -826,6 +892,7 @@ function New-AVDTuneCustomAdapter {
             'Fonts' { Join-Path (Get-AVDTuneSystemFolder Windows) 'Fonts' }
             'Hosts' { Join-Path (Get-AVDTuneSystemFolder System) 'drivers\etc\hosts' }
             'PublicIcons' { Join-Path (Get-AVDTuneSystemFolder ProgramData) 'AVDTune-Public\Icons' }
+            'Edge' { Join-Path ([Environment]::GetFolderPath('ProgramFilesX86')) 'Microsoft\Edge\Application' }   # the shortcut target of a web app (#88); never PATH
             default { throw "Unknown folder $Name." }
         }
     }
@@ -939,12 +1006,14 @@ function New-AVDTuneCustomAdapter {
         param($Path)
         if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $null }
         $shell = New-Object -ComObject WScript.Shell
-        try { $l = $shell.CreateShortcut($Path); $o = [pscustomobject]@{ Target = [string]$l.TargetPath; Arguments = [string]$l.Arguments; Icon = [string]$l.IconLocation; Description = [string]$l.Description; WorkingDirectory = [string]$l.WorkingDirectory }; [void][Runtime.InteropServices.Marshal]::ReleaseComObject($l); $o }
+        try { $l = $shell.CreateShortcut($Path); $o = [pscustomobject]@{ Target = [string]$l.TargetPath; Arguments = [string]$l.Arguments; Icon = [string]$l.IconLocation; Description = [string]$l.Description; WorkingDirectory = [string]$l.WorkingDirectory; AppUserModelId = '' }; [void][Runtime.InteropServices.Marshal]::ReleaseComObject($l) }
         finally { [void][Runtime.InteropServices.Marshal]::ReleaseComObject($shell) }
+        $o.AppUserModelId = [string](Get-AVDTuneLinkAumid $Path)   # web apps (#88): IPropertyStore of the link
+        $o
     }
     $a.ShortcutWrite = {
         # Made in the admin-only state folder with the strict ACL, then moved atomically into place (Public Desktop: the Windows default write access of users is accepted, everything else stops)
-        param($Path, $Target, $Arguments, $Icon, $WorkingDirectory, $Description)
+        param($Path, $Target, $Arguments, $Icon, $WorkingDirectory, $Description, $AppUserModelId)
         $folder = Split-Path $Path -Parent
         $problems = if ($folder -ieq [Environment]::GetFolderPath('CommonDesktopDirectory')) { @((Get-AVDTunePublicDesktopFindings -Path $Path).Problems) } else { @(Get-AVDTuneWriteChainProblems -Path $Path -AllowMissingLeaf) }
         if (@($problems).Count -gt 0) { throw "The folder of $Path is not safe ($(@($problems) -join '; ')): no shortcut was written." }
@@ -954,6 +1023,7 @@ function New-AVDTuneCustomAdapter {
         $shell = New-Object -ComObject WScript.Shell
         try {
             $l = $shell.CreateShortcut($temp); $l.TargetPath = $Target; $l.Arguments = $Arguments; $l.IconLocation = $Icon; $l.Description = $Description; $l.WorkingDirectory = $WorkingDirectory; $l.Save(); [void][Runtime.InteropServices.Marshal]::ReleaseComObject($l)
+            if ($AppUserModelId) { Set-AVDTuneLinkAumid $temp $AppUserModelId }   # web app without a known app id (#88): its own taskbar identity
             (New-Object IO.FileInfo $temp).SetAccessControl((New-AVDTuneFileSecurity))
             Move-AVDTuneFileReplace $temp $Path
         }
