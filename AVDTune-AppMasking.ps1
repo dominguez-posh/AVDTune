@@ -18,6 +18,7 @@ $script:MaskReadQueued = $false
 $script:MaskChecks = @{}
 $script:MaskUiBuilt = $false
 
+$script:MaskDefaultSetName = 'Public Desktop'   # the default name of a new rule set is data (file names), the same in every language
 function Get-MaskAdapter { if ($script:TestMode) { $script:MaskFake.M } else { if (-not $script:RealMask) { $script:RealMask = New-AVDTuneMaskingAdapter }; $script:RealMask } }
 function Get-MaskAnswers { $e = $null; try { $e = Get-AVDTuneEnvironment $script:StateRoot } catch { }; if ($e) { Get-AVDTuneEnvironmentAnswers $e } else { $null } }
 function Get-MaskDirectory { $d = $null; try { $d = Read-AVDTuneJson (Join-Path $script:StateRoot 'config\directory.json') } catch { }; if ($d -and (Get-AVDTuneProp $d 'Directory')) { $d.Directory } else { $null } }
@@ -93,7 +94,7 @@ function Build-MaskPage {
     $ui.PanelMaskDesk = New-Object System.Windows.Controls.StackPanel; $ui.PanelMaskDesk.Margin = '0,8,0,0'; [void]$c2.Panel.Children.Add($ui.PanelMaskDesk)
     $ui.BtnMaskUncovered = New-MaskButton (T 'mask.wiz.uncovered') (T 'mask.wiz.uncovered.tip'); $ui.BtnMaskUncovered.Margin = '0,6,0,6'; $ui.BtnMaskUncovered.HorizontalAlignment = 'Left'
     [void]$c2.Panel.Children.Add($ui.BtnMaskUncovered)
-    $ui.TxtMaskName = New-Object System.Windows.Controls.TextBox; $ui.TxtMaskName.Text = (T 'mask.pd.title'); $ui.TxtMaskName.Padding = '8,6'; [System.Windows.Automation.AutomationProperties]::SetName($ui.TxtMaskName, (T 'mask.wiz.setname.name'))
+    $ui.TxtMaskName = New-Object System.Windows.Controls.TextBox; $ui.TxtMaskName.Text = $script:MaskDefaultSetName; $ui.TxtMaskName.Padding = '8,6'; [System.Windows.Automation.AutomationProperties]::SetName($ui.TxtMaskName, (T 'mask.wiz.setname.name'))
     [void]$c2.Panel.Children.Add((New-MaskLabeled (T 'mask.wiz.setname') $ui.TxtMaskName))
     $ui.CmbMaskVis = New-Object System.Windows.Controls.ComboBox; $ui.CmbMaskVis.Padding = '8,6'; [System.Windows.Automation.AutomationProperties]::SetName($ui.CmbMaskVis, (T 'mask.wiz.visible.name'))
     [void]$c2.Panel.Children.Add((New-MaskLabeled (T 'mask.wiz.visible') $ui.CmbMaskVis))

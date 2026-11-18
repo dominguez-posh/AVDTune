@@ -138,7 +138,7 @@ try {
 
     # ---------------------------------------------------------------- the pages (#70 step 2): every key asked exists, no fixed UI text left (AST), no fixed text in any XAML
     $pageFiles = 'AVDTune-AppMasking.ps1', 'AVDTune-Benchmark.ps1', 'AVDTune-Custom.ps1', 'AVDTune-CustomSoftware.ps1', 'AVDTune-Environment.ps1', 'AVDTune-FSLogix.ps1', 'AVDTune-Language.ps1', 'AVDTune-Office.ps1',
-        'AVDTune-Optimization.ps1', 'AVDTune-Printers.ps1', 'AVDTune-Seal.ps1', 'AVDTune-Software.ps1', 'AVDTune-Updates.ps1', 'AVDTune-UserExperience.ps1', 'AVDTune-Vdi.ps1'
+        'AVDTune-Optimization.ps1', 'AVDTune-Printers.ps1', 'AVDTune-Seal.ps1', 'AVDTune-Software.ps1', 'AVDTune-Updates.ps1', 'AVDTune-UserExperience.ps1', 'AVDTune-Vdi.ps1', 'AVDTune-SharePoint.ps1', 'AVDTune-Protocol.ps1'
     $textCommands = 'T', 'Get-AVDTuneText', 'Set-AVDTuneUid', 'Get-AVDTuneEngineText'
     $uiProps = 'Text', 'Content', 'ToolTip', 'Header', 'Title'
     $uiHelper = '\A(New-(?!Object\z|Item\z|AVDTune)[A-Za-z]+|Confirm-Action|Show-[A-Za-z]*(Dialog|Message)[A-Za-z]*)\z'
