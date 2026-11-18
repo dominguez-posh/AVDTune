@@ -52,6 +52,12 @@ try {
     $other = Get-AVDTuneDesktopShortcut -Folder $desk -InstallRoot (Join-Path $tmp 'elsewhere')
     Test-Check 'a shortcut that points to another install folder does not match' (-not $other.Matches) $null
 
+    # ---------------------------------------------------------------- the second shortcut "AVDTune Benchmark" (#90): the launcher with -Benchmark
+    $bspec = Get-AVDTuneShortcutSpec $install -Benchmark
+    $blink = New-AVDTuneDesktopShortcut -InstallRoot $install -Folder $desk -Benchmark
+    Test-Check 'benchmark shortcut: AVDTune Benchmark.lnk next to AVDTune.lnk, same launcher with -Benchmark at the end, run as administrator, matches only its own spec' ((Test-Path -LiteralPath (Join-Path $desk 'AVDTune Benchmark.lnk')) -and (Get-AVDTuneShortcutName -Benchmark) -eq 'AVDTune Benchmark.lnk' -and $bspec.Arguments -ceq ($spec.Arguments + ' -Benchmark') -and $blink.Arguments -ceq $bspec.Arguments -and $blink.RunAs -and $blink.Matches -and -not (Get-AVDTuneDesktopShortcut -Folder $desk -InstallRoot $install).Arguments.EndsWith('-Benchmark')) $blink.Arguments
+    Test-Check 'benchmark shortcut: removing it leaves AVDTune.lnk; the Public Desktop is refused for it too' ((Remove-AVDTuneDesktopShortcut -Folder $desk -Benchmark) -and -not (Test-Path -LiteralPath (Join-Path $desk 'AVDTune Benchmark.lnk')) -and (Test-Path -LiteralPath (Join-Path $desk 'AVDTune.lnk')) -and (Get-ThrownText { New-AVDTuneDesktopShortcut -InstallRoot $install -Folder ([Environment]::GetFolderPath('CommonDesktopDirectory')) -Benchmark }) -like '*never puts a shortcut on the Public Desktop*') $null
+
     # ---------------------------------------------------------------- never the Public Desktop
     $public = @([Environment]::GetFolderPath('CommonDesktopDirectory'), (Join-Path $env:PUBLIC 'Desktop'), (Join-Path $env:SystemDrive 'Users\Public\Desktop\sub'), (Join-Path $env:SystemDrive 'Users\Default\Desktop'), 'C:\Users\All Users\Desktop')
     $pubBefore = @($public | ForEach-Object { Test-Path -LiteralPath (Join-Path $_ 'AVDTune.lnk') })

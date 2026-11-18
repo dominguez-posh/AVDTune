@@ -18,6 +18,7 @@ function Start-BenchJob([string]$Mode, [string]$Kind, [string]$SystemName = '', 
     if ($script:BenchJob) { throw 'A benchmark is already running.' }
     if ($script:UpdJob) { throw 'An update operation is running. Wait until it is done.' }
     if ($script:OptRun) { throw 'An optimization run is going. Wait until it is done.' }
+    $block = Get-BenchStartBlock; if ($block) { throw (T 'bench.rel.refused' $block) }   # also here: every start goes through this function (Finn, #90)
     Assert-NoOtherWriter
     $sync = [hashtable]::Synchronized(@{ Text = ''; Percent = 0 })
     $ps = New-AVDTunePowerShell
@@ -160,7 +161,56 @@ function Update-BenchmarkView {
     $ui.BoxBenchOnly.Visibility = ConvertTo-Vis ([bool]$script:BenchmarkOnly)
     $ui.BoxBenchCompare.Visibility = ConvertTo-Vis (-not $script:BenchmarkOnly)   # the comparison per image version belongs to a Golden Master
     if (-not $script:BenchmarkOnly) { Update-BenchCompareView }
+    Update-BenchIntegrity
+    if ($script:BenchmarkOnly) { Update-BenchShortcutRow }
 }
+
+# ---------------------------------------------------------------- integrity of the tool (Finn, #90): no start while the check runs or AVDTune is read only
+function Get-BenchStartBlock {
+    Get-AVDTuneBenchStartBlock -IntegrityRunning ([bool]($script:RelJob -and [string]$script:RelJob.Kind -in 'Start', 'Check')) -WriteBlock (Get-AVDTuneWriteBlock)
+}
+function Update-BenchIntegrity {
+    # the result of the integrity check on this page too (in benchmark-only mode the Overview is hidden), with the repair when the release offers it
+    $s = $script:Rel.Status
+    $key = if ($s) { [string]$s.Status } else { 'running' }
+    $block = Get-BenchStartBlock
+    $text = T 'bench.rel.status' (T "rel.pill.$key") $(if ($s) { [string]$s.Message } else { T 'rel.comparing' })
+    if ($block) { $text += "`r`n" + (T 'bench.rel.blocked' $block) }
+    $repair = $ui.BtnRelRepair.Visibility -eq 'Visible'
+    if ($block -and -not $repair -and $key -ne 'running') { $text += "`r`n" + (T 'bench.rel.hint') }
+    if ($ui.TxtBenchIntegrity.Text -ne $text) { $ui.TxtBenchIntegrity.Text = $text }
+    Set-Brush $ui.BoxBenchIntegrity ([System.Windows.Controls.Border]::BackgroundProperty) $(if ($block) { 'WarningBg' } else { 'Card' })
+    $ui.BtnBenchRelRepair.Visibility = ConvertTo-Vis $repair
+}
+Add-Click $ui.BtnBenchRelRepair { $ui.BtnRelRepair.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent))) }
+$script:Timer.Add_Tick({ try { if ($script:CurrentPage -eq 'Benchmark') { Update-BenchIntegrity } } catch { } })
+
+# ---------------------------------------------------------------- desktop shortcut "AVDTune Benchmark" (#90): the launcher with -Benchmark, like AVDTune.lnk (#15)
+function Update-BenchShortcutRow {
+    $installed = (Get-ShortcutMode) -eq 'Installed'
+    $link = $null; try { $link = Get-AVDTuneDesktopShortcut -Folder (Get-ShortcutDesktop) -InstallRoot $script:RelInstallRoot -Benchmark } catch { }
+    $ui.BtnBenchShortcut.Content = $(if ($link) { T 'bench.sc.remove' } else { T 'bench.sc.create' })
+    $ui.BtnBenchShortcut.IsEnabled = ($installed -or [bool]$link)
+    $ui.TxtBenchShortcut.Text = if (-not $installed -and -not $link) { T 'sc.state.notinstalled' }
+    elseif ($link -and -not $link.Matches) { T 'sc.state.wrong' $script:RelInstallRoot }
+    elseif ($link) { T 'bench.sc.ok' }
+    else { T 'sc.state.none' }
+}
+function Switch-BenchShortcut {
+    $folder = Get-ShortcutDesktop
+    if (Get-AVDTuneDesktopShortcut -Folder $folder -Benchmark) {
+        [void](Remove-AVDTuneDesktopShortcut -Folder $folder -Benchmark)
+        Add-RelProtocol 'Desktop shortcut AVDTune Benchmark removed' $folder
+        Show-Toast (T 'sc.toast.removed')
+    }
+    else {
+        $link = New-AVDTuneDesktopShortcut -InstallRoot $script:RelInstallRoot -Folder $folder -Benchmark
+        Add-RelProtocol 'Desktop shortcut AVDTune Benchmark created' "$($link.Path) -> $($link.Target) $($link.Arguments) (run as administrator)"
+        Show-Toast (T 'sc.toast.created')
+    }
+    Update-BenchShortcutRow
+}
+Add-Click $ui.BtnBenchShortcut { Switch-BenchShortcut }
 
 # ---------------------------------------------------------------- comparison per image version (#90), comparison systems (plan 6b)
 $script:BenchCompare = $null   # the comparison shown (exported as it is)
@@ -266,6 +316,8 @@ function Enter-BenchmarkOnlyMode {
 }
 
 function Start-BenchRun([string]$Mode) {
+    $block = Get-BenchStartBlock
+    if ($block) { Update-BenchIntegrity; throw (T 'bench.rel.refused' $block) }   # before any question (Finn, #90)
     $name = ''; $notes = ''
     if ($script:BenchmarkOnly) {
         $name = ([string]$ui.TxtBenchSystemName.Text).Trim(); $notes = ([string]$ui.TxtBenchSystemNotes.Text).Trim()

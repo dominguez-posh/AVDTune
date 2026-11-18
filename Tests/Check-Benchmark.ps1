@@ -724,6 +724,38 @@ public static class StandIn { public static int Main(string[] a) {
             Copy-Item -LiteralPath (Join-Path $exp 'changed.json') -Destination (Join-Path $sysFolder 'other-1.json')
             $cmpX = Get-AVDTuneBenchmarkVersionComparison -Root $rr -Config $config
             Test-Check 'import: a changed file put into the systems folder by hand is left out and named' (@($cmpX.Systems).Count -eq 1 -and (@($cmpX.Problems) -join ' ') -like '*other-1.json*integrity*') (@($cmpX.Problems) -join '; ')
+
+            # ---- Finn's review of 3365b39 (#90)
+            Test-Check 'run id: the whole string (\z, a line break at the end is refused), 1-64 characters, no device name' ((Test-AVDTuneBenchRunId '20261118-090116-aeb1') -and -not (Test-AVDTuneBenchRunId "20261118-090116-aeb1`n") -and -not (Test-AVDTuneBenchRunId 'CON') -and -not (Test-AVDTuneBenchRunId 'nul') -and -not (Test-AVDTuneBenchRunId 'COM1') -and -not (Test-AVDTuneBenchRunId 'lpt9') -and -not (Test-AVDTuneBenchRunId 'Aux') -and -not (Test-AVDTuneBenchRunId ('a' * 65)) -and -not (Test-AVDTuneBenchRunId 5) -and (Test-AVDTuneBenchRunId 'COM10')) $null
+            $bad.runId = 'CON'; $bad.system.notes = ''; $bad.integrity.sha256 = Get-AVDTuneBenchmarkIntegrityHash $bad
+            [IO.File]::WriteAllText((Join-Path $exp 'con-id.json'), ($bad | ConvertTo-Json -Depth 12))
+            Test-Check 'import: a device name as run id (CON) is refused, export too' ((Get-ThrownText { Import-AVDTuneBenchmarkSystem -Root $rr -Path (Join-Path $exp 'con-id.json') }) -like '*run id*' -and (Get-ThrownText { Export-AVDTuneBenchmarkResultFile -Root $rr -RunId 'NUL' -Path (Join-Path $exp 'n.json') }) -like '*Invalid run id*') $null
+            Test-Check 'export CSV: a cell that starts with | (DDE) gets the apostrophe too' ((ConvertTo-AVDTuneCsvCell '|cmd /c calc') -ceq '"''|cmd /c calc"') (ConvertTo-AVDTuneCsvCell '|cmd /c calc')
+            # the systems folder is read only while it is admin-only; files above 5 MB are left out
+            Remove-Item -LiteralPath (Join-Path $sysFolder 'other-1.json') -Force
+            $sysSec = [IO.Directory]::GetAccessControl($sysFolder, 'Access'); $keepSec = $sysSec.GetSecurityDescriptorSddlForm('Access')
+            $sysSec.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule((New-Object Security.Principal.SecurityIdentifier 'S-1-1-0'), 'Modify', 'ContainerInherit, ObjectInherit', 'None', 'Allow'))); [IO.Directory]::SetAccessControl($sysFolder, $sysSec)
+            $open = Get-AVDTuneBenchmarkSystems -Root $rr
+            $sysSec = [IO.Directory]::GetAccessControl($sysFolder, 'Access'); $sysSec.SetSecurityDescriptorSddlForm($keepSec, 'Access'); [IO.Directory]::SetAccessControl($sysFolder, $sysSec)
+            Test-Check 'systems folder: writable for Everyone = nothing of it is read, the folder is named; with its own rules again it is read' (@($open.Results).Count -eq 0 -and (@($open.Problems) -join ' ') -like '*not an admin-only folder*' -and @((Get-AVDTuneBenchmarkSystems -Root $rr).Results).Count -eq 1) (@($open.Problems) -join '; ')
+            Test-Check 'systems folder: the strict test (what the elevated AVDTune runs) refuses a folder that a standard account owns' ((Test-AVDTuneElevated) -or -not (Test-AVDTuneBenchSystemFolder -Folder $sysFolder -Root $rr -Strict)) $null
+            $bigSys = [IO.File]::Open((Join-Path $sysFolder 'big-1.json'), 'CreateNew'); try { $bigSys.SetLength(6MB) } finally { $bigSys.Dispose() }
+            $withBig = Get-AVDTuneBenchmarkSystems -Root $rr
+            Remove-Item -LiteralPath (Join-Path $sysFolder 'big-1.json') -Force
+            Test-Check 'systems folder: a file above 5 MB is not read, it is named' (@($withBig.Results).Count -eq 1 -and (@($withBig.Problems) -join ' ') -like '*big-1.json: larger than 5 MB*') (@($withBig.Problems) -join '; ')
+            # exports: no link as target or folder, written next to it and moved in one step
+            $jx = Join-Path $rr 'junction-out'; [void](New-Item -ItemType Junction -Path $jx -Value $exp)
+            Test-Check 'export: a folder that is a link (junction) is refused, nothing written through it' ((Get-ThrownText { Export-AVDTuneBenchmarkComparison -Comparison $cmp -Path (Join-Path $jx 'x.csv') -Format Csv }) -like '*is a link*' -and -not (Test-Path -LiteralPath (Join-Path $exp 'x.csv'))) $null
+            [IO.Directory]::Delete($jx)
+            $over = Join-Path $exp 'over.csv'; [IO.File]::WriteAllText($over, 'old')
+            [void](Export-AVDTuneBenchmarkComparison -Comparison $cmp -Path $over -Format Csv)
+            Test-Check 'export: an existing file is replaced in one step (temp file next to it, moved), no temp file stays' ((Get-Content -LiteralPath $over -Raw) -like '*Row,ImageVersion*' -and @(Get-ChildItem -LiteralPath $exp -Force -Filter '*.tmp').Count -eq 0) $null
+            $exportSrc = [regex]::Match((Get-Content -LiteralPath (Join-Path $repo 'Modules\AVDTune.Benchmark.psm1') -Raw), '(?s)function Export-AVDTuneBenchmarkComparison \{.*?function Test-AVDTuneBenchmarkLabel').Value
+            Test-Check 'export (source): no WriteAllText to the chosen path, the export goes through Write-AVDTuneExportFile' ($exportSrc -notmatch 'WriteAllText' -and $exportSrc -match 'Write-AVDTuneExportFile') $null
+            # benchmark start: never while the integrity check runs or AVDTune is read only (normal mode and benchmark only)
+            Test-Check 'start block: integrity check running or a write block stop the start, nothing else does' ((Get-AVDTuneBenchStartBlock -IntegrityRunning $true -WriteBlock '') -like '*integrity check*still running*' -and (Get-AVDTuneBenchStartBlock -IntegrityRunning $false -WriteBlock 'files changed') -like '*read only: files changed*' -and (Get-AVDTuneBenchStartBlock -IntegrityRunning $false -WriteBlock $null) -eq '') $null
+            $pageSrc = Get-Content -LiteralPath (Join-Path $repo 'AVDTune-Benchmark.ps1') -Raw
+            Test-Check 'start block (source): Start-BenchRun and Start-BenchJob both ask Get-BenchStartBlock first, which reads the release job and Get-AVDTuneWriteBlock' ([regex]::Match($pageSrc, '(?s)function Start-BenchRun.*?\n\}').Value -match '(?s)\A[^\n]*\n\s*\$block = Get-BenchStartBlock' -and [regex]::Match($pageSrc, '(?s)function Start-BenchJob.*?Assert-NoOtherWriter').Value -match 'Get-BenchStartBlock' -and [regex]::Match($pageSrc, '(?s)function Get-BenchStartBlock.*?\n\}').Value -match 'RelJob.*Get-AVDTuneWriteBlock') $null
         # ---- security review fixes (finding 4, 5, 8, 9, 11)
         $shareText = [regex]::Match($adapterSrc, '(?s)\$b\.ShareMakeFolder = \{.*?\n    \}').Value
         Test-Check 'share folder (source): created in one step with a protected DACL (current admin, SYSTEM, Administrators), owner and foreign rules and the link flag checked afterwards' ($shareText -match 'SetAccessRuleProtection\(\$true' -and $shareText -match '\.Create\(\$sec\)' -and $shareText -match 'S-1-5-18' -and $shareText -match 'S-1-5-32-544' -and $shareText -match 'GetOwner' -and $shareText -match 'foreign owner or rule' -and $shareText -match 'ReparsePoint' -and $shareText -notmatch 'CreateDirectory\(') $null
@@ -825,6 +857,14 @@ public static class StandIn { public static int Main(string[] a) {
     [IO.File]::WriteAllText((Join-Path $badRel3 'manifest.json'), ($m3 | ConvertTo-Json -Depth 5))
     Test-Check 'stand-alone package: a file in the release ZIP that the manifest does not list is refused' ((Get-ThrownText { & (Join-Path $repo 'Tools\New-AVDBenchmarkPackage.ps1') -ReleaseDir $badRel3 -OutDir (Join-Path $pk 'o3') }) -like '*does not list*Modules/Extra.psm1*') $null
     Test-Check 'stand-alone package: OutDir must be new or empty' ((Get-ThrownText { & (Join-Path $repo 'Tools\New-AVDBenchmarkPackage.ps1') -ReleaseDir $relOut -OutDir (Join-Path $pk 'out') }) -like '*not empty*') $null
+    $devRefused = @(foreach ($bp in @('CON', 'Modules/NUL.psm1', 'Bench/COM1', "Modules/AVDTune.psm1`n", 'a/../b')) {
+            $d = Join-Path $pk ('bad-' + [guid]::NewGuid().ToString('N').Substring(0, 6)); Copy-Item -LiteralPath $relOut -Destination $d -Recurse
+            $mm = Get-Content -LiteralPath (Join-Path $d 'manifest.json') -Raw | ConvertFrom-Json
+            $mm.Files = @($mm.Files) + [pscustomobject]@{ Path = $bp; Size = 1; Sha256 = ('0' * 64) }
+            [IO.File]::WriteAllText((Join-Path $d 'manifest.json'), ($mm | ConvertTo-Json -Depth 5))
+            if ((Get-ThrownText { & (Join-Path $repo 'Tools\New-AVDBenchmarkPackage.ps1') -ReleaseDir $d -OutDir (Join-Path $d 'o') }) -like '*Unsafe path in the manifest*') { $bp }
+        })
+    Test-Check 'stand-alone package: device names (CON, NUL, COM1), a line break at the end (\z) and .. in a manifest path are refused' ($devRefused.Count -eq 5) ($devRefused -join ',')
 
     Test-Check 'no file of the check run touched the real state folder' ($tmp -ne (Join-Path ([Environment]::GetFolderPath('CommonApplicationData')) 'AVDTune')) $tmp
 }

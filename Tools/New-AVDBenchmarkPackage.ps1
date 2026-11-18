@@ -26,10 +26,10 @@ param([Parameter(Mandatory)][string]$ReleaseDir, [Parameter(Mandatory)][string]$
 
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.IO.Compression, System.IO.Compression.FileSystem
-$safePath = '^[A-Za-z0-9._ -]+(/[A-Za-z0-9._ -]+)*$'
+$safePath = '\A[A-Za-z0-9._ -]+(/[A-Za-z0-9._ -]+)*\z'
 function Test-SafeRelative([string]$Path) {
-    # the same rule as Tools\New-AVDTuneRelease.ps1 and AVDTune.Release.psm1
-    $Path -match $safePath -and $Path -notmatch '(^|/)\.{1,2}(/|$)' -and $Path -notmatch '[. ](/|$)' -and $Path -notmatch '(?i)(^|/)(con|prn|aux|nul|com\d|lpt\d)(\.[^/]*)?(/|$)'
+    # the rule of Tools\New-AVDTuneRelease.ps1 and AVDTune.Release.psm1, anchored with \A and \z (a '$' would let a line break at the end through); no device names (CON, NUL, COM1 ...)
+    $Path -match $safePath -and $Path -notmatch '(\A|/)\.{1,2}(/|\z)' -and $Path -notmatch '[. ](/|\z)' -and $Path -notmatch '(?i)(\A|/)(con|prn|aux|nul|com\d|lpt\d)(\.[^/]*)?(/|\z)'
 }
 function Get-StreamSha256([IO.Stream]$Stream) {
     $sha = [Security.Cryptography.SHA256]::Create()

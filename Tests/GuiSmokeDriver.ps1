@@ -568,7 +568,7 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         $script:UpdLastRun = $null; Update-UpdatesView
         $true } }
     @{ Name = 'benchmark page'; Do = {
-        if ($script:OverviewJob -or $script:ReadyJob) { return $false }
+        if ($script:OverviewJob -or $script:ReadyJob -or ($script:RelJob -and [string]$script:RelJob.Kind -in 'Start', 'Check')) { return $false }   # #90: no start while the integrity check runs
         if (-not $script:BenchStep) {
             $script:BenchStep = 1
             Show-Page 'Benchmark'; $window.UpdateLayout()
@@ -617,7 +617,7 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         $script:BenchSmokeFile = $null
         $true } }
     @{ Name = 'benchmark only (plan 6b, #90)'; Do = {
-        if ($script:OverviewJob -or $script:ReadyJob) { return $false }
+        if ($script:OverviewJob -or $script:ReadyJob -or ($script:RelJob -and [string]$script:RelJob.Kind -in 'Start', 'Check')) { return $false }
         $click = { param($b) $b.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent))) }
         if (-not $script:BenchOnlyStep) {
             $script:BenchOnlyStep = 1
@@ -625,6 +625,20 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
             $shown = @($script:PageTable | Where-Object { $ui["Nav$($_.Key)"].Visibility -eq 'Visible' } | ForEach-Object { $_.Key })
             Show-Page 'Updates'
             Test-Smoke 'benchmark only: only Benchmark and Protocol in the navigation, any other page leads to the Benchmark page, no read-only banner, no version comparison, the system card' (($shown -join ',') -eq 'Benchmark,Protocol' -and $script:CurrentPage -eq 'Benchmark' -and $ui.PageBenchmark.Visibility -eq 'Visible' -and $ui.BoxReadOnly.Visibility -eq 'Collapsed' -and $ui.BoxBenchCompare.Visibility -eq 'Collapsed' -and $ui.BoxBenchOnly.Visibility -eq 'Visible') ($shown -join ',')
+            # Finn (#90): no start while the integrity check runs (the release job, set here on the window thread: the timer cannot tick in between) or AVDTune is read only
+            Test-Smoke 'integrity: the result of the integrity check is on the Benchmark page' ($ui.BoxBenchIntegrity.Visibility -eq 'Visible' -and $ui.TxtBenchIntegrity.Text -like ((T 'bench.rel.status' '*' '*').Split('*')[0] + '*')) $ui.TxtBenchIntegrity.Text
+            $ui.TxtBenchSystemName.Text = 'Old RDS 2019'
+            $keepRel = $script:RelJob; $script:RelJob = @{ Kind = 'Check' }
+            try { & $click $ui.BtnBenchQuick; $refusedText = $script:LastToast; $pageText = $ui.TxtBenchIntegrity.Text } finally { $script:RelJob = $keepRel }
+            Test-Smoke 'integrity: while the integrity check runs the benchmark does not start, the reason is in the toast and on the page' (-not $script:BenchJob -and $refusedText -like '*integrity check*still running*' -and $pageText -like '*still running*') "$refusedText | $pageText"
+            # the desktop shortcut "AVDTune Benchmark" (like AVDTune.lnk, #15): only for an installed copy, into the test desktop
+            $script:ShortcutTestMode = 'Installed'; Update-BenchShortcutRow
+            & $click $ui.BtnBenchShortcut
+            $bl = Get-AVDTuneDesktopShortcut -Folder (Get-ShortcutDesktop) -InstallRoot $script:RelInstallRoot -Benchmark
+            Test-Smoke 'benchmark shortcut: created in the test desktop with -Benchmark, run as administrator; the button offers Remove' ($bl -and $bl.Matches -and $bl.RunAs -and $bl.Arguments.EndsWith(' -Benchmark') -and [string]$ui.BtnBenchShortcut.Content -eq (T 'bench.sc.remove') -and (Get-ShortcutDesktop) -like "$($script:StateRoot)*") ($bl | Out-String)
+            & $click $ui.BtnBenchShortcut
+            Test-Smoke 'benchmark shortcut: Remove deletes it again' (-not (Get-AVDTuneDesktopShortcut -Folder (Get-ShortcutDesktop) -Benchmark) -and [string]$ui.BtnBenchShortcut.Content -eq (T 'bench.sc.create')) $null
+            $script:ShortcutTestMode = 'Development'; Update-BenchShortcutRow
             $ui.TxtBenchSystemName.Text = ''
             & $click $ui.BtnBenchQuick
             Test-Smoke 'benchmark only: without a system name nothing starts' (-not $script:BenchJob -and $script:LastToast -like '*name missing*') $script:LastToast

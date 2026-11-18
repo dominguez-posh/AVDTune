@@ -1557,13 +1557,70 @@ function ConvertTo-AVDTuneBenchmarkRow {
 
 function Get-AVDTuneBenchmarkSystemFolder([string]$Root) { Join-Path (Get-AVDTuneBenchmarkResultFolder $Root) 'systems' }
 
+function Test-AVDTuneBenchSystemFolder {
+    <# Is the folder of the comparison systems admin-only (Test-AVDTuneAdminOnlyPath up to the state folder, no link)? A process that is not elevated (the checks) also
+       accepts its own account, the same rule as New-AVDTuneOwnFolderSecurity; AVDTune itself always runs elevated and gets the strict test. #>
+    param([Parameter(Mandatory)][string]$Folder, [Parameter(Mandatory)][string]$Root, [switch]$Strict)
+    if ($Strict -or (Test-AVDTuneElevated)) { return [bool](Test-AVDTuneAdminOnlyPath -Path $Folder -Base $Root) }
+    try { if (([IO.File]::GetAttributes($Folder) -band [IO.FileAttributes]::ReparsePoint) -ne 0) { return $false } } catch { return $false }
+    $me = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+    $allowed = @('S-1-5-18', 'S-1-5-32-544', $me)
+    $sec = [IO.Directory]::GetAccessControl($Folder)
+    if ($sec.GetOwner([Security.Principal.SecurityIdentifier]).Value -notin $allowed) { return $false }
+    $write = 0x2 -bor 0x4 -bor 0x40 -bor 0x10000 -bor 0x40000 -bor 0x80000 -bor 0x40000000 -bor 0x10000000
+    foreach ($r in $sec.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier])) {
+        if ($r.AccessControlType -eq 'Allow' -and $r.IdentityReference.Value -notin $allowed -and (([int64]$r.FileSystemRights.value__ -band $write) -ne 0)) { return $false }
+    }
+    $true
+}
+
+function Test-AVDTuneBenchRunId {
+    # A run id that can be a file name: [A-Za-z0-9-], 1-64 characters, the whole string (\z, no line break at the end), no device name (CON, NUL, COM1 ...)
+    param([AllowNull()]$RunId)
+    $RunId -is [string] -and $RunId -match '\A[A-Za-z0-9-]{1,64}\z' -and $RunId -notmatch '(?i)\A(con|prn|aux|nul|com[1-9]|lpt[1-9])\z'
+}
+
+function Write-AVDTuneExportFile {
+    <# Writes an export to a file the administrator chose: the target and its folder must not be links (reparse points); written to a new temp file next to it
+       (CreateNew) and moved over the target in one step (Move-AVDTuneFileReplace), so a crash leaves the old or the new file. #>
+    param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][AllowEmptyString()][string]$Text, [switch]$Bom)
+    $full = [IO.Path]::GetFullPath($Path)
+    $dir = [IO.Path]::GetDirectoryName($full)
+    if (-not $dir -or -not [IO.Directory]::Exists($dir)) { throw "The folder of $full does not exist." }
+    if (([IO.File]::GetAttributes($dir) -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw "The folder $dir is a link: not exported there." }
+    if ([IO.Directory]::Exists($full)) { throw "$full is a folder." }
+    if ([IO.File]::Exists($full) -and ([IO.File]::GetAttributes($full) -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw "$full is a link: not overwritten." }
+    $temp = Join-Path $dir ('.' + [IO.Path]::GetFileName($full) + '.' + [guid]::NewGuid().ToString('N') + '.tmp')
+    $pre = (New-Object Text.UTF8Encoding ([bool]$Bom)).GetPreamble()
+    $body = (New-Object Text.UTF8Encoding $false).GetBytes($Text)
+    try {
+        $fs = New-Object IO.FileStream($temp, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+        try { $fs.Write($pre, 0, $pre.Length); $fs.Write($body, 0, $body.Length); $fs.Flush($true) } finally { $fs.Dispose() }
+        Move-AVDTuneFileReplace $temp $full
+    }
+    finally { if ([IO.File]::Exists($temp)) { [IO.File]::Delete($temp) } }
+    $full
+}
+
+function Get-AVDTuneBenchStartBlock {
+    # Why a benchmark may not start now ('' when it may): the integrity check of the tool still runs, or the tool is read only (write block, e.g. files that do not match the release) (Finn, #90)
+    param([bool]$IntegrityRunning, [AllowNull()][string]$WriteBlock)
+    if ($IntegrityRunning) { return 'the integrity check of AVDTune is still running' }
+    if ($WriteBlock) { return "AVDTune is read only: $WriteBlock" }
+    ''
+}
+
 function Get-AVDTuneBenchmarkSystems {
     # The imported comparison systems (benchmark-only and stand-alone results, plan 6b), oldest first; a file that fails the result check is left out and named in Problems
     param([Parameter(Mandatory)][string]$Root)
     $folder = Get-AVDTuneBenchmarkSystemFolder $Root
     $ok = @(); $problems = @()
     if (Test-Path -LiteralPath $folder) {
+        # the folder is read only when it is admin-only (and no link on the way up to the state folder); otherwise nothing of it counts (Finn, #90)
+        if (-not (Test-AVDTuneBenchSystemFolder -Folder $folder -Root $Root)) { return [pscustomobject]@{ Results = @(); Problems = @("$folder is not an admin-only folder of AVDTune: its comparison systems are not read") } }
         foreach ($f in @(Get-ChildItem -LiteralPath $folder -Filter '*.json' -File | Sort-Object Name)) {
+            if (($f.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { $problems += "$($f.Name): a link"; continue }
+            if ($f.Length -gt 5MB) { $problems += "$($f.Name): larger than 5 MB"; continue }
             $r = $null
             try { $r = Read-AVDTuneJson $f.FullName } catch { $problems += "$($f.Name): not readable"; continue }
             $p = @(Test-AVDTuneBenchmarkResult -Result $r)
@@ -1651,10 +1708,10 @@ function Get-AVDTuneBenchmarkVersionComparison {
 }
 
 function ConvertTo-AVDTuneCsvCell {
-    # One CSV text cell: quoted, quotes doubled; a cell that a spreadsheet would read as a formula (= + - @, tab, CR at the start) gets a leading apostrophe
+    # One CSV text cell: quoted, quotes doubled; a cell that a spreadsheet would read as a formula (= + - @ |, tab, CR at the start; | starts a DDE call) gets a leading apostrophe
     param([AllowNull()][string]$Text)
     if ($null -eq $Text) { $Text = '' }
-    if ($Text -match '^[=+\-@\t\r]') { $Text = "'" + $Text }
+    if ($Text -match '\A[=+\-@|\t\r]') { $Text = "'" + $Text }
     '"' + $Text.Replace('"', '""') + '"'
 }
 
@@ -1701,8 +1758,7 @@ function Export-AVDTuneBenchmarkComparison {
     # Writes the comparison to a file the administrator chose (save dialog), like the change log export; CSV with BOM (spreadsheet programs), JSON without
     param([Parameter(Mandatory)]$Comparison, [Parameter(Mandatory)][string]$Path, [ValidateSet('Csv', 'Json')][string]$Format = 'Csv')
     $text = ConvertTo-AVDTuneBenchmarkComparisonText -Comparison $Comparison -Format $Format
-    [IO.File]::WriteAllText($Path, $text, (New-Object Text.UTF8Encoding ($Format -eq 'Csv')))
-    $Path
+    Write-AVDTuneExportFile -Path $Path -Text $text -Bom:($Format -eq 'Csv')
 }
 
 function Test-AVDTuneBenchmarkLabel {
@@ -1741,7 +1797,7 @@ function Import-AVDTuneBenchmarkSystem {
     $p = @(Test-AVDTuneBenchmarkResult -Result $obj)
     if ($p.Count -gt 0) { throw "Not imported: $($p -join '; ')" }
     if ($obj.kind -isnot [string] -or $obj.kind -notin 'benchmark-only', 'standalone') { throw 'Only results of the benchmark-only mode or the stand-alone script can be a comparison system.' }
-    if ($obj.runId -isnot [string] -or $obj.runId -notmatch '^[A-Za-z0-9-]{1,64}$') { throw 'The run id of the file is not valid.' }
+    if (-not (Test-AVDTuneBenchRunId $obj.runId)) { throw 'The run id of the file is not valid.' }
     $hv = Get-AVDTuneProp (Get-AVDTuneProp $obj.scores 'host') 'value'
     if ($null -ne $hv -and $null -eq (ConvertTo-AVDTuneBenchNumber $hv)) { throw 'The host score of the file is not a number.' }
     $results = Get-AVDTuneBenchmarkResultFolder $Root
@@ -1757,13 +1813,12 @@ function Import-AVDTuneBenchmarkSystem {
 function Export-AVDTuneBenchmarkResultFile {
     # Copies a stored result (checked first) to a file the administrator chose: the result file of plan 6b for the import as comparison system elsewhere. Never a secret.
     param([Parameter(Mandatory)][string]$Root, [Parameter(Mandatory)][string]$RunId, [Parameter(Mandatory)][string]$Path)
-    if ($RunId -notmatch '^[A-Za-z0-9-]{1,64}$') { throw 'Invalid run id.' }
+    if (-not (Test-AVDTuneBenchRunId $RunId)) { throw 'Invalid run id.' }
     $r = @(Get-AVDTuneBenchmarkResult -Root $Root -RunId $RunId)
     if ($r.Count -eq 0) { throw "No benchmark result $RunId." }
     $p = @(Test-AVDTuneBenchmarkResult -Result $r[0])
     if ($p.Count -gt 0) { throw "The result is not exported: $($p -join '; ')" }
-    [IO.File]::WriteAllText($Path, ($r[0] | ConvertTo-Json -Depth 12), (New-Object Text.UTF8Encoding $false))
-    $Path
+    Write-AVDTuneExportFile -Path $Path -Text ($r[0] | ConvertTo-Json -Depth 12)
 }
 
 #endregion
@@ -1964,4 +2019,5 @@ Export-ModuleMember -Function Get-AVDTuneBenchShare, Get-AVDTuneBenchShareHost, 
     Invoke-AVDTuneBenchRun, ConvertTo-AVDTuneBenchAggregate, Get-AVDTuneBenchmarkSystem, Get-AVDTuneBenchmarkIntegrityHash, Test-AVDTuneBenchmarkResult, Get-AVDTuneBenchmarkResultFolder,
     Get-AVDTuneBenchmarkResult, Set-AVDTuneBenchmarkBaseline, Get-AVDTuneBenchmarkBaseline, Compare-AVDTuneBenchmark, Invoke-AVDTuneBenchmark, Get-AVDTuneBenchmarkSummaryText, New-AVDTuneBenchmarkRunId,
     ConvertTo-AVDTuneBenchNumber, ConvertTo-AVDTuneBenchText, ConvertTo-AVDTuneBenchmarkRow, Get-AVDTuneBenchmarkSystemFolder, Get-AVDTuneBenchmarkSystems, Get-AVDTuneBenchmarkVersionComparison,
-    ConvertTo-AVDTuneCsvCell, ConvertTo-AVDTuneBenchmarkComparisonText, Export-AVDTuneBenchmarkComparison, Test-AVDTuneBenchmarkLabel, Import-AVDTuneBenchmarkSystem, Export-AVDTuneBenchmarkResultFile
+    ConvertTo-AVDTuneCsvCell, ConvertTo-AVDTuneBenchmarkComparisonText, Export-AVDTuneBenchmarkComparison, Test-AVDTuneBenchmarkLabel, Import-AVDTuneBenchmarkSystem, Export-AVDTuneBenchmarkResultFile,
+    Test-AVDTuneBenchSystemFolder, Test-AVDTuneBenchRunId, Write-AVDTuneExportFile, Get-AVDTuneBenchStartBlock
