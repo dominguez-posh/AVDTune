@@ -69,10 +69,15 @@ function Build-MaskPage {
     $ui.TxtMaskCounter = New-MaskText '' '' '0,8,0,0'; $ui.TxtMaskCounter.FontWeight = 'SemiBold'; [void]$c1.Panel.Children.Add($ui.TxtMaskCounter)
     $ui.PanelMaskList = New-Object System.Windows.Controls.StackPanel; $ui.PanelMaskList.Margin = '0,8,0,0'; [void]$c1.Panel.Children.Add($ui.PanelMaskList)
     $ui.TxtMaskEntra = New-MaskText '' 'Hint' '0,8,0,0'; [void]$c1.Panel.Children.Add($ui.TxtMaskEntra)
+    $rowAll = New-Object System.Windows.Controls.StackPanel; $rowAll.Orientation = 'Horizontal'; $rowAll.Margin = '0,10,0,0'
+    $ui.BtnMaskPreviewAll = New-MaskButton 'Preview all changes' 'Preview every row whose choice was changed'; $ui.BtnMaskPreviewAll.Margin = '0,0,6,0'
+    $ui.BtnMaskSaveAll = New-MaskButton 'Save all changes' 'Save every changed row in one change (one undo)' $true; [void](Set-AVDTuneWriterButton $ui.BtnMaskSaveAll)   # #49
+    foreach ($b in $ui.BtnMaskPreviewAll, $ui.BtnMaskSaveAll) { [void]$rowAll.Children.Add($b) }
+    [void]$c1.Panel.Children.Add($rowAll)
     $row = New-Object System.Windows.Controls.StackPanel; $row.Orientation = 'Horizontal'; $row.Margin = '0,10,0,0'
     $ui.BtnMaskRefresh = New-MaskButton 'Refresh' 'Read the rule sets and the Public Desktop again'
     $ui.BtnMaskLogoff = New-MaskButton 'Add the Abmelden shortcut' 'Put a sign out shortcut on the Public Desktop for all users'
-    $ui.BtnMaskUndo = New-MaskButton 'Undo the last change' 'Put back the files, shortcut or group of the last change'
+    $ui.BtnMaskUndo = New-MaskButton 'Undo the last change' 'Put back the files, shortcut or group of the last change (all rows of a "Save all changes" together)'
     foreach ($b in $ui.BtnMaskRefresh, $ui.BtnMaskLogoff, $ui.BtnMaskUndo) { [void]$row.Children.Add($b) }
     [void]$c1.Panel.Children.Add($row)
     $ui.TxtMaskLogoffNote = New-MaskText '' 'Hint' '0,6,0,0'; [void]$c1.Panel.Children.Add($ui.TxtMaskLogoffNote)
@@ -278,10 +283,17 @@ function Show-MaskList($Dir, [string]$Err) {
         $rm = New-MaskButton 'Remove' "Remove the rule set $($rs.Name)"; $rm.Margin = '8,0,0,0'; $rm.DataContext = [string]$rs.Name; $rm.SetValue([System.Windows.Controls.Grid]::ColumnProperty, 2); [void](Set-AVDTuneWriterButton $rm)   # #49
         $rm.Add_Click({ param($src) try { Remove-MaskSet ([string]$src.DataContext) } catch { Show-Error $_.Exception.Message } })
         foreach ($e in $n, $d, $rm) { [void]$g.Children.Add($e) }
+        if (@($rs.Rules).Count -gt 1 -and $rs.OtherRules -eq 0 -and @($rs.Problems).Count -eq 0) {
+            # #74: a collective rule set (the wizard's) becomes one rule set per entry, so the rows of the list can be changed
+            $c3 = New-Object System.Windows.Controls.ColumnDefinition; $c3.Width = 'Auto'; [void]$g.ColumnDefinitions.Add($c3)
+            $sp = New-MaskButton 'Split per entry' "Split the rule set $($rs.Name) into one rule set per entry"; $sp.Margin = '8,0,0,0'; $sp.DataContext = [string]$rs.Name; $sp.SetValue([System.Windows.Controls.Grid]::ColumnProperty, 3); [void](Set-AVDTuneWriterButton $sp)   # #49
+            $sp.Add_Click({ param($src) try { Split-MaskSet ([string]$src.DataContext) } catch { Show-Error $_.Exception.Message } })
+            [void]$g.Children.Add($sp)
+        }
         [void]$ui.PanelMaskSets.Children.Add($g)
     }
     if (@($ov.RuleSets).Count -eq 0) { [void]$ui.PanelMaskSets.Children.Add((New-MaskText 'No rule sets yet.' 'Hint')) }
-    foreach ($b in $ui.BtnMaskApply, $ui.BtnMaskUndo, $ui.BtnMaskLogoff) { $b.IsEnabled = [bool]$applies }
+    foreach ($b in $ui.BtnMaskApply, $ui.BtnMaskUndo, $ui.BtnMaskLogoff, $ui.BtnMaskSaveAll) { $b.IsEnabled = [bool]$applies }
 }
 
 function Get-MaskLdap {
@@ -442,10 +454,76 @@ function Remove-MaskSet([string]$Name) {
     Show-MaskRun $run 'Remove rule set'; Update-MaskView
 }
 
+function Get-MaskRowChanges {
+    # #74: the rows whose choice in the form differs from the state read, each validated by the module against the state now (Get-AVDTuneShortcutChange); a row that cannot be changed stops with its name
+    $dir = Get-MaskDirectory; $m = Get-MaskAdapter
+    @(foreach ($r in @($script:MaskRowUi.Values | Sort-Object { [string]$_.Data.Name })) {
+            if (-not $r.Data.Editable) { continue }
+            $mode = [string]$r.Mode.SelectedItem
+            $sid = ''
+            if ($mode -eq 'Only members of a group') { $i = $r.Group.SelectedIndex; if ($i -ge 0) { $sid = [string]$r.Group.Tag[$i] } }
+            if ($mode -eq [string]$r.Data.Mode) {
+                if ($mode -ne 'Only members of a group') { continue }
+                $was = @($r.Data.Groups | Where-Object { $_ }); if ($was.Count -eq 1 -and [string]$was[0].Sid -eq $sid) { continue }
+            }
+            $ch = $null
+            try { $ch = Get-AVDTuneShortcutChange -Row $r.Data -M $m -Mode $mode -GroupSid $sid -Directory $dir } catch { throw "$($r.Data.Name): $($_.Exception.Message)" }
+            if ($ch.Action -ne 'None') { $ch }
+        })
+}
+
+function Invoke-MaskRows([bool]$WhatIf) {
+    # #74: every changed row in ONE run with ONE undo record ('Undo the last change' puts all of them back). Preview: nothing is written. Save: write gate, one confirmation with old and new
+    # of every row, then (after it) the connection to the DC when a row needs a group, a second question when existing assignments change their meaning, and one task.
+    if ($script:MaskReadJob) { throw 'The list is being read. Wait until it is done.' }
+    $lc = $null; $run = $null
+    try {
+        $changes = @(Get-MaskRowChanges)
+        if ($changes.Count -eq 0) { $ui.TxtMaskState.Text = 'No row has a change.'; return }
+        $m = Get-MaskAdapter
+        $needDc = @($changes | Where-Object { $_.SaveParams -and $_.SaveParams.ContainsKey('Directory') -and $_.SaveParams.Directory }).Count -gt 0
+        $lines = @($changes | ForEach-Object { "$($_.Name): $($_.Old) -> $($_.New)" })
+        if ($WhatIf) {
+            if ($needDc) { $lc = Get-MaskLdap }
+            $pv = Save-AVDTuneMaskingRows -Machine $script:Machine -M $m -Root $script:StateRoot -Changes $changes -Ldap $(if ($lc) { $lc.Ldap }) -Conn $(if ($lc) { $lc.Conn }) -WhatIf
+            $chg = @($pv.AssignmentChanges | ForEach-Object { " The assignment of '$($_.RuleSet)' changes from '$($_.Old)' to '$($_.New)'." }) -join ''
+            $ui.TxtMaskState.Text = "Preview (nothing written), $($changes.Count) row(s): $($lines -join '; ').$chg"
+            return
+        }
+        Assert-MaskWrite
+        if (-not (Confirm-Action "Save $($changes.Count) row(s) in one change?`n$($lines -join "`n")`n'Undo the last change' puts all of them back together." 'App Masking')) { return }
+        if ($needDc) { $lc = Get-MaskLdap }   # only now: after the write gate and the confirmation
+        $preview = Save-AVDTuneMaskingRows -Machine $script:Machine -M $m -Root $script:StateRoot -Changes $changes -Ldap $(if ($lc) { $lc.Ldap }) -Conn $(if ($lc) { $lc.Conn }) -WhatIf
+        $exp = @{}
+        if (@($preview.AssignmentChanges).Count -gt 0) {
+            $t = @($preview.AssignmentChanges | ForEach-Object { "$($_.RuleSet): $($_.Old) -> $($_.New)" }) -join "`n"
+            if (-not (Confirm-Action "The assignment of existing rule sets changes:`n$t`nThis changes who sees the hidden items. Continue?" 'App Masking')) { return }
+            foreach ($a in @($preview.AssignmentChanges)) { $exp[[string]$a.RuleSet] = @{ Old = [string]$a.Old; New = [string]$a.New } }
+        }
+        $ldap = $(if ($lc) { $lc.Ldap }); $conn = $(if ($lc) { $lc.Conn })
+        $run = Invoke-MaskChange -Title "Changing who sees $($changes.Count) entries" -Step 'Rule sets of the list' -Block { Save-AVDTuneMaskingRows -Machine $script:Machine -M $m -Root $script:StateRoot -Changes $changes -Ldap $ldap -Conn $conn -ExpectedChanges $exp -User ([string]$env:USERNAME) -SnapshotId (Get-MaskGateSnapshot) }
+    }
+    finally { if ($lc) { & $lc.Close }; $ui.PwdMask.Clear() }
+    Show-MaskRun $run 'App Masking list'; Update-MaskView
+}
+
+function Split-MaskSet([string]$Name) {
+    # #74: a collective rule set becomes one rule set per entry (same assignment); the preview gives the names and the hashes the run must still find
+    Assert-MaskWrite
+    $m = Get-MaskAdapter
+    $pv = Split-AVDTuneRuleSet -Machine $script:Machine -M $m -Root $script:StateRoot -Name $Name -WhatIf
+    if (-not (Confirm-Action "Split the rule set '$Name' into one rule set per entry?`n$(@($pv.Split.To) -join "`n")`nEach keeps its hiding rule and the same assignment; '$Name' is deleted. 'Undo the last change' puts it back." 'App Masking')) { return }
+    $sha = $pv.Split.Sha
+    $run = Invoke-MaskChange -Title "Splitting the rule set $Name" -Step "$(@($pv.Split.To).Count) rule sets" -Block { Split-AVDTuneRuleSet -Machine $script:Machine -M $m -Root $script:StateRoot -Name $Name -ExpectedSha $sha -User ([string]$env:USERNAME) -SnapshotId (Get-MaskGateSnapshot) }
+    Show-MaskRun $run 'Split rule set'; Update-MaskView
+}
+
 Build-MaskPage
 Add-Click $ui.BtnMaskRefresh { Update-MaskView }
 Add-Click $ui.BtnMaskUncovered { foreach ($d in @($script:MaskOv.PublicDesktop)) { if ($script:MaskChecks.ContainsKey([string]$d.Name)) { $script:MaskChecks[[string]$d.Name].IsChecked = ($d.State -ne 'Hidden' -and $d.IsShortcut) } } }
 Add-Click $ui.BtnMaskPreview { Invoke-MaskSave $true }
+Add-Click $ui.BtnMaskPreviewAll { try { Invoke-MaskRows $true } catch { $ui.TxtMaskState.Text = $_.Exception.Message; throw } }
+Add-Click $ui.BtnMaskSaveAll { try { Invoke-MaskRows $false } catch { $ui.TxtMaskState.Text = $_.Exception.Message; throw } }
 Add-Click $ui.BtnMaskApply { Invoke-MaskSave $false }
 Add-Click $ui.BtnMaskLogoff {
     Assert-MaskWrite

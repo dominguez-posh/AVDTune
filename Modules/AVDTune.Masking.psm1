@@ -611,8 +611,10 @@ function Get-AVDTuneRuleSetAssignment {
     Get-AVDTuneRuleVisibility (ConvertFrom-AVDTuneFxaText (ConvertFrom-AVDTuneRuleBytes $b))
 }
 
-function Save-AVDTuneRuleSet {
+function New-AVDTuneRuleSetSavePlan {
     <#
+        The validation and the steps of Save-AVDTuneRuleSet without the run (#74: several rule sets in one run). -Suffix is added to the step IDs of the two files so that the steps of
+        several rule sets stay apart in one plan. Returns Steps, Undo (the record of this rule set) and Change (the assignment change, or $null).
         Creates a rule set or adds to an existing one: -Entries (@{ Folder; Name }) become hiding rules (existing rules stay, an existing entry is not doubled),
         the assignment becomes -Visibility with -Groups (@{ Account = 'DOMAIN\Group'; Dn; Sid; Sam }; a group with Sid is checked against the domain controller by sAMAccountName and
         SID, the DN is taken from the DC). -CreateGroup (@{ Kind = 'Ad'|'Local'; Name; OuDn }) creates the group first: AD only with -Confirmed, with $Ldap/$Conn/$Directory, the OU must be
@@ -625,9 +627,10 @@ function Save-AVDTuneRuleSet {
     param(
         [Parameter(Mandatory)]$Machine, [Parameter(Mandatory)]$M, [string]$Root = (Get-AVDTuneRoot), [Parameter(Mandatory)][string]$Name, [Parameter(Mandatory)][object[]]$Entries,
         [ValidateSet('Hidden', 'HiddenExceptGroups')][string]$Visibility = 'Hidden', [object[]]$Groups = @(), $CreateGroup, $Ldap, $Conn, $Directory,
-        [switch]$Confirmed, $ExpectedChange, [string]$User, [string]$SnapshotId, [switch]$WhatIf
+        [switch]$Confirmed, $ExpectedChange, [string]$User, [string]$SnapshotId, [switch]$WhatIf, [string]$Suffix = ''
     )
     if (-not $WhatIf) { Assert-AVDTuneNotSealed -Root $Root }   # #50: a finished version takes no change (also before any undo or backup file is written)
+    if ($Suffix -and $Suffix -cnotmatch '\A\.[0-9]{1,4}\z') { throw "The step suffix '$Suffix' is not valid." }
     if (-not (Test-AVDTuneMaskingName $Name)) { throw "'$Name' is not a valid rule set name (letters, digits, space, '.', '_', '-', up to 64 characters)." }
     if (@($Entries).Count -eq 0) { throw 'No file to hide.' }
     foreach ($e in @($Entries)) { $why = Test-AVDTuneMaskingRulePath ([string]$e.Folder) ([string]$e.Name); if ($why) { throw $why } }
@@ -748,22 +751,38 @@ function Save-AVDTuneRuleSet {
         $co = if ($change) { $change.Old } else { '(no change)' }; $cn = if ($change) { $change.New } else { '(no change)' }
         if (-not $change -or $eo -cne $co -or $en -cne $cn) { throw "The assignment of the rule set '$Name' is not what the preview showed (confirmed: '$eo' -> '$en'; now: '$co' -> '$cn'). Nothing was written; run the preview again." }
     }
-    [void]$steps.Add((New-AVDTuneMaskingFileStep -Id 'appmasking.rules.fxr' -Title "Rule set ${Name}: $(@($Entries).Count) hiding rule(s)" -M $M -Path $fxrPath -Bytes $fxrBytes))
-    [void]$steps.Add((New-AVDTuneMaskingFileStep -Id 'appmasking.rules.fxa' -Title "Rule set ${Name}: assignment ($Visibility)" -M $M -Path $fxaPath -Bytes $fxaBytes))
+    [void]$steps.Add((New-AVDTuneMaskingFileStep -Id "appmasking.rules.fxr$Suffix" -Title "Rule set ${Name}: $(@($Entries).Count) hiding rule(s)" -M $M -Path $fxrPath -Bytes $fxrBytes))
+    [void]$steps.Add((New-AVDTuneMaskingFileStep -Id "appmasking.rules.fxa$Suffix" -Title "Rule set ${Name}: assignment ($Visibility)" -M $M -Path $fxaPath -Bytes $fxaBytes))
     $undo.Files = @(
-        @{ StepId = 'appmasking.rules.fxr'; Path = $fxrPath; Before = $(if ($null -ne $oldFxr) { [Convert]::ToBase64String($oldFxr) } else { $null }); AfterSha = (Get-AVDTuneBytesSha256 $fxrBytes) }
-        @{ StepId = 'appmasking.rules.fxa'; Path = $fxaPath; Before = $(if ($null -ne $oldFxa) { [Convert]::ToBase64String($oldFxa) } else { $null }); AfterSha = (Get-AVDTuneBytesSha256 $fxaBytes) })
-    $run = Invoke-AVDTune -Plan ([pscustomobject]@{ Name = 'App Masking'; Steps = @($steps | ForEach-Object { $_.Id }) }) -Catalog @($steps) -Machine $Machine -Root $Root -User $User -SnapshotId $SnapshotId -WhatIf:$WhatIf
-    Save-AVDTuneMaskingUndo -Root $Root -Undo ([pscustomobject]$undo) -Run $run
-    $run | Add-Member -NotePropertyName AssignmentChange -NotePropertyValue $change -Force
+        @{ StepId = "appmasking.rules.fxr$Suffix"; Path = $fxrPath; Before = $(if ($null -ne $oldFxr) { [Convert]::ToBase64String($oldFxr) } else { $null }); AfterSha = (Get-AVDTuneBytesSha256 $fxrBytes) }
+        @{ StepId = "appmasking.rules.fxa$Suffix"; Path = $fxaPath; Before = $(if ($null -ne $oldFxa) { [Convert]::ToBase64String($oldFxa) } else { $null }); AfterSha = (Get-AVDTuneBytesSha256 $fxaBytes) })
+    [pscustomobject]@{ Steps = @($steps); Undo = $undo; Change = $change }
+}
+
+function Save-AVDTuneRuleSet {
+    <#
+        Creates a rule set or adds to an existing one (validation and steps: New-AVDTuneRuleSetSavePlan, which documents the parameters), runs it through Invoke-AVDTune and writes the
+        undo record after the run with what changed. -WhatIf changes nothing; the run carries AssignmentChange (Old, New) for the confirmation of a changed assignment.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]$Machine, [Parameter(Mandatory)]$M, [string]$Root = (Get-AVDTuneRoot), [Parameter(Mandatory)][string]$Name, [Parameter(Mandatory)][object[]]$Entries,
+        [ValidateSet('Hidden', 'HiddenExceptGroups')][string]$Visibility = 'Hidden', [object[]]$Groups = @(), $CreateGroup, $Ldap, $Conn, $Directory,
+        [switch]$Confirmed, $ExpectedChange, [string]$User, [string]$SnapshotId, [switch]$WhatIf
+    )
+    if (-not $WhatIf) { Assert-AVDTuneNotSealed -Root $Root }   # #50 (the plan checks it too)
+    $PSBoundParameters['Root'] = $Root
+    $plan = New-AVDTuneRuleSetSavePlan @PSBoundParameters
+    $run = Invoke-AVDTune -Plan ([pscustomobject]@{ Name = 'App Masking'; Steps = @($plan.Steps | ForEach-Object { $_.Id }) }) -Catalog @($plan.Steps) -Machine $Machine -Root $Root -User $User -SnapshotId $SnapshotId -WhatIf:$WhatIf
+    Save-AVDTuneMaskingUndo -Root $Root -Undo ([pscustomobject]$plan.Undo) -Run $run
+    $run | Add-Member -NotePropertyName AssignmentChange -NotePropertyValue $plan.Change -Force
     $run
 }
 
-function Remove-AVDTuneRuleSet {
-    <# Deletes both files of a rule set (the old content goes into the undo record when the delete worked). The group, if any, stays: it may be used elsewhere. #>
-    [CmdletBinding()]
-    param([Parameter(Mandatory)]$Machine, [Parameter(Mandatory)]$M, [string]$Root = (Get-AVDTuneRoot), [Parameter(Mandatory)][string]$Name, $ExpectedSha, [string]$User, [string]$SnapshotId, [switch]$WhatIf)
-    if (-not $WhatIf) { Assert-AVDTuneNotSealed -Root $Root }   # #50: a finished version takes no change (also before any undo or backup file is written)
+function New-AVDTuneRuleSetRemovePlan {
+    <# The checks and steps of Remove-AVDTuneRuleSet without the run (#74). -Suffix keeps the step IDs of several rule sets apart in one plan. Returns Steps and Undo. #>
+    param([Parameter(Mandatory)]$Machine, [Parameter(Mandatory)]$M, [Parameter(Mandatory)][string]$Name, $ExpectedSha, [string]$Suffix = '')
+    if ($Suffix -and $Suffix -cnotmatch '\A\.[0-9]{1,4}\z') { throw "The step suffix '$Suffix' is not valid." }
     if (-not (Test-AVDTuneMaskingName $Name)) { throw "'$Name' is not a valid rule set name." }
     $paths = @((Join-Path $M.RulesFolder "$Name.fxr"), (Join-Path $M.RulesFolder "$Name.fxa"))
     if ($ExpectedSha) {
@@ -774,15 +793,125 @@ function Remove-AVDTuneRuleSet {
             if ($have -ne $want) { throw "The rule set '$Name' changed since it was read ($($pair[0])). Nothing was removed; refresh the list." }
         }
     }
-    $old = @(foreach ($p in $paths) { $b = & $M.ReadBytes $p; @{ StepId = "appmasking.remove.$([IO.Path]::GetExtension($p).TrimStart('.'))"; Path = $p; Before = $(if ($null -ne $b) { [Convert]::ToBase64String($b) } else { $null }); AfterSha = $null } })
+    $old = @(foreach ($p in $paths) { $b = & $M.ReadBytes $p; @{ StepId = "appmasking.remove.$([IO.Path]::GetExtension($p).TrimStart('.'))$Suffix"; Path = $p; Before = $(if ($null -ne $b) { [Convert]::ToBase64String($b) } else { $null }); AfterSha = $null } })
     if (@($old | Where-Object { $_.Before }).Count -eq 0) { throw "The rule set '$Name' does not exist." }
     $steps = @(foreach ($p in $paths) {
             $pp = $p
-            New-AVDTuneStep -Id "appmasking.remove.$([IO.Path]::GetExtension($pp).TrimStart('.'))" -Section AppMasking -Title "Remove $([IO.Path]::GetFileName($pp))" -Risk Medium `
+            New-AVDTuneStep -Id "appmasking.remove.$([IO.Path]::GetExtension($pp).TrimStart('.'))$Suffix" -Section AppMasking -Title "Remove $([IO.Path]::GetFileName($pp))" -Risk Medium `
                 -Test ({ param($mach) @{ Compliant = ($null -eq (& $M.ReadBytes $pp)); State = '' } }.GetNewClosure()) -Apply ({ param($mach) & $M.DeleteFile $pp }.GetNewClosure())
         })
-    $run = Invoke-AVDTune -Plan ([pscustomobject]@{ Name = 'App Masking remove'; Steps = @($steps | ForEach-Object { $_.Id }) }) -Catalog $steps -Machine $Machine -Root $Root -User $User -SnapshotId $SnapshotId -WhatIf:$WhatIf
-    Save-AVDTuneMaskingUndo -Root $Root -Undo ([pscustomobject]@{ At = (& $Machine.Now).ToString('o'); Name = $Name; Files = $old; Groups = @(); Shortcuts = @() }) -Run $run
+    [pscustomobject]@{ Steps = @($steps); Undo = [ordered]@{ At = (& $Machine.Now).ToString('o'); Name = $Name; Files = $old; Groups = @(); Shortcuts = @() } }
+}
+
+function Remove-AVDTuneRuleSet {
+    <# Deletes both files of a rule set (the old content goes into the undo record when the delete worked). The group, if any, stays: it may be used elsewhere. #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)]$Machine, [Parameter(Mandatory)]$M, [string]$Root = (Get-AVDTuneRoot), [Parameter(Mandatory)][string]$Name, $ExpectedSha, [string]$User, [string]$SnapshotId, [switch]$WhatIf)
+    if (-not $WhatIf) { Assert-AVDTuneNotSealed -Root $Root }   # #50: a finished version takes no change (also before any undo or backup file is written)
+    $plan = New-AVDTuneRuleSetRemovePlan -Machine $Machine -M $M -Name $Name -ExpectedSha $ExpectedSha
+    $run = Invoke-AVDTune -Plan ([pscustomobject]@{ Name = 'App Masking remove'; Steps = @($plan.Steps | ForEach-Object { $_.Id }) }) -Catalog $plan.Steps -Machine $Machine -Root $Root -User $User -SnapshotId $SnapshotId -WhatIf:$WhatIf
+    Save-AVDTuneMaskingUndo -Root $Root -Undo ([pscustomobject]$plan.Undo) -Run $run
+    $run
+}
+
+function Save-AVDTuneMaskingRows {
+    <#
+        Several rows of the App Masking list in ONE run with ONE undo record (#74). -Changes are results of Get-AVDTuneShortcutChange (Action Save or Remove; None is skipped); every rule set
+        gets its own steps (step IDs with .1, .2 ...), the run goes through the write gate once, and the undo record holds the files of every rule set that changed, so 'Undo the last change'
+        puts back all rows of the run together. -ExpectedChanges maps a rule set name to the Old and New of its preview (AssignmentChanges of the -WhatIf run, confirmed by the administrator); a
+        changed assignment without it is refused, as in Save-AVDTuneRuleSet. A rule set twice in the list and a row that would create a group are refused before anything is written.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)]$Machine, [Parameter(Mandatory)]$M, [string]$Root = (Get-AVDTuneRoot), [Parameter(Mandatory)][object[]]$Changes, $Ldap, $Conn,
+        [hashtable]$ExpectedChanges = @{}, [string]$User, [string]$SnapshotId, [switch]$WhatIf)
+    if (-not $WhatIf) { Assert-AVDTuneNotSealed -Root $Root }
+    $todo = @(@($Changes) | Where-Object { $_ -and [string]$_.Action -in 'Save', 'Remove' })
+    if ($todo.Count -eq 0) { throw 'No row has a change.' }
+    if ($todo.Count -gt 500) { throw 'Too many rows in one run (at most 500).' }
+    $seen = @{}
+    foreach ($ch in $todo) {
+        $k = ([string]$ch.RuleSet).ToLowerInvariant()
+        if ($seen.ContainsKey($k)) { throw "The rule set '$($ch.RuleSet)' is in the list twice. Nothing was written." }
+        $seen[$k] = $true
+    }
+    $steps = New-Object System.Collections.ArrayList; $files = New-Object System.Collections.ArrayList; $assign = New-Object System.Collections.ArrayList
+    $n = 0
+    foreach ($ch in $todo) {
+        $n++
+        if ([string]$ch.Action -eq 'Save') {
+            $p = @{}; foreach ($k in $ch.SaveParams.Keys) { $p[$k] = $ch.SaveParams[$k] }
+            if ($p.ContainsKey('CreateGroup') -and $p.CreateGroup) { throw 'A row of the list never creates a group.' }
+            if ($p.ContainsKey('Directory') -and $p.Directory) { $p.Ldap = $Ldap; $p.Conn = $Conn }
+            if ($ExpectedChanges.ContainsKey([string]$ch.RuleSet)) { $p.ExpectedChange = $ExpectedChanges[[string]$ch.RuleSet] }
+            $plan = New-AVDTuneRuleSetSavePlan -Machine $Machine -M $M -Root $Root @p -Suffix ".$n" -WhatIf:$WhatIf
+            if ($plan.Change) { [void]$assign.Add([pscustomobject]@{ RuleSet = [string]$ch.RuleSet; Old = [string]$plan.Change.Old; New = [string]$plan.Change.New }) }
+        }
+        else { $plan = New-AVDTuneRuleSetRemovePlan -Machine $Machine -M $M -Name ([string]$ch.RuleSet) -ExpectedSha $ch.ExpectedSha -Suffix ".$n" }
+        foreach ($x in @($plan.Steps)) { [void]$steps.Add($x) }
+        foreach ($f in @($plan.Undo.Files)) { [void]$files.Add($f) }
+    }
+    $names = @($todo | ForEach-Object { [string]$_.Name })
+    $run = Invoke-AVDTune -Plan ([pscustomobject]@{ Name = 'App Masking list'; Steps = @($steps | ForEach-Object { $_.Id }) }) -Catalog @($steps) -Machine $Machine -Root $Root -User $User -SnapshotId $SnapshotId -WhatIf:$WhatIf
+    Save-AVDTuneMaskingUndo -Root $Root -Undo ([pscustomobject]@{ At = (& $Machine.Now).ToString('o'); Name = "App Masking list: $($names -join ', ')"; Files = @($files); Groups = @(); Shortcuts = @() }) -Run $run
+    $run | Add-Member -NotePropertyName AssignmentChanges -NotePropertyValue @($assign) -Force
+    $run
+}
+
+function Split-AVDTuneRuleSet {
+    <#
+        Splits a collective rule set (e.g. 'Public Desktop' of the wizard) into one rule set per entry of the Public Desktop (#74), named like the rows of the list
+        (Get-AVDTuneShortcutRuleSetName), so those rows become editable. Each new rule set holds its one hiding rule (the line kept as it was) and the SAME assignment (the .fxa bytes copied);
+        then the old rule set is deleted. One run, one undo record: undo deletes the new rule sets and puts the old one back. Refused before anything is written: problems in the files, rules
+        of another type, a rule outside the Public Desktop, fewer than two rules, two rules that give the same name, a target rule set that exists already, and (with -ExpectedSha, the
+        hashes of the preview run) a file that changed since the preview. The run carries Split: From, To (names), Sha (Fxr, Fxa of the old files).
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)]$Machine, [Parameter(Mandatory)]$M, [string]$Root = (Get-AVDTuneRoot), [Parameter(Mandatory)][string]$Name, $ExpectedSha, [string]$User, [string]$SnapshotId, [switch]$WhatIf)
+    if (-not $WhatIf) { Assert-AVDTuneNotSealed -Root $Root }
+    if (-not (Test-AVDTuneMaskingName $Name)) { throw "'$Name' is not a valid rule set name." }
+    $fxrPath = Join-Path $M.RulesFolder "$Name.fxr"; $fxaPath = Join-Path $M.RulesFolder "$Name.fxa"
+    $oldFxr = & $M.ReadBytes $fxrPath; $oldFxa = & $M.ReadBytes $fxaPath
+    if ($null -eq $oldFxr) { throw "The rule set '$Name' does not exist." }
+    if ($null -eq $oldFxa) { throw "The rule set '$Name' has no assignment (.fxa): it is not split." }
+    $sha = @{ Fxr = (Get-AVDTuneBytesSha256 $oldFxr); Fxa = (Get-AVDTuneBytesSha256 $oldFxa) }
+    if (-not $WhatIf -and -not $ExpectedSha) { throw 'Splitting needs the hashes of the preview (-ExpectedSha): run the preview first.' }
+    if ($ExpectedSha -and ([string]$ExpectedSha.Fxr -ne $sha.Fxr -or [string]$ExpectedSha.Fxa -ne $sha.Fxa)) { throw "The rule set '$Name' changed since the preview. Nothing was written; run the preview again." }
+    $fxr = ConvertFrom-AVDTuneFxrText (ConvertFrom-AVDTuneRuleBytes $oldFxr)
+    if (@($fxr.Problems).Count -gt 0) { throw "The rule set '$Name' is not split: its .fxr has problems ($(@($fxr.Problems) -join ' '))." }
+    if (@($fxr.Entries | Where-Object { -not $_.Rule }).Count -gt 0) { throw "The rule set '$Name' holds rules of another type than hiding a file (registry, printers ...): it is not split." }
+    $fxa = ConvertFrom-AVDTuneFxaText (ConvertFrom-AVDTuneRuleBytes $oldFxa)
+    if (@($fxa.Problems).Count -gt 0) { throw "The rule set '$Name' is not split: its .fxa has problems ($(@($fxa.Problems) -join ' '))." }
+    $rules = @($fxr.Entries)
+    if ($rules.Count -lt 2) { throw "The rule set '$Name' holds fewer than two rules: there is nothing to split." }
+    $desk = (& $M.PublicDesktopFolder).TrimEnd([char]92); $drive = & $M.SystemDrive
+    $targets = New-Object System.Collections.ArrayList; $taken = @{}
+    foreach ($e in $rules) {
+        if ((Resolve-AVDTuneRuleFolder ([string]$e.Rule.Folder) $drive) -ine $desk) { throw "The rule set '$Name' hides '$($e.Rule.Folder)\$($e.Rule.Name)', which is not on the Public Desktop: it is not split." }
+        $why = Test-AVDTuneMaskingRulePath ([string]$e.Rule.Folder) ([string]$e.Rule.Name); if ($why) { throw $why }
+        $tn = Get-AVDTuneShortcutRuleSetName ([string]$e.Rule.Name)
+        if ($tn -ieq $Name) { throw "The rule '$($e.Rule.Name)' would keep the name '$Name': it is not split." }
+        if ($taken.ContainsKey($tn.ToLowerInvariant())) { throw "Two rules of '$Name' give the same rule set name '$tn': it is not split." }
+        $taken[$tn.ToLowerInvariant()] = $true
+        foreach ($x in 'fxr', 'fxa') { if ($null -ne (& $M.ReadBytes (Join-Path $M.RulesFolder "$tn.$x"))) { throw "The rule set '$tn' exists already: '$Name' is not split. Remove or rename it first." } }
+        [void]$targets.Add([pscustomobject]@{ Name = $tn; Entry = $e })
+    }
+    $steps = New-Object System.Collections.ArrayList; $files = New-Object System.Collections.ArrayList; $n = 0
+    foreach ($t in $targets) {
+        $n++
+        $one = [pscustomobject]@{ Header = $fxr.Header; Entries = @($t.Entry); Trailing = @(); Problems = @() }
+        $nb = ConvertTo-AVDTuneRuleBytes (ConvertTo-AVDTuneFxrText $one)
+        $pr = Join-Path $M.RulesFolder "$($t.Name).fxr"; $pa = Join-Path $M.RulesFolder "$($t.Name).fxa"
+        [void]$steps.Add((New-AVDTuneMaskingFileStep -Id "appmasking.split.fxr.$n" -Title "Rule set $($t.Name): 1 hiding rule (from $Name)" -M $M -Path $pr -Bytes $nb))
+        [void]$steps.Add((New-AVDTuneMaskingFileStep -Id "appmasking.split.fxa.$n" -Title "Rule set $($t.Name): assignment of $Name" -M $M -Path $pa -Bytes $oldFxa))
+        [void]$files.Add(@{ StepId = "appmasking.split.fxr.$n"; Path = $pr; Before = $null; AfterSha = (Get-AVDTuneBytesSha256 $nb) })
+        [void]$files.Add(@{ StepId = "appmasking.split.fxa.$n"; Path = $pa; Before = $null; AfterSha = $sha.Fxa })
+    }
+    $rp = New-AVDTuneRuleSetRemovePlan -Machine $Machine -M $M -Name $Name -ExpectedSha $sha -Suffix '.0'
+    foreach ($x in @($rp.Steps)) { [void]$steps.Add($x) }
+    foreach ($f in @($rp.Undo.Files)) { [void]$files.Add($f) }
+    $run = Invoke-AVDTune -Plan ([pscustomobject]@{ Name = 'App Masking split'; Steps = @($steps | ForEach-Object { $_.Id }) }) -Catalog @($steps) -Machine $Machine -Root $Root -User $User -SnapshotId $SnapshotId -WhatIf:$WhatIf
+    Save-AVDTuneMaskingUndo -Root $Root -Undo ([pscustomobject]@{ At = (& $Machine.Now).ToString('o'); Name = "Split $Name"; Files = @($files); Groups = @(); Shortcuts = @() }) -Run $run
+    $run | Add-Member -NotePropertyName Split -NotePropertyValue ([pscustomobject]@{ From = $Name; To = @($targets | ForEach-Object { $_.Name }); Sha = $sha }) -Force
     $run
 }
 
@@ -1074,5 +1203,5 @@ Export-ModuleMember -Function Save-AVDTuneMaskingBackup, Get-AVDTuneWriteChainPr
     ConvertTo-AVDTuneRuleBytes, ConvertFrom-AVDTuneRuleBytes, ConvertFrom-AVDTuneFxrText, ConvertTo-AVDTuneFxrText, ConvertTo-AVDTuneFxrRuleLine, New-AVDTuneFxaRow,
     ConvertFrom-AVDTuneFxaText, ConvertTo-AVDTuneFxaText, ConvertTo-AVDTuneFxaRows, Get-AVDTuneRuleVisibility, Get-AVDTuneMaskingSettings, Set-AVDTuneMaskingSettings,
     Get-AVDTuneMaskingCapabilities, New-AVDTuneLdapWriter, Get-AVDTuneAdGroup, Get-AVDTuneBuiltinAdminDn, Get-AVDTuneRuleSets, Get-AVDTunePublicDesktopList,
-    Get-AVDTuneMaskingOverview, Get-AVDTuneMaskingUndoPath, Save-AVDTuneRuleSet, Remove-AVDTuneRuleSet, Undo-AVDTuneMaskingChange, Get-AVDTuneComfortShortcuts,
+    Get-AVDTuneMaskingOverview, Get-AVDTuneMaskingUndoPath, Save-AVDTuneRuleSet, Remove-AVDTuneRuleSet, Save-AVDTuneMaskingRows, Split-AVDTuneRuleSet, Undo-AVDTuneMaskingChange, Get-AVDTuneComfortShortcuts,
     Add-AVDTuneComfortShortcut, New-AVDTuneMaskingAdapter, Get-AVDTuneShortcutRuleSetName, Get-AVDTuneMaskingList, Get-AVDTuneEntraGroupInfo, Get-AVDTuneShortcutChange, Get-AVDTuneMaskAttrName
