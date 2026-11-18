@@ -360,7 +360,7 @@ function Update-CustView {
         $apply = New-MaskButton (T 'cust.btn.apply') (T 'cust.btn.apply.tip' $r.Title); $apply.Add_Click({ param($src) try { Invoke-CustApply @([string]$src.DataContext) } catch { Show-Error $_.Exception.Message } })
         $undo = $null; if ($r.Undo) { $undo = New-MaskButton (T 'cust.btn.undo') (T 'cust.btn.undo.tip' $r.Title); $undo.Add_Click({ param($src) try { Invoke-CustUndo (Get-CustRow ([string]$src.DataContext)) $false } catch { Show-Error $_.Exception.Message } }) }
         $rm = New-MaskButton (T 'cust.btn.remove') (T 'cust.btn.remove.tip' $r.Title); $rm.Add_Click({ param($src) try { Invoke-CustUndo (Get-CustRow ([string]$src.DataContext)) $true } catch { Show-Error $_.Exception.Message } })
-        foreach ($b in $apply, $undo, $rm) { if ($b) { $b.IsEnabled = -not $busy; $b.DataContext = [string]$r.Id } }
+        foreach ($b in $apply, $undo, $rm) { if ($b) { $b.IsEnabled = -not $busy; $b.DataContext = [string]$r.Id; [void](Set-AVDTuneWriterButton $b) } }
         $panel = switch ($r.Kind) { 'Shortcut' { $ui.PanelCustShortcuts } 'WebApp' { $ui.PanelCustWebApps } 'Font' { $ui.PanelCustFonts } default { $ui.PanelCustSteps } }
         [void]$panel.Children.Add((New-CustRow ([string]$r.Status) "$(T "cust.kind.$($r.Kind.ToLower())"): $($r.Title)" ($detail -join ' ') @($apply, $undo, $rm)))
     }

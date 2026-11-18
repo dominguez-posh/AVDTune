@@ -170,7 +170,7 @@ Add-Click $ui.BtnBenchFull { Start-BenchRun 'Full' }
 Add-Click $ui.BtnBenchQuick { Start-BenchRun 'Quick' }
 function Start-BenchRepair {
     Assert-NoOtherWriter -AllowSealed   # the repair (also after the finish, #50) changes the master (Windows Update, indexer): never next to another writer (#66)
-    $r = Invoke-UiTaskInline -Kind 'benchmark-repair' -Title 'Restoring Windows Update and the indexer' -Step 'Putting back what the benchmark paused' -Block {
+    $r = Invoke-UiTaskInline -Kind 'benchmark-repair' -Title 'Restoring Windows Update and the indexer' -Step 'Putting back what the benchmark paused' -Writer -AllowSealed -Block {
         $m = $script:Machine
         $b = $(if ($script:TestMode) { . $script:BenchFakeScript; New-AVDTuneFakeBench -Reference (Get-AVDTuneBenchmarkReference) -Config (Get-AVDTuneBenchmarkConfig) } else { New-AVDTuneBenchAdapter })
         Repair-AVDTuneBenchmarkCrash -Machine $m -Bench $b -Root $script:StateRoot -User ([string]$env:USERNAME)

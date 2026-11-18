@@ -28,7 +28,7 @@ function New-VdiButton([string]$Text, [string]$Key, [string]$Act, [string]$Tip, 
     [System.Windows.Automation.AutomationProperties]::SetName($b, $Tip)
     # the handler is looked up by sender (Add-Click); key and action come from the fixed catalog of the module
     Add-Click $b ([scriptblock]::Create("Invoke-VdiAction '$Key' '$Act'"))
-    $b
+    Set-AVDTuneWriterButton $b   # every action of a card changes the master: locked while a writer runs (#49)
 }
 
 function Build-VdiCards {

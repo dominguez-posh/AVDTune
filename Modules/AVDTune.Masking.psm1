@@ -563,12 +563,21 @@ function Save-AVDTuneMaskingUndo {
 function Save-AVDTuneMaskingBackup {
     # What is about to be overwritten or deleted by an undo goes into config\masking-backups first (a failed backup stops the undo)
     param([Parameter(Mandatory)][string]$Root, [Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][byte[]]$Bytes, [int]$Keep = 20)
-    $name = '{0}-{1}-{2}.json' -f [datetime]::UtcNow.ToString('yyyyMMddHHmmssfff'), [guid]::NewGuid().ToString('N').Substring(0, 6), (Split-Path $Path -Leaf)
+    # Name: UTC time stamp (ms) + 6 hex digits sequence. The clock ticks only every ~15 ms, so several backups of one undo share a stamp; the sequence then counts up
+    # from the newest backup in the folder (#94: a random suffix sorted them by chance and the clean-up could delete the newest). Unique and sortable by name.
     $folder = Join-Path $Root 'config\masking-backups'
+    $stamp = [datetime]::UtcNow.ToString('yyyyMMddHHmmssfff'); $seq = 0
+    $newest = $null
+    if ([IO.Directory]::Exists($folder)) { $newest = @([IO.Directory]::GetFiles($folder, '*.json') | ForEach-Object { Split-Path $_ -Leaf } | Where-Object { $_ -cmatch '\A[0-9]{17}-[0-9a-f]{6}-' } | Sort-Object -Descending { $_.Substring(0, 24) } | Select-Object -First 1) }
+    if ($newest -and [string]::CompareOrdinal($newest.Substring(0, 17), $stamp) -ge 0) {
+        $stamp = $newest.Substring(0, 17); $seq = [Convert]::ToInt32($newest.Substring(18, 6), 16) + 1   # same stamp (or a clock that went back): after the newest
+        if ($seq -gt 0xFFFFFF) { $stamp = ([int64]$stamp + 1).ToString('00000000000000000'); $seq = 0 }
+    }
+    $name = '{0}-{1}-{2}.json' -f $stamp, $seq.ToString('x6'), (Split-Path $Path -Leaf)
     Write-AVDTuneFile (Join-Path $folder $name) ([ordered]@{ Path = $Path; Sha256 = (Get-AVDTuneBytesSha256 $Bytes); Bytes = [Convert]::ToBase64String($Bytes) } | ConvertTo-Json)
-    # retention: only the newest $Keep backups stay (the name starts with a UTC time stamp). Plain files of this folder only, no recursion, no links followed.
+    # retention: only the newest $Keep backups stay (stamp + sequence sort in the order they were written). Plain files of this folder only, no recursion, no links followed.
     try {
-        $old = @([IO.Directory]::GetFiles($folder, '*.json') | Where-Object { (Split-Path $_ -Leaf) -cmatch '\A[0-9]{17}-[0-9a-f]{6}-' -and ((New-Object IO.FileInfo $_).Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0 } | Sort-Object { Split-Path $_ -Leaf } -Descending | Select-Object -Skip ([Math]::Max(1, $Keep)))
+        $old = @([IO.Directory]::GetFiles($folder, '*.json') | Where-Object { (Split-Path $_ -Leaf) -cmatch '\A[0-9]{17}-[0-9a-f]{6}-' -and ((New-Object IO.FileInfo $_).Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0 } | Sort-Object { (Split-Path $_ -Leaf).Substring(0, 24) } -Descending | Select-Object -Skip ([Math]::Max(1, $Keep)))
         foreach ($f in $old) { [IO.File]::Delete($f) }
     }
     catch { }   # a failed clean-up never stops the undo that needs the backup

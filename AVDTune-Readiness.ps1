@@ -199,7 +199,7 @@ function New-ReadyRow($Row) {
     $safe = ([string]$Row.Id) -replace '[^A-Za-z0-9]', '_'
     if ($Row.FixId -and $Row.Status -in 'red', 'yellow') {
         $fixBtn = New-Object System.Windows.Controls.Button; $fixBtn.Content = T 'ready.fix'; $fixBtn.Margin = '0,0,6,0'; $fixBtn.Name = "BtnReadyFix_$safe"; $fixBtn.DataContext = [string]$Row.FixId
-        $fixBtn.IsEnabled = (Test-AVDTuneWriteAllowed)
+        $fixBtn.IsEnabled = (Test-AVDTuneWriteAllowed); [void](Set-AVDTuneWriterButton $fixBtn)   # #49: locked while a writer runs
         if (-not $fixBtn.IsEnabled) { $fixBtn.ToolTip = T 'ready.fix.readonly' }
         [System.Windows.Automation.AutomationProperties]::SetName($fixBtn, (T 'ready.fix.name' $Row.Title))
         $fixBtn.Add_Click({ param($src) try { Start-ReadyFix ([string]$src.DataContext) } catch { Show-Error $_.Exception.Message } })

@@ -53,7 +53,7 @@ function New-OffResultRow($Row) {
         $b = New-Object System.Windows.Controls.Button; $b.Content = 'Fix'; $b.DataContext = [string]$Row.FixAction; $b.Margin = '10,0,0,0'; $b.Padding = '14,4,14,4'; $b.VerticalAlignment = 'Center'
         $b.SetValue([System.Windows.Controls.Grid]::ColumnProperty, 3)
         [System.Windows.Automation.AutomationProperties]::SetName($b, "Fix: $($Row.Title)")
-        $b.ToolTip = "Sets only this setting; asks first. Source: $($Row.Source)"
+        $b.ToolTip = "Sets only this setting; asks first. Source: $($Row.Source)"; [void](Set-AVDTuneWriterButton $b)   # #49: locked while a writer runs
         $b.Add_Click({ param($src) try { Invoke-OffFix ([string]$src.DataContext) } catch { Show-Error $_.Exception.Message } })
         [void]$grid.Children.Add($b)
     }

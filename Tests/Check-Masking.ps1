@@ -472,8 +472,17 @@ try {
     # N7: config\masking-backups keeps only the newest backups
     $bk = Join-Path $tmp 'config\masking-backups'
     if (Test-Path $bk) { Get-ChildItem $bk -Filter '*.json' | Remove-Item -Force }
-    1..25 | ForEach-Object { Save-AVDTuneMaskingBackup -Root $tmp -Path "$rules\n$_.fxr" -Bytes ([Text.Encoding]::ASCII.GetBytes("backup $_")) }
+    $order = New-Object System.Collections.Generic.List[string]
+    1..25 | ForEach-Object { Save-AVDTuneMaskingBackup -Root $tmp -Path "$rules\n$_.fxr" -Bytes ([Text.Encoding]::ASCII.GetBytes("backup $_")); $order.Add(@(Get-ChildItem $bk -Filter "*-n$_.fxr.json")[0].Name) }
     $left = @(Get-ChildItem $bk -Filter '*.json' | ForEach-Object Name)
+    $ascending = $true; for ($i = 1; $i -lt $order.Count; $i++) { if ([string]::CompareOrdinal($order[$i], $order[$i - 1]) -le 0) { $ascending = $false } }
+    Test-Check 'N7 backups (#94): names written in one fast run sort in the order they were written (stamp + sequence, no random suffix)' ($ascending -and $order.Count -eq 25) ($order -join ' ')
+    # a backup with the same (or a later) stamp in the folder: the new one gets the next sequence number, deterministic
+    $seed = Join-Path $bk '99991231235959999-00000a-seed.fxr.json'; [IO.File]::WriteAllText($seed, '{}')
+    Save-AVDTuneMaskingBackup -Root $tmp -Path "$rules\after.fxr" -Bytes ([byte[]](2))
+    $after = @(Get-ChildItem $bk -Filter '*-after.fxr.json' | ForEach-Object Name)
+    Test-Check 'N7 backups (#94): with a backup of the same stamp in the folder the next one is stamp + sequence + 1' ($after.Count -eq 1 -and $after[0] -ceq '99991231235959999-00000b-after.fxr.json') ($after -join ' ')
+    Get-ChildItem $bk -Filter '9999*.json' | Remove-Item -Force
     Save-AVDTuneMaskingBackup -Root $tmp -Path "$rules\n26.fxr" -Bytes ([byte[]](1)) -Keep 3
     $left3 = @(Get-ChildItem $bk -Filter '*.json').Count
     Test-Check 'N7 backups: after 25 backups only the newest 20 are left (the oldest are removed, the newest stays); -Keep sets the limit' ($left.Count -eq 20 -and @($left | Where-Object { $_ -like '*-n25.fxr.json' }).Count -eq 1 -and @($left | Where-Object { $_ -like '*-n1.fxr.json' -or $_ -like '*-n5.fxr.json' }).Count -eq 0 -and $left3 -eq 3) "$($left.Count) $left3"

@@ -136,7 +136,7 @@ function Start-WatermarkChange([string]$Mode) {
         $user = [string]$env:USERNAME
         $gate = Get-AVDTuneWriteGate
         $wmTitle = @{ On = 'Installing the watermark'; Off = 'Removing the watermark'; LegacyRemove = 'Removing the old overlay' }[$Mode]
-        $result = Invoke-UiTaskInline -Kind 'watermark' -Title $wmTitle -Step 'Changing the master' -Block { Set-AVDTuneWatermark -Machine $script:Machine -Root $script:StateRoot -SourceRoot $script:WmSourceRoot -Mode $Mode -User $user -SnapshotId $gate.SnapshotId }
+        $result = Invoke-UiTaskInline -Kind 'watermark' -Title $wmTitle -Step 'Changing the master' -Writer -Block { Set-AVDTuneWatermark -Machine $script:Machine -Root $script:StateRoot -SourceRoot $script:WmSourceRoot -Mode $Mode -User $user -SnapshotId $gate.SnapshotId }
     }
     finally { $window.Cursor = $null }
     foreach ($r in $result.Results) { Register-StepResult $r }
