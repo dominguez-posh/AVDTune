@@ -55,7 +55,7 @@ function New-AVDTuneFakeSharePoint {
         $sid = [regex]::Escape($s.SiteId)
         if ($Method -eq 'GET' -and $path -match '^/sites/([^/:]+):/(sites|teams)/([^/]+)$') {
             if ($Matches[1] -ne $siteHost -or $Matches[3] -ne $siteName) { return (& $answer 404 @{ error = @{ code = 'itemNotFound' } } '') }
-            $id = if ($s.BadSiteId) { "other.sharepoint.com,$([guid]::NewGuid()),$([guid]::NewGuid())" } else { $s.SiteId }
+            $id = if ($s.BadSiteId) { "fabrikam.sharepoint.com,$([guid]::NewGuid()),$([guid]::NewGuid())" } else { $s.SiteId }
             return (& $answer 200 @{ id = $id } '')
         }
         if ($Method -eq 'GET' -and $path -match "^/sites/$sid/drive$") { return (& $answer 200 @{ id = $s.DriveId } '') }
