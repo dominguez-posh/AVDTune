@@ -1251,6 +1251,31 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
             }
             4 {
                 Test-Smoke 'Customizations: Remove of the font undoes it on the master and takes it out of the list' (-not $fake.Files.ContainsKey('c:\windows\fonts\corp-sans.ttf') -and @((Get-AVDTuneCustomizations -Root $script:StateRoot).Items | Where-Object { $_.Kind -eq 'Font' }).Count -eq 0 -and [string]$ui.PanelCustFonts.Children[0].Text -eq (T 'cust.empty.fonts')) $ui.TxtCustState.Text
+                # web app (#88): http is refused in the form; https is saved and applied (Edge policy + shortcut with its own AppUserModelID)
+                $ui.CmbCustKind.SelectedIndex = @(Get-AVDTuneCustomKinds).IndexOf('WebApp')
+                $script:CustForm['Name'].Text = 'Portal'; $script:CustForm['StartUrl'].Text = 'http://portal.example.test/'; $script:CustForm['Location'].SelectedItem = 'Desktop'; $script:CustForm['IconFile'].SelectedItem = 'crm.ico'
+                & $click $ui.BtnCustSave
+                Test-Smoke 'Web apps (#88): a start URL without https is refused in the form with the reason, nothing is saved' ($ui.TxtCustErrors.Text -like '*https*' -and @((Get-AVDTuneCustomizations -Root $script:StateRoot).Items | Where-Object { $_.Kind -eq 'WebApp' }).Count -eq 0) $ui.TxtCustErrors.Text
+                $script:CustForm['StartUrl'].Text = 'https://portal.example.test/'
+                & $click $ui.BtnCustSave
+                Test-Smoke 'Web apps (#88): the web app is saved with the icon pinned by SHA256' (@((Get-AVDTuneCustomizations -Root $script:StateRoot).Items | Where-Object { $_.Kind -eq 'WebApp' -and $_.IconSha256 -match '\A[0-9a-f]{64}\z' -and $_.WindowMode -eq 'Window' }).Count -eq 1) $ui.TxtCustErrors.Text
+                $script:SmokeCustStep = 5; return $false
+            }
+            5 {
+                $wa = @($script:CustStatus.Items | Where-Object { $_.Kind -eq 'WebApp' })
+                Test-Smoke 'Web apps (#88): the web app is listed in its own card as missing' ($wa.Count -eq 1 -and $wa[0].Status -eq 'NonCompliant' -and $ui.PanelCustWebApps.Children.Count -eq 1 -and $ui.PanelCustWebApps.Children[0] -is [System.Windows.Controls.Grid]) "$($wa.Count) $(@($wa | ForEach-Object { $_.Status }) -join ',')"
+                & $click (& $rowButton $ui.PanelCustWebApps (T 'cust.btn.apply'))
+                $script:SmokeCustStep = 6; return $false
+            }
+            6 {
+                $pol = $fake.Registry['hklm:\software\policies\microsoft\edge|webappinstallforcelist']
+                $lnk = $fake.Shortcuts['c:\users\public\desktop\portal.lnk']
+                Test-Smoke 'Web apps (#88): Apply writes WebAppInstallForceList (REG_SZ JSON list) and the desktop shortcut msedge.exe --app with its AppUserModelID' ($pol -and $pol.Kind -eq 'String' -and [string]$pol.Value -like '*https://portal.example.test/*' -and $lnk -and $lnk.Arguments -ceq '--app=https://portal.example.test/' -and $lnk.AppUserModelId -like 'AVDTune.WebApp.*' -and @($script:CustStatus.Items | Where-Object { $_.Kind -eq 'WebApp' -and $_.Status -eq 'Compliant' }).Count -eq 1) "pol=$(if ($pol) { $pol.Value }) lnk=$($lnk | ConvertTo-Json -Compress) rows=$(@($script:CustStatus.Items | Where-Object { $_.Kind -eq 'WebApp' } | ForEach-Object { "$($_.Status) $($_.State) $($_.Message)" }) -join ' | ') state=$($ui.TxtCustState.Text) asked=$($script:ConfirmAsked)"
+                & $click (& $rowButton $ui.PanelCustWebApps (T 'cust.btn.remove'))
+                $script:SmokeCustStep = 7; return $false
+            }
+            7 {
+                Test-Smoke 'Web apps (#88): Remove undoes it (no policy value before: removed again, shortcut gone) and takes it out of the list' (-not $fake.Registry.ContainsKey('hklm:\software\policies\microsoft\edge|webappinstallforcelist') -and -not $fake.Shortcuts.ContainsKey('c:\users\public\desktop\portal.lnk') -and [string]$ui.PanelCustWebApps.Children[0].Text -eq (T 'cust.empty.webapps')) $ui.TxtCustState.Text
                 if ($script:SmokeCustGate) { Close-AVDTuneWriteGate }
                 Show-Page 'Overview'
                 return $true
