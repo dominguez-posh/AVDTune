@@ -6,7 +6,7 @@
 # ComputerName, Now (datetime, fixed clock), and for the readiness analysis: Paths (array of existing paths), Dirs (hashtable folder -> names), Hotfixes (array of @{ Id; InstalledOn }),
 # NetAdapters (array of @{ Name; Description; Status }), Pnp (array of PnP instance IDs that are present), Arch ('AMD64' or 'ARM64'), Tpm ($true/$false/$null), Firmware ('UEFI'/'BIOS'/$null, GetFirmwareType). A Native entry can carry Registry (hashtable) that is applied when the command runs. $m.Store.FailWrites = @('part of a key|name') makes RegSet throw for matching values (error path checks).
 
-. (Join-Path $PSScriptRoot 'FakeShared.ps1')   # fakes that several runspaces use at once (#80)
+. $(if (Get-Command Resolve-AVDTuneTestScript -ErrorAction Ignore) { $fakeShared = Resolve-AVDTuneTestScript -Path (Join-Path $PSScriptRoot 'FakeShared.ps1') -AppRoot (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent); if (-not $fakeShared) { throw 'FakeShared.ps1 is not a file below the Tests folder of this copy.' }; $fakeShared } else { Join-Path $PSScriptRoot 'FakeShared.ps1' })   # fakes that several runspaces use at once (#80), through the test script gate when the module is loaded
 function New-AVDTuneFakeMachine {
     param([hashtable]$Seed = @{})
     $store = @{

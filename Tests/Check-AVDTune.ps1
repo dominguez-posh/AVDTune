@@ -950,9 +950,24 @@ try { $ps = [powershell]::Create(); $ps.Runspace = $rs; [void]$ps.AddScript($pro
     # ---------------------------------------------------------------- fakes shared by runspaces (#80)
     # The GUI hands the fake machine to background workers in test mode. Two runspaces call its members 1000 times at the same time (with cmdlets inside
     # the members); in a child process with a time limit, because bound closures hung there. Before the fix: a hang or "the store is not reachable".
-    $fm80 = New-AVDTuneFakeMachine
-    $bound80 = @($fm80.PSObject.Properties | Where-Object { $_.Value -is [scriptblock] -and $_.Value.Module })
-    Test-Check 'fakes (#80): no member of the fake machine is a closure bound to the runspace that made it' ($bound80.Count -eq 0) (@($bound80.Name) -join ', ')
+    # every factory of Tests\Fakes (a new one is found by its name New-AVDTuneFake*): no script block in what it returns (members, nested tables) is bound to a runspace
+    foreach ($f80 in (Get-ChildItem -LiteralPath (Join-Path $PSScriptRoot 'Fakes') -Filter 'Fake*.ps1')) { . $f80.FullName }
+    $findBound80 = {
+        param($Value, [string]$Path, [int]$Depth, $Out)
+        if ($null -eq $Value -or $Depth -gt 4 -or $Value -is [string] -or $Value -is [ValueType]) { return }
+        if ($Value -is [scriptblock]) { if ($Value.Module) { [void]$Out.Add($Path) }; return }
+        if ($Value -is [System.Collections.IDictionary]) { foreach ($k in @($Value.Keys)) { & $findBound80 $Value[$k] "$Path.$k" ($Depth + 1) $Out } }
+        elseif ($Value -is [System.Management.Automation.PSCustomObject]) { foreach ($p in @($Value.PSObject.Properties)) { & $findBound80 $p.Value "$Path.$($p.Name)" ($Depth + 1) $Out } }
+    }
+    $notAdapters80 = @('New-AVDTuneFakeReleaseBuild', 'New-AVDTuneFakeFeed', 'New-AVDTuneFakeZip')   # they build files and feeds, no adapter with members
+    $made80 = 0; $bound80 = New-Object System.Collections.ArrayList
+    foreach ($fn80 in @(Get-Command -CommandType Function -Name 'New-AVDTuneFake*', 'Add-AVDTuneOptimizationFakeMembers' | Where-Object { $_.Name -notin $notAdapters80 })) {
+        $a80 = @{}
+        if ($fn80.Parameters.ContainsKey('Machine')) { $a80.Machine = New-AVDTuneFakeMachine }
+        if ($fn80.Name -eq 'New-AVDTuneFakeBench') { $a80.Reference = @{}; $a80.Config = @{} }
+        try { $o80 = & $fn80.Name @a80; $made80++; & $findBound80 $o80 $fn80.Name 0 $bound80 } catch { [void]$bound80.Add("$($fn80.Name) failed: $($_.Exception.Message)") }
+    }
+    Test-Check 'fakes (#80): no member of any fake (every New-AVDTuneFake* factory) is a closure bound to the runspace that made it' ($made80 -ge 18 -and $bound80.Count -eq 0) "$made80 factories; $(@($bound80) -join ', ')"
     $stress80 = Join-Path $tmp 'stress80.ps1'
     $stressText = @'
 $ErrorActionPreference = 'Stop'

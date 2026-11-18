@@ -2,7 +2,7 @@
 # share data plane (New-AVDTuneFakeFiles) and an LDAP adapter that answers the storage account's AD object and the domain (New-AVDTuneFakeStorageLdap). In memory, no network,
 # no tenant. Every call is in .Log (method and URL, never a token or a key). All names are made up (storageaccount, example.test, contoso).
 
-. (Join-Path $PSScriptRoot 'FakeShared.ps1')   # fakes that several runspaces use at once (#80)
+. $(if (Get-Command Resolve-AVDTuneTestScript -ErrorAction Ignore) { $fakeShared = Resolve-AVDTuneTestScript -Path (Join-Path $PSScriptRoot 'FakeShared.ps1') -AppRoot (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent); if (-not $fakeShared) { throw 'FakeShared.ps1 is not a file below the Tests folder of this copy.' }; $fakeShared } else { Join-Path $PSScriptRoot 'FakeShared.ps1' })   # fakes that several runspaces use at once (#80), through the test script gate when the module is loaded
 $script:StSub = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'
 function ConvertTo-StJson($Object) { $Object | ConvertTo-Json -Depth 12 | ConvertFrom-Json }
 

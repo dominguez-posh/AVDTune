@@ -11,7 +11,7 @@
 # RedirectHops (chain of n redirects before the content), PageSize (Intune answers in pages with @odata.nextLink).
 # All names are made up.
 
-. (Join-Path $PSScriptRoot 'FakeShared.ps1')   # fakes that several runspaces use at once (#80)
+. $(if (Get-Command Resolve-AVDTuneTestScript -ErrorAction Ignore) { $fakeShared = Resolve-AVDTuneTestScript -Path (Join-Path $PSScriptRoot 'FakeShared.ps1') -AppRoot (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent); if (-not $fakeShared) { throw 'FakeShared.ps1 is not a file below the Tests folder of this copy.' }; $fakeShared } else { Join-Path $PSScriptRoot 'FakeShared.ps1' })   # fakes that several runspaces use at once (#80), through the test script gate when the module is loaded
 function New-AVDTuneFakeLibrary {
     $s = @{ Files = @{}; Notes = New-Object System.Collections.ArrayList; Offline = $false; IntuneOffline = $false; Tamper = @{}; Log = (New-Object System.Collections.ArrayList)
         Redirect = $false; RedirectTo = ''; RedirectEmpty = $false; RedirectRelative = $false; RedirectHops = 0; PageSize = 0; HopKey = '' }

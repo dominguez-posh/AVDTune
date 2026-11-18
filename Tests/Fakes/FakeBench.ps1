@@ -11,7 +11,7 @@
 # Round 2 fixes: Volumes and WorkLeftovers (what the leftover scan reports).
 # .Store holds the state, .Log what was asked (never a secret).
 
-. (Join-Path $PSScriptRoot 'FakeShared.ps1')   # fakes that several runspaces use at once (#80)
+. $(if (Get-Command Resolve-AVDTuneTestScript -ErrorAction Ignore) { $fakeShared = Resolve-AVDTuneTestScript -Path (Join-Path $PSScriptRoot 'FakeShared.ps1') -AppRoot (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent); if (-not $fakeShared) { throw 'FakeShared.ps1 is not a file below the Tests folder of this copy.' }; $fakeShared } else { Join-Path $PSScriptRoot 'FakeShared.ps1' })   # fakes that several runspaces use at once (#80), through the test script gate when the module is loaded
 function New-FakeDiskspdXml {
     # XML of the documented diskspd -Rxml layout: TimeSpan with TestTimeSeconds, the Latency buckets, and Thread/Target totals (made up; not captured from a real run)
     param([double]$Seconds = 12, [double]$ReadP50 = 0.1, [double]$ReadP99 = 0.3, [double]$WriteP50 = 0.5, [double]$WriteP99 = 1.5, [long]$ReadCount = 0, [long]$WriteCount = 0, [long]$ReadBytes = 0, [long]$WriteBytes = 0, [int]$Threads = 1)

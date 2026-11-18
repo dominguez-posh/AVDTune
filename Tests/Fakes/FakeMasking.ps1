@@ -3,7 +3,7 @@
 #   New-AVDTuneFakeMasking [-Seed @{ Files (path -> byte[]); Desktop (array of @{ Name; Target; Arguments; Icon; IsShortcut }); Unsafe ($true: every write is refused like an
 #     unsafe folder); AdminName; LocalGroups (name -> description); Shortcuts (path -> @{ Target; Arguments; Icon; Description }) }]
 #   New-AVDTuneFakeMaskingLdap [-Seed @{ Groups (list of @{ Name; Dn; Sid; Description; Members }); AddFails; BuiltinDn }]
-. (Join-Path $PSScriptRoot 'FakeShared.ps1')   # fakes that several runspaces use at once (#80)
+. $(if (Get-Command Resolve-AVDTuneTestScript -ErrorAction Ignore) { $fakeShared = Resolve-AVDTuneTestScript -Path (Join-Path $PSScriptRoot 'FakeShared.ps1') -AppRoot (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent); if (-not $fakeShared) { throw 'FakeShared.ps1 is not a file below the Tests folder of this copy.' }; $fakeShared } else { Join-Path $PSScriptRoot 'FakeShared.ps1' })   # fakes that several runspaces use at once (#80), through the test script gate when the module is loaded
 $script:FakeRulesFolder = 'C:\Program Files\FSLogix\Apps\Rules'
 
 function New-AVDTuneFakeMasking {

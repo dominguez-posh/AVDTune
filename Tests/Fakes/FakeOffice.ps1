@@ -6,7 +6,7 @@
 #   OdtFiles (names in the unpacked folder), ProtectedOdt ($false = the unpacked folder is not protected), HoldFails ($true = setup.exe cannot be held), SetupOutput (text the run gives back), PackageExit, NoSetup, SetupExit, ConfigureNoEffect ($true = setup.exe exits 0 but the registry does not change), SwapSetupAfterCheck ($true = the signature of setup.exe
 #   is wrong from the second check on), Texts (hashtable path -> text written), Folders, Build (build number a fresh install reports).
 # All names are made up. The package link is of the real shape (guid, officedeploymenttool_<build>-<build>.exe) but points nowhere useful.
-. (Join-Path $PSScriptRoot 'FakeShared.ps1')   # fakes that several runspaces use at once (#80)
+. $(if (Get-Command Resolve-AVDTuneTestScript -ErrorAction Ignore) { $fakeShared = Resolve-AVDTuneTestScript -Path (Join-Path $PSScriptRoot 'FakeShared.ps1') -AppRoot (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent); if (-not $fakeShared) { throw 'FakeShared.ps1 is not a file below the Tests folder of this copy.' }; $fakeShared } else { Join-Path $PSScriptRoot 'FakeShared.ps1' })   # fakes that several runspaces use at once (#80), through the test script gate when the module is loaded
 function New-AVDTuneFakeOffice {
     param([Parameter(Mandatory)]$Machine, [hashtable]$Seed = @{})
     $s = @{
