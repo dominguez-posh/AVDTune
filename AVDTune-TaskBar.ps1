@@ -218,6 +218,9 @@ $ui.BoxTaskBar.Add_KeyDown({ param($s, $e) try { if ($e.Key -in 'Enter', 'Space'
 $ui.BoxTaskList.Add_KeyDown({ param($s, $e) try { if ($e.Key -eq 'Escape') { $e.Handled = $true; Show-TaskList $false } } catch { } })
 Add-Click $ui.BtnTaskClose { Show-TaskList $false }
 $script:Timer.Add_Tick({ try { Update-TaskBar } catch { } })
+# #49 (4): the write buttons of every page are locked while a writer job runs (AVDTune-Tasks.ps1, one command for all of them)
+$script:WriterLock = New-AVDTuneWriterLockCommand
+$script:Timer.Add_Tick({ try { Update-AVDTuneWriterLock -Command $script:WriterLock -Ui $ui } catch { } })
 
 function Invoke-UiTaskInline {
     # A call that runs on the window thread (sign-in, a request to Azure, an install): the task shows first, the bar is painted before the call blocks the thread

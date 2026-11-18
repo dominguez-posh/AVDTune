@@ -159,3 +159,43 @@ function Assert-NoOtherWriter {
     if ($w) { throw "Another operation that changes the master is still running ($w). Wait until it is done." }
     if (-not $AllowSealed -and $script:StateRoot -and (Test-AVDTuneSealed -Root $script:StateRoot)) { throw (T 'shell.sealed') }   # the window always has a state root; the engine refuses on its own as well
 }
+
+# #49 (4): one global lock of the write buttons while a writer job runs, in one place instead of on every page. Each button below gets the one command
+# AVDTune.WriterLockCommand (it does nothing on a click); WPF disables a button whose command cannot execute, on top of what the page sets itself, so the
+# page keeps its own state and gets it back when the writer has ended. The window timer sets Busy from Get-AVDTuneRunningWriter and wires buttons that
+# pages build later (Masking, Customizations, Language, Optimization). A click that comes through anyway is still refused by Assert-NoOtherWriter.
+$script:WriterButtons = @(
+    'BtnMaskApply', 'BtnMaskUndo', 'BtnBenchFull', 'BtnBenchQuick', 'BtnBenchRepair', 'BtnCustApplyAll', 'BtnEnvApply', 'BtnEnvUndo', 'BtnEnvMasterApply',
+    'BtnFslSettingsApply', 'BtnFslSettingsUndo', 'BtnFslListsApply', 'BtnFslListsUndo', 'BtnFslGroupAdd', 'BtnFslGroupRemove', 'BtnFslExcludeAdmins', 'BtnFslRedirSave',
+    'BtnFslRedirUndo', 'BtnFslDefAdd', 'BtnFslDefUndo', 'BtnFslInstall', 'BtnFslAclSet', 'BtnFslTestWrite', 'BtnFslStorage', 'BtnLangInstall', 'BtnLangApply', 'BtnLangUndo',
+    'BtnOffInstall', 'BtnOffRemove', 'BtnOffUndo', 'BtnOffPolicies', 'BtnOffPoliciesUndo', 'BtnOffFixUndo', 'BtnOptApply', 'BtnOptUndo', 'BtnRelInstall', 'BtnRelRepair',
+    'BtnRelBack', 'BtnSealRun', 'BtnSealRepair', 'BtnSwUpdateAll', 'BtnUpdAll', 'BtnUpdSelected', 'BtnRepairDism', 'BtnRepairSfc', 'BtnBlockOn', 'BtnBlockOff',
+    'BtnBlockRepair', 'BtnWmInstall', 'BtnWmRemove', 'BtnWmLegacy')
+function New-AVDTuneWriterLockCommand {
+    if (-not ('AVDTune.WriterLockCommand' -as [type])) {
+        Add-Type -TypeDefinition @'
+namespace AVDTune {
+    public sealed class WriterLockCommand : System.Windows.Input.ICommand {
+        private bool busy;
+        public event System.EventHandler CanExecuteChanged;
+        public bool Busy {
+            get { return busy; }
+            set { if (busy == value) return; busy = value; System.EventHandler h = CanExecuteChanged; if (h != null) h(this, System.EventArgs.Empty); }
+        }
+        public bool CanExecute(object parameter) { return !busy; }
+        public void Execute(object parameter) { }
+    }
+}
+'@
+    }
+    New-Object AVDTune.WriterLockCommand
+}
+function Update-AVDTuneWriterLock {
+    # One tick of the window timer: wire the listed buttons that exist (once each) and set Busy. $Ui is the element table of the window.
+    param([Parameter(Mandatory)]$Command, [Parameter(Mandatory)]$Ui)
+    foreach ($name in $script:WriterButtons) {
+        $b = $Ui[$name]
+        if ($b -and -not [object]::ReferenceEquals($b.Command, $Command)) { $b.Command = $Command }
+    }
+    $Command.Busy = [bool](Get-AVDTuneRunningWriter)
+}

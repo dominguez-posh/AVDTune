@@ -200,5 +200,22 @@ $script:FakeSealed = $false; $sealOpen = $true; try { Assert-NoOtherWriter } cat
 $allowUsers = @(Get-ChildItem -LiteralPath $repo -Filter 'AVDTune-*.ps1' | Select-String -Pattern 'Assert-NoOtherWriter -AllowSealed' | ForEach-Object { $_.Filename } | Sort-Object -Unique)
 Test-Check 'sealed (#50): a write start is refused while the version is finished (text shell.sealed), the crash repairs (finish, benchmark) pass, an open version passes' ($sealErr -eq 'shell.sealed' -and $sealRepair -and $sealOpen -and ($allowUsers -join ',') -eq 'AVDTune-Benchmark.ps1,AVDTune-Seal.ps1') "err=$sealErr users=$($allowUsers -join ',')"
 
+# #49 (4): the global lock of the write buttons (one command, WPF disables the button while a writer job runs and gives the page its own state back)
+Add-Type -AssemblyName PresentationFramework
+$cmd49 = New-AVDTuneWriterLockCommand
+$b1 = New-Object System.Windows.Controls.Button; $b2 = New-Object System.Windows.Controls.Button; $b2.IsEnabled = $false
+$ui49 = @{ BtnSealRun = $b1; BtnUpdAll = $b2; BtnRefresh = (New-Object System.Windows.Controls.Button) }
+Update-AVDTuneWriterLock -Command $cmd49 -Ui $ui49; $idle = ($b1.IsEnabled -and -not $b2.IsEnabled -and $ui49.BtnRefresh.IsEnabled)
+$script:SwJob = @{ Kind = 'Run' }; Update-AVDTuneWriterLock -Command $cmd49 -Ui $ui49; $locked = (-not $b1.IsEnabled -and -not $b2.IsEnabled -and $ui49.BtnRefresh.IsEnabled)
+$b2.IsEnabled = $true; $stillLocked = -not $b2.IsEnabled   # a page that enables its button meanwhile does not lift the lock
+$script:SwJob = @{ Kind = 'Scan' }; Update-AVDTuneWriterLock -Command $cmd49 -Ui $ui49; $scanFree = $b1.IsEnabled
+$script:SwJob = $null; $b2.IsEnabled = $false; Update-AVDTuneWriterLock -Command $cmd49 -Ui $ui49; $back = ($b1.IsEnabled -and -not $b2.IsEnabled)
+Test-Check 'writer lock (#49.4): listed write buttons are disabled while a writer job runs (not a read-only kind, not other buttons); the page state comes back afterwards' ($idle -and $locked -and $stillLocked -and $scanFree -and $back -and [object]::ReferenceEquals($b1.Command, $cmd49)) "idle=$idle locked=$locked still=$stillLocked scan=$scanFree back=$back"
+$xamlText = (Get-ChildItem -LiteralPath (Join-Path $repo 'UI') -Filter '*.xaml' | ForEach-Object { [IO.File]::ReadAllText($_.FullName) }) -join "`n"
+$codeText = (Get-ChildItem -LiteralPath $repo -Filter 'AVDTune-*.ps1' | ForEach-Object { [IO.File]::ReadAllText($_.FullName) }) -join "`n"
+$unknownButtons = @($script:WriterButtons | Where-Object { -not $xamlText.Contains("x:Name=""$_""") -and -not $codeText.Contains("`$ui.$_ = ") })
+$taskBarText = [IO.File]::ReadAllText((Join-Path $repo 'AVDTune-TaskBar.ps1'))
+Test-Check 'writer lock (#49.4): every listed button exists (XAML or built by its page) and the window timer runs the lock' ($unknownButtons.Count -eq 0 -and $taskBarText -match '\$script:Timer\.Add_Tick\(\{ try \{ Update-AVDTuneWriterLock -Command \$script:WriterLock -Ui \$ui \}') ($unknownButtons -join ', ')
+
 if ($script:failed -gt 0) { throw "$script:failed check(s) failed." }
 'Check-Tasks: all checks passed.'
