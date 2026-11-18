@@ -4,6 +4,7 @@
 # Like the real system, Get-MpPreference answers 0 for a setting that was never set; $m.Store.MpUnreported = @('Name') makes MpGet answer $null (setting not reported).
 # $m.Store.MpAbsent = $true makes MpGet throw like a host without Defender (command missing); $m.Store.MpError = 'text' makes it throw any other read error.
 # $m.Store.RegKinds['path|name'] = 'Binary' (lower case key) makes RegInfo report another kind than DWord/String.
+# #41: SharedSignaturesPath is text ('' = no path, not 0). $m.Store.Unc['\\server\share'] = @{ Ok; GuidFolders; Error } is what UncReadable answers for a path (lower case key); any other path cannot be reached.
 
 . $(if (Get-Command Resolve-AVDTuneTestScript -ErrorAction Ignore) { $fakeShared = Resolve-AVDTuneTestScript -Path (Join-Path $PSScriptRoot 'FakeShared.ps1') -AppRoot (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent); if (-not $fakeShared) { throw 'FakeShared.ps1 is not a file below the Tests folder of this copy.' }; $fakeShared } else { Join-Path $PSScriptRoot 'FakeShared.ps1' })   # fakes that several runspaces use at once (#80), through the test script gate when the module is loaded
 function Add-AVDTuneOptimizationFakeMembers {
@@ -11,7 +12,8 @@ function Add-AVDTuneOptimizationFakeMembers {
     $store = $Machine.Store
     $store.Appx = @{}; foreach ($a in $Appx) { $store.Appx[$a.ToLowerInvariant()] = [pscustomobject]@{ Installed = $true; Provisioned = $true } }
     $store.Mp = @{}; foreach ($k in $Defender.Keys) { $store.Mp[[string]$k] = $Defender[$k] }
-    $store.MpUnreported = @(); $store.RegKinds = @{}
+    $store.MpUnreported = @(); $store.RegKinds = @{}; $store.Unc = @{}; $store.DnsDomain = ''
+    if (-not $store.Mp.ContainsKey('SharedSignaturesPath')) { $store.Mp['SharedSignaturesPath'] = '' }
     # Default user profile (#40): loading is simulated through the real Mount-/Dismount-AVDTuneDefaultHive with fake operations. $m.Store.Hive holds Loaded, Registry
     # ('path|name' lower case -> value), Kinds, Keys, Loads, Unloads; Stale = a hive left loaded by a crash (set Loaded = $true before the first use), FailLoad = reg load
     # fails, StuckUnloads = n unload attempts fail (an open handle), PathError = the profile path check throws this text. The members refuse when the hive is not loaded.
@@ -96,6 +98,14 @@ function Add-AVDTuneOptimizationFakeMembers {
             # like Set-MpPreference: the threat actions are an enum (Clean=1, Quarantine=2, Remove=3, Allow=6, UserDefined=8, NoAction=9, Block=10, None=11), 0 and other numbers cannot be bound
             if ([string]$Name -like '*ThreatDefaultAction' -and (@(1, 2, 3, 6, 8, 9, 10, 11) -notcontains [int]$Value)) { throw "fake: Set-MpPreference cannot bind $Value to $Name (not a value of the enum ThreatAction)" }
             $store.Mp[[string]$Name] = $Value; [void]$store.Log.Add("MpSet $Name=$Value restore=$Restore")
+        }.GetNewClosure())
+    $Machine | Add-Member -NotePropertyName DnsDomain -NotePropertyValue ({ [string]$store.DnsDomain }.GetNewClosure())
+    $Machine | Add-Member -NotePropertyName UncReadable -NotePropertyValue ({
+            param($Path, $Domains = @())
+            [void]$store.Log.Add("UncReadable $Path")
+            $hp = Get-OptUncHostProblem -HostName (Get-OptUncHost $Path) -Domains @($Domains); if ($hp) { throw "Refused: $hp" }   # like the real member
+            $k = ([string]$Path).TrimEnd('\').ToLowerInvariant()
+            if ($store.Unc.ContainsKey($k)) { $store.Unc[$k] } else { @{ Ok = $false; GuidFolders = 0; Error = 'The network path was not found.' } }
         }.GetNewClosure())
     $Machine | Add-Member -NotePropertyName RegInfo -NotePropertyValue ({
             param($Path, $Name)

@@ -11,6 +11,7 @@ if ($script:TestMode) {
 
 $script:OptStatus = $null
 $script:OptChecked = @{}        # id -> $true / $false; filled from the defaults of the data file at the first view
+$script:OptInputs = @{}         # id -> text the administrator entered for an entry with an input (#41: the UNC path of the shared security intelligence); memory only
 $script:OptInitDone = $false
 $script:OptOnlyOpen = $false
 $script:OptBuilding = $false
@@ -190,7 +191,7 @@ function Show-OptList {
     Update-OptPresetStatus
     $script:OptBuilding = $true
     try {
-        $ui.PanelOptList.Children.Clear()
+        $ui.PanelOptList.Children.Clear(); $ui.OptInputBoxes = @{}
         $ui.BoxOptErrors.Visibility = ConvertTo-Vis ($st -and -not $st.DataValid)
         if (-not $st) { $ui.TxtOptSummary.Text = $(if ($script:OptJob) { 'Reading the state of the master ...' } else { '' }); $ui.BtnOptApply.IsEnabled = $false; $ui.BtnOptUndo.IsEnabled = $false; return }
         if (-not $st.DataValid) {
@@ -225,6 +226,18 @@ function Show-OptList {
                 if ($r.Default) { [void]$line.Children.Add((New-OptPill 'Default on' 'AccentSubtle' 'Primary')) }
                 [void]$mid.Children.Add($line)
                 [void]$mid.Children.Add((New-Text ([string]$r.Why) 'Hint' '0,3,0,0'))
+                if ([string]$r.Input -eq 'UncPath') {
+                    # #41: the share is an input; prefilled with the path that is set now; checked (format here, readability in the run) when Apply is pressed
+                    if (-not $script:OptInputs.ContainsKey([string]$r.Id) -and (Test-AVDTuneUncPath ([string]$r.State))) { $script:OptInputs[[string]$r.Id] = [string]$r.State }
+                    $inLine = New-Object System.Windows.Controls.StackPanel; $inLine.Orientation = 'Horizontal'; $inLine.Margin = '0,6,0,0'
+                    $inLbl = New-Text 'Share (UNC):' $null '0,0,8,0'; $inLbl.VerticalAlignment = 'Center'
+                    $tb = New-Object System.Windows.Controls.TextBox; $tb.Width = 380; $tb.MaxLength = 260; $tb.DataContext = [string]$r.Id; $tb.Text = [string]$script:OptInputs[[string]$r.Id]
+                    [System.Windows.Automation.AutomationProperties]::SetName($tb, "UNC path for $($r.Title)"); $tb.ToolTip = '\\server\share\folder - no user name or password: the share is read with the logon of this session'
+                    $tb.Add_TextChanged({ param($s) $script:OptInputs[[string]$s.DataContext] = [string]$s.Text.Trim() })
+                    $ui.OptInputBoxes[[string]$r.Id] = $tb
+                    foreach ($x in $inLbl, $tb) { [void]$inLine.Children.Add($x) }
+                    [void]$mid.Children.Add($inLine)
+                }
                 $src = New-Text "Source: $($r.Source)" 'Hint' '0,2,0,0'; [void]$mid.Children.Add($src)
                 $stateText = if ($r.Failed) { "Cannot be read: $($r.Message)" } else { [string]$r.State }
                 $sp = New-Object System.Windows.Controls.StackPanel; $sp.SetValue([System.Windows.Controls.Grid]::ColumnProperty, 2)
@@ -274,7 +287,17 @@ function Start-OptChange([string]$Mode) {
         $skip = @($sel | Where-Object { $_.Irreversible })
         $sel = @($sel | Where-Object { -not $_.Irreversible })
     }
-    else { $sel = @($sel | Where-Object { -not $_.Compliant }); $skip = @() }
+    else { $sel = @($sel | Where-Object { -not $_.Compliant -or ([string]$_.Input -eq 'UncPath' -and (ConvertTo-OptUncCompare ([string]$script:OptInputs[[string]$_.Id])) -ne (ConvertTo-OptUncCompare ([string]$_.State))) }); $skip = @() }
+    # #41: the value of an entry with an input; its format is checked here, whether the share can be read in the run
+    $inputs = @{}
+    if ($Mode -eq 'Apply') {
+        foreach ($r in @($sel | Where-Object { [string]$_.Input -eq 'UncPath' })) {
+            $v = [string]$script:OptInputs[[string]$r.Id]
+            if (-not (Test-AVDTuneUncPath $v)) { throw "Enter the share for '$($r.Title)' as a UNC path like \\server\share\folder (no user name or password). Nothing was changed." }
+            $inputs[[string]$r.Id] = $v
+        }
+    }
+    $hosts = @($inputs.Values | ForEach-Object { Get-OptUncHost $_ } | Select-Object -Unique)   # #41 review F1: named in the confirmation, only these are read
     if ($sel.Count -eq 0) { Show-Toast $(if ($Mode -eq 'Undo') { 'Nothing selected that can be undone.' } else { 'Nothing selected that is not in place yet.' }); return }
     $irr = @($sel | Where-Object { $_.Irreversible })
     $reboot = @($sel | Where-Object { $_.Reboot }).Count
@@ -283,6 +306,7 @@ function Start-OptChange([string]$Mode) {
         $(if ($high.Count -gt 0) { "`n$($high.Count) of them have risk High: " + (@($high | Select-Object -First 3 | ForEach-Object { $_.Title }) -join '; ') }) +
         $(if ($reboot -gt 0 -and $Mode -eq 'Apply') { "`n$reboot need a restart to take effect." }) +
         $(if ($skip.Count -gt 0) { "`n$($skip.Count) AppX removal(s) in the selection cannot be undone and are left out." }) +
+        $(if ($inputs.Count -gt 0) { "`nShare for the Defender updates: " + (@($inputs.Values) -join ', ') + ". To check that it can be read, the logon of this administrator is sent to " + (@($hosts) -join ', ') + ' (nothing is set if it cannot be read).' }) +
         "`nThe value that is there now is saved first so each entry can be undone (not AppX)."
     if (-not (Confirm-Action $ask 'Optimization')) { return }
     $confirmIrr = $false
@@ -294,27 +318,27 @@ function Start-OptChange([string]$Mode) {
     $ids = @($sel | ForEach-Object { $_.Id })
     $user = [string]$env:USERNAME
     $gate = Get-AVDTuneWriteGate
-    Start-OptRun $Mode $ids $confirmIrr $user $gate
+    Start-OptRun $Mode $ids $confirmIrr $user $gate $inputs $hosts
 }
 
-function Start-OptRun([string]$Mode, [string[]]$Ids, [bool]$ConfirmIrr, [string]$User, $Gate) {
+function Start-OptRun([string]$Mode, [string[]]$Ids, [bool]$ConfirmIrr, [string]$User, $Gate, [hashtable]$Inputs = @{}, [string[]]$Hosts = @()) {
     # Apply or Undo as a task in the background (the work of an entry, Defender and AppX removal included, no longer blocks the window). The confirmations are
     # done before. The window stays open until the run is done (closing handler below), like for the other operations that change the master.
     Assert-NoOtherWriter   # every start of a writer job asks the central check (#50/#66 review)
     if ($script:OptRun) { throw 'Another optimization run is still running.' }
     $label = if ($Mode -eq 'Undo') { 'Undoing optimizations' } else { 'Applying optimizations' }
     $task = Start-AVDTuneUiTask -Kind 'optimization' -Title $label -Step "$($Ids.Count) entries"   # no Retry: it changes the master and starts only after its confirmation
-    if ($script:TestMode) { $script:OptRun = @{ Inline = $true; Task = $task; Mode = $Mode; Ids = $Ids; ConfirmIrr = $ConfirmIrr; User = $User; Gate = $Gate } }
+    if ($script:TestMode) { $script:OptRun = @{ Inline = $true; Task = $task; Mode = $Mode; Ids = $Ids; ConfirmIrr = $ConfirmIrr; User = $User; Gate = $Gate; Inputs = $Inputs; Hosts = $Hosts } }
     else {
         $ps = New-AVDTunePowerShell
         [void]$ps.AddScript({
-                param($AppRoot, $Root, $Ids, $Mode, $ConfirmIrr, $User, $Gate)
+                param($AppRoot, $Root, $Ids, $Mode, $ConfirmIrr, $User, $Gate, $Inputs, $Hosts)
                 $ErrorActionPreference = 'Stop'
                 Import-Module (Join-Path $AppRoot 'Modules\AVDTune.psm1') -Force
                 Import-Module (Join-Path $AppRoot 'Modules\AVDTune.Optimization.psm1') -Force
                 if ($Gate) { Open-AVDTuneWriteGate -SnapshotId $Gate.SnapshotId -ConfirmedBy $Gate.ConfirmedBy }
-                Invoke-AVDTuneOptimization -Machine (New-AVDTuneMachine) -Root $Root -Ids $Ids -Mode $Mode -ConfirmIrreversible:$ConfirmIrr -User $User -SnapshotId $Gate.SnapshotId
-            }).AddArgument($script:AppRoot).AddArgument($script:StateRoot).AddArgument($Ids).AddArgument($Mode).AddArgument($ConfirmIrr).AddArgument($User).AddArgument($Gate)
+                Invoke-AVDTuneOptimization -Machine (New-AVDTuneMachine) -Root $Root -Ids $Ids -Mode $Mode -ConfirmIrreversible:$ConfirmIrr -User $User -SnapshotId $Gate.SnapshotId -Inputs $Inputs -ConfirmedHosts $Hosts
+            }).AddArgument($script:AppRoot).AddArgument($script:StateRoot).AddArgument($Ids).AddArgument($Mode).AddArgument($ConfirmIrr).AddArgument($User).AddArgument($Gate).AddArgument($Inputs).AddArgument($Hosts)
         $script:OptRun = @{ PS = $ps; Handle = $ps.BeginInvoke(); Task = $task; Mode = $Mode }
     }
     Set-OptBusy $true
@@ -329,7 +353,7 @@ function Complete-OptRun {
     $script:OptRun = $null
     $result = $null; $err = ''; $streamErr = ''
     if ($job.Inline) {
-        try { $result = Invoke-AVDTuneOptimization -Machine $script:Machine -Root $script:StateRoot -Ids $job.Ids -Mode $job.Mode -ConfirmIrreversible:$job.ConfirmIrr -User $job.User -SnapshotId $job.Gate.SnapshotId } catch { $err = $_.Exception.Message }
+        try { $result = Invoke-AVDTuneOptimization -Machine $script:Machine -Root $script:StateRoot -Ids $job.Ids -Mode $job.Mode -ConfirmIrreversible:$job.ConfirmIrr -User $job.User -SnapshotId $job.Gate.SnapshotId -Inputs $(if ($job.Inputs) { $job.Inputs } else { @{} }) -ConfirmedHosts @($job.Hosts) } catch { $err = $_.Exception.Message }
     }
     else {
         try {
