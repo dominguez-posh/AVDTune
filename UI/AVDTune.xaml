@@ -505,7 +505,8 @@
                                             </Grid>
                                             <StackPanel Orientation="Horizontal" Margin="0,12,0,0">
                                                 <Button x:Name="BtnFslStorage" Style="{DynamicResource PrimaryButton}" Content="Run storage check" Margin="0,0,8,0" AutomationProperties.Name="Run the storage check"/>
-                                                <Button x:Name="BtnFslAclSet" Content="Set the recommended ACL" Visibility="Collapsed" AutomationProperties.Name="Set the recommended ACL on the share root"/>
+                                                <Button x:Name="BtnFslAclSet" Content="Set the recommended ACL" Visibility="Collapsed" AutomationProperties.Name="Set the recommended ACL on the share root" Margin="0,0,8,0"/>
+                                                <Button x:Name="BtnFslAclUndo" Content="Undo the ACL" Visibility="Collapsed" AutomationProperties.Name="Put back the ACL the share root had before AVDTune set it"/>
                                             </StackPanel>
                                             <TextBlock x:Name="TxtFslStorageSummary" Margin="0,10,0,0" TextWrapping="Wrap"/>
                                             <StackPanel x:Name="PanelFslStorage" Margin="0,8,0,0"/>

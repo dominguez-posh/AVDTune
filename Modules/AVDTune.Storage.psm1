@@ -275,8 +275,17 @@ function Set-AVDTuneStorageRootAcl {
     if ($diff.Compliant) { return [pscustomobject]@{ Status = 'Unchanged'; Message = 'The root already matches the recommendation.' } }
     $h = @{ 'x-ms-date' = [DateTime]::UtcNow.ToString('R', [Globalization.CultureInfo]::InvariantCulture); 'x-ms-file-permission' = $diff.Recommended; 'x-ms-file-permission-format' = 'sddl'
         'x-ms-file-attributes' = 'preserve'; 'x-ms-file-creation-time' = 'preserve'; 'x-ms-file-last-write-time' = 'preserve' }
+    # the undo record before the PUT (#24): the ACL found and what is set; older records are kept (Write-AVDTuneUndoFile); the SDDL stays out of the change log
+    $undoPath = Join-Path $Root 'config\storage-acl-undo.json'
+    $rec = [ordered]@{ Account = $Account; Share = $Share; Before = [string]$now.Sddl; Set = [string]$diff.Recommended; After = ''; At = [DateTime]::UtcNow.ToString('o'); User = $User }
+    Write-AVDTuneUndoFile $undoPath ($rec | ConvertTo-Json -Depth 3)
     $r = Invoke-AVDTuneStorageFiles -Files $Files -Method PUT -Account $Account -Share $Share -Query 'restype=directory&comp=properties' -Token $Token -Headers $h
     [void](Set-AVDTuneState -Root $Root -Values @{ LastChange = [DateTime]::UtcNow.ToString('o') })   # also a failed attempt may have changed part of it
+    if ([int]$r.Status -ge 200 -and [int]$r.Status -lt 300) {
+        # the form Azure keeps (it may write the SDDL differently): the undo compares against this, so it only resets what AVDTune set
+        $back = Get-AVDTuneStorageShareAcl -Files $Files -Account $Account -Share $Share -Token $Token
+        if ($back.Ok) { $rec.After = [string]$back.Sddl; Write-AVDTuneFile $undoPath ($rec | ConvertTo-Json -Depth 3) }
+    }
     if ([int]$r.Status -lt 200 -or [int]$r.Status -ge 300) {
         $why = if ([int]$r.Status -in 401, 403) { 'The signed-in account lacks the role Storage File Data Privileged Contributor (or SMB Share Elevated Contributor does not apply to the REST call).' } else { "Azure answered $($r.Status)." }
         return [pscustomobject]@{ Status = 'Failed'; Message = "The ACL was not set. $why$(if ($r.Error) { ' (' + $r.Error + ')' })" }
@@ -284,6 +293,55 @@ function Set-AVDTuneStorageRootAcl {
     $state = Get-AVDTuneState $Root
     if ($state.ImageVersion) { [void](Add-AVDTuneChangeLogEntry -Root $Root -Version $state.ImageVersion -Category 'FSLogix' -Component 'Storage ACL' -ChangeType Changed -Text "NTFS ACL of the root of share $Share on storage account $Account set to Microsoft's FSLogix recommendation ($(@($diff.Findings).Count) finding(s) fixed)" -User $User -SnapshotId $SnapshotId -Source Step) }
     [pscustomobject]@{ Status = 'Changed'; Message = "The recommended ACL was set on the root of $Share." }
+    }
+    finally { Stop-AVDTuneChange -Root $Root -Owner $changeOwner }
+}
+
+function Test-AVDTuneSddlText([string]$Sddl) {
+    <# An SDDL from the undo record is data: printable ASCII only (no CR/LF for the header), at most 8 KiB (the limit of x-ms-file-permission), and a valid security descriptor #>
+    if (-not $Sddl -or $Sddl.Length -gt 8192 -or $Sddl -notmatch '^[\x20-\x7E]+$') { return $false }
+    try { [void](ConvertFrom-AVDTuneSddl -Sddl $Sddl -DomainSid 'S-1-5-21-1-1-1'); $true } catch { $false }   # domain aliases (DU) parse also on a master outside the domain; only the form is checked here
+}
+
+function Get-AVDTuneStorageAclUndo {
+    <# The last ACL set by AVDTune on a share root (config\storage-acl-undo.json): @{ Account; Share; Before; Set; After; At; User } or $null. Types checked; anything else is $null. #>
+    param([string]$Root = (Get-AVDTuneRoot))
+    $u = $null; try { $u = Read-AVDTuneJson (Join-Path $Root 'config\storage-acl-undo.json') } catch { return $null }
+    if (-not $u) { return $null }
+    foreach ($n in 'Account', 'Share', 'Before', 'Set', 'After') { $v = Get-AVDTuneProp $u $n; if ($null -ne $v -and $v -isnot [string]) { return $null } }
+    if (-not (Test-AVDTuneStorageAccountName ([string]$u.Account)) -or -not (Test-AVDTuneShareName ([string]$u.Share))) { return $null }
+    if (-not (Test-AVDTuneSddlText ([string]$u.Before))) { return $null }
+    [pscustomobject]@{ Account = [string]$u.Account; Share = [string]$u.Share; Before = [string]$u.Before; Set = [string](Get-AVDTuneProp $u 'Set'); After = [string](Get-AVDTuneProp $u 'After'); At = [string](Get-AVDTuneProp $u 'At'); User = [string](Get-AVDTuneProp $u 'User') }
+}
+
+function Undo-AVDTuneStorageRootAcl {
+    <#
+        Puts back the ACL the share root had before AVDTune set it (#24). Only when the root still has the ACL AVDTune set (read again first; changed since: nothing is set),
+        through the write gate, with LastChange and a change log entry. Same token path and role as setting it. Returns @{ Status Changed | Failed; Message }.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)]$Files, [Parameter(Mandatory)][string]$Token, [string]$Root = (Get-AVDTuneRoot), [string]$User, [string]$SnapshotId)
+    if (-not (Test-AVDTuneWriteAllowed)) { return [pscustomobject]@{ Status = 'Failed'; Message = 'Read only: confirm a snapshot of today on the Overview first. Nothing was set.' } }
+    $u = Get-AVDTuneStorageAclUndo -Root $Root
+    if (-not $u) { return [pscustomobject]@{ Status = 'Failed'; Message = 'There is nothing to undo: AVDTune has not set an ACL on a share root (or the undo record is not valid).' } }
+    $changeOwner = Start-AVDTuneChange -Root $Root
+    try {
+        $now = Get-AVDTuneStorageShareAcl -Files $Files -Account $u.Account -Share $u.Share -Token $Token
+        if (-not $now.Ok) { return [pscustomobject]@{ Status = 'Failed'; Message = "The current ACL cannot be read, so nothing is set: $($now.Error)" } }
+        $expected = if ($u.After) { $u.After } else { $u.Set }
+        if ($now.Sddl -ceq $u.Before) { return [pscustomobject]@{ Status = 'Failed'; Message = 'The root already has the ACL from before. Nothing was set.' } }
+        if (-not $expected -or $now.Sddl -cne $expected) { return [pscustomobject]@{ Status = 'Failed'; Message = 'The ACL on the share root changed after AVDTune set it. Nothing was set: check the root by hand.' } }
+        $h = @{ 'x-ms-date' = [DateTime]::UtcNow.ToString('R', [Globalization.CultureInfo]::InvariantCulture); 'x-ms-file-permission' = $u.Before; 'x-ms-file-permission-format' = 'sddl'
+            'x-ms-file-attributes' = 'preserve'; 'x-ms-file-creation-time' = 'preserve'; 'x-ms-file-last-write-time' = 'preserve' }
+        $r = Invoke-AVDTuneStorageFiles -Files $Files -Method PUT -Account $u.Account -Share $u.Share -Query 'restype=directory&comp=properties' -Token $Token -Headers $h
+        [void](Set-AVDTuneState -Root $Root -Values @{ LastChange = [DateTime]::UtcNow.ToString('o') })   # also a failed attempt
+        if ([int]$r.Status -lt 200 -or [int]$r.Status -ge 300) {
+            $why = if ([int]$r.Status -in 401, 403) { 'The signed-in account lacks the role Storage File Data Privileged Contributor.' } else { "Azure answered $($r.Status)." }
+            return [pscustomobject]@{ Status = 'Failed'; Message = "The ACL was not put back. $why$(if ($r.Error) { ' (' + $r.Error + ')' })" }
+        }
+        $state = Get-AVDTuneState $Root
+        if ($state.ImageVersion) { [void](Add-AVDTuneChangeLogEntry -Root $Root -Version $state.ImageVersion -Category 'FSLogix' -Component 'Storage ACL' -ChangeType Changed -Text "Undo: NTFS ACL of the root of share $($u.Share) on storage account $($u.Account) put back to the state before AVDTune set it" -User $User -SnapshotId $SnapshotId -Source Step) }
+        [pscustomobject]@{ Status = 'Changed'; Message = "The ACL from before was put back on the root of $($u.Share)." }
     }
     finally { Stop-AVDTuneChange -Root $Root -Owner $changeOwner }
 }
@@ -576,5 +634,5 @@ function New-AVDTuneFilesAdapter {
 #endregion
 
 Export-ModuleMember -Function Test-AVDTuneStorageAccountName, Test-AVDTuneShareName, Split-AVDTuneUncShare, Test-AVDTunePrivateIp, Assert-AVDTuneStorageArmPath, Invoke-AVDTuneStorageArm, Invoke-AVDTuneStorageFiles,
-    Find-AVDTuneStorageAccount, Get-AVDTuneStorageAdCompare, Get-AVDTuneStorageShareAcl, Get-AVDTuneStorageProfileFolders, Get-AVDTuneStorageAclDiff, Set-AVDTuneStorageRootAcl,
+    Find-AVDTuneStorageAccount, Get-AVDTuneStorageAdCompare, Get-AVDTuneStorageShareAcl, Get-AVDTuneStorageProfileFolders, Get-AVDTuneStorageAclDiff, Set-AVDTuneStorageRootAcl, Get-AVDTuneStorageAclUndo, Undo-AVDTuneStorageRootAcl, Test-AVDTuneSddlText,
     Invoke-AVDTuneStorageCheck, Get-AVDTuneStorageResult, Save-AVDTuneStorageCheckRun, New-AVDTuneFilesAdapter

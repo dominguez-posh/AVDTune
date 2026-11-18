@@ -30,7 +30,7 @@ $script:FslLatestLookup = $null   # the running read-only lookup of the newest r
 $script:FslLatestResult = $null   # @{ Result (Get-AVDTuneFSLogixLatest); At }: cached, 60 minutes when it worked, 5 minutes when it did not
 $script:FslSharedGate = $null
 # the kinds of Start-FslJob that change the master or the share (Install is one too; Test changes the share only with the write tests, Storage only reads)
-$script:FslChangeKinds = @('Settings', 'SettingsUndo', 'Lists', 'ListsUndo', 'Group', 'Redirections', 'RedirectionsUndo', 'Defender', 'DefenderUndo', 'Acl')
+$script:FslChangeKinds = @('Settings', 'SettingsUndo', 'Lists', 'ListsUndo', 'Group', 'Redirections', 'RedirectionsUndo', 'Defender', 'DefenderUndo', 'Acl', 'AclUndo')
 
 function Get-FslAnswers { $e = $null; try { $e = Get-AVDTuneEnvironment $script:StateRoot } catch { }; if ($e) { Get-AVDTuneEnvironmentAnswers $e } else { $null } }
 function Test-FslApplies { $a = Get-FslAnswers; [bool]($a -and [string](Get-AVDTuneProp $a 'Profiles') -ne 'None') }
@@ -164,7 +164,7 @@ function Update-FslButtons {
     $job = [bool]$script:FslJob
     $noChange = $job -or [bool]$script:FslReadJob -or -not $script:FslState -or $script:FslStale
     foreach ($b in $ui.BtnFslTest, $ui.BtnFslTestWrite, $ui.BtnFslStorage) { $b.IsEnabled = -not $job }
-    foreach ($b in $ui.BtnFslInstall, $ui.BtnFslAclSet, $ui.BtnFslSettingsApply, $ui.BtnFslSettingsUndo, $ui.BtnFslListsApply, $ui.BtnFslListsUndo, $ui.BtnFslGroupAdd, $ui.BtnFslGroupRemove, $ui.BtnFslExcludeAdmins, $ui.BtnFslRedirSave, $ui.BtnFslRedirUndo, $ui.BtnFslDefAdd, $ui.BtnFslDefUndo) { $b.IsEnabled = -not $noChange }
+    foreach ($b in $ui.BtnFslInstall, $ui.BtnFslAclSet, $ui.BtnFslAclUndo, $ui.BtnFslSettingsApply, $ui.BtnFslSettingsUndo, $ui.BtnFslListsApply, $ui.BtnFslListsUndo, $ui.BtnFslGroupAdd, $ui.BtnFslGroupRemove, $ui.BtnFslExcludeAdmins, $ui.BtnFslRedirSave, $ui.BtnFslRedirUndo, $ui.BtnFslDefAdd, $ui.BtnFslDefUndo) { $b.IsEnabled = -not $noChange }
 }
 function Set-FslCursor { $window.Cursor = $(if ($script:FslJob -and $script:CurrentPage -eq 'FSLogix') { [System.Windows.Input.Cursors]::AppStarting } else { $null }) }   # only when a job starts or ends (as before)
 
@@ -473,6 +473,8 @@ function Update-FslTestView {
 function Update-FslStorageView {
     $ui.PanelFslStorage.Children.Clear()
     $r = $script:FslStorage
+    $undo = Get-AVDTuneStorageAclUndo -Root $script:StateRoot
+    $ui.BtnFslAclUndo.Visibility = $(if ($undo) { 'Visible' } else { 'Collapsed' })   # the ACL AVDTune set can be put back (#24)
     if (-not $r) { $ui.TxtFslStorageSummary.Text = 'The storage check has not been run.'; $ui.BtnFslAclSet.Visibility = 'Collapsed'; $ui.TxtFslAclDiff.Visibility = 'Collapsed'; return }
     $ui.TxtFslStorageSummary.Text = "Account $($r.Account): $($r.Overall) ($($r.Counts.Red) red, $($r.Counts.Yellow) yellow, $($r.Counts.Unknown) not checkable, $($r.Counts.Green) green)$(if ($r.KeyUsed) { '. The account key was used for this run (in memory only).' })"
     $order = @{ red = 0; yellow = 1; unknown = 2; green = 3; info = 4 }
@@ -533,6 +535,7 @@ switch ($Kind) {
     'RedirectionsUndo' { [pscustomobject]@{ Runs = @(Undo-AVDTuneRedirections -Machine $C.Machine -F $C.F -Root $C.Root -User $C.User -SnapshotId $C.SnapshotId) } }
     'Defender' { if (-not $C.Args.DefenderHash) { throw 'The confirmed state of the Defender exclusions is missing. Nothing was set.' }; [pscustomobject]@{ Runs = @(Set-AVDTuneFSLogixDefender -Machine $C.Machine -F $C.F -Root $C.Root -VhdLocations @(Get-AVDTuneFSLogixLocations -Machine $C.Machine) -User $C.User -SnapshotId $C.SnapshotId -Skip @($C.Args.Skip) -ExpectedHash $C.Args.DefenderHash) } }
     'DefenderUndo' { [pscustomobject]@{ Runs = @(Undo-AVDTuneFSLogixDefender -Machine $C.Machine -F $C.F -Root $C.Root -User $C.User -SnapshotId $C.SnapshotId) } }
+    'AclUndo' { Undo-AVDTuneStorageRootAcl -Files $C.Files -Token $C.StorageToken -Root $C.Root -User $C.User -SnapshotId $C.SnapshotId }
     'Acl' { Set-AVDTuneStorageRootAcl -Files $C.Files -Account $C.Args.Account -Share $C.Args.Share -Token $C.StorageToken -UsersSid $C.Args.UsersSid -AdminsSid $C.Args.AdminsSid -ConfirmedHash $C.Args.Hash -Root $C.Root -User $C.User -SnapshotId $C.SnapshotId }
     default { throw "Unknown FSLogix job '$Kind'." }
 }
@@ -549,7 +552,7 @@ function Get-FslKindText([string]$Kind) {
     switch ($Kind) {
         'Install' { 'install' } 'Test' { 'function test' } 'Storage' { 'storage check' } 'Settings' { 'FSLogix settings' } 'SettingsUndo' { 'Undo of the FSLogix settings' }
         'Group' { 'FSLogix list' } 'Lists' { 'FSLogix lists' } 'ListsUndo' { 'Undo of the FSLogix lists' } 'Redirections' { 'redirections.xml' } 'RedirectionsUndo' { 'Undo of redirections.xml' }
-        'Defender' { 'Defender exclusions' } 'DefenderUndo' { 'Undo of the Defender exclusions' } 'Acl' { 'NTFS ACL' } default { $Kind }
+        'Defender' { 'Defender exclusions' } 'DefenderUndo' { 'Undo of the Defender exclusions' } 'Acl' { 'NTFS ACL' } 'AclUndo' { 'Undo of the NTFS ACL' } default { $Kind }
     }
 }
 function New-FslTask([string]$Kind, [bool]$Write) {
@@ -558,16 +561,16 @@ function New-FslTask([string]$Kind, [bool]$Write) {
     $title = switch ($Kind) {
         'Install' { 'Installing or updating FSLogix' } 'Test' { $(if ($Write) { 'FSLogix function test with write tests' } else { 'FSLogix function test' }) } 'Storage' { 'FSLogix storage check' }
         'Settings' { 'Applying FSLogix settings' } 'SettingsUndo' { 'Undo of the FSLogix settings' } 'Group' { 'Changing an FSLogix list' } 'Lists' { 'Applying the recommended FSLogix lists' } 'ListsUndo' { 'Undo of the recommended FSLogix lists' }
-        'Redirections' { 'Writing redirections.xml' } 'RedirectionsUndo' { 'Undo of redirections.xml' } 'Defender' { 'Setting the Defender exclusions' } 'DefenderUndo' { 'Undo of the Defender exclusions' } default { 'Setting the NTFS ACL of the share root' }
+        'Redirections' { 'Writing redirections.xml' } 'RedirectionsUndo' { 'Undo of redirections.xml' } 'Defender' { 'Setting the Defender exclusions' } 'DefenderUndo' { 'Undo of the Defender exclusions' } 'AclUndo' { 'Undo of the NTFS ACL of the share root' } default { 'Setting the NTFS ACL of the share root' }
     }
     $step = switch ($Kind) {
         'Install' { 'Looking up the newest release' } 'Test' { 'Checking the master against Microsoft''s FSLogix requirements' } 'Storage' { 'Reading the storage account, the share and its settings' }
-        'Settings' { 'Writing the setting(s) to the registry' } 'Redirections' { 'Checking the text and writing the file to the folder' } 'Defender' { 'Adding the ticked exclusions to Microsoft Defender Antivirus' } 'Acl' { 'Reading the ACL again and setting the recommended one' }
+        'Settings' { 'Writing the setting(s) to the registry' } 'Redirections' { 'Checking the text and writing the file to the folder' } 'Defender' { 'Adding the ticked exclusions to Microsoft Defender Antivirus' } 'Acl' { 'Reading the ACL again and setting the recommended one' } 'AclUndo' { 'Reading the ACL again and putting back the one from before' }
         default { 'Changing the master' }
     }
     $taskKind = switch ($Kind) {
         { $_ -in 'Settings', 'SettingsUndo' } { 'fslogix-settings' } { $_ -in 'Lists', 'ListsUndo' } { 'fslogix-lists' } 'Group' { 'fslogix-groups' } { $_ -in 'Redirections', 'RedirectionsUndo' } { 'fslogix-redirections' }
-        { $_ -in 'Defender', 'DefenderUndo' } { 'fslogix-defender' } 'Acl' { 'fslogix-acl' } default { "fslogix-$($Kind.ToLower())" }
+        { $_ -in 'Defender', 'DefenderUndo' } { 'fslogix-defender' } { $_ -in 'Acl', 'AclUndo' } { 'fslogix-acl' } default { "fslogix-$($Kind.ToLower())" }
     }
     $retry = if ($Kind -eq 'Test' -and -not $Write) { @{ Command = 'Start-FslJob'; Arguments = @('Test', @{ Write = $false }) } } elseif ($Kind -eq 'Storage') { @{ Command = 'Start-FslJob'; Arguments = @('Storage', @{}) } }
     Start-AVDTuneUiTask -Kind $taskKind -Title $title -Step $step -Retry $retry
@@ -600,11 +603,11 @@ function Start-FslJob([string]$Kind, [hashtable]$Arg = @{}) {
         $s = $script:StartContext.Session
         if ($s -and $s.Connected) { try { $common.CallerOid = [string](Get-AVDTuneProp (Get-AVDTuneTokenClaims (Get-AVDTuneAccessToken -Session $s -Audience Arm)) 'oid') } catch { } }
     }
-    if ($Kind -eq 'Acl') { $common.StorageToken = $(if ($script:TestMode) { 'fake-storage-token' } else { '' }) }   # the real path is not built yet (the click refuses it before)
+    if ($Kind -in 'Acl', 'AclUndo') { $st = Get-FslStorageToken; if (-not $st.Token) { throw "The NTFS ACL cannot be changed: $($st.Reason)" }; $common.StorageToken = $st.Token }   # the Storage token of the sign-in (memory only, removed with the job; #24)
     if ($script:TestMode) {
         $c = $common.Clone(); $c.Machine = $script:Machine; $c.F = $script:FslFake.F; $c.Progress = $null
         if ($Kind -eq 'Storage') { $c.Arm = $script:FslFake.Arm; $c.Files = $script:FslFake.Files; $c.Ldap = $script:FslFake.Ldap; $c.FakeLdap = $true; $c.ArmToken = 'fake-arm-token' }   # the storage token comes from the fake session through Get-FslStorageToken (in $common), like in real use
-        if ($Kind -eq 'Acl') { $c.Files = $script:FslFake.Files }
+        if ($Kind -in 'Acl', 'AclUndo') { $c.Files = $script:FslFake.Files }
         $res = $null; $err = ''
         try { $res = & ([scriptblock]::Create($script:FslWorkerText)) $Kind $c } catch { $err = $_.Exception.Message }
         $c.StorageToken = $null; $c.ArmToken = $null; $c.TestPassword = $null
@@ -624,7 +627,7 @@ function Start-FslJob([string]$Kind, [hashtable]$Arg = @{}) {
                 Import-Module (Join-Path $AppRoot 'Modules\AVDTune.Storage.psm1') -Force
                 $c = $Common.Clone(); $c.Machine = New-AVDTuneMachine; $c.F = New-AVDTuneFSLogixAdapter; $c.Progress = { param($t) $Sync.Text = $t }
                 if ($Kind -eq 'Storage') { $c.Arm = New-AVDTuneArmAdapter; $c.Files = New-AVDTuneFilesAdapter; $c.Ldap = New-AVDTuneLdapAdapter; $c.FakeLdap = $false }
-                if ($Kind -eq 'Acl') { $c.Files = New-AVDTuneFilesAdapter }
+                if ($Kind -in 'Acl', 'AclUndo') { $c.Files = New-AVDTuneFilesAdapter }
                 if ($Gate) { Open-AVDTuneWriteGate -SnapshotId $Gate.SnapshotId -ConfirmedBy $Gate.ConfirmedBy }
                 & ([scriptblock]::Create($WorkerText)) $Kind $c
             }).AddArgument($script:AppRoot).AddArgument($Kind).AddArgument($common).AddArgument($gate).AddArgument($sync).AddArgument($script:FslWorkerText)
@@ -705,9 +708,9 @@ function Complete-FslJob {
             Show-Toast $ui.TxtFslState.Text
             $ui.PwdFslPassword.Clear(); $ui.ChkFslKey.IsChecked = $false   # the confirmation of the key fallback is for one run
         }
-        'Acl' {
+        { $_ -in 'Acl', 'AclUndo' } {
             Complete-FslChangeTask $job.Task $result
-            $ui.TxtFslState.Text = "NTFS ACL: $($result.Status). $($result.Message)"; Show-Toast $ui.TxtFslState.Text
+            $ui.TxtFslState.Text = "$(Get-FslKindText $job.Kind): $($result.Status). $($result.Message)"; Show-Toast $ui.TxtFslState.Text; Update-FslStorageView
             [void](Add-AVDTuneProtocolNote -Protocol $script:Protocol -Group 'fslogix' -Subject 'NTFS ACL of the share root' -Note "$($result.Status). $($result.Message)"); Save-Protocol
         }
         default {
@@ -761,12 +764,20 @@ Add-Click $ui.BtnFslAclSet {
     if ($sids.Users.Count -eq 0 -or $sids.Admins.Count -eq 0) { throw 'Name the users group and the administrators group.' }
     Assert-FslWrite
     if ($r.KeyUsed) { throw 'The ACL was read with the account key; setting it needs the token path (role Storage File Data Privileged Contributor).' }
-    if (-not $script:TestMode) { throw 'Setting the NTFS ACL is not built yet: it comes in its own issue (write gate, confirmed hash of the diff, intent backup on the PUT). Until then the check only reads.' }
     if (-not (Confirm-Action "Set the recommended ACL on the root of the share $($r.AclDiff.Share) of $($r.AclDiff.Account)? The diff above is what changes (the ACL is read again first; if it changed since, nothing is set)." 'NTFS ACL')) { return }
     $d = $r.AclDiff
     $share = [pscustomobject]@{ Account = [string]$d.Account; Share = [string]$d.Share }   # the share the check looked at and the administrator saw, not the first location again
     if (-not $share.Account -or -not $share.Share) { throw 'The diff does not name the share: run the storage check again.' }
     Start-FslJob 'Acl' @{ Account = $share.Account; Share = $share.Share; UsersSid = $sids.Users[0]; AdminsSid = $sids.Admins[0]; Hash = $d.Hash }
+}
+
+Add-Click $ui.BtnFslAclUndo {
+    $u = Get-AVDTuneStorageAclUndo -Root $script:StateRoot
+    if (-not $u) { throw 'There is nothing to undo: AVDTune has not set an ACL on a share root.' }
+    Assert-FslWrite
+    $before = @(); try { $before = @((ConvertFrom-AVDTuneSddl -Sddl $u.Before -DomainSid 'S-1-5-21-1-1-1').Aces | ForEach-Object { Format-AVDTuneAce $_ }) } catch { }
+    if (-not (Confirm-Action "Put back the ACL the root of the share $($u.Share) of $($u.Account) had before AVDTune set it?`r`n`r`n  $($before -join "`r`n  ")`r`n`r`nThe ACL is read again first; if it changed after AVDTune set it, nothing is set." 'NTFS ACL')) { return }
+    Start-FslJob 'AclUndo' @{}
 }
 
 # ---------------------------------------------------------------- the page

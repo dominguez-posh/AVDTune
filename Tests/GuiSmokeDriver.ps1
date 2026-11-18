@@ -1054,6 +1054,11 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         # set the ACL after the diff
         $ui.BtnFslAclSet.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent))); Complete-FslJob; Complete-SmokeFslRead
         Test-Smoke 'set the recommended ACL: the confirmation names the diff, the share got it once with attributes preserved, the change log has it' ($script:ConfirmAsked -like '*recommended ACL*diff*' -and $script:FslFake.Files.Store.Puts.Count -eq 1 -and $script:FslFake.Files.Store.Puts[0].Attributes -eq 'preserve' -and @(Get-AVDTuneChangeLog -Root $script:StateRoot | Where-Object Component -eq 'Storage ACL').Count -eq 1) $ui.TxtFslState.Text
+        # undo of the set ACL (#24)
+        $before = [string]$script:FslFake.Files.Store.Puts[0].Sddl
+        Test-Smoke 'after the ACL was set the undo button is shown' ($ui.BtnFslAclUndo.Visibility -eq 'Visible') $null
+        $ui.BtnFslAclUndo.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent))); Complete-FslJob; Complete-SmokeFslRead
+        Test-Smoke 'undo of the ACL: the confirmation names the ACL from before, the share got it back once, the change log has the undo' ($script:ConfirmAsked -like '*Put back the ACL*' -and $script:FslFake.Files.Store.Puts.Count -eq 2 -and [string]$script:FslFake.Files.Store.Puts[1].Sddl -ne $before -and @(Get-AVDTuneChangeLog -Root $script:StateRoot | Where-Object { $_.Component -eq 'Storage ACL' -and $_.Text -like 'Undo:*' }).Count -eq 1) $ui.TxtFslState.Text
         $true } }
     @{ Name = 'office: content, dropdowns, preselection, fix buttons (#61)'; Do = {
         if ($script:OverviewJob -or $script:ReadyJob -or $script:ReadyQueued -or $script:FslJob -or $script:OffJob) { return $false }
