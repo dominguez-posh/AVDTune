@@ -233,9 +233,69 @@ function Test-AVDTunePrinterExportFiles {
     if ($f.Count -gt $script:MaxFiles) { return "The export has $($f.Count) entries (more than $($script:MaxFiles))." }
     $sum = 0L; foreach ($x in $f) { $sum += [int64]$x.Length }
     if ($sum -gt $script:MaxBytes) { return "The export is $sum bytes (more than $($script:MaxBytes))." }
-    $bad = @($f | Where-Object { [string]$_.Path -match '(\A|\\)\.\.(\\|\z)|\A[\\/]|:' -or [bool]$_.Link })
+    $bad = @($f | Where-Object { -not (Test-AVDTunePrinterRelPath ([string]$_.Path)) -or [bool]$_.Link })
     if ($bad.Count) { return "The export has a path that is not allowed or a link: $($bad[0].Path)." }
     ''
+}
+
+function Test-AVDTunePrinterRelPath([string]$Path) {
+    # A relative path of the export: at most 8 segments joined by \, each one plain name (no . or .., no / : * ? " < > |, no control character, no trailing dot or space)
+    if (-not $Path -or $Path.Length -gt 200) { return $false }
+    $seg = $Path.Split([char]92)
+    if ($seg.Count -gt 8) { return $false }
+    foreach ($s in $seg) {
+        if (-not $s -or $s -eq '.' -or $s -eq '..' -or $s.TrimEnd('. ') -ne $s) { return $false }
+        if (-not [regex]::IsMatch($s, '\A[^/:*?"<>|\x00-\x1F]{1,120}\z', 'None', $script:Rx)) { return $false }
+    }
+    $true
+}
+
+function Copy-AVDTunePrinterExport {
+    <#
+        N1: the export file by file (no copy of a whole tree): each relative path is checked here (Test-AVDTunePrinterRelPath), the target must stay below $Local after
+        GetFullPath, folders are made one by one as own folders, each file is written new (CreateNew: nothing existing is overwritten). The bytes come from the session.
+    #>
+    param([Parameter(Mandatory)]$P, [Parameter(Mandatory)]$Session, [Parameter(Mandatory)]$Export, [Parameter(Mandatory)][string]$Local)
+    $base = [IO.Path]::GetFullPath($Local).TrimEnd([char]92) + '\'
+    foreach ($e in @($Export.Files)) {
+        $rel = [string]$e.Path
+        if (-not (Test-AVDTunePrinterRelPath $rel) -or [bool]$e.Link) { throw "The export has a path that is not allowed or a link: $rel." }
+        $target = [IO.Path]::GetFullPath($base + $rel)
+        if (-not $target.StartsWith($base, [StringComparison]::OrdinalIgnoreCase)) { throw "$rel leaves the work folder." }
+        $seg = $rel.Split([char]92); $dir = $base.TrimEnd([char]92)
+        $last = if ([bool](Get-AVDTuneProp $e 'Dir')) { $seg.Count } else { $seg.Count - 1 }
+        for ($i = 0; $i -lt $last; $i++) { $dir = "$dir\$($seg[$i])"; & $P.LocalMkdir $dir }
+        if (-not [bool](Get-AVDTuneProp $e 'Dir')) { & $P.LocalWriteNew $target (& $P.RemoteReadFile $Session ([string]$Export.Source + '\' + $rel)) }
+    }
+}
+
+function Get-AVDTunePrinterInfCatalog {
+    <#
+        M-neu: the catalog an INF names, read like Windows: only the [Version] section (case-insensitive, comments after ; removed), CatalogFile.NTamd64 before CatalogFile.NT
+        before CatalogFile; a key that is there twice is refused, a value with a string token (%...%) or a path is refused. Returns Catalog or Error.
+    #>
+    param([string]$Text)
+    $vals = @{}; $section = ''
+    foreach ($raw in ($Text -split "`r?`n")) {
+        $line = $raw; $c = $line.IndexOf(';'); if ($c -ge 0) { $line = $line.Substring(0, $c) }
+        $line = $line.Trim()
+        if (-not $line) { continue }
+        if ($line.StartsWith('[')) { $section = $line.Trim('[', ']', ' ').ToLowerInvariant(); continue }
+        if ($section -ne 'version') { continue }
+        $eq = $line.IndexOf('='); if ($eq -lt 1) { continue }
+        $k = $line.Substring(0, $eq).Trim().ToLowerInvariant()
+        if ($k -notin 'catalogfile.ntamd64', 'catalogfile.nt', 'catalogfile') { continue }
+        if ($vals.ContainsKey($k)) { return [pscustomobject]@{ Catalog = ''; Error = "The INF names $k twice in [Version]." } }
+        $vals[$k] = $line.Substring($eq + 1).Trim().Trim('"')
+    }
+    foreach ($k in 'catalogfile.ntamd64', 'catalogfile.nt', 'catalogfile') {
+        if ($vals.ContainsKey($k)) {
+            $v = $vals[$k]
+            if (-not [regex]::IsMatch($v, '\A[^\\/:*?"<>|%\x00-\x1F]{1,200}\.cat\z', 'IgnoreCase', $script:Rx)) { return [pscustomobject]@{ Catalog = ''; Error = "The catalog name of $k is not a plain .cat file name." } }
+            return [pscustomobject]@{ Catalog = $v; Error = '' }
+        }
+    }
+    [pscustomobject]@{ Catalog = ''; Error = 'The INF names no catalog file in [Version]: an unsigned driver is not installed.' }
 }
 
 function Test-AVDTunePrinterLocalTree {
@@ -263,13 +323,13 @@ function Test-AVDTunePrinterCatalog {
     if ($InfLeaf -notin $top) { $r.Reason = "The INF $InfLeaf is not on the top level of the export."; return [pscustomobject]$r }
     $text = [string](& $P.ReadInf (Join-Path $Folder $InfLeaf))
     if ($text.Length -gt 1MB) { $r.Reason = 'The INF is larger than 1 MB.'; return [pscustomobject]$r }
-    $cat = ''
-    foreach ($key in 'CatalogFile\.NTamd64', 'CatalogFile') {
-        $m = [regex]::Match($text, "(?im)^[ \t]*$key[ \t]*=[ \t]*([^\s;]+)", 'None', $script:Rx)
-        if ($m.Success) { $cat = $m.Groups[1].Value.Trim('"'); break }
-    }
-    if (-not $cat -or -not [regex]::IsMatch($cat, '\A[^\\/:*?"<>|]{1,200}\.cat\z', 'IgnoreCase', $script:Rx)) { $r.Reason = 'The INF names no catalog file: an unsigned driver is not installed.'; return [pscustomobject]$r }
-    if ($cat -notin $top) { $r.Reason = "The catalog $cat is not on the top level of the export."; return [pscustomobject]$r }
+    $ic = Get-AVDTunePrinterInfCatalog -Text $text
+    if ($ic.Error) { $r.Reason = $ic.Error; return [pscustomobject]$r }
+    $cat = $ic.Catalog
+    # exactly one catalog in the whole export, and it is the one the INF names (a second catalog could be the one Windows takes)
+    $cats = @(& $P.LocalTree $Folder | Where-Object { ([string]$_.Path) -like '*.cat' })
+    if ($cats.Count -ne 1) { $r.Reason = "The export has $($cats.Count) catalog files; exactly one is allowed."; return [pscustomobject]$r }
+    if ($cat -notin $top -or (Split-Path ([string]$cats[0].Path) -Leaf) -ine $cat) { $r.Reason = "The catalog $cat is not the one catalog on the top level of the export."; return [pscustomobject]$r }
     $s = & $P.CatalogSignature (Join-Path $Folder $cat)
     $r.Signer = [string]$s.Subject; $r.Thumbprint = ([string]$s.Thumbprint).ToUpperInvariant()
     if ([string]$s.Status -ne 'Valid' -or -not [bool]$s.ChainOk) { $r.Reason = "The catalog $cat has no valid signature ($($s.Status))."; return [pscustomobject]$r }
@@ -293,7 +353,7 @@ function Get-AVDTunePrinterCheckedExport {
         try {
             $bad = Test-AVDTunePrinterExportFiles $exp.Files
             if ($bad) { throw $bad }
-            & $P.RemoteCopy $Session $exp $local
+            Copy-AVDTunePrinterExport -P $P -Session $Session -Export $exp -Local $local
         }
         finally { & $P.RemoteRemove $Session $exp.Folder }
         $bad = Test-AVDTunePrinterLocalTree -P $P -Folder $local
@@ -629,13 +689,30 @@ function New-AVDTunePrinterAdapter {
                 $hit = @(Get-ChildItem -LiteralPath $dir -Recurse -File -Filter $leaf -ErrorAction Stop)[0]
                 if (-not $hit) { throw "The export has no $leaf." }
                 $src = $hit.DirectoryName
-                $files = @(Get-ChildItem -LiteralPath $src -Recurse -Force -ErrorAction Stop | ForEach-Object { [pscustomobject]@{ Path = $_.FullName.Substring($src.Length).TrimStart('\'); Length = $(if ($_.PSIsContainer) { 0 } else { $_.Length }); Link = (($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) } })
+                $files = @(Get-ChildItem -LiteralPath $src -Recurse -Force -ErrorAction Stop | ForEach-Object { [pscustomobject]@{ Path = $_.FullName.Substring($src.Length).TrimStart('\'); Dir = [bool]$_.PSIsContainer; Length = $(if ($_.PSIsContainer) { 0 } else { $_.Length }); Link = (($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) } })
                 [pscustomobject]@{ Folder = $dir; Source = $src; Files = $files }
             }
             catch { [IO.Directory]::Delete($dir, $true); throw }
         } | ForEach-Object { [pscustomobject]@{ Folder = [string]$_.Folder; Source = [string]$_.Source; Files = @($_.Files) } }
     }
-    $a.RemoteCopy = { param($Session, $Export, $Local) Copy-Item -FromSession $Session -Path ([string]$Export.Source + '\*') -Destination $Local -Recurse -ErrorAction Stop }
+    $a.RemoteReadFile = {
+        # one file of the export (the path is built by Copy-AVDTunePrinterExport from the checked relative path); the server side refuses a link and anything over 100 MB
+        param($Session, $Path)
+        , [byte[]](Invoke-Command -Session $Session -ArgumentList $Path -ErrorAction Stop -ScriptBlock {
+                param($f)
+                $i = New-Object IO.FileInfo $f
+                if (($i.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw "$f is a link." }
+                if ($i.Length -gt 100MB) { throw "$f is larger than 100 MB." }
+                , [IO.File]::ReadAllBytes($f)
+            })
+    }
+    $a.LocalMkdir = { param($Path) if (-not [IO.Directory]::Exists($Path)) { New-AVDTuneOwnFolder -Path $Path } elseif (([IO.File]::GetAttributes($Path) -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw "$Path is a link." } }
+    $a.LocalWriteNew = {
+        # a new file (CreateNew: an existing one, also a link put there, is never written through), inheriting the admin-only ACL of the work folder
+        param($Path, [byte[]]$Bytes)
+        $s = New-Object IO.FileStream($Path, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+        try { $s.Write($Bytes, 0, $Bytes.Length); $s.Flush($true) } finally { $s.Dispose() }
+    }
     $a.RemoteRemove = {
         # N2: only a folder AVDTune made: full path, parent exactly Windows\Temp, name AVDTune-<12 hex>; .NET deletes a link inside as a link and does not follow it
         param($Session, $Folder)

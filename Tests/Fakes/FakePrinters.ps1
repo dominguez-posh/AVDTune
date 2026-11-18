@@ -2,7 +2,7 @@
 # drivers, their exports (files, catalog, signer), the drivers of the master, the registry and the local work folders, all in memory. Nothing here touches the computer.
 # Dot-source this file, then: $p = New-AVDTuneFakePrinters [-Seed @{ ... }]
 # Seed keys (all optional): Servers (FQDN -> @{ Printers = array of @{ Name; ShareName; Shared; DriverName }; Drivers = array of @{ Name; Environment; Version; InfPath;
-# PackageAware; LocalPackageAware; Cat; Signer = @{ Status; ChainOk; Subject; Issuer; Thumbprint } } }), Local (driver name -> version), Registry ('path|name' -> @{ Value; Kind }).
+# PackageAware; LocalPackageAware; Cat; Cat2 (a second catalog in the export); InfText (the INF as text); Signer = @{ Status; ChainOk; Subject; Issuer; Thumbprint } } }), Local (driver name -> version), Registry ('path|name' -> @{ Value; Kind }).
 # Switches on .Store: FailExport, Unreachable (server: every session fails), BigExport (the export lists more bytes than allowed), EscapeExport (an entry '..\x'),
 # LinkInCopy (the local copy has a link), NestedInf (the INF is not on the top level of the copy), SwapSigner (driver name -> other signer from the second export on).
 # Log, Credentials (user names of the sessions), Auth (authentication of the sessions), Sessions, RemoteFolders, LocalFolders, Packages, TrustedHistory are recorded.
@@ -35,6 +35,7 @@ function New-AVDTuneFakePrinters {
         Log = (New-Object System.Collections.ArrayList); Credentials = (New-Object System.Collections.ArrayList); Auth = (New-Object System.Collections.ArrayList)
         Sessions = @{}; RemoteFolders = @{}; LocalFolders = @{}; Packages = @{}; TrustedHistory = (New-Object System.Collections.ArrayList)
         FailExport = $false; Unreachable = ''; BigExport = $false; EscapeExport = $false; LinkInCopy = $false; NestedInf = $false; SwapSigner = @{}; Exports = @{}; Next = 0
+        Reads = (New-Object System.Collections.ArrayList); Mkdirs = (New-Object System.Collections.ArrayList); ReadDriver = $null; ReadLength = 0
         Whql = $whql; Vendor = $vendor
     }
     foreach ($k in $Seed.Keys) { $store[$k] = $Seed[$k] }
@@ -58,7 +59,10 @@ function New-AVDTuneFakePrinters {
         if ($store.FailExport) { throw 'pnputil /export-driver ended with 5.' }
         $d = & $drvOf $store.Sessions[$Session] $InfPath
         if (-not $d) { throw 'The driver package of this INF is not in the driver store of the server.' }
-        $files = @(@{ Path = $InfPath.Substring($InfPath.LastIndexOf([char]92) + 1); Length = 4000; Link = $false }, @{ Path = $d.Cat; Length = 9000; Link = $false }, @{ Path = 'amd64\driver.dll'; Length = 300000; Link = $false })
+        $inf = $InfPath.Substring($InfPath.LastIndexOf([char]92) + 1); if ($store.NestedInf) { $inf = "sub\$inf" }
+        $files = @(@{ Path = $inf; Length = 4000; Link = $false }, @{ Path = $d.Cat; Length = 9000; Link = $false }, @{ Path = 'amd64'; Dir = $true; Length = 0; Link = $false }, @{ Path = 'amd64\driver.dll'; Length = 300000; Link = $false })
+        if ($store.NestedInf) { $files += @{ Path = 'sub'; Dir = $true; Length = 0; Link = $false } }
+        if ($d.ContainsKey('Cat2')) { $files += @{ Path = $d.Cat2; Length = 9000; Link = $false } }
         if ($store.BigExport) { $files += @{ Path = 'amd64\huge.bin'; Length = 600MB; Link = $false } }
         if ($store.EscapeExport) { $files += @{ Path = '..\evil.dll'; Length = 10; Link = $false } }
         $store.Next++; $f = "C:\Windows\Temp\AVDTune-$('{0:x12}' -f $store.Next)"; $store.RemoteFolders[$f] = @{ Driver = $d; Files = $files }
@@ -67,19 +71,32 @@ function New-AVDTuneFakePrinters {
         $o = @(); foreach ($x in $files) { $o += [pscustomobject]$x }
         [pscustomobject]@{ Folder = $f; Source = $f; Files = $o }
     }.GetNewClosure()
-    $p.RemoteCopy = {
-        param($Session, $Export, $Local)
-        $r = $store.RemoteFolders[$Export.Folder]; $l = $store.LocalFolders[$Local]
-        $l.Driver = $r.Driver; $o = @()
-        foreach ($x in @($r.Files)) { $rel = $x.Path; if ($store.NestedInf -and $rel -like '*.inf') { $rel = "sub\$rel" }; $o += @{ Path = ($Local.TrimEnd([char]92) + '\' + $rel); Length = $x.Length; Link = $false } }
-        if ($store.LinkInCopy) { $o += @{ Path = ($Local.TrimEnd([char]92) + '\amd64\link'); Length = 0; Link = $true } }
-        $l.Files = $o
-        & $log "RemoteCopy $($Export.Folder)"
+    $p.RemoteReadFile = {
+        param($Session, $Path)
+        foreach ($k in @($store.RemoteFolders.Keys)) {
+            if ($Path.StartsWith($k + '\')) {
+                $r = $store.RemoteFolders[$k]; $rel = $Path.Substring($k.Length + 1)
+                foreach ($x in @($r.Files)) { if ($x.Path -eq $rel) { $store.ReadDriver = $r.Driver; $store.ReadLength = $x.Length; [void]$store.Reads.Add($rel); return , (New-Object byte[] 4) } }
+            }
+        }
+        throw "No file $Path in an export."
+    }.GetNewClosure()
+    $p.LocalMkdir = { param($Path) [void]$store.Mkdirs.Add($Path) }.GetNewClosure()
+    $p.LocalWriteNew = {
+        param($Path, [byte[]]$Bytes)
+        foreach ($k in @($store.LocalFolders.Keys)) {
+            if ($Path.StartsWith($k + '\')) {
+                $l = $store.LocalFolders[$k]
+                foreach ($x in @($l.Files)) { if ($x.Path -eq $Path) { throw "The file '$Path' exists." } }
+                $l.Driver = $store.ReadDriver; $l.Files += @{ Path = $Path; Length = $store.ReadLength; Link = $false }; return
+            }
+        }
+        throw "$Path is not in a work folder."
     }.GetNewClosure()
     $p.RemoteRemove = { param($Session, $Folder) $store.RemoteFolders.Remove($Folder); & $log "RemoteRemove $Folder" }.GetNewClosure()
     $p.WorkFolder = { param($Root) $store.Next++; $d = $Root.TrimEnd([char]92) + "\temp\printers-w$($store.Next)"; $store.LocalFolders[$d] = @{ Driver = $null; Files = @() }; $d }.GetNewClosure()
-    $p.LocalTree = { param($Folder) $l = $store.LocalFolders[$Folder]; if (-not $l) { return @() }; $o = @(); foreach ($x in @($l.Files)) { $o += [pscustomobject]$x }; $o }.GetNewClosure()
-    $p.ReadInf = { param($Path) $l = & $folderOf $Path; if (-not $l) { throw "No INF $Path." }; "[Version]`r`nSignature=`"`$Windows NT`$`"`r`nCatalogFile.NTamd64=$($l.Driver.Cat)`r`n" }.GetNewClosure()
+    $p.LocalTree = { param($Folder) $l = $store.LocalFolders[$Folder]; if (-not $l) { return @() }; $o = @(); foreach ($x in @($l.Files)) { $o += [pscustomobject]$x }; if ($store.LinkInCopy) { $o += [pscustomobject]@{ Path = ($Folder.TrimEnd([char]92) + '\amd64\link'); Length = 0; Link = $true } }; $o }.GetNewClosure()
+    $p.ReadInf = { param($Path) $l = & $folderOf $Path; if (-not $l) { throw "No INF $Path." }; if ($l.Driver.ContainsKey('InfText')) { return $l.Driver.InfText }; "[Version]`r`nSignature=`"`$Windows NT`$`"`r`nCatalogFile.NTamd64=$($l.Driver.Cat)`r`n" }.GetNewClosure()
     $p.CatalogSignature = {
         param($Path)
         $l = & $folderOf $Path; if (-not $l) { throw "No catalog $Path." }
