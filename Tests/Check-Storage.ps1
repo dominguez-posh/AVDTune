@@ -278,19 +278,26 @@ try {
     $rec = Get-AVDTuneStorageAclUndo -Root $tmp
     Test-Check 'setting the ACL keeps an undo record: the ACL before and the one Azure keeps now (counter-test #24)' ($us.Status -eq 'Changed' -and $rec -and $rec.Before -eq $badSddl -and $rec.After -eq $goodSddl -and $rec.Account -eq 'storageaccount' -and $rec.Share -eq 'profiles') $null
     Close-AVDTuneWriteGate
-    $ug = Undo-AVDTuneStorageRootAcl -Files $ue.Files -Token $stTok -Root $tmp -User 'admin1' -SnapshotId 'snap'
+    $ug = Undo-AVDTuneStorageRootAcl -Files $ue.Files -Token $stTok -AllowedShares @('storageaccount/profiles') -Root $tmp -User 'admin1' -SnapshotId 'snap'
     Test-Check 'undo without the write gate: refused, nothing set (#24)' ($ug.Status -eq 'Failed' -and $ug.Message -like '*Read only*' -and $ue.Files.Store.Puts.Count -eq 1) $ug.Message
     Open-AVDTuneWriteGate -SnapshotId 'snap-check' -ConfirmedBy 'Check Runner'
+    $uw = Undo-AVDTuneStorageRootAcl -Files $ue.Files -Token $stTok -AllowedShares @('storageaccount/other', 'otheraccount/profiles') -Root $tmp -User 'admin1' -SnapshotId 'snap'
+    $un = Undo-AVDTuneStorageRootAcl -Files $ue.Files -Token $stTok -AllowedShares @() -Root $tmp -User 'admin1' -SnapshotId 'snap'
+    Test-Check 'review F2: the undo record of a share that is not a profile location of this master (or no location at all) is not used, nothing set (counter-test)' ($uw.Status -eq 'Failed' -and $uw.Message -like '*not a profile location*' -and $un.Status -eq 'Failed' -and $ue.Files.Store.Puts.Count -eq 1) $uw.Message
+    $noIntent = & $ue.Files.Invoke 'GET' 'https://storageaccount.file.core.windows.net/profiles?restype=directory' $stTok @{ 'x-ms-version' = '2024-11-04' } $null
+    Test-Check 'review F5: like Azure (Learn, Get Directory Properties), a reading GET with an OAuth token and no x-ms-file-request-intent is refused, so the header stays on the GETs' ([int]$noIntent.Status -eq 400 -and (Get-Content -LiteralPath (Join-Path $repo 'Modules\AVDTune.Storage.psm1') -Raw) -match 'Required if Authorization header specifies an OAuth token') $null
+    $srcFsl = Get-Content -LiteralPath (Join-Path $repo 'AVDTune-FSLogix.ps1') -Raw
+    Test-Check 'review F2: the page hands the shares of its VHDLocations to the undo' ($srcFsl -match "(?s)'AclUndo' \{.{0,400}Get-AVDTuneFSLogixLocations -Machine \`$C\.Machine.{0,300}-AllowedShares \`$allowed") $null
     $logBefore = @(Get-AVDTuneChangeLog -Root $tmp | Where-Object { $_.Component -eq 'Storage ACL' }).Count
-    $uo = Undo-AVDTuneStorageRootAcl -Files $ue.Files -Token $stTok -Root $tmp -User 'admin1' -SnapshotId 'snap'
+    $uo =Undo-AVDTuneStorageRootAcl -Files $ue.Files -Token $stTok -AllowedShares @('storageaccount/profiles') -Root $tmp -User 'admin1' -SnapshotId 'snap'
     $ulog = @(Get-AVDTuneChangeLog -Root $tmp | Where-Object { $_.Component -eq 'Storage ACL' })
     Test-Check 'undo puts the ACL from before back once (attributes and times preserved), with a change log entry without SDDL text (#24)' ($uo.Status -eq 'Changed' -and $ue.Files.Store.Puts.Count -eq 2 -and $ue.Files.Store.Puts[1].Sddl -eq $badSddl -and $ue.Files.Store.Puts[1].Attributes -eq 'preserve' -and $ue.Files.Store.Acls[''] -eq $badSddl -and $ulog.Count -eq $logBefore + 1 -and $ulog[-1].Text -like 'Undo:*' -and $ulog[-1].Text -notmatch 'O:BA') $uo.Message
-    $uo2 = Undo-AVDTuneStorageRootAcl -Files $ue.Files -Token $stTok -Root $tmp -User 'admin1' -SnapshotId 'snap'
+    $uo2 = Undo-AVDTuneStorageRootAcl -Files $ue.Files -Token $stTok -AllowedShares @('storageaccount/profiles') -Root $tmp -User 'admin1' -SnapshotId 'snap'
     Test-Check 'a second undo sets nothing (the root has the ACL from before)' ($uo2.Status -eq 'Failed' -and $ue.Files.Store.Puts.Count -eq 2) $uo2.Message
     $uc = New-Env -FilesSeed @{ Acls = @{ '' = $badSddl }; Folders = @() }
     [void](& $call $uc (Get-AVDTuneStorageAclDiff -FoundSddl $badSddl -UsersSid $usersSid -AdminsSid $adminsSid -Account 'storageaccount' -Share 'profiles').Hash)
     $uc.Files.Store.Acls[''] = 'O:BAG:DUD:PAI(A;OICI;FA;;;BA)'   # someone changed the root after AVDTune set it
-    $ucr = Undo-AVDTuneStorageRootAcl -Files $uc.Files -Token $stTok -Root $tmp -User 'admin1' -SnapshotId 'snap'
+    $ucr = Undo-AVDTuneStorageRootAcl -Files $uc.Files -Token $stTok -AllowedShares @('storageaccount/profiles') -Root $tmp -User 'admin1' -SnapshotId 'snap'
     Test-Check 'the root changed after AVDTune set it: undo sets nothing (counter-test #24)' ($ucr.Status -eq 'Failed' -and $ucr.Message -like '*changed after AVDTune set it*' -and $uc.Files.Store.Puts.Count -eq 1) $ucr.Message
     $undoFile = Join-Path $tmp 'config\storage-acl-undo.json'
     Test-Check 'older undo records are kept, not overwritten (checklist)' (@(Get-ChildItem -LiteralPath (Join-Path $tmp 'config') -Filter 'storage-acl-undo*.json').Count -ge 2) $null
@@ -298,7 +305,7 @@ try {
         $r0 = [ordered]@{ Account = 'storageaccount'; Share = 'profiles'; Before = $badSddl; Set = $goodSddl; After = $goodSddl }
         foreach ($k in $bad.Keys) { $r0[$k] = $bad[$k] }
         Write-AVDTuneFile $undoFile ($r0 | ConvertTo-Json)
-        $ux = Undo-AVDTuneStorageRootAcl -Files $uc.Files -Token $stTok -Root $tmp -User 'admin1' -SnapshotId 'snap'
+        $ux = Undo-AVDTuneStorageRootAcl -Files $uc.Files -Token $stTok -AllowedShares @('storageaccount/profiles') -Root $tmp -User 'admin1' -SnapshotId 'snap'
         Test-Check "an undo record that is not valid is data, not used ($(@($bad.Keys)[0]) = $(@($bad.Values)[0] -replace '[\r\n]', ' '))" ($null -eq (Get-AVDTuneStorageAclUndo -Root $tmp) -and $ux.Status -eq 'Failed' -and $ux.Message -like '*nothing to undo*' -and $uc.Files.Store.Puts.Count -eq 1) $null
     }
 

@@ -353,9 +353,28 @@ function Test-AVDTuneUncPath($Path) {
        no '\\?\' or '\\.\' device paths, no '.' or '..' segments, at most 260 characters. Format only: whether the share can be read is checked when the entry is applied. #>
     if ($Path -isnot [string] -or $Path.Length -lt 5 -or $Path.Length -gt 260) { return $false }
     if (-not (Test-OptText $Path 5 260)) { return $false }   # no control characters
-    if (-not (Test-OptPattern $Path '\A\\\\[A-Za-z0-9](?:[A-Za-z0-9-]{0,62})(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,62}))*\\[A-Za-z0-9_.$-][A-Za-z0-9_.$ -]{0,79}(?:\\[A-Za-z0-9_.$(){} -]{1,120})*\z')) { return $false }
+    if (-not (Test-OptPattern $Path '\A\\\\[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*\\[A-Za-z0-9_.$-][A-Za-z0-9_.$ -]{0,79}(?:\\[A-Za-z0-9_.$(){} -]{1,120})*\z')) { return $false }
     foreach ($seg in $Path.Substring(2).Split('\')) { if ($seg -match '^\.+$' -or $seg.EndsWith(' ') -or $seg.EndsWith('.')) { return $false } }
     $true
+}
+function Get-OptUncHost([string]$Path) { if (Test-AVDTuneUncPath $Path) { $Path.Substring(2).Split('\')[0].ToLowerInvariant() } else { '' } }
+function Get-OptUncHostProblem {
+    <# #41 review F1: reading the share sends the administrator's logon to the host. Only a private IPv4 (RFC 1918, not loopback, not public) or a full name inside
+       one of the domains (the machine's DNS domain, the domain read from the DC) is accepted; a single-label name, localhost and any other host are refused. #>
+    param([string]$HostName, [string[]]$Domains = @())
+    $h = $HostName.ToLowerInvariant()
+    if ($h -match '\A[0-9.]+\z') { if (Test-AVDTunePrivateIp $h) { return $null }; return "the address $h is not a private address of the network (loopback and public addresses are refused)." }
+    $doms = @($Domains | Where-Object { $_ } | ForEach-Object { ([string]$_).Trim().TrimEnd('.').ToLowerInvariant() } | Where-Object { Test-OptPattern $_ '\A[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+\z' } | Select-Object -Unique)
+    if ($h -eq 'localhost' -or $h -notmatch '\.') { return "the host '$h' is not a full name (server.domain); enter the full name of the file server in the domain." }
+    foreach ($d in $doms) { if ($h.EndsWith('.' + $d)) { return $null } }
+    if ($doms.Count -eq 0) { return "no domain is known for this master (not joined, no DC read): only a private IPv4 address of the file server is accepted, not '$h'." }
+    "the host '$h' is not in the domain $($doms -join ' or '); the administrator's logon is only sent to file servers of that domain."
+}
+function Get-OptShareDomains($Machine, [string]$Root) {
+    # the domains a share host may be in: the DNS domain of this machine and the domain the DC step read (config\directory.json)
+    $d = @(); try { $d += [string](& $Machine.DnsDomain) } catch { }
+    try { $j = Read-AVDTuneJson (Join-Path $Root 'config\directory.json'); $n = Get-AVDTuneProp (Get-AVDTuneProp $j 'Directory') 'DnsName'; if ($n -is [string]) { $d += $n } } catch { }
+    @($d | Where-Object { $_ })
 }
 function ConvertTo-OptUncCompare($Value) { if ($null -eq $Value -or ($Value -is [string] -and $Value -eq '') -or ($Value -isnot [string])) { '' } else { $Value.TrimEnd('\').ToLowerInvariant() } }
 function Get-OptDefenderProblem {
@@ -835,8 +854,9 @@ function Add-AVDTuneOptimizationMachineMembers {
         UncReadable = {
             # #41: can the share of the shared security intelligence be read (as the elevated administrator; Defender reads it as the computer account), and does it hold
             # at least one {GUID} folder (the layout of Learn's unpack script)? No credentials: the current logon only. Returns @{ Ok; GuidFolders; Error }.
-            param($Path)
+            param($Path, $Domains = @())
             if (-not (Test-AVDTuneUncPath $Path)) { throw 'Refused: not a valid UNC path.' }
+            $hp = Get-OptUncHostProblem -HostName (Get-OptUncHost $Path) -Domains @($Domains); if ($hp) { throw "Refused: $hp" }   # checked again right before the logon goes out
             try {
                 $di = New-Object IO.DirectoryInfo ([string]$Path)
                 if (-not $di.Exists) { return @{ Ok = $false; GuidFolders = 0; Error = 'The share or folder does not exist or cannot be reached.' } }
@@ -845,6 +865,7 @@ function Add-AVDTuneOptimizationMachineMembers {
             }
             catch { @{ Ok = $false; GuidFolders = 0; Error = $_.Exception.Message } }
         }.GetNewClosure()
+        DnsDomain = { [string]([System.Net.NetworkInformation.IPGlobalProperties]::GetIPGlobalProperties().DomainName) }
         RegInfo = {
             # Value as it is stored (not expanded) with its kind, read through the registry key (never through a property object: names like PSPath cannot clash)
             param($Path, $Name)
@@ -875,7 +896,7 @@ function Add-AVDTuneOptimizationMachineMembers {
             finally { $pk.Close() }
         }.GetNewClosure()
     }
-    foreach ($name in 'AppxState', 'AppxRemove', 'MpGet', 'MpSet', 'UncReadable', 'RegInfo', 'RegKeyRemoveEmpty', 'HiveInfo', 'HiveKeyExists', 'HiveSet', 'HiveRemove', 'HiveKeyRemoveEmpty', 'HiveUnmount') {
+    foreach ($name in 'AppxState', 'AppxRemove', 'MpGet', 'MpSet', 'UncReadable', 'DnsDomain', 'RegInfo', 'RegKeyRemoveEmpty', 'HiveInfo', 'HiveKeyExists', 'HiveSet', 'HiveRemove', 'HiveKeyRemoveEmpty', 'HiveUnmount') {
         if ($null -ne $Machine.PSObject.Properties[$name]) { continue }
         if ($Machine.Kind -ne 'Real') { throw "The machine adapter has no member '$name'." }
         $Machine | Add-Member -NotePropertyName $name -NotePropertyValue $real[$name]
@@ -900,7 +921,7 @@ function New-AVDTuneOptimizationStep {
         machine adapter and the backup file; nothing of the entry is evaluated as code. An entry that breaks the limits of the list is refused here as well
         (not only when the data is read), so an entry made by hand cannot get around them.
     #>
-    param([Parameter(Mandatory)]$Entry, [Parameter(Mandatory)][string]$Root, [string]$InputValue = '')
+    param([Parameter(Mandatory)]$Entry, [Parameter(Mandatory)][string]$Root, [string]$InputValue = '', [string]$ConfirmedHost = '')
     $problem = Get-OptEntryProblem $Entry
     if ($problem) { throw "Entry $($Entry.Id) refused: $problem" }
     $id = $Entry.Id
@@ -1041,17 +1062,24 @@ function New-AVDTuneOptimizationStep {
             if ((Get-AVDTuneProp $Entry 'Input') -eq 'UncPath') {
                 # #41: the path comes from the page; without one the row only says whether a path is set (Apply refuses, Undo works)
                 if ($InputValue -and -not (Test-AVDTuneUncPath $InputValue)) { throw "Entry $id refused: the path is not a valid UNC path." }
-                $want = $InputValue
+                $want = $InputValue; $confirmedHost = $ConfirmedHost.ToLowerInvariant()
                 $present = { param($m) try { [void](& $m.MpGet $param); $true } catch { if (Test-OptDefenderAbsent $_) { $false } else { throw } } }.GetNewClosure()
                 $test = { param($m) $v = ConvertTo-OptUncCompare (& $m.MpGet $param); @{ Compliant = $(if ($want) { $v -ne '' -and $v -eq (ConvertTo-OptUncCompare $want) } else { $v -ne '' }); State = $(if ($v) { [string](& $m.MpGet $param) } else { 'no path set' }) } }.GetNewClosure()
                 $apply = {
                     param($m)
                     if (-not $want) { throw 'Enter the UNC path of the share first. Nothing was set.' }
-                    $rd = & $m.UncReadable $want
+                    $uh = Get-OptUncHost $want
+                    if ($confirmedHost -cne $uh) { throw "The administrator did not confirm that the logon is sent to $uh. Nothing was read or set." }
+                    $doms = @(Get-OptShareDomains $m $Root)
+                    $hp = Get-OptUncHostProblem -HostName $uh -Domains $doms; if ($hp) { throw "Refused, nothing was read or set: $hp" }
+                    $v0 = & $m.MpGet $param
+                    if ($null -ne $v0 -and $v0 -isnot [string]) { throw 'The value that is set now cannot be saved for the undo (it is not text). Nothing was set.' }   # review F4
+                    $rd = & $m.UncReadable $want $doms
                     if (-not $rd.Ok) { throw "The share cannot be read, nothing was set (with no readable share Defender gets no updates from its other sources): $($rd.Error)" }
                     if ([int]$rd.GuidFolders -lt 1) { throw 'The share holds no {GUID} folder with an unpacked update yet (see the update job on Learn). Nothing was set: Defender would get no updates.' }
                     $v = & $m.MpGet $param
-                    [void](Save-AVDTuneOptimizationBackup -Root $Root -Id $id -Record @{ Kind = 'DefenderPref'; Parameter = $param; Unset = $false; Value = $(if ($v -is [string]) { $v } else { '' }); At = (& $m.Now).ToString('o') })
+                    if ($null -ne $v -and $v -isnot [string]) { throw 'The value that is set now cannot be saved for the undo (it is not text). Nothing was set.' }
+                    [void](Save-AVDTuneOptimizationBackup -Root $Root -Id $id -Record @{ Kind = 'DefenderPref'; Parameter = $param; Unset = $false; Value = $(if ($null -eq $v) { '' } else { [string]$v }); At = (& $m.Now).ToString('o') })
                     & $m.MpSet $param $want $false
                 }.GetNewClosure()
                 $undo = {
@@ -1165,7 +1193,7 @@ function Invoke-AVDTuneOptimization {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)]$Machine, [string]$Root = (Get-AVDTuneRoot), [string]$DataPath = $script:DataFile, [Parameter(Mandatory)][AllowEmptyCollection()][string[]]$Ids,
-        [ValidateSet('Apply', 'Undo')][string]$Mode = 'Apply', [switch]$ConfirmIrreversible, [string]$User, [string]$SnapshotId, [switch]$WhatIf, [hashtable]$Inputs = @{}
+        [ValidateSet('Apply', 'Undo')][string]$Mode = 'Apply', [switch]$ConfirmIrreversible, [string]$User, [string]$SnapshotId, [switch]$WhatIf, [hashtable]$Inputs = @{}, [string[]]$ConfirmedHosts = @()
     )
     $data = Read-AVDTuneOptimizationData -Path $DataPath
     if (-not $data.Valid) { throw ('The optimization data is not valid, nothing is applied: ' + (@($data.Errors | Select-Object -First 3) -join ' ')) }
@@ -1181,7 +1209,7 @@ function Invoke-AVDTuneOptimization {
     }
     if ($Mode -eq 'Apply') { foreach ($id in $selected) { if ((Get-AVDTuneProp $byId[$id] 'Input') -eq 'UncPath' -and -not $Inputs.ContainsKey($id)) { throw "Enter the path for '$($byId[$id].Title)' first. Nothing was changed." } } }
     [void](Add-AVDTuneOptimizationMachineMembers -Machine $Machine)
-    $items = @($selected | ForEach-Object { New-AVDTuneOptimizationStep -Entry $byId[$_] -Root $Root -InputValue $(if ($Inputs.ContainsKey($_)) { [string]$Inputs[$_] } else { '' }) })
+    $items = @($selected | ForEach-Object { New-AVDTuneOptimizationStep -Entry $byId[$_] -Root $Root -InputValue $(if ($Inputs.ContainsKey($_)) { [string]$Inputs[$_] } else { '' }) -ConfirmedHost $(if ($Inputs.ContainsKey($_) -and (@($ConfirmedHosts | ForEach-Object { ([string]$_).ToLowerInvariant() }) -ccontains (Get-OptUncHost ([string]$Inputs[$_])))) { Get-OptUncHost ([string]$Inputs[$_]) } else { '' }) })
     if ($Mode -eq 'Apply' -and -not $WhatIf -and -not $ConfirmIrreversible) {
         $pending = @($items | Where-Object { $_.Entry.Irreversible -and (& $_.Present $Machine) -and -not (ConvertTo-AVDTuneTestResult (& $_.Step.Test $Machine)).Compliant })
         if ($pending.Count -gt 0) { throw "$($pending.Count) AppX removal(s) cannot be undone and need their own confirmation (ConfirmIrreversible). Nothing was changed." }
@@ -1273,5 +1301,5 @@ function Invoke-AVDTuneOptimization {
 
 Export-ModuleMember -Function Get-AVDTuneOptimizationDataPath, Read-AVDTuneOptimizationData, Get-AVDTuneOptimizationPresetIds, Get-AVDTuneOptimizationCategoryLabel, Get-AVDTuneOptimizationCategoryOrder,
     Add-AVDTuneOptimizationMachineMembers, New-AVDTuneOptimizationStep, Get-AVDTuneOptimizationStatus, Test-OptDefenderAbsent, ConvertTo-OptInt32, Invoke-AVDTuneOptimization,
-    Get-AVDTuneOptimizationBackup, Save-AVDTuneOptimizationBackup, Remove-AVDTuneOptimizationBackup, ConvertTo-OptScalar, ConvertTo-OptCompare, Test-OptInt, Test-OptText, Test-OptPattern, Get-OptRegistryProblem, Get-OptServiceProblem, Get-OptTaskProblem, Get-OptAppxProblem, Get-OptDefenderProblem, Get-OptEntryProblem, Test-AVDTuneUncPath, ConvertTo-OptUncCompare, Get-OptCreatedKeys, Assert-OptRegistryAccess, Get-OptRegistryKeyProblem, Get-OptRegistryValueProblem, Get-OptRestoreProblem, Test-OptDefenderUnset, ConvertTo-OptDWordRead, ConvertTo-OptDWordWrite, Test-OptRegPathSyntax, Test-OptRegNameSyntax,
+    Get-AVDTuneOptimizationBackup, Save-AVDTuneOptimizationBackup, Remove-AVDTuneOptimizationBackup, ConvertTo-OptScalar, ConvertTo-OptCompare, Test-OptInt, Test-OptText, Test-OptPattern, Get-OptRegistryProblem, Get-OptServiceProblem, Get-OptTaskProblem, Get-OptAppxProblem, Get-OptDefenderProblem, Get-OptEntryProblem, Test-AVDTuneUncPath, ConvertTo-OptUncCompare, Get-OptUncHost, Get-OptUncHostProblem, Get-OptShareDomains, Get-OptCreatedKeys, Assert-OptRegistryAccess, Get-OptRegistryKeyProblem, Get-OptRegistryValueProblem, Get-OptRestoreProblem, Test-OptDefenderUnset, ConvertTo-OptDWordRead, ConvertTo-OptDWordWrite, Test-OptRegPathSyntax, Test-OptRegNameSyntax,
     Get-AVDTuneDefaultHiveName, Get-AVDTuneDefaultHivePath, Mount-AVDTuneDefaultHive, Dismount-AVDTuneDefaultHive, Get-OptHiveCreatedKeys, Assert-OptHiveAccess, Test-OptHivePathSyntax, Test-OptHiveNameSyntax, Get-OptHiveProblem, Get-OptHiveKeyProblem, Get-OptHiveValueProblem

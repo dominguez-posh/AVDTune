@@ -297,6 +297,7 @@ function Start-OptChange([string]$Mode) {
             $inputs[[string]$r.Id] = $v
         }
     }
+    $hosts = @($inputs.Values | ForEach-Object { Get-OptUncHost $_ } | Select-Object -Unique)   # #41 review F1: named in the confirmation, only these are read
     if ($sel.Count -eq 0) { Show-Toast $(if ($Mode -eq 'Undo') { 'Nothing selected that can be undone.' } else { 'Nothing selected that is not in place yet.' }); return }
     $irr = @($sel | Where-Object { $_.Irreversible })
     $reboot = @($sel | Where-Object { $_.Reboot }).Count
@@ -305,7 +306,7 @@ function Start-OptChange([string]$Mode) {
         $(if ($high.Count -gt 0) { "`n$($high.Count) of them have risk High: " + (@($high | Select-Object -First 3 | ForEach-Object { $_.Title }) -join '; ') }) +
         $(if ($reboot -gt 0 -and $Mode -eq 'Apply') { "`n$reboot need a restart to take effect." }) +
         $(if ($skip.Count -gt 0) { "`n$($skip.Count) AppX removal(s) in the selection cannot be undone and are left out." }) +
-        $(if ($inputs.Count -gt 0) { "`nShare for the Defender updates: " + (@($inputs.Values) -join ', ') + ' (checked for readability first; nothing is set if it cannot be read).' }) +
+        $(if ($inputs.Count -gt 0) { "`nShare for the Defender updates: " + (@($inputs.Values) -join ', ') + ". To check that it can be read, the logon of this administrator is sent to " + (@($hosts) -join ', ') + ' (nothing is set if it cannot be read).' }) +
         "`nThe value that is there now is saved first so each entry can be undone (not AppX)."
     if (-not (Confirm-Action $ask 'Optimization')) { return }
     $confirmIrr = $false
@@ -317,27 +318,27 @@ function Start-OptChange([string]$Mode) {
     $ids = @($sel | ForEach-Object { $_.Id })
     $user = [string]$env:USERNAME
     $gate = Get-AVDTuneWriteGate
-    Start-OptRun $Mode $ids $confirmIrr $user $gate $inputs
+    Start-OptRun $Mode $ids $confirmIrr $user $gate $inputs $hosts
 }
 
-function Start-OptRun([string]$Mode, [string[]]$Ids, [bool]$ConfirmIrr, [string]$User, $Gate, [hashtable]$Inputs = @{}) {
+function Start-OptRun([string]$Mode, [string[]]$Ids, [bool]$ConfirmIrr, [string]$User, $Gate, [hashtable]$Inputs = @{}, [string[]]$Hosts = @()) {
     # Apply or Undo as a task in the background (the work of an entry, Defender and AppX removal included, no longer blocks the window). The confirmations are
     # done before. The window stays open until the run is done (closing handler below), like for the other operations that change the master.
     Assert-NoOtherWriter   # every start of a writer job asks the central check (#50/#66 review)
     if ($script:OptRun) { throw 'Another optimization run is still running.' }
     $label = if ($Mode -eq 'Undo') { 'Undoing optimizations' } else { 'Applying optimizations' }
     $task = Start-AVDTuneUiTask -Kind 'optimization' -Title $label -Step "$($Ids.Count) entries"   # no Retry: it changes the master and starts only after its confirmation
-    if ($script:TestMode) { $script:OptRun = @{ Inline = $true; Task = $task; Mode = $Mode; Ids = $Ids; ConfirmIrr = $ConfirmIrr; User = $User; Gate = $Gate; Inputs = $Inputs } }
+    if ($script:TestMode) { $script:OptRun = @{ Inline = $true; Task = $task; Mode = $Mode; Ids = $Ids; ConfirmIrr = $ConfirmIrr; User = $User; Gate = $Gate; Inputs = $Inputs; Hosts = $Hosts } }
     else {
         $ps = New-AVDTunePowerShell
         [void]$ps.AddScript({
-                param($AppRoot, $Root, $Ids, $Mode, $ConfirmIrr, $User, $Gate, $Inputs)
+                param($AppRoot, $Root, $Ids, $Mode, $ConfirmIrr, $User, $Gate, $Inputs, $Hosts)
                 $ErrorActionPreference = 'Stop'
                 Import-Module (Join-Path $AppRoot 'Modules\AVDTune.psm1') -Force
                 Import-Module (Join-Path $AppRoot 'Modules\AVDTune.Optimization.psm1') -Force
                 if ($Gate) { Open-AVDTuneWriteGate -SnapshotId $Gate.SnapshotId -ConfirmedBy $Gate.ConfirmedBy }
-                Invoke-AVDTuneOptimization -Machine (New-AVDTuneMachine) -Root $Root -Ids $Ids -Mode $Mode -ConfirmIrreversible:$ConfirmIrr -User $User -SnapshotId $Gate.SnapshotId -Inputs $Inputs
-            }).AddArgument($script:AppRoot).AddArgument($script:StateRoot).AddArgument($Ids).AddArgument($Mode).AddArgument($ConfirmIrr).AddArgument($User).AddArgument($Gate).AddArgument($Inputs)
+                Invoke-AVDTuneOptimization -Machine (New-AVDTuneMachine) -Root $Root -Ids $Ids -Mode $Mode -ConfirmIrreversible:$ConfirmIrr -User $User -SnapshotId $Gate.SnapshotId -Inputs $Inputs -ConfirmedHosts $Hosts
+            }).AddArgument($script:AppRoot).AddArgument($script:StateRoot).AddArgument($Ids).AddArgument($Mode).AddArgument($ConfirmIrr).AddArgument($User).AddArgument($Gate).AddArgument($Inputs).AddArgument($Hosts)
         $script:OptRun = @{ PS = $ps; Handle = $ps.BeginInvoke(); Task = $task; Mode = $Mode }
     }
     Set-OptBusy $true
@@ -352,7 +353,7 @@ function Complete-OptRun {
     $script:OptRun = $null
     $result = $null; $err = ''; $streamErr = ''
     if ($job.Inline) {
-        try { $result = Invoke-AVDTuneOptimization -Machine $script:Machine -Root $script:StateRoot -Ids $job.Ids -Mode $job.Mode -ConfirmIrreversible:$job.ConfirmIrr -User $job.User -SnapshotId $job.Gate.SnapshotId -Inputs $(if ($job.Inputs) { $job.Inputs } else { @{} }) } catch { $err = $_.Exception.Message }
+        try { $result = Invoke-AVDTuneOptimization -Machine $script:Machine -Root $script:StateRoot -Ids $job.Ids -Mode $job.Mode -ConfirmIrreversible:$job.ConfirmIrr -User $job.User -SnapshotId $job.Gate.SnapshotId -Inputs $(if ($job.Inputs) { $job.Inputs } else { @{} }) -ConfirmedHosts @($job.Hosts) } catch { $err = $_.Exception.Message }
     }
     else {
         try {

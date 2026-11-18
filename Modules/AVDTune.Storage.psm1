@@ -54,13 +54,6 @@ function Split-AVDTuneUncShare {
     [pscustomobject]@{ Host = $h; Account = $acct; Share = $share; Path = $path.Trim('\'); IsAzureFiles = $az }
 }
 
-function Test-AVDTunePrivateIp([string]$Ip) {
-    # RFC 1918 and the shared address space; what a private endpoint gets
-    if ($Ip -notmatch '^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$') { return $false }
-    $a = [int]$Matches[1]; $b = [int]$Matches[2]
-    ($a -eq 10) -or ($a -eq 172 -and $b -ge 16 -and $b -le 31) -or ($a -eq 192 -and $b -eq 168)
-}
-
 function Assert-AVDTuneStorageArmPath {
     param([string]$Path, [string]$Method)
     if ($Path -notmatch '^/subscriptions/[0-9a-fA-F-]{36}/') { throw 'Not an ARM subscription path.' }
@@ -90,6 +83,8 @@ function Invoke-AVDTuneStorageFiles {
     if ($Path -and $Path -notmatch '^[^<>:"|?*\\\x00-\x1F]+(/[^<>:"|?*\\\x00-\x1F]+)*$') { throw 'The path is not valid.' }
     if ($Query -notmatch '^[A-Za-z0-9=&_.-]+$') { throw 'The query is not valid.' }
     $url = "https://$Account.file.core.windows.net/$Share" + $(if ($Path) { "/$Path" } else { '' }) + "?$Query"
+    # The intent header goes on every call, the reading GETs too (review F5): Learn, Get Directory Properties (FileREST), request headers: "x-ms-file-request-intent:
+    # Required if Authorization header specifies an OAuth token. Acceptable value is backup." Every call here uses the user's OAuth token; without it Azure refuses the GET.
     $h = @{ 'x-ms-version' = $script:FilesVersion; 'x-ms-file-request-intent' = 'backup' }
     foreach ($k in $Headers.Keys) { $h[$k] = $Headers[$k] }
     & $Files.Invoke $Method $url $Token $h $Body
@@ -320,10 +315,12 @@ function Undo-AVDTuneStorageRootAcl {
         through the write gate, with LastChange and a change log entry. Same token path and role as setting it. Returns @{ Status Changed | Failed; Message }.
     #>
     [CmdletBinding()]
-    param([Parameter(Mandatory)]$Files, [Parameter(Mandatory)][string]$Token, [string]$Root = (Get-AVDTuneRoot), [string]$User, [string]$SnapshotId)
+    param([Parameter(Mandatory)]$Files, [Parameter(Mandatory)][string]$Token, [Parameter(Mandatory)][AllowEmptyCollection()][string[]]$AllowedShares, [string]$Root = (Get-AVDTuneRoot), [string]$User, [string]$SnapshotId)
     if (-not (Test-AVDTuneWriteAllowed)) { return [pscustomobject]@{ Status = 'Failed'; Message = 'Read only: confirm a snapshot of today on the Overview first. Nothing was set.' } }
     $u = Get-AVDTuneStorageAclUndo -Root $Root
     if (-not $u) { return [pscustomobject]@{ Status = 'Failed'; Message = 'There is nothing to undo: AVDTune has not set an ACL on a share root (or the undo record is not valid).' } }
+    # review F2: only a share of the environment the FSLogix page works with (its VHDLocations, 'account/share'); a record of another account or share is not used
+    if (@($AllowedShares | ForEach-Object { ([string]$_).ToLowerInvariant() }) -cnotcontains "$($u.Account)/$($u.Share)".ToLowerInvariant()) { return [pscustomobject]@{ Status = 'Failed'; Message = "The last ACL AVDTune set belongs to share $($u.Share) of $($u.Account), which is not a profile location of this master (VHDLocations). Nothing was set." } }
     $changeOwner = Start-AVDTuneChange -Root $Root
     try {
         $now = Get-AVDTuneStorageShareAcl -Files $Files -Account $u.Account -Share $u.Share -Token $Token
@@ -633,6 +630,6 @@ function New-AVDTuneFilesAdapter {
 
 #endregion
 
-Export-ModuleMember -Function Test-AVDTuneStorageAccountName, Test-AVDTuneShareName, Split-AVDTuneUncShare, Test-AVDTunePrivateIp, Assert-AVDTuneStorageArmPath, Invoke-AVDTuneStorageArm, Invoke-AVDTuneStorageFiles,
+Export-ModuleMember -Function Test-AVDTuneStorageAccountName, Test-AVDTuneShareName, Split-AVDTuneUncShare, Assert-AVDTuneStorageArmPath, Invoke-AVDTuneStorageArm, Invoke-AVDTuneStorageFiles,
     Find-AVDTuneStorageAccount, Get-AVDTuneStorageAdCompare, Get-AVDTuneStorageShareAcl, Get-AVDTuneStorageProfileFolders, Get-AVDTuneStorageAclDiff, Set-AVDTuneStorageRootAcl, Get-AVDTuneStorageAclUndo, Undo-AVDTuneStorageRootAcl, Test-AVDTuneSddlText,
     Invoke-AVDTuneStorageCheck, Get-AVDTuneStorageResult, Save-AVDTuneStorageCheckRun, New-AVDTuneFilesAdapter

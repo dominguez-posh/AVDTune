@@ -12,7 +12,7 @@ function Add-AVDTuneOptimizationFakeMembers {
     $store = $Machine.Store
     $store.Appx = @{}; foreach ($a in $Appx) { $store.Appx[$a.ToLowerInvariant()] = [pscustomobject]@{ Installed = $true; Provisioned = $true } }
     $store.Mp = @{}; foreach ($k in $Defender.Keys) { $store.Mp[[string]$k] = $Defender[$k] }
-    $store.MpUnreported = @(); $store.RegKinds = @{}; $store.Unc = @{}
+    $store.MpUnreported = @(); $store.RegKinds = @{}; $store.Unc = @{}; $store.DnsDomain = ''
     if (-not $store.Mp.ContainsKey('SharedSignaturesPath')) { $store.Mp['SharedSignaturesPath'] = '' }
     # Default user profile (#40): loading is simulated through the real Mount-/Dismount-AVDTuneDefaultHive with fake operations. $m.Store.Hive holds Loaded, Registry
     # ('path|name' lower case -> value), Kinds, Keys, Loads, Unloads; Stale = a hive left loaded by a crash (set Loaded = $true before the first use), FailLoad = reg load
@@ -99,9 +99,11 @@ function Add-AVDTuneOptimizationFakeMembers {
             if ([string]$Name -like '*ThreatDefaultAction' -and (@(1, 2, 3, 6, 8, 9, 10, 11) -notcontains [int]$Value)) { throw "fake: Set-MpPreference cannot bind $Value to $Name (not a value of the enum ThreatAction)" }
             $store.Mp[[string]$Name] = $Value; [void]$store.Log.Add("MpSet $Name=$Value restore=$Restore")
         }.GetNewClosure())
+    $Machine | Add-Member -NotePropertyName DnsDomain -NotePropertyValue ({ [string]$store.DnsDomain }.GetNewClosure())
     $Machine | Add-Member -NotePropertyName UncReadable -NotePropertyValue ({
-            param($Path)
+            param($Path, $Domains = @())
             [void]$store.Log.Add("UncReadable $Path")
+            $hp = Get-OptUncHostProblem -HostName (Get-OptUncHost $Path) -Domains @($Domains); if ($hp) { throw "Refused: $hp" }   # like the real member
             $k = ([string]$Path).TrimEnd('\').ToLowerInvariant()
             if ($store.Unc.ContainsKey($k)) { $store.Unc[$k] } else { @{ Ok = $false; GuidFolders = 0; Error = 'The network path was not found.' } }
         }.GetNewClosure())

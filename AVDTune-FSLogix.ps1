@@ -535,7 +535,11 @@ switch ($Kind) {
     'RedirectionsUndo' { [pscustomobject]@{ Runs = @(Undo-AVDTuneRedirections -Machine $C.Machine -F $C.F -Root $C.Root -User $C.User -SnapshotId $C.SnapshotId) } }
     'Defender' { if (-not $C.Args.DefenderHash) { throw 'The confirmed state of the Defender exclusions is missing. Nothing was set.' }; [pscustomobject]@{ Runs = @(Set-AVDTuneFSLogixDefender -Machine $C.Machine -F $C.F -Root $C.Root -VhdLocations @(Get-AVDTuneFSLogixLocations -Machine $C.Machine) -User $C.User -SnapshotId $C.SnapshotId -Skip @($C.Args.Skip) -ExpectedHash $C.Args.DefenderHash) } }
     'DefenderUndo' { [pscustomobject]@{ Runs = @(Undo-AVDTuneFSLogixDefender -Machine $C.Machine -F $C.F -Root $C.Root -User $C.User -SnapshotId $C.SnapshotId) } }
-    'AclUndo' { Undo-AVDTuneStorageRootAcl -Files $C.Files -Token $C.StorageToken -Root $C.Root -User $C.User -SnapshotId $C.SnapshotId }
+    'AclUndo' {
+        # review F2: the shares of this master's VHDLocations (the environment of the page), read here in the worker
+        $allowed = @(Get-AVDTuneFSLogixLocations -Machine $C.Machine | ForEach-Object { Split-AVDTuneUncShare $_ } | Where-Object { $_ -and $_.IsAzureFiles } | ForEach-Object { "$($_.Account)/$($_.Share)" })
+        Undo-AVDTuneStorageRootAcl -Files $C.Files -Token $C.StorageToken -AllowedShares $allowed -Root $C.Root -User $C.User -SnapshotId $C.SnapshotId
+    }
     'Acl' { Set-AVDTuneStorageRootAcl -Files $C.Files -Account $C.Args.Account -Share $C.Args.Share -Token $C.StorageToken -UsersSid $C.Args.UsersSid -AdminsSid $C.Args.AdminsSid -ConfirmedHash $C.Args.Hash -Root $C.Root -User $C.User -SnapshotId $C.SnapshotId }
     default { throw "Unknown FSLogix job '$Kind'." }
 }
