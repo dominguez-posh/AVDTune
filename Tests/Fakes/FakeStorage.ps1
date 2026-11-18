@@ -2,6 +2,7 @@
 # share data plane (New-AVDTuneFakeFiles) and an LDAP adapter that answers the storage account's AD object and the domain (New-AVDTuneFakeStorageLdap). In memory, no network,
 # no tenant. Every call is in .Log (method and URL, never a token or a key). All names are made up (storageaccount, example.test, contoso).
 
+. $(if (Get-Command Resolve-AVDTuneTestScript -ErrorAction Ignore) { $fakeShared = Resolve-AVDTuneTestScript -Path (Join-Path $PSScriptRoot 'FakeShared.ps1') -AppRoot (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent); if (-not $fakeShared) { throw 'FakeShared.ps1 is not a file below the Tests folder of this copy.' }; $fakeShared } else { Join-Path $PSScriptRoot 'FakeShared.ps1' })   # fakes that several runspaces use at once (#80), through the test script gate when the module is loaded
 $script:StSub = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'
 function ConvertTo-StJson($Object) { $Object | ConvertTo-Json -Depth 12 | ConvertFrom-Json }
 
@@ -51,7 +52,7 @@ function New-AVDTuneFakeStorageArm {
         }
         [pscustomobject]@{ Status = 404; Body = $null; Error = "fake: no route for $Method $p" }
     }.GetNewClosure()
-    [pscustomobject]$a
+    ConvertTo-AVDTuneFakeShared ([pscustomobject]$a)
 }
 
 # Seed: Acls (hashtable path ('' = root) -> SDDL), Folders (array of names). Switches in .Store: Offline, Forbidden (403 on the data plane), PutForbidden, ChangeOnRead (the root ACL changes after the first read: tests the confirmed diff), NoKeyHeader
@@ -96,7 +97,7 @@ function New-AVDTuneFakeFiles {
         }
         [pscustomobject]@{ Status = 404; Headers = @{}; Body = ''; Error = "fake: no route for $Method $query" }
     }.GetNewClosure()
-    [pscustomobject]$a
+    ConvertTo-AVDTuneFakeShared ([pscustomobject]$a)
 }
 
 # Seed: Account (@{ Sam; Sid; Spns; PwdLastSet (datetime); Uac; EncTypes; Count }), Domain (@{ Sid; Guid; MaxPwdAgeDays }), Missing ($true: the object does not exist), Fail ($true: the search throws)
@@ -126,5 +127,5 @@ function New-AVDTuneFakeStorageLdap {
         }
         @()
     }.GetNewClosure()
-    [pscustomobject]$a
+    ConvertTo-AVDTuneFakeShared ([pscustomobject]$a)
 }

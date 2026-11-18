@@ -6,6 +6,7 @@
 # Switches on .Store: FailWrite (a path or registry key part: the write throws), Tamper (library name -> other bytes: the download is different), ScriptMode
 # (sha256 -> 'Ok' | 'Broken' (test answers 7) | 'NoChange' (apply does nothing)).
 
+. $(if (Get-Command Resolve-AVDTuneTestScript -ErrorAction Ignore) { $fakeShared = Resolve-AVDTuneTestScript -Path (Join-Path $PSScriptRoot 'FakeShared.ps1') -AppRoot (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent); if (-not $fakeShared) { throw 'FakeShared.ps1 is not a file below the Tests folder of this copy.' }; $fakeShared } else { Join-Path $PSScriptRoot 'FakeShared.ps1' })   # fakes that several runspaces use at once (#80), through the test script gate when the module is loaded
 function New-AVDTuneFakeCustom {
     param([hashtable]$Seed = @{})
     $enc = New-Object Text.UTF8Encoding $false
@@ -127,7 +128,7 @@ function New-AVDTuneFakeCustom {
             'Undo' { $store.ScriptState[$Sha256] = $false; & $log "Script Undo $Sha256"; [pscustomobject]@{ ExitCode = 0; Output = '' } }
         }
     }.GetNewClosure()
-    [pscustomobject]$c
+    ConvertTo-AVDTuneFakeShared ([pscustomobject]$c)
 }
 
 function Get-AVDTuneFakeCustomLibrary {

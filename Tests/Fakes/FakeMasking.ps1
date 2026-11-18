@@ -3,6 +3,7 @@
 #   New-AVDTuneFakeMasking [-Seed @{ Files (path -> byte[]); Desktop (array of @{ Name; Target; Arguments; Icon; IsShortcut }); Unsafe ($true: every write is refused like an
 #     unsafe folder); AdminName; LocalGroups (name -> description); Shortcuts (path -> @{ Target; Arguments; Icon; Description }) }]
 #   New-AVDTuneFakeMaskingLdap [-Seed @{ Groups (list of @{ Name; Dn; Sid; Description; Members }); AddFails; BuiltinDn }]
+. $(if (Get-Command Resolve-AVDTuneTestScript -ErrorAction Ignore) { $fakeShared = Resolve-AVDTuneTestScript -Path (Join-Path $PSScriptRoot 'FakeShared.ps1') -AppRoot (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent); if (-not $fakeShared) { throw 'FakeShared.ps1 is not a file below the Tests folder of this copy.' }; $fakeShared } else { Join-Path $PSScriptRoot 'FakeShared.ps1' })   # fakes that several runspaces use at once (#80), through the test script gate when the module is loaded
 $script:FakeRulesFolder = 'C:\Program Files\FSLogix\Apps\Rules'
 
 function New-AVDTuneFakeMasking {
@@ -41,7 +42,7 @@ function New-AVDTuneFakeMasking {
     $a.LocalGroupCreate = { param($Name, $Description) [void]$s.Log.Add("LocalGroupCreate $Name"); $s.LocalGroups[$Name] = $Description }.GetNewClosure()
     $a.LocalGroupInfo = { param($Name) if ($s.LocalGroups.ContainsKey($Name)) { @{ Exists = $true; Sid = $(if ($s.LocalGroupSids.ContainsKey($Name)) { $s.LocalGroupSids[$Name] } else { 'S-1-5-21-1-2-3-' + (2000 + $s.LocalGroups.Count) }); Description = [string]$s.LocalGroups[$Name]; MemberCount = $(if ($s.LocalGroupMembers.ContainsKey($Name)) { @($s.LocalGroupMembers[$Name]).Count } else { 0 }) } } else { @{ Exists = $false; Sid = ''; Description = ''; MemberCount = 0 } } }.GetNewClosure()
     $a.LocalGroupDelete = { param($Name) [void]$s.Log.Add("LocalGroupDelete $Name"); $s.LocalGroups.Remove($Name) }.GetNewClosure()
-    [pscustomobject]$a
+    ConvertTo-AVDTuneFakeShared ([pscustomobject]$a)
 }
 
 function New-AVDTuneFakeMaskingLdap {
@@ -93,5 +94,5 @@ function New-AVDTuneFakeMaskingLdap {
         $keep = @($s.Groups | Where-Object { $_.Dn -ine $target }); $s.Groups.Clear(); foreach ($g in $keep) { [void]$s.Groups.Add($g) }
     }.GetNewClosure()
     $a.Close = { param($Conn) }.GetNewClosure()
-    [pscustomobject]$a
+    ConvertTo-AVDTuneFakeShared ([pscustomobject]$a)
 }

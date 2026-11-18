@@ -14,6 +14,7 @@
 #   Dependents  hashtable service name -> array of running dependent services (RunningDependents)
 # .Store holds the state, .Log what was asked (never a secret).
 
+. $(if (Get-Command Resolve-AVDTuneTestScript -ErrorAction Ignore) { $fakeShared = Resolve-AVDTuneTestScript -Path (Join-Path $PSScriptRoot 'FakeShared.ps1') -AppRoot (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent); if (-not $fakeShared) { throw 'FakeShared.ps1 is not a file below the Tests folder of this copy.' }; $fakeShared } else { Join-Path $PSScriptRoot 'FakeShared.ps1' })   # fakes that several runspaces use at once (#80), through the test script gate when the module is loaded
 function New-AVDTuneFakeFinish {
     param([hashtable]$Seed = @{})
     $store = @{
@@ -51,5 +52,5 @@ function New-AVDTuneFakeFinish {
     $a.PathExists = { param($Path) $Path -in $store.Present }.GetNewClosure()
     $a.RemoveFolder = { param($Path) [void]$store.Log.Add("RemoveFolder $Path"); $store.Present = @($store.Present | Where-Object { $_ -ne $Path }) }.GetNewClosure()
     $a.FindTokenFiles = { param($StateRoot) [void]$store.Log.Add('FindTokenFiles'); @($store.TokenFiles) }.GetNewClosure()
-    [pscustomobject]$a
+    ConvertTo-AVDTuneFakeShared ([pscustomobject]$a)
 }

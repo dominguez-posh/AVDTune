@@ -3,6 +3,7 @@
 #   New-AVDTuneFakeReleaseHttp -Seed @{ Text = @{ url = 'text' }; Files = @{ url = bytes }; Offline = $false }   .Store holds the maps, .Log every request
 #   New-AVDTuneFakeReleaseBuild -Work <folder> -Version <v> -Files @{ 'path' = 'text' } -Http <adapter>          builds a release and publishes it into the adapter
 
+. $(if (Get-Command Resolve-AVDTuneTestScript -ErrorAction Ignore) { $fakeShared = Resolve-AVDTuneTestScript -Path (Join-Path $PSScriptRoot 'FakeShared.ps1') -AppRoot (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent); if (-not $fakeShared) { throw 'FakeShared.ps1 is not a file below the Tests folder of this copy.' }; $fakeShared } else { Join-Path $PSScriptRoot 'FakeShared.ps1' })   # fakes that several runspaces use at once (#80), through the test script gate when the module is loaded
 function New-AVDTuneFakeReleaseHttp {
     param([hashtable]$Seed = @{})
     $s = @{ Text = @{}; Files = @{}; Offline = $false; Log = (New-Object System.Collections.ArrayList) }
@@ -22,7 +23,7 @@ function New-AVDTuneFakeReleaseHttp {
         if (-not $s.Files.ContainsKey($Url)) { throw 'GitHub answered 404 (github.com).' }
         [IO.File]::WriteAllBytes($Path, [byte[]]$s.Files[$Url])
     }.GetNewClosure()
-    $h
+    ConvertTo-AVDTuneFakeShared $h
 }
 
 function New-AVDTuneFakeReleaseBuild {

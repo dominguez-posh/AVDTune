@@ -5,6 +5,7 @@
 # $m.Store.MpAbsent = $true makes MpGet throw like a host without Defender (command missing); $m.Store.MpError = 'text' makes it throw any other read error.
 # $m.Store.RegKinds['path|name'] = 'Binary' (lower case key) makes RegInfo report another kind than DWord/String.
 
+. $(if (Get-Command Resolve-AVDTuneTestScript -ErrorAction Ignore) { $fakeShared = Resolve-AVDTuneTestScript -Path (Join-Path $PSScriptRoot 'FakeShared.ps1') -AppRoot (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent); if (-not $fakeShared) { throw 'FakeShared.ps1 is not a file below the Tests folder of this copy.' }; $fakeShared } else { Join-Path $PSScriptRoot 'FakeShared.ps1' })   # fakes that several runspaces use at once (#80), through the test script gate when the module is loaded
 function Add-AVDTuneOptimizationFakeMembers {
     param([Parameter(Mandatory)]$Machine, [string[]]$Appx = @(), [hashtable]$Defender = @{})
     $store = $Machine.Store
@@ -115,5 +116,5 @@ function Add-AVDTuneOptimizationFakeMembers {
             if ($hasValues -or $hasSub) { [void]$store.Log.Add("RegKeyKept $Path"); return }
             $store.Keys.Remove($p); [void]$store.Log.Add("RegKeyRemoveEmpty $Path")
         }.GetNewClosure())
-    $Machine
+    ConvertTo-AVDTuneFakeShared $Machine
 }

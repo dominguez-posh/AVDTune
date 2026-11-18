@@ -5,6 +5,7 @@
 #   LockError (text: the lock cannot be taken), Defender, DefenderFails, Appx = hashtable name -> version,
 #   Signatures = hashtable file name -> @{ Valid; Subject; Issuer; OriginalFilename } (otherwise the right publisher of each tool: Microsoft, choco Chocolatey),
 #   Missing = full paths that do not exist. Stage/Unstage (copy of a tool into a private folder) only log.
+. $(if (Get-Command Resolve-AVDTuneTestScript -ErrorAction Ignore) { $fakeShared = Resolve-AVDTuneTestScript -Path (Join-Path $PSScriptRoot 'FakeShared.ps1') -AppRoot (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent); if (-not $fakeShared) { throw 'FakeShared.ps1 is not a file below the Tests folder of this copy.' }; $fakeShared } else { Join-Path $PSScriptRoot 'FakeShared.ps1' })   # fakes that several runspaces use at once (#80), through the test script gate when the module is loaded
 function New-AVDTuneFakeUpdates {
     param([hashtable]$Seed = @{})
     $s = @{ Wua = @(); WuaSearchFails = $null; WuaResults = @{}; MicrosoftUpdate = $false; RegisterFails = $false; Native = @{}; Tools = @('winget.exe', 'choco.exe', 'teamsbootstrapper.exe')
@@ -64,5 +65,5 @@ function New-AVDTuneFakeUpdates {
     $u.DefenderUpdate = { [void]$s.Log.Add('DefenderUpdate'); if ($s.DefenderFails) { @{ Ok = $false; Error = 'fake: offline' } } else { $s.Defender = @{ Version = '1.400.9.0'; LastUpdated = [datetime]'2026-11-15T12:00:00' }; @{ Ok = $true; Error = '' } } }.GetNewClosure()
     $u.LockEnter = { if ($s.LockError) { @{ Ok = $false; Error = $s.LockError } } else { $s.LockHeld = $true; [void]$s.Log.Add('LockEnter'); @{ Ok = $true; Error = '' } } }.GetNewClosure()
     $u.LockExit = { $s.LockHeld = $false; [void]$s.Log.Add('LockExit') }.GetNewClosure()
-    [pscustomobject]$u
+    ConvertTo-AVDTuneFakeShared ([pscustomobject]$u)
 }

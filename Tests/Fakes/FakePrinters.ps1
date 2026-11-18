@@ -6,8 +6,7 @@
 # Switches on .Store: FailExport, Unreachable (server: every session fails), BigExport (the export lists more bytes than allowed), EscapeExport (an entry '..\x'),
 # LinkInCopy (the local copy has a link), NestedInf (the INF is not on the top level of the copy), SwapSigner (driver name -> other signer from the second export on).
 # Log, Credentials (user names of the sessions), Auth (authentication of the sessions), Sessions, RemoteFolders, LocalFolders, Packages, TrustedHistory are recorded.
-# No cmdlet with a scriptblock (ForEach-Object, Where-Object, Select-Object) and no Join-Path in these closures: called from the page job's runspace, a closure of the
-# window's runspace hangs there (seen in the smoke, #86); plain foreach and string operations only.
+. $(if (Get-Command Resolve-AVDTuneTestScript -ErrorAction Ignore) { $fakeShared = Resolve-AVDTuneTestScript -Path (Join-Path $PSScriptRoot 'FakeShared.ps1') -AppRoot (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent); if (-not $fakeShared) { throw 'FakeShared.ps1 is not a file below the Tests folder of this copy.' }; $fakeShared } else { Join-Path $PSScriptRoot 'FakeShared.ps1' })   # fakes that several runspaces use at once (#80), through the test script gate when the module is loaded
 
 function New-AVDTuneFakePrinters {
     param([hashtable]$Seed = @{})
@@ -127,5 +126,5 @@ function New-AVDTuneFakePrinters {
     $p.RegSet = { param($Path, $Name, $Value, $Type) $store.Registry["$Path|$Name".ToLowerInvariant()] = @{ Value = $Value; Kind = [string]$Type }; & $log "RegSet $Path|$Name" }.GetNewClosure()
     $p.RegRemove = { param($Path, $Name) $store.Registry.Remove("$Path|$Name".ToLowerInvariant()); & $log "RegRemove $Path|$Name" }.GetNewClosure()
     $p.RegValues = { param($Path) $pre = "$Path|".ToLowerInvariant(); $o = @(); foreach ($k in @($store.Registry.Keys)) { if ($k.StartsWith($pre)) { $o += $k.Substring($pre.Length) } }; $o }.GetNewClosure()
-    [pscustomobject]$p
+    ConvertTo-AVDTuneFakeShared ([pscustomobject]$p)
 }
