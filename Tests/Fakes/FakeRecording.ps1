@@ -5,8 +5,9 @@
 # (key -> text), Effects (sha256 -> @{ ExitCode; Output; Programs; Files; Registry; Services; Shortcuts (added or changed, same shapes); Remove (keys of any area) }).
 # Switches on .Store: Signature (sha256 -> @{ Status; Subject }; default Valid, CN=Example Vendor), Mismatch (sha256 -> $true: the held file does not match the pin),
 # Truncate (an area name: every snapshot reports it as cut). Logged: Installs (Path, Tool, Arguments, Timeout, TempDir), Staged (open folders), Unstaged, Holds, Releases.
-# The closures use language constructs only (no ForEach-Object, Where-Object, Join-Path): the GUI smoke calls them from a runspace.
+# The factory ends with ConvertTo-AVDTuneFakeShared (#80): the GUI smoke calls the blocks from a background runspace.
 
+. $(if (Get-Command Resolve-AVDTuneTestScript -ErrorAction Ignore) { $fakeShared = Resolve-AVDTuneTestScript -Path (Join-Path $PSScriptRoot 'FakeShared.ps1') -AppRoot (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent); if (-not $fakeShared) { throw 'FakeShared.ps1 is not a file below the Tests folder of this copy.' }; $fakeShared } else { Join-Path $PSScriptRoot 'FakeShared.ps1' })   # fakes that several runspaces use at once (#80), through the test script gate when the module is loaded
 function New-AVDTuneFakeRecording {
     param([hashtable]$Seed = @{})
     $areas = @('Programs', 'Files', 'Registry', 'Services', 'Shortcuts')
@@ -52,5 +53,5 @@ function New-AVDTuneFakeRecording {
     $r.Unstage = { param($Folder) if ($store.Staged.ContainsKey($Folder)) { $store.Staged.Remove($Folder); $store.Unstaged++ } }.GetNewClosure()
     $r.ReadProgram = { param($Key) if ($store.Programs.ContainsKey($Key)) { $store.Programs[$Key] } else { $null } }.GetNewClosure()
     $r.FileExists = { param($Path) $store.Files.ContainsKey($Path) }.GetNewClosure()
-    [pscustomobject]$r
+    ConvertTo-AVDTuneFakeShared ([pscustomobject]$r)
 }
