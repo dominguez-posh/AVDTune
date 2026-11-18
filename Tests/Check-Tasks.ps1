@@ -198,8 +198,9 @@ function T([string]$Key) { $Key }
 $sealErr = $null; try { Assert-NoOtherWriter } catch { $sealErr = $_.Exception.Message }
 $sealRepair = $true; try { Assert-NoOtherWriter -AllowSealed } catch { $sealRepair = $false }
 $script:FakeSealed = $false; $sealOpen = $true; try { Assert-NoOtherWriter } catch { $sealOpen = $false }
-$allowUsers = @(Get-ChildItem -LiteralPath $repo -Filter 'AVDTune-*.ps1' | Select-String -Pattern 'Assert-NoOtherWriter -AllowSealed' | ForEach-Object { $_.Filename } | Sort-Object -Unique)
-Test-Check 'sealed (#50): a write start is refused while the version is finished (text shell.sealed), the crash repairs (finish, benchmark, maintenance mode) pass, an open version passes' ($sealErr -eq 'shell.sealed' -and $sealRepair -and $sealOpen -and ($allowUsers -join ',') -eq 'AVDTune-Benchmark.ps1,AVDTune-Seal.ps1,AVDTune-Updates.ps1' -and [IO.File]::ReadAllText((Join-Path $repo 'AVDTune-Updates.ps1')).Contains("Assert-NoOtherWriter -AllowSealed:(`$Kind -eq 'Block-Repair')")) "err=$sealErr users=$($allowUsers -join ',')"
+# the central lock (#49.3) only forwards -AllowSealed:$AllowSealed of its caller; who passes it: the crash repairs and the new version (it ends Sealed)
+$allowUsers = @(Get-ChildItem -LiteralPath $repo -Filter '*.ps1' | Where-Object { $_.Name -like 'AVDTune-*.ps1' -or $_.Name -eq 'Start-AVDTune.ps1' } | Select-String -Pattern '(Assert-NoOtherWriter|Enter-AVDTuneWriter|-Writer)\b.*-AllowSealed(?!:\$AllowSealed)' | ForEach-Object { $_.Filename } | Sort-Object -Unique)
+Test-Check 'sealed (#50): a write start is refused while the version is finished (text shell.sealed), the crash repairs (finish, benchmark, maintenance mode) and the new version pass, an open version passes' ($sealErr -eq 'shell.sealed' -and $sealRepair -and $sealOpen -and ($allowUsers -join ',') -eq 'AVDTune-Benchmark.ps1,AVDTune-Seal.ps1,AVDTune-Updates.ps1,Start-AVDTune.ps1' -and [IO.File]::ReadAllText((Join-Path $repo 'AVDTune-Updates.ps1')).Contains("Assert-NoOtherWriter -AllowSealed:(`$Kind -eq 'Block-Repair')")) "err=$sealErr users=$($allowUsers -join ',')"
 # #50/#66 review: every function of a page that starts a writer job (assigns one of WriterJobVariables) asks Assert-NoOtherWriter itself, not only some of its callers
 $unguarded = @()
 foreach ($pf in Get-ChildItem -LiteralPath $repo -Filter 'AVDTune-*.ps1') {
@@ -236,6 +237,35 @@ $codeText = (Get-ChildItem -LiteralPath $repo -Filter 'AVDTune-*.ps1' | ForEach-
 $unknownButtons = @($script:WriterButtons | Where-Object { -not $xamlText.Contains("x:Name=""$_""") -and -not $codeText.Contains("`$ui.$_ = ") })
 $taskBarText = [IO.File]::ReadAllText((Join-Path $repo 'AVDTune-TaskBar.ps1'))
 Test-Check 'writer lock (#49.4): every listed button exists (XAML or built by its page) and the window timer runs the lock' ($unknownButtons.Count -eq 0 -and $taskBarText -match '\$script:Timer\.Add_Tick\(\{ try \{ Update-AVDTuneWriterLock -Command \$script:WriterLock -Ui \$ui \}') ($unknownButtons -join ', ')
+
+# #49 (3): the central lock with kind and title (Enter/Exit-AVDTuneWriter) feeds Get-AVDTuneRunningWriter, Assert-NoOtherWriter and the write buttons
+$cmdC = Get-AVDTuneWriterLockCommand; $rowBtn = Set-AVDTuneWriterButton (New-Object System.Windows.Controls.Button)
+$hC = Enter-AVDTuneWriter -Kind 'demo' -Title 'Demo writer'
+$heldC = ((Get-AVDTuneRunningWriter) -eq 'Demo writer' -and @(Get-AVDTuneWriterHold)[0].Kind -eq 'demo' -and -not $rowBtn.IsEnabled -and [object]::ReferenceEquals($rowBtn.Command, $cmdC))
+$secondC = $(try { [void](Enter-AVDTuneWriter -Kind 'x' -Title 'Second'); $false } catch { $_.Exception.Message -like '*Demo writer*' })
+$assertC = $(try { Assert-NoOtherWriter; $false } catch { $true })
+Exit-AVDTuneWriter $hC; Exit-AVDTuneWriter $hC; Exit-AVDTuneWriter $null
+$freeC = (-not (Get-AVDTuneRunningWriter) -and @(Get-AVDTuneWriterHold).Count -eq 0 -and $rowBtn.IsEnabled)
+Test-Check 'central lock (#49.3): Enter holds kind and title, a second writer and Assert-NoOtherWriter are refused with the title, the row button is locked at once; Exit (twice) frees all' ($heldC -and $secondC -and $assertC -and $freeC) "held=$heldC second=$secondC assert=$assertC free=$freeC"
+$script:SwJob = @{ Kind = 'Run' }; $jobBlocksC = $(try { [void](Enter-AVDTuneWriter -Kind 'x' -Title 'y'); $false } catch { $true }); $script:SwJob = $null
+$script:FakeSealed = $true; $sealedC = $(try { [void](Enter-AVDTuneWriter -Kind 'x' -Title 'y'); $false } catch { $true }); $hS = Enter-AVDTuneWriter -Kind 'repair' -Title 'Repair' -AllowSealed; Exit-AVDTuneWriter $hS; $script:FakeSealed = $false
+$hF = $null; try { $hF = Enter-AVDTuneWriter -Kind 'demo' -Title 'Failing'; throw 'boom' } catch { } finally { Exit-AVDTuneWriter $hF }
+Test-Check 'central lock (#49.3): a running writer job refuses Enter, a finished version refuses it unless -AllowSealed, a failing writer frees the lock in finally' ($jobBlocksC -and $sealedC -and -not (Get-AVDTuneRunningWriter) -and @(Get-AVDTuneWriterHold).Count -eq 0) "job=$jobBlocksC sealed=$sealedC"
+# Invoke-UiTaskInline -Writer holds the lock while its block runs and gives it back also when the block throws
+$tbAst = [Management.Automation.Language.Parser]::ParseInput($taskBarText, [ref]$null, [ref]$null)
+Invoke-Expression ($tbAst.Find({ param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Invoke-UiTaskInline' }, $true).Extent.Text)
+function Update-TaskBar { }
+$window = $null
+$inC = Invoke-UiTaskInline -Kind 'demo' -Title 'Inline writer' -Writer -Block { Get-AVDTuneRunningWriter }
+$failC = $(try { Invoke-UiTaskInline -Kind 'demo' -Title 'Inline writer' -Writer -Block { throw 'boom' }; $false } catch { -not (Get-AVDTuneRunningWriter) })
+$readC = Invoke-UiTaskInline -Kind 'demo' -Title 'Inline read' -Block { [string](Get-AVDTuneRunningWriter) }
+Test-Check 'central lock (#49.3): Invoke-UiTaskInline -Writer holds the lock with its title while the block runs, frees it after a throw; without -Writer it takes none' ($inC -eq 'Inline writer' -and $failC -and $readC -eq '' -and -not (Get-AVDTuneRunningWriter)) "in=$inC fail=$failC read=$readC"
+# the inline writers use it, and the write buttons built in code rows get the lock command
+$inlineUsers = @{ 'AVDTune-UserExperience.ps1' = "-Step 'Changing the master' -Writer -Block"; 'AVDTune-Benchmark.ps1' = '-Writer -AllowSealed -Block'; 'AVDTune-Seal.ps1' = 'finally { Exit-AVDTuneWriter $hold }'; 'Start-AVDTune.ps1' = 'finally { Exit-AVDTuneWriter $hold }' }
+$noInline = @($inlineUsers.Keys | Where-Object { -not [IO.File]::ReadAllText((Join-Path $repo $_)).Contains($inlineUsers[$_]) })
+$rowFiles = @{ 'AVDTune-Software.ps1' = 1; 'AVDTune-Vdi.ps1' = 1; 'AVDTune-Custom.ps1' = 1; 'AVDTune-Readiness.ps1' = 1; 'AVDTune-Office.ps1' = 1; 'AVDTune-AppMasking.ps1' = 2 }
+$noRow = @($rowFiles.Keys | Where-Object { ([regex]::Matches([IO.File]::ReadAllText((Join-Path $repo $_)), 'Set-AVDTuneWriterButton \$')).Count -lt $rowFiles[$_] })
+Test-Check 'central lock (#49.3): watermark, benchmark repair, finish repair and new version hold the lock; the write buttons of code rows (software, VDI, customizations, readiness, Office, masking) get the lock command' ($noInline.Count -eq 0 -and $noRow.Count -eq 0 -and 'BtnMaskLogoff' -in $script:WriterButtons) "inline: $($noInline -join ', ') rows: $($noRow -join ', ')"
 
 if ($script:failed -gt 0) { throw "$script:failed check(s) failed." }
 'Check-Tasks: all checks passed.'

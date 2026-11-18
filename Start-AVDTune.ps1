@@ -411,7 +411,10 @@ function Start-NewVersion {
     $ask = if ($state.ImageVersion) { T 'ov.newversion.ask.next' $next $state.ImageVersion } else { T 'ov.newversion.ask.first' $next }
     if (-not (Confirm-Action $ask (T 'ov.newversion'))) { return }
     $user = [string]$env:USERNAME
-    try { $version = Start-AVDTuneImageVersion -Root $script:StateRoot -User $user } catch { Show-Error $_.Exception.Message; return }
+    $hold = $null
+    try { $hold = Enter-AVDTuneWriter -Kind 'new-version' -Title (T 'ov.newversion') -AllowSealed; $version = Start-AVDTuneImageVersion -Root $script:StateRoot -User $user }   # the central lock (#49); a new version ends Sealed
+    catch { Show-Error $_.Exception.Message; return }
+    finally { Exit-AVDTuneWriter $hold }
     [void](Add-AVDTuneChangeLogEntry -Root $script:StateRoot -Version $version -Category 'Setup' -Component 'Image version' -ChangeType Note -Text "Image version $version started" -User $user)
     [void](Add-AVDTuneProtocolNote -Protocol $script:Protocol -Group 'setup' -Subject "Image version $version started")
     Save-Protocol

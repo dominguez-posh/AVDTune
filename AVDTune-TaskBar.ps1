@@ -219,18 +219,23 @@ $ui.BoxTaskList.Add_KeyDown({ param($s, $e) try { if ($e.Key -eq 'Escape') { $e.
 Add-Click $ui.BtnTaskClose { Show-TaskList $false }
 $script:Timer.Add_Tick({ try { Update-TaskBar } catch { } })
 # #49 (4): the write buttons of every page are locked while a writer job runs (AVDTune-Tasks.ps1, one command for all of them)
-$script:WriterLock = New-AVDTuneWriterLockCommand
+$script:WriterLock = Get-AVDTuneWriterLockCommand   # the one command (#49): Enter/Exit-AVDTuneWriter and the row buttons use it too
 $script:Timer.Add_Tick({ try { Update-AVDTuneWriterLock -Command $script:WriterLock -Ui $ui } catch { } })
 
 function Invoke-UiTaskInline {
     # A call that runs on the window thread (sign-in, a request to Azure, an install): the task shows first, the bar is painted before the call blocks the thread
-    param([Parameter(Mandatory)][string]$Kind, [Parameter(Mandatory)][string]$Title, [Parameter(Mandatory)][scriptblock]$Block, [string]$Step = '', [string]$Done = '', [hashtable]$Retry)
+    # -Writer: the call changes the master and holds the central lock (#49) with kind and title until it ends (the switch AllowSealed only for the crash repairs)
+    param([Parameter(Mandatory)][string]$Kind, [Parameter(Mandatory)][string]$Title, [Parameter(Mandatory)][scriptblock]$Block, [string]$Step = '', [string]$Done = '', [hashtable]$Retry, [switch]$Writer, [switch]$AllowSealed)
     # the names here are unlikely on purpose: the block of the caller runs below this function and sees its variables
-    $inlineTask = Start-AVDTuneUiTask -Kind $Kind -Title $Title -Step $Step -Retry $Retry
-    try { Update-TaskBar; $window.Dispatcher.Invoke([Action] {}, [System.Windows.Threading.DispatcherPriority]::Render) } catch { }
-    try { $inlineOut = & $Block }
-    catch { Complete-AVDTuneUiTask $inlineTask -Failed -Summary $_.Exception.Message; throw }
-    Complete-AVDTuneUiTask $inlineTask -Summary $Done
+    $inlineHold = if ($Writer) { Enter-AVDTuneWriter -Kind $Kind -Title $Title -AllowSealed:$AllowSealed } else { $null }
+    try {
+        $inlineTask = Start-AVDTuneUiTask -Kind $Kind -Title $Title -Step $Step -Retry $Retry
+        try { Update-TaskBar; $window.Dispatcher.Invoke([Action] {}, [System.Windows.Threading.DispatcherPriority]::Render) } catch { }
+        try { $inlineOut = & $Block }
+        catch { Complete-AVDTuneUiTask $inlineTask -Failed -Summary $_.Exception.Message; throw }
+        Complete-AVDTuneUiTask $inlineTask -Summary $Done
+    }
+    finally { Exit-AVDTuneWriter $inlineHold }
     $inlineOut
 }
 

@@ -217,7 +217,7 @@ function New-SwButton([string]$Text, $Wish, [string]$Confirm, [string]$Automatio
     $b.Content = $Text; $b.Margin = '4,0,0,0'; $b.VerticalAlignment = 'Center'; $b.DataContext = @{ Wish = $Wish; Confirm = $Confirm }
     [System.Windows.Automation.AutomationProperties]::SetName($b, $Automation)
     $b.Add_Click({ param($s) try { Start-SwRun @($s.DataContext.Wish) ([string]$s.DataContext.Confirm) } catch { Show-Error $_.Exception.Message } })
-    $b
+    Set-AVDTuneWriterButton $b   # locked while a writer runs (#49)
 }
 function New-SwRow([string[]]$Widths, [object[]]$Cells) {
     $grid = New-Object System.Windows.Controls.Grid

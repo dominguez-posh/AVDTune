@@ -211,7 +211,7 @@ function New-MaskListRow($Row, $Choices, $Entra) {
     $grp.Tag = $sids
     $grp.SetValue([System.Windows.Controls.Grid]::ColumnProperty, 2)
     $pv = New-MaskButton 'Preview' "Preview the change for $($Row.Name)"; $pv.Margin = '0,0,6,0'; $pv.SetValue([System.Windows.Controls.Grid]::ColumnProperty, 3)
-    $sv = New-MaskButton 'Save' "Save the change for $($Row.Name)" $true; $sv.Margin = '0'; $sv.SetValue([System.Windows.Controls.Grid]::ColumnProperty, 4)
+    $sv = New-MaskButton 'Save' "Save the change for $($Row.Name)" $true; $sv.Margin = '0'; $sv.SetValue([System.Windows.Controls.Grid]::ColumnProperty, 4); [void](Set-AVDTuneWriterButton $sv)   # #49
     foreach ($e2 in $n, $mode, $grp, $pv, $sv) { [void]$g.Children.Add($e2) }
     [void]$wrap.Children.Add($g)
     $noteText = $(if ($Row.Note) { $Row.Note } elseif ($Row.Mode -eq 'Only members of a group') { 'Visible for: ' + (@($Row.Groups | ForEach-Object { $_.Account }) -join ', ') + "  (rule set $($Row.RuleSet))" } else { '' })
@@ -275,7 +275,7 @@ function Show-MaskList($Dir, [string]$Err) {
         $n = New-MaskText $rs.Name '' '0'; $n.FontWeight = 'SemiBold'
         $txt = "$(@($rs.Rules).Count) hiding rule(s)" + $(if ($rs.OtherRules -gt 0) { ", $($rs.OtherRules) other (kept)" } else { '' }) + $(if ($rs.Visibility) { '; ' + $rs.Visibility.Text } else { '' }) + $(if (@($rs.Problems).Count -gt 0) { '. Problems: ' + (@($rs.Problems) -join ' ') } else { '' })
         $d = New-MaskText $txt 'Hint' '0'; $d.SetValue([System.Windows.Controls.Grid]::ColumnProperty, 1)
-        $rm = New-MaskButton 'Remove' "Remove the rule set $($rs.Name)"; $rm.Margin = '8,0,0,0'; $rm.DataContext = [string]$rs.Name; $rm.SetValue([System.Windows.Controls.Grid]::ColumnProperty, 2)
+        $rm = New-MaskButton 'Remove' "Remove the rule set $($rs.Name)"; $rm.Margin = '8,0,0,0'; $rm.DataContext = [string]$rs.Name; $rm.SetValue([System.Windows.Controls.Grid]::ColumnProperty, 2); [void](Set-AVDTuneWriterButton $rm)   # #49
         $rm.Add_Click({ param($src) try { Remove-MaskSet ([string]$src.DataContext) } catch { Show-Error $_.Exception.Message } })
         foreach ($e in $n, $d, $rm) { [void]$g.Children.Add($e) }
         [void]$ui.PanelMaskSets.Children.Add($g)
