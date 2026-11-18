@@ -106,6 +106,7 @@
   "cust.task.undo": "Anpassungen rückgängig machen",
   "cust.vis.admins": "Niemand außer Administratoren",
   "cust.vis.everyone": "Alle",
+  "env.interrupted.closed": "Ein Lauf des Umgebungsassistenten war mittendrin abgebrochen; er ist jetzt nach dem echten Stand in Azure abgeschlossen: {0}",
   "health.detail.agent": "Der AVD-Agent ist installiert. Er darf nicht auf dem Master sein: Der Hostpool installiert ihn auf den Sitzungshosts.",
   "health.detail.benchmark": "Ein Benchmark wurde nicht sauber beendet: Windows Update oder der Indexer sind eventuell noch angehalten. Setze sie auf der Seite „Benchmark“ zurück.",
   "health.detail.blockmaint": "Aus: Wartungsmodus, Updates sind möglich. Schalte die Sperre vor dem Abschluss ein.",

@@ -2173,6 +2173,34 @@ function Remove-AVDTuneOldRuns {
     $removed
 }
 
+function Get-AVDTuneEnvInterrupted {
+    <#
+        #45: runs of the environment wizard (config\azure-setup.json) that stopped in the middle: AVDTune or the VM ended between the two journal writes of a step,
+        so a step is still Started or the run has no end. The run that this process carries out right now (AppDomain 'AVDTune.EnvApplyRun') is not one.
+        Returns RunId, Started and the open steps (Id, Type, Action, Path). Only reads.
+    #>
+    param([string]$Root = (Get-AVDTuneRoot))
+    $j = $null; try { $j = Read-AVDTuneJson (Join-Path $Root 'config\azure-setup.json') } catch { return @() }
+    $running = [string][AppDomain]::CurrentDomain.GetData('AVDTune.EnvApplyRun')
+    @(foreach ($run in @(Get-AVDTuneProp $j 'Runs')) {
+            if (-not $run -or ($running -and [string](Get-AVDTuneProp $run 'RunId') -eq $running)) { continue }
+            $open = @(@(Get-AVDTuneProp $run 'Steps') | Where-Object { $_ -and [string](Get-AVDTuneProp $_ 'Status') -eq 'Started' })
+            if ($open.Count -eq 0 -and (Get-AVDTuneProp $run 'Ended')) { continue }
+            [pscustomobject]@{ RunId = [string](Get-AVDTuneProp $run 'RunId'); Started = [string](Get-AVDTuneProp $run 'Started')
+                Steps = @($open | ForEach-Object { [pscustomobject]@{ Id = [string]$_.Id; Type = [string]$_.Type; Action = [string]$_.Action; Path = [string]$_.Path } }) }
+        })
+}
+
+function Get-AVDTuneEnvHealthRow {
+    # The Overview row for an interrupted run of the environment wizard (#45); nothing when there is none
+    param([string]$Root = (Get-AVDTuneRoot))
+    $runs = @(Get-AVDTuneEnvInterrupted -Root $Root)
+    if ($runs.Count -eq 0) { return }
+    $what = @($runs | ForEach-Object { $_.Steps } | ForEach-Object { "$($_.Action) $(($_.Path -split '/')[-1]) ($($_.Type))" })
+    [pscustomobject]@{ Id = 'envinterrupted'; Title = 'Environment wizard'; Status = 'warn'
+        Detail = "A run of the environment wizard stopped in the middle (run $(@($runs | ForEach-Object { $_.RunId }) -join ', '))$(if ($what.Count -gt 0) { ': not confirmed: ' + ($what -join '; ') }). Open the Environment page and make the plan or the undo plan: AVDTune reads the real state of these resources and closes the run; then run the plan again or take it back." }
+}
+
 #endregion
 
 #region write gate
@@ -2635,7 +2663,7 @@ function Get-AVDTuneOverview {
         Office = Get-AVDTuneOfficeInfo $Machine
         LastUpdate = $(if ($state.LastUpdate) { [string]$state.LastUpdate } else { '' })
         LastBenchmark = $(if ($state.LastBenchmark) { [string]$state.LastBenchmark } else { '' })
-        Health = @(@(Get-AVDTuneHealth $Machine $state $UpdateBlock) + @(Get-AVDTuneBenchmarkHealthRow $Root))
+        Health = @(@(Get-AVDTuneHealth $Machine $state $UpdateBlock) + @(Get-AVDTuneBenchmarkHealthRow $Root) + @(Get-AVDTuneEnvHealthRow $Root))
         UpdateBlock = $(if ($UpdateBlock) { [string]$UpdateBlock.State } else { [string]$state.UpdateBlock })
         Sealed = [bool]$state.Sealed
     }
@@ -2645,7 +2673,7 @@ function Get-AVDTuneOverview {
 
 Export-ModuleMember -Function Move-AVDTuneFileReplace, Get-AVDTuneDcFromNtDomain, Get-AVDTuneSystemFolder, Get-AVDTuneSystemModulePath, Set-AVDTuneSafeModulePath, Test-AVDTuneModulePathStable, Assert-AVDTuneModulePathStable, Get-AVDTuneModulePathProblems, New-AVDTunePowerShell, New-AVDTuneRunspacePool, Get-AVDTuneChocolateyRoot, Get-AVDTuneChildTool, Initialize-AVDTuneToolTemp, Get-AVDTuneChildEnvironment, Get-AVDTuneProfilePath, Get-AVDTuneHklmValue, New-AVDTuneChildStartInfo, Invoke-AVDTuneChildProcess, Invoke-AVDTuneProgram, Open-AVDTuneSystemProgram, New-AVDTuneDownloadFolder, New-AVDTuneOwnFolder, Test-AVDTuneOwnFolder, New-AVDTuneAdminFile, Set-AVDTuneProcessTemp, Initialize-AVDTuneTempParent, Test-AVDTuneWindowsSignature, Test-AVDTuneSystemProgramPath, Get-AVDTuneProp, Get-AVDTuneWebResponse, Test-AVDTuneElevated, Get-AVDTuneRoot, Test-AVDTuneDefaultRoot, Test-AVDTuneTestMode, Resolve-AVDTuneTestScript, Get-AVDTuneLongPath, Get-AVDTuneTestModeRefusal, Confirm-AVDTuneAction, ConvertTo-AVDTuneArgument, New-AVDTuneMachine, Invoke-AVDTuneMachine, Invoke-AVDTuneDefaultHiveUnload, Remove-AVDTuneTreeSafe,
     New-AVDTuneStateSecurity, Initialize-AVDTuneState, Read-AVDTuneAclInfo, Get-AVDTuneStateSecurityProblems, Move-AVDTuneStateToQuarantine, New-AVDTuneProtectedFolder, Assert-AVDTuneStateSecurity, Get-AVDTuneStateSecurityReport, Get-AVDTuneState, Set-AVDTuneState, Test-AVDTuneImageVersion, Get-AVDTuneNextImageVersion, Start-AVDTuneImageVersion,
-    Add-AVDTuneRun, Get-AVDTuneRun, Remove-AVDTuneOldRuns, Get-AVDTuneLastChange, Get-AVDTuneChangeTimes, Get-AVDTuneChangeMarker, Invoke-AVDTuneStateLock, Get-AVDTuneChangeStopError, Test-AVDTuneSealed, Assert-AVDTuneNotSealed, Test-AVDTuneChangeInProgress, Assert-AVDTuneNoForeignChange, Resolve-AVDTuneStaleChange, Start-AVDTuneChange, Stop-AVDTuneChange, Get-AVDTuneSnapshotClockBufferMinutes, ConvertTo-AVDTuneUtc, Get-AVDTuneSnapshotWindow, Test-AVDTuneSnapshotInWindow,New-AVDTuneStep, Invoke-AVDTuneStep, New-AVDTuneStepFromData, Get-AVDTuneStepCatalog, Invoke-AVDTune,
+    Add-AVDTuneRun, Get-AVDTuneRun, Remove-AVDTuneOldRuns, Get-AVDTuneEnvInterrupted, Get-AVDTuneEnvHealthRow, Get-AVDTuneLastChange, Get-AVDTuneChangeTimes, Get-AVDTuneChangeMarker, Invoke-AVDTuneStateLock, Get-AVDTuneChangeStopError, Test-AVDTuneSealed, Assert-AVDTuneNotSealed, Test-AVDTuneChangeInProgress, Assert-AVDTuneNoForeignChange, Resolve-AVDTuneStaleChange, Start-AVDTuneChange, Stop-AVDTuneChange, Get-AVDTuneSnapshotClockBufferMinutes, ConvertTo-AVDTuneUtc, Get-AVDTuneSnapshotWindow, Test-AVDTuneSnapshotInWindow,New-AVDTuneStep, Invoke-AVDTuneStep, New-AVDTuneStepFromData, Get-AVDTuneStepCatalog, Invoke-AVDTune,
     Add-AVDTuneChangeLogEntry, Get-AVDTuneChangeLog, Get-AVDTuneChangeLogVersions, ConvertTo-AVDTuneChangeLogDocument, Export-AVDTuneChangeLog,
     Get-AVDTuneWindowsInfo, Get-AVDTuneOfficeInfo, Get-AVDTuneSourceImage, Get-AVDTuneHealth, Get-AVDTuneOverview, Write-AVDTuneFile, Read-AVDTuneJson,
     Open-AVDTuneWriteGate, Close-AVDTuneWriteGate, Set-AVDTuneWriteBlock, Clear-AVDTuneWriteBlock, Get-AVDTuneWriteBlock, Get-AVDTuneWriteGate, Test-AVDTuneWriteAllowed, Remove-AVDTuneControlCharacters, ConvertTo-AVDTuneTestResult,

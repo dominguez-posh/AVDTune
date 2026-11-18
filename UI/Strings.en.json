@@ -106,6 +106,7 @@
   "cust.task.undo": "Undoing customizations",
   "cust.vis.admins": "Nobody except administrators",
   "cust.vis.everyone": "Everyone",
+  "env.interrupted.closed": "A run of the environment wizard had stopped in the middle; it is closed now from the real state in Azure: {0}",
   "health.detail.agent": "The AVD agent is installed. It must not be on the master: the host pool installs it on the session hosts.",
   "health.detail.benchmark": "A benchmark did not end properly: Windows Update or the indexer may still be paused. Restore them on the Benchmark page.",
   "health.detail.blockmaint": "Off: maintenance mode, updates are possible. Switch the block on before Finish.",
