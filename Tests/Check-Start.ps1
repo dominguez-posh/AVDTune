@@ -674,6 +674,16 @@ try {
         $syncV.Release = $true; [void]$rsV.EndInvoke($hV)
         Stop-AVDTuneChange -Root $rn -Owner $kStop
         Test-Check 'stop (#66): the same stop works when the lock is free again' (-not (Test-AVDTuneChangeInProgress -Root $rn)) $null
+        # #58: a state.json held open (virus scanner) longer than the retries: the stop does not throw and does not swallow the error either; the marker stays (fail closed),
+        # the holder is released (the next start of this process is a holder again), the error is kept for the window; with the file free the next stop clears the marker
+        $kHeld = Start-AVDTuneChange -Root $rn
+        $hold = [IO.File]::Open((Join-Path $rn 'state.json'), [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+        $thrownH = $null; try { Stop-AVDTuneChange -Root $rn -Owner $kHeld } catch { $thrownH = $_.Exception.Message } finally { $hold.Dispose() }
+        $errH = Get-AVDTuneChangeStopError
+        Test-Check 'stop (#58): a state.json write that fails after the retries is reported for the window (not swallowed), does not throw, and the marker stays' (-not $thrownH -and $errH -like '*could not be recorded*' -and (Test-AVDTuneChangeInProgress -Root $rn)) "thrown=$thrownH err=$errH"
+        $kAgain = Start-AVDTuneChange -Root $rn
+        Stop-AVDTuneChange -Root $rn -Owner $kAgain
+        Test-Check 'stop (#58): ... the holder was released: the next start holds the marker and its stop clears it' ($kAgain -eq $true -and -not (Test-AVDTuneChangeInProgress -Root $rn) -and -not (Get-AVDTuneChangeStopError)) "again=$kAgain"
     }
     finally { & (Get-Module AVDTune) { $script:StateLockSeconds = 30 }; if ($rsV) { $rsV.Dispose() }; $mtx2.Dispose() }
     # ---------------------------------------------------------------- findings of the security review of #27

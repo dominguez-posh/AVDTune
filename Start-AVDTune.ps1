@@ -395,7 +395,7 @@ $script:Timer.Interval = [TimeSpan]::FromMilliseconds(250)
 # one handler: the refresh, then the error of a stop that could not get the state lock (Stop-AVDTuneChange never replaces a result with it; read once, so it is shown once)
 $script:Timer.Add_Tick({
     try { Complete-OverviewRefresh } catch { Show-Error $_.Exception.Message }
-    try { $stopError = Get-AVDTuneChangeStopError; if ($stopError) { Show-Error $stopError } } catch { }
+    try { $stopError = Get-AVDTuneChangeStopError; if ($stopError) { Show-Error $stopError; [void](Add-AVDTuneProtocolNote -Protocol $script:Protocol -Group 'other' -Subject $stopError); Save-Protocol } } catch { }   # #58: in the protocol too
 })
 
 Add-Click $ui.BtnRefresh { Start-OverviewRefresh }

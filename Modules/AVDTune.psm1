@@ -1989,12 +1989,14 @@ function Stop-AVDTuneChange {
             if (@($holders[$key]) -contains $thread -and $rest.Count -gt 0) {
                 # another holder still works: only the end of this one is stamped, the marker stays
                 $holders[$key] = $rest
-                try { [void](Set-AVDTuneState -Root $Root -Values @{ LastChange = [datetime]::UtcNow.ToString('o') }) } catch { }
+                [void](Set-AVDTuneState -Root $Root -Values @{ LastChange = [datetime]::UtcNow.ToString('o') })
                 return
             }
-            # the end is stamped here (also after an abort: a change may have been half done), in the same write that clears the marker; FirstChange comes from the marker still in place
-            try { [void](Set-AVDTuneState -Root $Root -Values @{ LastChange = [datetime]::UtcNow.ToString('o'); ChangeInProgress = $null }) } catch { }
-            $holders.Remove($key)
+            # the end is stamped here (also after an abort: a change may have been half done), in the same write that clears the marker; FirstChange comes from the marker still in place.
+            # A write that fails after the retries of Move-AVDTuneFileReplace (virus scanner, #58) is not swallowed: the holder of this process is released (a later start
+            # takes the marker over), the error goes to the window below, and the marker stays in state.json (fail closed: no new version, no snapshot as the current state).
+            try { [void](Set-AVDTuneState -Root $Root -Values @{ LastChange = [datetime]::UtcNow.ToString('o'); ChangeInProgress = $null }) }
+            finally { $holders.Remove($key) }
         }
     }
     catch { [AppDomain]::CurrentDomain.SetData('AVDTune.ChangeStopError', "The end of a change could not be recorded: $($_.Exception.Message)") }
