@@ -1576,11 +1576,18 @@ function ConvertTo-AVDTuneBenchmarkRow {
 function Get-AVDTuneBenchmarkSystemFolder([string]$Root) { Join-Path (Get-AVDTuneBenchmarkResultFolder $Root) 'systems' }
 
 function Test-AVDTuneBenchSystemFolder {
-    <# Is the folder of the comparison systems admin-only (Test-AVDTuneAdminOnlyPath up to the state folder, no link)? A process that is not elevated (the checks) also
-       accepts its own account, the same rule as New-AVDTuneOwnFolderSecurity; AVDTune itself always runs elevated and gets the strict test. #>
+    <# Is the folder of the comparison systems admin-only? No link on the way from the state folder down to it, and the folder itself admin-only (Test-AVDTuneAdminOnlyPath:
+       owner and writers only SYSTEM, Administrators, TrustedInstaller). The folders between (runs, runs\benchmark) are plain folders of the checked state folder and inherit
+       its protected rules; their owner can be the administrator's account, so they are checked for links only. A process that is not elevated (the checks) also accepts its
+       own account for the folder itself, the same rule as New-AVDTuneOwnFolderSecurity; AVDTune itself always runs elevated and gets the strict test. #>
     param([Parameter(Mandatory)][string]$Folder, [Parameter(Mandatory)][string]$Root, [switch]$Strict)
-    if ($Strict -or (Test-AVDTuneElevated)) { return [bool](Test-AVDTuneAdminOnlyPath -Path $Folder -Base $Root) }
-    try { if (([IO.File]::GetAttributes($Folder) -band [IO.FileAttributes]::ReparsePoint) -ne 0) { return $false } } catch { return $false }
+    $stop = [IO.Path]::GetFullPath($Root).TrimEnd('\')
+    $item = [IO.Path]::GetFullPath($Folder).TrimEnd('\')
+    if (-not $item.StartsWith($stop + '\', [StringComparison]::OrdinalIgnoreCase)) { return $false }
+    for ($p = $item; $p.Length -gt $stop.Length; $p = [IO.Path]::GetDirectoryName($p)) {
+        try { if (([IO.File]::GetAttributes($p) -band [IO.FileAttributes]::ReparsePoint) -ne 0) { return $false } } catch { return $false }
+    }
+    if ($Strict -or (Test-AVDTuneElevated)) { return [bool](Test-AVDTuneAdminOnlyPath -Path $Folder) }
     $me = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
     $allowed = @('S-1-5-18', 'S-1-5-32-544', $me)
     $sec = [IO.Directory]::GetAccessControl($Folder)

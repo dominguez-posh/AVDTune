@@ -748,7 +748,7 @@ public static class StandIn { public static int Main(string[] a) {
             $open = Get-AVDTuneBenchmarkSystems -Root $rr
             $sysSec = [IO.Directory]::GetAccessControl($sysFolder, 'Access'); $sysSec.SetSecurityDescriptorSddlForm($keepSec, 'Access'); [IO.Directory]::SetAccessControl($sysFolder, $sysSec)
             Test-Check 'systems folder: writable for Everyone = nothing of it is read, the folder is named; with its own rules again it is read' (@($open.Results).Count -eq 0 -and (@($open.Problems) -join ' ') -like '*not an admin-only folder*' -and @((Get-AVDTuneBenchmarkSystems -Root $rr).Results).Count -eq 1) (@($open.Problems) -join '; ')
-            Test-Check 'systems folder: the strict test (what the elevated AVDTune runs) refuses a folder that a standard account owns' ((Test-AVDTuneElevated) -or -not (Test-AVDTuneBenchSystemFolder -Folder $sysFolder -Root $rr -Strict)) $null
+            Test-Check 'systems folder: the strict test (what the elevated AVDTune runs) refuses a folder that a standard account owns; a folder outside the state folder is refused' (((Test-AVDTuneElevated) -or -not (Test-AVDTuneBenchSystemFolder -Folder $sysFolder -Root $rr -Strict)) -and -not (Test-AVDTuneBenchSystemFolder -Folder $exp -Root $sysFolder) -and (Test-AVDTuneBenchSystemFolder -Folder $sysFolder -Root $rr)) $null
             $bigSys = [IO.File]::Open((Join-Path $sysFolder 'big-1.json'), 'CreateNew'); try { $bigSys.SetLength(6MB) } finally { $bigSys.Dispose() }
             $withBig = Get-AVDTuneBenchmarkSystems -Root $rr
             Remove-Item -LiteralPath (Join-Path $sysFolder 'big-1.json') -Force
