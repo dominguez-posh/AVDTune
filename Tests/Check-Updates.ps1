@@ -296,8 +296,14 @@ try {
     $link = Join-Path $tmp ('temp\' + [guid]::NewGuid().ToString('N'))
     $cmd = Join-Path ([Environment]::GetFolderPath('System')) 'cmd.exe'
     [void](& $cmd /c mklink /J $link $outside)
+    # audit #97: download folders with a prefix (New-AVDTuneDownloadFolder) are crash leftovers too; a tool folder and a set-aside folder are not touched here
+    $pref = @(foreach ($p in 'fslogix', 'office', 'vdi', 'printers', 'rec') { $d = New-AVDTuneDownloadFolder -Root $tmp -Prefix $p; Set-Content -LiteralPath (Join-Path $d 'x.bin') -Value 'x'; $d })
+    $keepTool = Join-Path $tmp 'temp\winget'; [void](New-Item -ItemType Directory -Path $keepTool -Force)
+    $keepAside = Join-Path $tmp 'temp\winget.untrusted-20260101-000000'; [void](New-Item -ItemType Directory -Path $keepAside -Force)
     $cleared = Clear-AVDTuneStageFolder -Root $tmp
-    Test-Check 'start: staging folders left behind are removed, a junction only as a link (its target keeps its file)' ($cleared -eq 2 -and -not (Test-Path -LiteralPath (Split-Path $left -Parent)) -and -not (Test-Path -LiteralPath $link) -and (Test-Path -LiteralPath (Join-Path $outside 'keep.txt'))) "cleared $cleared"
+    Test-Check 'start (#97): download folders with a prefix left by a crash are removed as well; tool and set-aside folders stay' (@($pref | Where-Object { Test-Path -LiteralPath $_ }).Count -eq 0 -and (Test-Path -LiteralPath $keepTool) -and (Test-Path -LiteralPath $keepAside)) (@($pref | Where-Object { Test-Path -LiteralPath $_ }) -join ',')
+    Remove-Item -LiteralPath $keepTool, $keepAside -Recurse -Force   # the later checks of the winget temp folder start without them
+    Test-Check 'start: staging folders left behind are removed, a junction only as a link (its target keeps its file)' ($cleared -eq 7 -and -not (Test-Path -LiteralPath (Split-Path $left -Parent)) -and -not (Test-Path -LiteralPath $link) -and (Test-Path -LiteralPath (Join-Path $outside 'keep.txt'))) "cleared $cleared"
 
     # the real Run with harmless processes this check starts itself (powershell.exe and ping.exe on 127.0.0.1); their PIDs are tracked and only they are stopped
     $ps = Join-Path ([Environment]::GetFolderPath('System')) 'WindowsPowerShell\v1.0\powershell.exe'

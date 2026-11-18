@@ -8,7 +8,8 @@
       finish.wu-cache      Windows Update download cache (SoftwareDistribution\Download); Windows Update and BITS are stopped for it
       finish.diskspd       the downloaded diskspd of the benchmark (tools\diskspd)
       finish.block         update block on and no maintenance mode left (the end state)
-      finish.tokens        tokens, refresh token and the temporary profiles of the sign-in window removed and proved; no token pattern in AVDTune's own files
+      finish.state-temp    contents of <state>\temp (tool folders, set-aside folders, download leftovers), except the folder of the running window (host)
+      finish.tokens       tokens, refresh token and the temporary profiles of the sign-in window removed and proved; no token pattern in AVDTune's own files
       finish.version       the image version is closed in state.json (Sealed, Finished)
     Cleanup removes contents only, never follows a link (a junction in a folder that users can write to is removed itself, not its target), and a file in
     use stays and is counted ("n left, in use"), it does not fail the finish.
@@ -126,6 +127,34 @@ function Clear-AVDTuneFolderContents {
     if (-not (Test-AVDTuneNoLinkChain -Folder $dir.FullName)) { throw "The path $Folder contains a link: nothing is deleted." }
     $r = Remove-AVDTuneTreeSafe -Path $dir.FullName -ContentsOnly   # checks the path again on the open handle (a link swapped in after the check above)
     [pscustomobject]@{ Removed = $r.Removed; Left = $r.Left; Skipped = $r.Skipped }
+}
+function Get-AVDTuneFinishStateTempEntries {
+    <#
+        The entries of <state>\temp that the finish removes (audit #97): every tool folder (winget, choco, msiexec, apps, office, bench), every set-aside folder
+        (<tool>.untrusted-*, <tool>.used-*), download and staging leftovers (<prefix>-<guid>, <guid>) and loose files. Only the folder of the running window
+        (host: TEMP of this process, Set-AVDTuneProcessTemp) stays. Returns DirectoryInfo/FileInfo objects; none when the folder is missing.
+    #>
+    param([Parameter(Mandatory)][string]$Folder, [string[]]$Keep = @('host'))
+    $dir = New-Object IO.DirectoryInfo $Folder
+    if (-not $dir.Exists) { return @() }
+    @($dir.GetFileSystemInfos() | Where-Object { $_.Name -notin $Keep })
+}
+function Clear-AVDTuneFinishStateTemp {
+    <#
+        Removes the entries of Get-AVDTuneFinishStateTempEntries, each through Remove-AVDTuneTreeSafe (handles, a link removed as a link, never followed). The
+        folder itself and the parent chain must be no links (throws, nothing deleted). An entry in use stays and counts as Left. Returns Removed, Left, Skipped.
+    #>
+    param([Parameter(Mandatory)][string]$Folder, [string[]]$Keep = @('host'))
+    $removed = 0; $left = 0; $skipped = 0
+    if (-not (Test-Path -LiteralPath $Folder)) { return [pscustomobject]@{ Removed = 0; Left = 0; Skipped = 0 } }
+    if (-not (Test-AVDTuneNoLinkChain -Folder $Folder)) { throw "The path $Folder contains a link: nothing is deleted." }
+    foreach ($e in @(Get-AVDTuneFinishStateTempEntries -Folder $Folder -Keep $Keep)) {
+        $r = $null
+        try { $r = Remove-AVDTuneTreeSafe -Path $e.FullName } catch { $left++; continue }
+        $skipped += [int]$r.Skipped
+        if ($r.Gone) { $removed++ } else { $left++ }
+    }
+    [pscustomobject]@{ Removed = $removed; Left = $left; Skipped = $skipped }
 }
 function Find-AVDTuneTokenFiles {
     <#
@@ -510,6 +539,11 @@ function Get-AVDTuneFinishSteps {
         [void](Set-AVDTuneUpdateBlock -Machine $m -Root $Root -Mode On -User $User -SnapshotId $SnapshotId)
     }.GetNewClosure()
     [void]$steps.Add([pscustomobject]@{ Step = (New-AVDTuneStep -Id 'finish.block' -Section Seal -Title 'Update block on, maintenance mode ended (end state)' -Why 'Users of the image must not see or run updates; the maintenance mode is only for the own run of AVDTune.' -Test $bTest -Apply $bApply); Lifts = $false })
+    # <state>\temp (audit #97): tool folders, set-aside folders and download leftovers must not reach the image; before the token scan (a large leftover is a hit there)
+    $stateTemp = Join-Path $Root 'temp'
+    $stTest = { param($m) $n = @(Get-AVDTuneFinishStateTempEntries -Folder $stateTemp).Count; @{ Compliant = ($n -eq 0 -or [bool]$attempted['state-temp']); State = "$n item(s)" } }.GetNewClosure()
+    $stApply = { param($m) $r = Clear-AVDTuneFinishStateTemp -Folder $stateTemp; $Report.Skipped += [int]$r.Skipped; $Report.Left += [int]$r.Left; $attempted['state-temp'] = $true }.GetNewClosure()
+    [void]$steps.Add([pscustomobject]@{ Step = (New-AVDTuneStep -Id 'finish.state-temp' -Section Seal -Title 'AVDTune work folders emptied' -Why 'Temporary folders of winget, Chocolatey, msiexec, the benchmark and downloads (also folders set aside as untrusted and leftovers of a crash) are not part of the image. Only the folder of the running window stays; a link is removed itself, never followed; a file in use stays.' -Test $stTest -Apply $stApply); Lifts = $false })
     # tokens
     $tTest = {
         param($m)
@@ -671,5 +705,5 @@ function Invoke-AVDTuneFinishEndAction {
 
 #endregion
 
-Export-ModuleMember -Function Invoke-AVDTuneFinishEndAction, New-AVDTuneFinishAdapter, Clear-AVDTuneFolderContents, Get-AVDTuneFinishRebootWait, Get-AVDTuneFileLinkCount, Clear-AVDTuneReadOnlyMark, Find-AVDTuneTokenFiles, Test-AVDTuneNoLinkChain, Get-AVDTuneFinishRecord, Get-AVDTuneFinishCrash,
+Export-ModuleMember -Function Invoke-AVDTuneFinishEndAction, New-AVDTuneFinishAdapter, Clear-AVDTuneFolderContents, Get-AVDTuneFinishStateTempEntries, Clear-AVDTuneFinishStateTemp, Get-AVDTuneFinishRebootWait, Get-AVDTuneFileLinkCount, Clear-AVDTuneReadOnlyMark, Find-AVDTuneTokenFiles, Test-AVDTuneNoLinkChain, Get-AVDTuneFinishRecord, Get-AVDTuneFinishCrash,
     Start-AVDTuneFinishLift, Restore-AVDTuneFinishLift, Test-AVDTuneFinishBinding, Get-AVDTuneFinishConfirmText, Repair-AVDTuneFinishCrash, Test-AVDTuneFinishGate, Get-AVDTuneFinishSteps, Invoke-AVDTuneFinish
