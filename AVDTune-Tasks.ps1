@@ -138,8 +138,8 @@ function Get-AVDTuneUiTaskLabel([string]$Status) { switch ($Status) { 'running' 
 # thread, and state.json, the snapshot gate marker and the machine itself are not made for two writers at once (#66). Every start of such an operation (and every inline writer)
 # calls Assert-NoOtherWriter first. A new job adds the name of its script variable to the list; a job that is read only in some of its kinds names them.
 # RelJob is the release job (install, repair, back change AVDTune itself; the checks only read, #49). CustJob: customizations (#85), Status only reads. PrnJob: printers (#86), Servers and Read only read.
-$script:WriterJobVariables = @('OptRun', 'UpdJob', 'BenchJob', 'SealJob', 'SwJob', 'FslJob', 'OffJob', 'LangJob', 'VdiJob', 'ReadyJob', 'RelJob', 'CustJob', 'PrnJob')
-$script:WriterReadOnlyKinds = @{ UpdJob = @('Scan'); SwJob = @('Scan'); VdiJob = @('Latest'); ReadyJob = @('Start', 'Erstanalyse', 'Healthcheck', 'Manual'); RelJob = @('Start', 'Check'); CustJob = @('Status', 'Reach', 'Preview'); PrnJob = @('Servers', 'Read') }
+$script:WriterJobVariables = @('OptRun', 'UpdJob', 'BenchJob', 'SealJob', 'SwJob', 'FslJob', 'OffJob', 'LangJob', 'VdiJob', 'ReadyJob', 'RelJob', 'CustJob', 'PrnJob', 'CswJob')
+$script:WriterReadOnlyKinds = @{ UpdJob = @('Scan'); SwJob = @('Scan'); VdiJob = @('Latest'); ReadyJob = @('Start', 'Erstanalyse', 'Healthcheck', 'Manual'); RelJob = @('Start', 'Check'); CustJob = @('Status', 'Reach', 'Preview'); PrnJob = @('Servers', 'Read'); CswJob = @('Status') }
 function Get-AVDTuneRunningWriter {
     # The name of the running job that changes the master, '' when there is none
     foreach ($name in $script:WriterJobVariables) {
