@@ -686,6 +686,19 @@ try {
         Test-Check 'stop (#58): ... the holder was released: the next start holds the marker and its stop clears it' ($kAgain -eq $true -and -not (Test-AVDTuneChangeInProgress -Root $rn) -and -not (Get-AVDTuneChangeStopError)) "again=$kAgain"
     }
     finally { & (Get-Module AVDTune) { $script:StateLockSeconds = 30 }; if ($rsV) { $rsV.Dispose() }; $mtx2.Dispose() }
+    # #50: after the finish (Sealed) every writer is refused by the central marker until a new version is started; the repairs of a crash pass -AllowSealed
+    $rs50 = Join-Path $tmp 'issue50-sealed'; [void](Initialize-AVDTuneState -Root $rs50); [void](Start-AVDTuneImageVersion -Root $rs50 -Date ([datetime]'2026-11-01') -User 'admin1')
+    [void](Set-AVDTuneState -Root $rs50 -Values @{ Sealed = $true })
+    $e50 = Get-ThrownText { [void](Start-AVDTuneChange -Root $rs50) }
+    Test-Check 'sealed (#50): a change of a finished version is refused with the hint to start a new version, no marker is set' ($e50 -like '*2026.11.001 is finished*Start a new version*' -and -not (Test-AVDTuneChangeInProgress -Root $rs50) -and (Test-AVDTuneSealed -Root $rs50)) $e50
+    $k50 = Start-AVDTuneChange -Root $rs50 -AllowSealed; Stop-AVDTuneChange -Root $rs50 -Owner $k50
+    Test-Check 'sealed (#50): a crash repair (-AllowSealed) still gets the marker' ($k50 -eq $true -and -not (Test-AVDTuneChangeInProgress -Root $rs50)) $null
+    [void](Set-AVDTuneState -Root $rs50 -Values @{ Sealed = 'true' })
+    Test-Check 'sealed (#50): only a real true counts (a string is not $true)' (-not (Test-AVDTuneSealed -Root $rs50)) $null
+    [void](Set-AVDTuneState -Root $rs50 -Values @{ Sealed = $true })
+    [void](Start-AVDTuneImageVersion -Root $rs50 -Date ([datetime]'2026-11-02') -User 'admin1')
+    $k50b = Start-AVDTuneChange -Root $rs50; Stop-AVDTuneChange -Root $rs50 -Owner $k50b
+    Test-Check 'sealed (#50): after Start new version changes work again' ($k50b -eq $true -and -not (Test-AVDTuneSealed -Root $rs50)) $null
     # ---------------------------------------------------------------- findings of the security review of #27
     # 1: a change in progress (marker): first change = its start, no new version, no snapshot as the current state meanwhile
     $rp = Join-Path $tmp 'issue27-progress'; [void](Initialize-AVDTuneState -Root $rp); [void](Start-AVDTuneImageVersion -Root $rp -Date ([datetime]'2026-11-01') -User 'admin1')

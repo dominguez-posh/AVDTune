@@ -361,6 +361,7 @@
   "shell.readonly": "Nur lesen: Bestätige zuerst auf der Übersicht einen Snapshot von heute. Bis dahin ändert nichts auf dieser Seite den Master.",
   "shell.readonlygo": "Zur Übersicht",
   "shell.readonlygo.name": "Zur Übersicht, um die Startsequenz abzuschließen",
+  "shell.sealed": "Diese Image-Version ist abgeschlossen: weitere Änderungen sind gesperrt. Starte zuerst auf der Übersicht eine neue Version.",
   "shell.sessionend": "Abmelden oder Herunterfahren wurde aufgehalten: Ein Vorgang (Update oder Benchmark) läuft noch. Versuche es erneut, wenn er fertig ist.",
   "shell.shutdownreason": "AVDTune führt einen Vorgang aus (Update oder Benchmark). Warte, bis er fertig ist: Was angehalten oder aufgehoben wurde (Update-Sperre, Windows Update, Indexer), wird am Ende zurückgesetzt.",
   "stage.btn.domain.done": "Anzeigen",

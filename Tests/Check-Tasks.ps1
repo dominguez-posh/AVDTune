@@ -190,5 +190,15 @@ $script:RelJob = @{ Kind = 'Install' }; Set-ShutdownBlock $false; $relKept = ($s
 $script:RelJob = @{ Kind = 'Start' }; Set-ShutdownBlock $false; $relReleased = ($script:DestroyCount -eq $d0 + 1); $script:RelJob = $null
 Test-Check 'shutdown block (#49): a running release check does not keep the block of an ended run' ($relKept -and $relReleased -and 'RelJob' -in $script:WriterJobVariables) "released=$relReleased"
 
+# #50: after the finish every write start of a page is refused with the clear text; the crash repairs pass -AllowSealed (and only they)
+$script:FakeSealed = $true
+function Test-AVDTuneSealed { param($Root) $script:FakeSealed }
+function T([string]$Key) { $Key }
+$sealErr = $null; try { Assert-NoOtherWriter } catch { $sealErr = $_.Exception.Message }
+$sealRepair = $true; try { Assert-NoOtherWriter -AllowSealed } catch { $sealRepair = $false }
+$script:FakeSealed = $false; $sealOpen = $true; try { Assert-NoOtherWriter } catch { $sealOpen = $false }
+$allowUsers = @(Get-ChildItem -LiteralPath $repo -Filter 'AVDTune-*.ps1' | Select-String -Pattern 'Assert-NoOtherWriter -AllowSealed' | ForEach-Object { $_.Filename } | Sort-Object -Unique)
+Test-Check 'sealed (#50): a write start is refused while the version is finished (text shell.sealed), the crash repairs (finish, benchmark) pass, an open version passes' ($sealErr -eq 'shell.sealed' -and $sealRepair -and $sealOpen -and ($allowUsers -join ',') -eq 'AVDTune-Benchmark.ps1,AVDTune-Seal.ps1') "err=$sealErr users=$($allowUsers -join ',')"
+
 if ($script:failed -gt 0) { throw "$script:failed check(s) failed." }
 'Check-Tasks: all checks passed.'

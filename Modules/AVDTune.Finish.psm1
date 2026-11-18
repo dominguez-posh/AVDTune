@@ -317,7 +317,7 @@ function Repair-AVDTuneFinishCrash {
     Assert-AVDTuneNoForeignChange -Root $Root   # a finish of another AVDTune process still runs: no crash (#49)
     $record = Get-AVDTuneFinishCrash -Root $Root
     if (-not $record) { return [pscustomobject]@{ Repaired = $false; Failed = @(); Message = 'No interrupted finish.' } }
-    $changeOwner = Start-AVDTuneChange -Root $Root   # marker and LastChange through the central helpers (#27)
+    $changeOwner = Start-AVDTuneChange -Root $Root -AllowSealed   # a repair puts back what a crash left lifted, also after the version was closed (#50); marker and LastChange through the central helpers (#27)
     try {
     $failed = @(Restore-AVDTuneFinishLift -Machine $Machine -Root $Root)
     $record = Get-AVDTuneFinishRecord $Root

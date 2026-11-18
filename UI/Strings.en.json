@@ -361,6 +361,7 @@
   "shell.readonly": "Read only: confirm a snapshot of today on the Overview first. Nothing on this page changes the master until then.",
   "shell.readonlygo": "Go to the Overview",
   "shell.readonlygo.name": "Go to the Overview to finish the start sequence",
+  "shell.sealed": "This image version is finished: further changes are locked. Start a new version on the Overview first.",
   "shell.sessionend": "Log off or shut down was held back: an operation (update or benchmark) is still running. Try again when it is done.",
   "shell.shutdownreason": "AVDTune runs an operation (update or benchmark). Wait until it is done: what was paused or lifted (update block, Windows Update, indexer) is put back at the end.",
   "stage.btn.domain.done": "Show",

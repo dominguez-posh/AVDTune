@@ -96,7 +96,7 @@ Add-Click $ui.BtnSealRun {
     Start-SealJob
 }
 Add-Click $ui.BtnSealRepair {
-    if (-not (Test-AVDTuneWriteAllowed)) { throw 'Read only: confirm a snapshot of today on the Overview first.' }; Assert-NoOtherWriter
+    if (-not (Test-AVDTuneWriteAllowed)) { throw 'Read only: confirm a snapshot of today on the Overview first.' }; Assert-NoOtherWriter -AllowSealed   # the repair puts back what a crash left lifted, also after the version was closed (#50)
     $r = Repair-AVDTuneFinishCrash -Machine $script:Machine -Root $script:StateRoot -User ([string]$env:USERNAME)
     [void](Add-AVDTuneProtocolNote -Protocol $script:Protocol -Group 'seal' -Subject 'Finish repaired' -Note $r.Message); Save-Protocol
     Show-Toast $r.Message
