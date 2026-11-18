@@ -35,6 +35,7 @@ function Get-UpdTaskTitle([string]$Kind) {
 }
 function Start-UpdJob([string]$Kind, $Argument) {
     # Kind: Scan | Run | Repair-Dism | Repair-Sfc
+    if ($Kind -notin $script:WriterReadOnlyKinds.UpdJob) { Assert-NoOtherWriter -AllowSealed:($Kind -eq 'Block-Repair') }   # every writer kind asks the central check; the crash repair of the maintenance mode also after the finish (#50/#66 review)
     if ($script:UpdJob) { throw 'Another update operation is still running.' }
     if ($script:BenchJob) { throw 'A benchmark is running. Wait until it is done.' }
     if ($script:OptRun) { throw 'An optimization run is going. Wait until it is done.' }

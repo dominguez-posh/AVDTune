@@ -198,7 +198,26 @@ $sealErr = $null; try { Assert-NoOtherWriter } catch { $sealErr = $_.Exception.M
 $sealRepair = $true; try { Assert-NoOtherWriter -AllowSealed } catch { $sealRepair = $false }
 $script:FakeSealed = $false; $sealOpen = $true; try { Assert-NoOtherWriter } catch { $sealOpen = $false }
 $allowUsers = @(Get-ChildItem -LiteralPath $repo -Filter 'AVDTune-*.ps1' | Select-String -Pattern 'Assert-NoOtherWriter -AllowSealed' | ForEach-Object { $_.Filename } | Sort-Object -Unique)
-Test-Check 'sealed (#50): a write start is refused while the version is finished (text shell.sealed), the crash repairs (finish, benchmark) pass, an open version passes' ($sealErr -eq 'shell.sealed' -and $sealRepair -and $sealOpen -and ($allowUsers -join ',') -eq 'AVDTune-Benchmark.ps1,AVDTune-Seal.ps1') "err=$sealErr users=$($allowUsers -join ',')"
+Test-Check 'sealed (#50): a write start is refused while the version is finished (text shell.sealed), the crash repairs (finish, benchmark, maintenance mode) pass, an open version passes' ($sealErr -eq 'shell.sealed' -and $sealRepair -and $sealOpen -and ($allowUsers -join ',') -eq 'AVDTune-Benchmark.ps1,AVDTune-Seal.ps1,AVDTune-Updates.ps1' -and [IO.File]::ReadAllText((Join-Path $repo 'AVDTune-Updates.ps1')).Contains("Assert-NoOtherWriter -AllowSealed:(`$Kind -eq 'Block-Repair')")) "err=$sealErr users=$($allowUsers -join ',')"
+# #50/#66 review: every function of a page that starts a writer job (assigns one of WriterJobVariables) asks Assert-NoOtherWriter itself, not only some of its callers
+$unguarded = @()
+foreach ($pf in Get-ChildItem -LiteralPath $repo -Filter 'AVDTune-*.ps1') {
+    $pAst = [Management.Automation.Language.Parser]::ParseFile($pf.FullName, [ref]$null, [ref]$null)
+    foreach ($fnAst in $pAst.FindAll({ param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] }, $true)) {
+        $fnText = $fnAst.Extent.Text
+        foreach ($wv in $script:WriterJobVariables) { if ($fnText.Contains("`$script:$wv = @{") -and -not $fnText.Contains('Assert-NoOtherWriter')) { $unguarded += "$($pf.Name):$($fnAst.Name)" } }
+    }
+}
+Test-Check 'writers (#50 review): every page function that starts a writer job calls Assert-NoOtherWriter (Start-OptRun, Start-SwJob, Start-UpdJob included)' ($unguarded.Count -eq 0) ($unguarded -join ', ')
+# #50 review: the module writers outside Start-AVDTuneChange refuse a finished version themselves (masking, benchmark quiet mode, environment apply and undo)
+$guardFns = @(@('AVDTune.Masking.psm1', 'Save-AVDTuneRuleSet'), @('AVDTune.Masking.psm1', 'Remove-AVDTuneRuleSet'), @('AVDTune.Masking.psm1', 'Undo-AVDTuneMaskingChange'), @('AVDTune.Masking.psm1', 'Add-AVDTuneComfortShortcut'),
+    @('AVDTune.Benchmark.psm1', 'Start-AVDTuneBenchmarkQuiet'), @('AVDTune.Environment.psm1', 'Invoke-AVDTuneEnvApply'), @('AVDTune.Environment.psm1', 'Invoke-AVDTuneEnvUndo'))
+$noGuard = @(foreach ($g in $guardFns) {
+        $mAst = [Management.Automation.Language.Parser]::ParseFile((Join-Path $repo "Modules\$($g[0])"), [ref]$null, [ref]$null)
+        $mFn = $mAst.Find({ param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $g[1] }, $true)
+        if (-not $mFn -or $mFn.Body.Extent.Text -notmatch 'Assert-AVDTuneNotSealed -Root \$Root') { $g[1] }
+    })
+Test-Check 'sealed (#50 review): masking, benchmark quiet mode and environment apply/undo refuse a finished version in the module' ($noGuard.Count -eq 0) ($noGuard -join ', ')
 
 # #49 (4): the global lock of the write buttons (one command, WPF disables the button while a writer job runs and gives the page its own state back)
 Add-Type -AssemblyName PresentationFramework

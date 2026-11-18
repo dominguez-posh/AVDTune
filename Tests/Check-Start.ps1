@@ -693,8 +693,14 @@ try {
     Test-Check 'sealed (#50): a change of a finished version is refused with the hint to start a new version, no marker is set' ($e50 -like '*2026.11.001 is finished*Start a new version*' -and -not (Test-AVDTuneChangeInProgress -Root $rs50) -and (Test-AVDTuneSealed -Root $rs50)) $e50
     $k50 = Start-AVDTuneChange -Root $rs50 -AllowSealed; Stop-AVDTuneChange -Root $rs50 -Owner $k50
     Test-Check 'sealed (#50): a crash repair (-AllowSealed) still gets the marker' ($k50 -eq $true -and -not (Test-AVDTuneChangeInProgress -Root $rs50)) $null
-    [void](Set-AVDTuneState -Root $rs50 -Values @{ Sealed = 'true' })
-    Test-Check 'sealed (#50): only a real true counts (a string is not $true)' (-not (Test-AVDTuneSealed -Root $rs50)) $null
+    # fail closed (#50 review): a value written by hand (string, number) counts as finished; only a missing field or a real false is open; an unreadable state.json refuses
+    $sealedAs = @{}
+    foreach ($case in @(@('string', 'true'), @('stringFalse', 'false'), @('number', 1), @('false', $false))) { [void](Set-AVDTuneState -Root $rs50 -Values @{ Sealed = $case[1] }); $sealedAs[$case[0]] = Test-AVDTuneSealed -Root $rs50 }
+    $sj = Join-Path $rs50 'state.json'; $sjKeep = [IO.File]::ReadAllText($sj)
+    $noSeal = $sjKeep | ConvertFrom-Json; $noSeal.PSObject.Properties.Remove('Sealed'); [IO.File]::WriteAllText($sj, ($noSeal | ConvertTo-Json -Depth 8)); $sealedAs['missing'] = Test-AVDTuneSealed -Root $rs50
+    [IO.File]::WriteAllText($sj, '{ "Sealed": fal'); $eBroken = Get-ThrownText { [void](Start-AVDTuneChange -Root $rs50) }
+    [IO.File]::WriteAllText($sj, $sjKeep)
+    Test-Check 'sealed (#50): fail closed: "true", "false" and 1 count as finished, a missing field and a real false are open, a broken state.json refuses the change' ($sealedAs.string -and $sealedAs.stringFalse -and $sealedAs.number -and -not $sealedAs.false -and -not $sealedAs.missing -and $eBroken -and -not (Test-AVDTuneChangeInProgress -Root $rs50)) "$(($sealedAs.GetEnumerator() | ForEach-Object { "$($_.Key)=$($_.Value)" }) -join ' ') broken=$eBroken"
     [void](Set-AVDTuneState -Root $rs50 -Values @{ Sealed = $true })
     [void](Start-AVDTuneImageVersion -Root $rs50 -Date ([datetime]'2026-11-02') -User 'admin1')
     $k50b = Start-AVDTuneChange -Root $rs50; Stop-AVDTuneChange -Root $rs50 -Owner $k50b

@@ -385,6 +385,29 @@ try {
     Test-Check 'interrupted (#45): the undo plan can take the found resource back' (@($upI.Steps | Where-Object { $_.Id -eq $made.Id -and $_.Action -eq 'Delete' }).Count -eq 1) (($upI.Steps | ForEach-Object { "$($_.Id)=$($_.Action)" }) -join ', ')
     $envPage = [IO.File]::ReadAllText((Join-Path $repo 'AVDTune-Environment.ps1'))
     Test-Check 'interrupted (#45): the plan and the undo plan of the page close an interrupted run first' (([regex]::Matches($envPage, 'Resolve-EnvInterrupted \$tok\.Token')).Count -eq 2) $null
+    # #45 review: the run is closed under the state lock and not while another AVDTune process changes the master or a wizard run of this process is carried out
+    $root = New-Root; $roots += $root
+    $arm = New-AVDTuneFakeEnvArm
+    [void](Invoke-Full $arm $good $root)
+    $jp = Join-Path $root 'config\azure-setup.json'; $jj = [IO.File]::ReadAllText($jp) | ConvertFrom-Json
+    @($jj.Runs[0].Steps | Where-Object { $_.Type -eq 'endpoint' })[0].Status = 'Started'; [IO.File]::WriteAllText($jp, ($jj | ConvertTo-Json -Depth 10))
+    [AppDomain]::CurrentDomain.SetData('AVDTune.EnvApplyRun', 'other-run')
+    $eRun = Get-Thrown { Resolve-AVDTuneEnvInterrupted -Arm $arm -Token $tok -Root $root }
+    [AppDomain]::CurrentDomain.SetData('AVDTune.EnvApplyRun', $null)
+    $other = Get-Process | Where-Object { $_.Id -ne $PID -and $(try { $_.StartTime } catch { $null }) } | Select-Object -First 1   # a live process that is not this one: its marker counts as another AVDTune process
+    [void](Set-AVDTuneState -Root $root -Values @{ ChangeInProgress = [ordered]@{ Started = (Get-Date).ToUniversalTime().ToString('o'); Pid = $other.Id; ProcessStart = $other.StartTime.ToUniversalTime().ToString('o'); ProcessName = $other.ProcessName } })
+    $eForeign = Get-Thrown { Resolve-AVDTuneEnvInterrupted -Arm $arm -Token $tok -Root $root }
+    [void](Set-AVDTuneState -Root $root -Values @{ ChangeInProgress = $null })
+    $stillOpen = @(Get-AVDTuneEnvInterrupted -Root $root).Count
+    $closed = @(Resolve-AVDTuneEnvInterrupted -Arm $arm -Token $tok -Root $root).Count
+    Test-Check 'interrupted (#45 review): refused while a wizard run is carried out or another AVDTune process holds a live marker (journal unchanged), closed once both are gone' ($eRun -like '*carried out right now*' -and $eForeign -like '*Another AVDTune process*' -and $stillOpen -eq 1 -and $closed -eq 1 -and @(Get-AVDTuneEnvInterrupted -Root $root).Count -eq 0) "run=$eRun foreign=$eForeign"
+    # #50 review: apply and undo of the wizard refuse a finished version before any request
+    $root = New-Root; $roots += $root
+    $arm = New-AVDTuneFakeEnvArm
+    [void](Set-AVDTuneState -Root $root -Values @{ Sealed = $true })
+    $eApply = Get-Thrown { Invoke-Full $arm $good $root }
+    $eUndo = Get-Thrown { Invoke-AVDTuneEnvUndo -Arm $arm -Token $tok -ConfirmedHash 'x' -Root $root }
+    Test-Check 'sealed (#50 review): the environment apply and undo refuse a finished version, nothing is written' ($eApply -like '*is finished*' -and $eUndo -like '*is finished*' -and @(Get-Writes $arm).Count -eq 0) "apply=$eApply undo=$eUndo"
 
     # ---------------------------------------------------------------- review findings of #32 (Finn): share empty, per share and account, journal as input, existing accounts, create semantics
     Close-AVDTuneWriteGate; Open-AVDTuneWriteGate -SnapshotId 'snapB' -ConfirmedBy 'Test User'

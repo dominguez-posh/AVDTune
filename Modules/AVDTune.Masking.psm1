@@ -618,6 +618,7 @@ function Save-AVDTuneRuleSet {
         [ValidateSet('Hidden', 'HiddenExceptGroups')][string]$Visibility = 'Hidden', [object[]]$Groups = @(), $CreateGroup, $Ldap, $Conn, $Directory,
         [switch]$Confirmed, $ExpectedChange, [string]$User, [string]$SnapshotId, [switch]$WhatIf
     )
+    if (-not $WhatIf) { Assert-AVDTuneNotSealed -Root $Root }   # #50: a finished version takes no change (also before any undo or backup file is written)
     if (-not (Test-AVDTuneMaskingName $Name)) { throw "'$Name' is not a valid rule set name (letters, digits, space, '.', '_', '-', up to 64 characters)." }
     if (@($Entries).Count -eq 0) { throw 'No file to hide.' }
     foreach ($e in @($Entries)) { $why = Test-AVDTuneMaskingRulePath ([string]$e.Folder) ([string]$e.Name); if ($why) { throw $why } }
@@ -753,6 +754,7 @@ function Remove-AVDTuneRuleSet {
     <# Deletes both files of a rule set (the old content goes into the undo record when the delete worked). The group, if any, stays: it may be used elsewhere. #>
     [CmdletBinding()]
     param([Parameter(Mandatory)]$Machine, [Parameter(Mandatory)]$M, [string]$Root = (Get-AVDTuneRoot), [Parameter(Mandatory)][string]$Name, $ExpectedSha, [string]$User, [string]$SnapshotId, [switch]$WhatIf)
+    if (-not $WhatIf) { Assert-AVDTuneNotSealed -Root $Root }   # #50: a finished version takes no change (also before any undo or backup file is written)
     if (-not (Test-AVDTuneMaskingName $Name)) { throw "'$Name' is not a valid rule set name." }
     $paths = @((Join-Path $M.RulesFolder "$Name.fxr"), (Join-Path $M.RulesFolder "$Name.fxa"))
     if ($ExpectedSha) {
@@ -784,6 +786,7 @@ function Undo-AVDTuneMaskingChange {
     #>
     [CmdletBinding()]
     param([Parameter(Mandatory)]$Machine, [Parameter(Mandatory)]$M, [string]$Root = (Get-AVDTuneRoot), $Ldap, $Conn, [switch]$Force, [string]$User, [string]$SnapshotId, [switch]$WhatIf)
+    if (-not $WhatIf) { Assert-AVDTuneNotSealed -Root $Root }   # #50: a finished version takes no change (also before any undo or backup file is written)
     $u = Read-AVDTuneMaskingUndo $Root
     if (-not $u) { throw 'There is nothing to undo: no App Masking change was recorded.' }
     $steps = New-Object System.Collections.ArrayList
@@ -882,6 +885,7 @@ function Add-AVDTuneComfortShortcut {
     <# Creates a comfort shortcut on the Public Desktop (read only for users). An existing file of that name that is not ours is never replaced; one of ours with another target, icon or ACL is made right. #>
     [CmdletBinding()]
     param([Parameter(Mandatory)]$Machine, [Parameter(Mandatory)]$M, [string]$Root = (Get-AVDTuneRoot), [Parameter(Mandatory)][ValidateSet('logoff')][string]$Id, [string[]]$ExpectedWarnings, [string]$User, [string]$SnapshotId, [switch]$WhatIf)
+    if (-not $WhatIf) { Assert-AVDTuneNotSealed -Root $Root }   # #50: a finished version takes no change (also before any undo or backup file is written)
     $s = @(Get-AVDTuneComfortShortcuts -M $M | Where-Object Id -eq $Id)[0]
     $path = Join-Path (& $M.PublicDesktopFolder) $s.Name
     $cur = & $M.ReadShortcut $path

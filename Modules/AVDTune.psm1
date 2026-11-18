@@ -1949,11 +1949,15 @@ function Resolve-AVDTuneStaleChange {
 }
 
 function Test-AVDTuneSealed {
-    # The current image version is finished (Sealed in state.json, #50): no further change until "Start new version"
+    # The current image version is finished (Sealed in state.json, #50): no further change until "Start new version".
+    # Fail closed: only a missing field or a real JSON false is open; any other value (a string, a number: written by hand) counts as finished, and a state.json
+    # that cannot be read throws (the caller refuses).
     param([string]$Root = (Get-AVDTuneRoot))
     $state = Read-AVDTuneJson (Join-Path $Root 'state.json')
     $v = Get-AVDTuneProp $state 'Sealed'
-    [bool]($v -is [bool] -and $v)   # only a real JSON true (a string "true" is not $true)
+    if ($null -eq $v) { return $false }
+    if ($v -is [bool]) { return $v }
+    $true
 }
 
 function Assert-AVDTuneNotSealed {
@@ -2141,6 +2145,8 @@ function Remove-AVDTuneOldRuns {
     $folder = Join-Path $Root 'runs'
     $dir = New-Object IO.DirectoryInfo $folder
     if (-not $dir.Exists -or ($dir.Attributes -band [IO.FileAttributes]::ReparsePoint)) { return 0 }
+    # under the state lock (#52 review): the names the state holds (LastRunId, readiness, healthchecks) cannot change while the records are chosen and removed
+    Invoke-AVDTuneStateLock {
     $state = Read-AVDTuneJson (Join-Path $Root 'state.json')
     $named = @([string](Get-AVDTuneProp $state 'LastRunId'), [string](Get-AVDTuneProp (Get-AVDTuneProp $state 'Readiness') 'RunId')) + @(@(Get-AVDTuneProp $state 'Versions') | Where-Object { $_ } | ForEach-Object { [string](Get-AVDTuneProp $_ 'HealthcheckRunId') })
     $kindRx = New-Object Text.RegularExpressions.Regex('"Plan"\s*:\s*"Readiness analysis \((Start|Manual|Healthcheck)\)"\s*,\s*"Kind"\s*:\s*"(Start|Manual|Healthcheck)"', [Text.RegularExpressions.RegexOptions]::None, [TimeSpan]::FromMilliseconds(200))
@@ -2171,6 +2177,7 @@ function Remove-AVDTuneOldRuns {
         [void](Add-AVDTuneChangeLogEntry -Root $Root -Version $version -Category 'Housekeeping' -Component 'Run records' -ChangeType Note -Text "$removed old readiness analysis record(s) removed from runs (kept: the newest $Keep of the last $Days days, every record with changes and every record the state names)." -User $User)
     }
     $removed
+    }
 }
 
 function Get-AVDTuneEnvInterrupted {
