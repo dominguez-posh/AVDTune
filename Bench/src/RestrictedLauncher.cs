@@ -307,7 +307,7 @@ public static class RestrictedLauncher
         try { return Inspect(token); } finally { CloseHandle(token); }
     }
 
-    private static void EnablePrivilege(string name, bool enable)
+    internal static void EnablePrivilege(string name, bool enable)
     {
         IntPtr token = IntPtr.Zero;
         try

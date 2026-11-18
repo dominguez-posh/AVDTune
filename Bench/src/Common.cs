@@ -34,6 +34,8 @@ public sealed class Options
     /// <summary>Programs of the application starts: key (word, excel, edge, explorer, powershell) to the full path AVDTune checked (Authenticode) and holds open. Validated by Apps.ValidateExe.</summary>
     public Dictionary<string, string> AppPaths = new(StringComparer.Ordinal);
     public bool NoCold, NoSpeedometer, Encode;
+    /// <summary>Application starts with the reduced admin token instead of a temporary standard user (issue #92). Not used by AVDTune; for diagnosis only.</summary>
+    public bool ReducedToken;
     /// <summary>Folder of the local Speedometer copy (below the release of AVDTune).</summary>
     public string? Site;
     public int SpeedIterations = 2;
@@ -66,6 +68,7 @@ public sealed class Options
                     }
                 case "--no-cold": o.NoCold = true; break;
                 case "--no-speedometer": o.NoSpeedometer = true; break;
+                case "--reduced-token": o.ReducedToken = true; break;
                 case "--site": o.Site = Next(); break;
                 case "--speed-iterations": o.SpeedIterations = int.Parse(Next(), System.Globalization.CultureInfo.InvariantCulture); break;
                 case "--host":

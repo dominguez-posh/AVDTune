@@ -5,14 +5,14 @@ namespace AVDTune.Bench;
 /// <summary>host.app.speedometer (design 1.1): Speedometer 3.1 from the local copy, served from 127.0.0.1 on a random port. There is NO debugging port (finding 1 of the round 2 security
 /// review: a DevTools port on Edge would be a remote-control door into a process of the administrator). Instead the loopback server serves a small wrapper page of the same origin: it
 /// loads Speedometer in an iframe, reads #result-number once location.hash is #summary and reports the number to /result/&lt;token&gt; (a 128-bit token per run). Edge runs InPrivate with a
-/// throw-away profile, no sign-in, no sync, no extensions, started with the reduced token (Medium integrity, not elevated). Files of the benchmark are not changed.</summary>
+/// throw-away profile, no sign-in, no sync, no extensions, started as the temporary standard user of the run (issue #92; Medium integrity, not elevated). Files of the benchmark are not changed.</summary>
 public static class Speedometer
 {
     public const int TimeoutSec = 600;
     /// <summary>A Speedometer 3.1 score outside this band is not a measurement of a browser (runs per minute); it is refused as implausible.</summary>
     public static bool Plausible(double score) => score is >= 0.5 and <= 500;
 
-    public static Measure Run(Options o, string edgeExe, string siteDir, string work)
+    public static Measure Run(Options o, string edgeExe, string siteDir, string work, IAppLauncher launcher)
     {
         const string Id = "host.app.speedometer";
         Log.Progress("apps: speedometer");
@@ -24,7 +24,7 @@ public static class Speedometer
         {
             server = new SiteServer(siteDir);
             server.AddWrapper(o.SpeedIterations);
-            using var p = RestrictedLauncher.Start(edgeExe, RestrictedLauncher.BuildArguments(Apps.EdgeArgs(profile, server.WrapperUrl, "--window-size=1280,900")), Apps.TmpDir(work), Apps.ChildEnvironment(Apps.TmpDir(work)), job);
+            using var p = launcher.Start(edgeExe, RestrictedLauncher.BuildArguments(Apps.EdgeArgs(profile, server.WrapperUrl, "--window-size=1280,900")), Apps.TmpDir(work), Apps.TmpDir(work), job);
             double deadline = Timing.Now() + TimeoutSec;
             string? text = null;
             while (Timing.Now() < deadline)

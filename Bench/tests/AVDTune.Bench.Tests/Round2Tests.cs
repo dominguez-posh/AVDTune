@@ -239,8 +239,31 @@ internal static class Round2
         catch { return false; }
     }
 
+    private static void IsolatedUserChecks()
+    {
+        var n1 = IsolatedUser.NewName(); var n2 = IsolatedUser.NewName();
+        Check("isolated user (#92): the name is the prefix and 12 random hex digits, at most 20 characters, different per run", System.Text.RegularExpressions.Regex.IsMatch(n1, "^avdtb-[0-9a-f]{12}$") && n1.Length <= 20 && n1 != n2, n1);
+        Check("isolated user (#92): only an account with the exact name form AND the marker is a leftover to remove; a look-alike or another description is never touched",
+            IsolatedUser.IsLeftover(n1, IsolatedUser.Marker) && !IsolatedUser.IsLeftover(n1, "made by someone else") && !IsolatedUser.IsLeftover(n1, null) && !IsolatedUser.IsLeftover("avdtb-ABCDEF123456", IsolatedUser.Marker)
+            && !IsolatedUser.IsLeftover("avdtb-0123456789ab-x", IsolatedUser.Marker) && !IsolatedUser.IsLeftover("Administrator", IsolatedUser.Marker) && !IsolatedUser.IsLeftover("xavdtb-0123456789ab", IsolatedUser.Marker));
+        var pw1 = IsolatedUser.NewPassword(); var pw2 = IsolatedUser.NewPassword();
+        Check("isolated user (#92): the password is 40 random characters with upper, lower, digit and symbol, different per run, a char array (zeroed by the caller)", pw1.Length == IsolatedUser.PasswordLength && IsolatedUser.PasswordOk(pw1) && !pw1.SequenceEqual(pw2) && !IsolatedUser.PasswordOk("abcdefghijklmnopqrst".ToCharArray()) && Throws(() => IsolatedUser.NewPassword(8)));
+        Array.Clear(pw1); Array.Clear(pw2);
+        var env = IsolatedUser.ChildEnvironment(new[] { @"USERPROFILE=C:\Users\avdtb-0123456789ab", @"TEMP=C:\Users\avdtb-0123456789ab\AppData\Local\Temp", "Path=C:\\Windows" }, @"C:\w\tmp");
+        Check("isolated user (#92): the programs get the user's own environment (its profile), TEMP and TMP in the work folder", env["USERPROFILE"] == @"C:\Users\avdtb-0123456789ab" && env["TEMP"] == @"C:\w\tmp" && env["TMP"] == @"C:\w\tmp" && env["PATH"] == "C:\\Windows");
+        Check("isolated user (#92): the account must be in Users only (another group fails closed)", IsolatedUser.GroupProblem(new[] { "Users" }, "Users") == null && IsolatedUser.GroupProblem(new[] { "Users", "Administrators" }, "Users") != null && IsolatedUser.GroupProblem(Array.Empty<string>(), "Users") != null);
+        Check("isolated user (#92): the default DACL of its token is the user, SYSTEM and Administrators (AVDTune can wait for and end the programs)", IsolatedUser.DefaultDaclSddl("S-1-5-21-1-2-3-1001") == "D:(A;;GA;;;S-1-5-21-1-2-3-1001)(A;;GA;;;SY)(A;;GA;;;BA)");
+        Check("isolated user (#92): window station without clipboard, screen reading or exit; desktop without journal hooks or desktop switch", (IsolatedUser.WinstaRights & (0x4u | 0x200u | 0x40u | 0x10u | 0x8u)) == 0 && (IsolatedUser.DesktopRights & (0x10u | 0x20u | 0x100u)) == 0);
+        Check("isolated user (#92): the default is the temporary user; --reduced-token is the explicit exception", !Options.Parse(new[] { "apps" }).ReducedToken && Options.Parse(new[] { "apps", "--reduced-token" }).ReducedToken);
+        var src = SrcText();
+        Check("isolated user (#92, source): leftovers are removed before a new account, the password is freed right after LogonUser, the domain-admin refusal (#84) stays, the child token is read back before it runs",
+            src.Contains("var left = CleanupLeftovers();") && src.Contains("FreePassword(ref pw);") && src.Contains("if (RestrictedLauncher.DomainAdminRefusal(") && src.Contains("if (user != Sid.Value) throw") && src.Contains("if (RestrictedLauncher.TokenProblem(facts) is { } problem) throw")
+            && src.Contains("private static IAppLauncher MakeLauncher(Options o) => o.ReducedToken ? new ReducedTokenLauncher() : IsolatedUser.Create();") && src.Contains("(launcher as IDisposable)?.Dispose();"));
+    }
+
     private static void LauncherChecks()
     {
+        IsolatedUserChecks();
         Check("launcher: arguments are quoted the way CommandLineToArgvW reads them back", RestrictedLauncher.QuoteArg("abc") == "abc" && RestrictedLauncher.QuoteArg("a b") == "\"a b\"" && RestrictedLauncher.QuoteArg("") == "\"\"" && RestrictedLauncher.QuoteArg("a\"b") == "\"a\\\"b\"" && RestrictedLauncher.QuoteArg(@"C:\x y\") == "\"C:\\x y\\\\\"" && RestrictedLauncher.BuildArguments(new[] { "/q", "a b" }) == "/q \"a b\"");
         Check("launcher: the environment block is sorted, NUL-ended, NUL at the end", RestrictedLauncher.EnvironmentBlock(new Dictionary<string, string> { ["b"] = "2", ["A"] = "1" }) == "A=1\0b=2\0\0");
         Check("launcher: only a token that is not elevated and Medium or lower is accepted", RestrictedLauncher.IntegrityAcceptable(0x2000, false) && RestrictedLauncher.IntegrityAcceptable(0x1000, false) && !RestrictedLauncher.IntegrityAcceptable(0x3000, false) && !RestrictedLauncher.IntegrityAcceptable(0x2000, true) && !RestrictedLauncher.IntegrityAcceptable(0x4000, true));
