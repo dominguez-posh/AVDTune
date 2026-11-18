@@ -14,9 +14,11 @@
       AVDTUNE_SMOKE  script that drives the window off-screen (Tests\GuiSmokeDriver.ps1)
 .PARAMETER HideConsole
     Hides the console window of this process.
+.PARAMETER Benchmark
+    Benchmark only (plan 6b, #90): no setup, no sign-in, no snapshot gate, no Golden Master pages; only the Benchmark page and the protocol.
 #>
 [CmdletBinding()]
-param([switch]$HideConsole)
+param([switch]$HideConsole, [Alias('BenchmarkOnly')][switch]$Benchmark)
 
 # First statement, before any cmdlet (#73): modules only from the system folders, never from the admin's Documents or HKCU\Environment. Even Join-Path or
 # New-Object would be autoloaded through the inherited path, from any module there that exports that name. Same value as Get-AVDTuneSystemModulePath.
@@ -49,6 +51,7 @@ $script:ModulePathProblems = @(Get-AVDTuneModulePathProblems)
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, System.Windows.Forms
 
 $script:AppRoot = $PSScriptRoot
+$script:BenchmarkOnly = [bool]$Benchmark   # plan 6b: set here or by "Benchmark only" in the sign-in step of the first start (Enter-BenchmarkOnlyMode)
 $script:ToolVersion = (Get-Content -LiteralPath (Join-Path $PSScriptRoot 'VERSION') -Raw -Encoding UTF8).Trim()   # the file VERSION is also the version of the release
 . (Join-Path $PSScriptRoot 'AVDTune-Theme.ps1')
 . (Join-Path $PSScriptRoot 'AVDTune-UiText.ps1')   # the texts of the window (UI\Strings.en.json, UI\Strings.de.json)
@@ -251,6 +254,7 @@ foreach ($page in $script:PageTable) {
 }
 
 function Show-Page([string]$Key) {
+    if ($script:BenchmarkOnly -and $Key -notin 'Benchmark', 'Protocol') { $Key = 'Benchmark' }   # benchmark only: no other page, whatever asks for it
     $script:CurrentPage = $Key
     $isPlaceholder = $Key -notin 'Overview', 'Protocol', 'Updates', 'UpdateBlock', 'UserExperience', 'Benchmark', 'FSLogix', 'Software', 'Office', 'VdiComponents', 'AppMasking', 'Seal', 'Environment', 'Optimization', 'Language', 'Customizations', 'Printers'
     $ui.PageOverview.Visibility = ConvertTo-Vis ($Key -eq 'Overview')
@@ -692,11 +696,12 @@ if ($stateRepair -and @($stateRepair.Quarantined).Count -gt 0) {
 Update-Chip
 Show-Page 'Overview'
 # First start: the sign-in opens by itself (it needs no answer; the domain step and the questions follow, issue #64)
-if (-not (Get-AVDTuneEnvironment $script:StateRoot)) { try { Open-Stage 'SignIn' } catch { Show-Error $_.Exception.Message } }
+if ($script:BenchmarkOnly) { try { Enter-BenchmarkOnlyMode } catch { Show-Error $_.Exception.Message } }   # plan 6b: no sign-in, no setup
+elseif (-not (Get-AVDTuneEnvironment $script:StateRoot)) { try { Open-Stage 'SignIn' } catch { Show-Error $_.Exception.Message } }
 $script:Timer.Start()
 Start-OverviewRefresh
 Update-ReleaseView; Start-RelJob 'Start'   # integrity of the tool against its release and the update check, at every start (AVDTune-Release.ps1)
-Start-ReadyJob 'Start' ''   # the readiness analysis runs at every start (read only; Azure checks need the sign-in and run again after it)
+if (-not $script:BenchmarkOnly) { Start-ReadyJob 'Start' '' }   # the readiness analysis runs at every start (read only; Azure checks need the sign-in and run again after it)
 # A maintenance mode that never ended (closed or crashed in the middle) is reported at once; the repair is on the Update block page
 if (Get-AVDTuneFinishCrash -Root $script:StateRoot) { Show-Toast (T 'shell.crash.finish') }
 if (Get-AVDTuneMaintenanceCrash -Root $script:StateRoot) { Show-Toast (T 'shell.crash.maint') }

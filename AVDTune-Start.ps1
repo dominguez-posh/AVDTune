@@ -137,12 +137,13 @@ function Update-StartView {
 
 function Update-ReadOnlyBanner {
     $locked = -not (Test-AVDTuneWriteAllowed)
-    $ui.BoxReadOnly.Visibility = ConvertTo-Vis ($locked -and $script:CurrentPage -notin 'Overview', 'Protocol')
+    $ui.BoxReadOnly.Visibility = ConvertTo-Vis ($locked -and $script:CurrentPage -notin 'Overview', 'Protocol' -and -not $script:BenchmarkOnly)   # benchmark only has no snapshot gate (plan 6b)
 }
 function Update-NavVisibility {
-    # FSLogix and App Masking disappear when the answers say there is no FSLogix
+    # FSLogix and App Masking disappear when the answers say there is no FSLogix; benchmark only (plan 6b) shows the Benchmark page and the protocol alone
     $e = Get-AVDTuneEnvironment $script:StateRoot
     $hidden = @(); if ($e) { $hidden = @((Resolve-AVDTuneEnvironmentPlan (Get-AVDTuneEnvironmentAnswers $e)).HiddenPages) }
+    if ($script:BenchmarkOnly) { $hidden = @($script:PageTable | ForEach-Object { $_.Key } | Where-Object { $_ -notin 'Benchmark', 'Protocol' }) }
     foreach ($page in $script:PageTable) { $ui["Nav$($page.Key)"].Visibility = ConvertTo-Vis ($page.Key -notin $hidden) }
 }
 function Update-RollbackCard {
@@ -367,6 +368,11 @@ function Build-SignInForm {
             # Another administrator: runs the setup with his account (assignment + his own consent); also checks the saved registration
             $ui.BtnStageAction2.Content = T 'stage.signin.setup'; $ui.BtnStageAction2.Visibility = 'Visible'
             $script:StageAction2 = { Invoke-SignIn -Setup }
+        }
+        elseif (-not (Get-AVDTuneEnvironment $script:StateRoot)) {
+            # First start (plan 6b): AVDTune only as a benchmark, next to the setup of a Golden Master; no sign-in, no setup, no snapshot gate
+            $ui.BtnStageAction2.Content = T 'stage.signin.benchonly'; $ui.BtnStageAction2.Visibility = 'Visible'
+            $script:StageAction2 = { if (Confirm-Action (T 'stage.signin.benchonly.ask') 'Benchmark') { Enter-BenchmarkOnlyMode } }
         }
     }
     $script:StageAction = { Invoke-SignIn }

@@ -665,6 +665,21 @@
                                             <Button x:Name="BtnBenchFull" Style="{DynamicResource PrimaryButton}" Content="Full run" AutomationProperties.Name="Start a full benchmark"/>
                                         </StackPanel>
                                     </Grid>
+                                    <Border x:Name="BoxBenchOnly" Visibility="Collapsed" Style="{DynamicResource CardBox}" Margin="0,16,0,0" Background="{DynamicResource Card}" Padding="20,16">
+                                        <StackPanel>
+                                            <TextBlock Uid="bench.only.title" Style="{DynamicResource CardTitle}"/>
+                                            <TextBlock Uid="bench.only.intro" Style="{DynamicResource Hint}" Margin="0,4,0,0" TextWrapping="Wrap"/>
+                                            <Grid Margin="0,10,0,0">
+                                                <Grid.ColumnDefinitions><ColumnDefinition Width="160"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                                                <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+                                                <TextBlock Uid="bench.only.name" VerticalAlignment="Center"/>
+                                                <TextBox x:Name="TxtBenchSystemName" Uid="bench.only.namebox" Grid.Column="1" MaxLength="80" Width="360" HorizontalAlignment="Left"/>
+                                                <TextBlock Uid="bench.only.notes" Grid.Row="1" VerticalAlignment="Top" Margin="0,10,0,0"/>
+                                                <TextBox x:Name="TxtBenchSystemNotes" Uid="bench.only.notesbox" Grid.Row="1" Grid.Column="1" MaxLength="500" Width="360" Height="60" Margin="0,8,0,0" HorizontalAlignment="Left" TextWrapping="Wrap" AcceptsReturn="True" VerticalScrollBarVisibility="Auto"/>
+                                            </Grid>
+                                            <Button x:Name="BtnBenchExportResult" Uid="bench.only.export" HorizontalAlignment="Left" Margin="0,12,0,0"/>
+                                        </StackPanel>
+                                    </Border>
                                     <Border x:Name="BoxBenchCrash" Visibility="Collapsed" Style="{DynamicResource CardBox}" Margin="0,16,0,0" Background="{DynamicResource ErrorBg}" Padding="20,14">
                                         <StackPanel>
                                             <TextBlock Text="A benchmark did not end properly" FontWeight="SemiBold" Foreground="{DynamicResource Danger}"/>
@@ -684,6 +699,22 @@
                                             <TextBlock x:Name="TxtBenchMeta" Style="{DynamicResource Hint}" Margin="0,4,0,0" TextWrapping="Wrap"/>
                                             <StackPanel x:Name="PanelBenchCats" Margin="0,12,0,0"/>
                                             <TextBlock x:Name="TxtBenchNotes" Style="{DynamicResource Hint}" Margin="0,10,0,0" TextWrapping="Wrap"/>
+                                        </StackPanel>
+                                    </Border>
+                                    <Border x:Name="BoxBenchCompare" Style="{DynamicResource CardBox}" Margin="0,16,0,0" Background="{DynamicResource Card}" Padding="20,16">
+                                        <StackPanel>
+                                            <Grid>
+                                                <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                                                <TextBlock Uid="bench.cmp.title" Style="{DynamicResource CardTitle}" VerticalAlignment="Center"/>
+                                                <StackPanel Grid.Column="1" Orientation="Horizontal">
+                                                    <Button x:Name="BtnBenchImport" Uid="bench.cmp.import" Margin="0,0,8,0"/>
+                                                    <Button x:Name="BtnBenchExportCsv" Uid="bench.cmp.csv" Margin="0,0,8,0"/>
+                                                    <Button x:Name="BtnBenchExportJson" Uid="bench.cmp.json"/>
+                                                </StackPanel>
+                                            </Grid>
+                                            <TextBlock x:Name="TxtBenchCompareHint" Style="{DynamicResource Hint}" Margin="0,4,0,0" TextWrapping="Wrap"/>
+                                            <StackPanel x:Name="PanelBenchCompare" Margin="0,8,0,0"/>
+                                            <TextBlock x:Name="TxtBenchCompareProblems" Style="{DynamicResource Hint}" Margin="0,8,0,0" TextWrapping="Wrap" Visibility="Collapsed"/>
                                         </StackPanel>
                                     </Border>
                                     <Border Style="{DynamicResource CardBox}" Margin="0,16,0,0" Background="{DynamicResource Card}" Padding="20,16">
