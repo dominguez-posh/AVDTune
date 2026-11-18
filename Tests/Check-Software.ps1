@@ -173,7 +173,7 @@ try {
     $src = [IO.File]::ReadAllText((Join-Path $repo 'Modules\AVDTune.Updates.psm1'))
     # the start itself is the central one in AVDTune.psm1 (#76): New-AVDTuneChildStartInfo, then Invoke-AVDTuneChildProcess -WaitForTree (job object, tree ended on timeout)
     $coreSrc = Get-Content -LiteralPath (Join-Path $repo 'Modules\AVDTune.psm1') -Raw
-    Test-Check 'the real runner starts every process with UseShellExecute false, no window, in a job object that ends the whole tree before the lock is let go' ($src -match 'Invoke-AVDTuneProgram -File \$File -Arguments \$Arguments -TimeoutSeconds \$TimeoutSeconds -WaitForTree' -and $coreSrc -match 'New-AVDTuneChildStartInfo -File \$File' -and $coreSrc -match 'UseShellExecute = \$false; \$psi\.CreateNoWindow = \$true' -and $coreSrc -match 'ChildJob\]::Terminate\(\$job\)' -and $coreSrc -match 'if \(!timedOut && waitForTree\) \{\s*while \(Active\(job\) > 0\)') $null
+    Test-Check 'the real runner starts every process with UseShellExecute false, no window, in a job object that ends the whole tree before the lock is let go' ($src -match 'Invoke-AVDTuneProgram -File \$File -Arguments \$Arguments -TimeoutSeconds \$TimeoutSeconds -WaitForTree' -and $coreSrc -match 'New-AVDTuneChildStartInfo -File \$full' -and $coreSrc -match 'UseShellExecute = \$false; \$psi\.CreateNoWindow = \$true' -and $coreSrc -match 'ChildJob\]::Terminate\(\$job\)' -and $coreSrc -match 'if \(!timedOut && waitForTree\) \{\s*while \(Active\(job\) > 0\)') $null
 
     # ---------------------------------------------------------------- the run: gate, whatif, items checked first
     $x = New-Env
