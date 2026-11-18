@@ -432,6 +432,7 @@ AVDTune can be used purely as a benchmark: for existing systems, and for systems
 - No test user and no logon test (dropped by the user decision of 2026-11-15); the user activity simulation is optional as everywhere.
 - Results: local report (HTML, PDF) and a result file (JSON, no secrets) for export. In a Golden Master environment the result file can be imported as "Vergleichssystem", then it appears in the comparison of every benchmark, in the change log and in the SharePoint list of the environment.
 - Same engine, same version and reference as in the full tool and the AVD-Benchmark stand-alone script, so results are comparable.
+- Status (#90, 2026-11-18): `-Benchmark` and "Nur Benchmark" in the sign-in step, system name and notes, result file export and import as comparison system, comparison per image version with CSV/JSON export are built (docs/benchmark-design.md section 12). Open: the share with key or password, PDF, the stand-alone entry script and its delivery.
 
 ## 7a. The real process and the "Abschliessen" step (user's process document, decision 2026-11-15)
 

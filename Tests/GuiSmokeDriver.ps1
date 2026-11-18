@@ -282,6 +282,7 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         $script:Machine.Store.DcLocate = [pscustomobject]@{ Name = ''; Address = '10.0.0.10'; Site = 'Default-First-Site-Name' }
         Test-Smoke 'first start without environment.json: the stages are in the new order (sign-in, domain, questions, snapshot), only the sign-in is to do, nothing is asked before it' (-not (Test-Path (Join-Path $script:StateRoot 'environment.json')) -and (($script:Stages | ForEach-Object Id) -join ',') -eq 'SignIn,Domain,Environment,Snapshot' -and (($script:Stages | ForEach-Object Status) -join ',') -eq 'Pending,Locked,Locked,Locked' -and $ui.PanelStages.Children.Count -eq 4) (($script:Stages | ForEach-Object Status) -join ',')
         Open-Stage 'SignIn'; $window.UpdateLayout()
+        Test-Smoke 'first start: "Benchmark only" is offered next to the sign-in (plan 6b, #90), nothing is switched before the confirmation' ($ui.BtnStageAction2.Visibility -eq 'Visible' -and [string]$ui.BtnStageAction2.Content -eq (T 'stage.signin.benchonly') -and -not $script:BenchmarkOnly) ([string]$ui.BtnStageAction2.Content)
         Test-Smoke 'sign-in form lists the four tokens with their permissions' ($ui.PanelStageBody.Children.Count -ge 5 -and (Find-Text $ui.PanelStageBody 'Sites') -and (Find-Text $ui.PanelStageBody 'Azure Resource Manager (snapshot, VM size, region): user_impersonation')) $null
         Test-Smoke 'sign-in form without tenant and client ID: tenant from the sign-in, own app registration announced, account field' ((Find-Text $ui.PanelStageBody 'Taken from the sign-in (tid of the token) and saved') -and (Find-Text $ui.PanelStageBody "None yet: AVDTune creates its own app registration 'AVDTune' first") -and $script:Form.Account -and $script:Form.Account.Text -eq '' -and $script:Form.ClientId -and $script:Form.ClientId.Text -eq '' -and (Find-Text $ui.PanelStageBody 'Client ID of an existing app registration (optional)')) $null
         Save-SmokeShot '14-start-signin'
@@ -567,7 +568,7 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         $script:UpdLastRun = $null; Update-UpdatesView
         $true } }
     @{ Name = 'benchmark page'; Do = {
-        if ($script:OverviewJob -or $script:ReadyJob) { return $false }
+        if ($script:OverviewJob -or $script:ReadyJob -or ($script:RelJob -and [string]$script:RelJob.Kind -in 'Start', 'Check')) { return $false }   # #90: no start while the integrity check runs
         if (-not $script:BenchStep) {
             $script:BenchStep = 1
             Show-Page 'Benchmark'; $window.UpdateLayout()
@@ -590,6 +591,78 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         Test-Smoke 'quick run done: result stored, score and six categories shown, provisional note, history row' ($r.Count -eq 1 -and $r[0].mode -eq 'quick' -and $ui.TxtBenchScore.Text -match '^\d+$' -and $ui.PanelBenchCats.Children.Count -eq 6 -and $ui.BoxBenchProvisional.Visibility -eq 'Visible' -and $ui.PanelBenchHistory.Children.Count -eq 1 -and $ui.BtnBenchFull.IsEnabled) "$($r.Count) $($ui.TxtBenchScore.Text) | $($ui.TxtBenchState.Text)"
         Test-Smoke 'the run is in the protocol and the change log, services are back' (@($script:Protocol.Actions | Where-Object { $_.Category -eq 'benchmark' }).Count -ge 1 -and @(Get-AVDTuneChangeLog -Root $script:StateRoot | Where-Object { $_.Category -eq 'Benchmark' }).Count -ge 1) $null
         Save-SmokeShot '35-benchmark'
+        $true } }
+    @{ Name = 'benchmark comparison per image version (#90)'; Do = {
+        if ($script:OverviewJob -or $script:ReadyJob -or $script:BenchJob) { return $false }   # the fake machine is not thread safe
+        $click = { param($b) $b.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent))) }
+        . $script:BenchFakeScript
+        $keepVersion = (Get-AVDTuneState $script:StateRoot).ImageVersion
+        foreach ($v in @(@('2026.11.901', 1.0), @('2026.11.902', 0.7))) {
+            [void](Set-AVDTuneState -Root $script:StateRoot -Values @{ ImageVersion = $v[0] })
+            [void](Invoke-AVDTuneBenchmark -Machine $script:Machine -Bench (New-AVDTuneFakeBench -Reference (Get-AVDTuneBenchmarkReference) -Config (Get-AVDTuneBenchmarkConfig) -Seed @{ Factor = $v[1] }) -Root $script:StateRoot -Mode Full -SkipIdleCheck -NoReport)
+        }
+        [void](Set-AVDTuneState -Root $script:StateRoot -Values @{ ImageVersion = $keepVersion })
+        Show-Page 'Benchmark'; $window.UpdateLayout()
+        $rows = @($ui.PanelBenchCompare.Children)
+        Test-Smoke 'comparison: one row per image version, the newest on top, red with the word (not color alone) after a drop of 30 percent' ($ui.BoxBenchCompare.Visibility -eq 'Visible' -and $rows.Count -eq 2 -and (Find-Text $rows[0] '2026.11.902') -and (Find-Text $rows[0] (T 'bench.cmp.light.red')) -and (Find-Text $rows[1] '2026.11.901') -and $ui.TxtBenchCompareHint.Text -like '*10*') $rows.Count
+        $script:BenchSmokeFile = Join-Path $env:AVDTUNE_SMOKE_OUT 'bench-compare.csv'
+        & $click $ui.BtnBenchExportCsv
+        $csvLines = @(Get-Content -LiteralPath $script:BenchSmokeFile)
+        Test-Smoke 'comparison: CSV export with a header and one row per version, toast with the path' ($csvLines.Count -eq 3 -and $csvLines[0] -like 'Row,ImageVersion,*' -and $csvLines[2] -like '*"2026.11.902"*"red"' -and $script:LastToast -like '*bench-compare.csv*') ($csvLines -join ' | ')
+        $script:BenchSmokeFile = Join-Path $env:AVDTUNE_SMOKE_OUT 'bench-compare.json'
+        & $click $ui.BtnBenchExportJson
+        $j = Get-Content -LiteralPath $script:BenchSmokeFile -Raw | ConvertFrom-Json
+        Test-Smoke 'comparison: JSON export with the rows' ($j.schemaVersion -eq 1 -and @($j.rows).Count -eq 2) $null
+        Save-SmokeShot '35b-benchmark-compare'
+        $script:BenchSmokeFile = $null
+        $true } }
+    @{ Name = 'benchmark only (plan 6b, #90)'; Do = {
+        if ($script:OverviewJob -or $script:ReadyJob -or ($script:RelJob -and [string]$script:RelJob.Kind -in 'Start', 'Check')) { return $false }
+        $click = { param($b) $b.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent))) }
+        if (-not $script:BenchOnlyStep) {
+            $script:BenchOnlyStep = 1
+            Enter-BenchmarkOnlyMode; $window.UpdateLayout()
+            $shown = @($script:PageTable | Where-Object { $ui["Nav$($_.Key)"].Visibility -eq 'Visible' } | ForEach-Object { $_.Key })
+            Show-Page 'Updates'
+            Test-Smoke 'benchmark only: only Benchmark and Protocol in the navigation, any other page leads to the Benchmark page, no read-only banner, no version comparison, the system card' (($shown -join ',') -eq 'Benchmark,Protocol' -and $script:CurrentPage -eq 'Benchmark' -and $ui.PageBenchmark.Visibility -eq 'Visible' -and $ui.BoxReadOnly.Visibility -eq 'Collapsed' -and $ui.BoxBenchCompare.Visibility -eq 'Collapsed' -and $ui.BoxBenchOnly.Visibility -eq 'Visible') ($shown -join ',')
+            # Finn (#90): no start while the integrity check runs (the release job, set here on the window thread: the timer cannot tick in between) or AVDTune is read only
+            Test-Smoke 'integrity: the result of the integrity check is on the Benchmark page' ($ui.BoxBenchIntegrity.Visibility -eq 'Visible' -and $ui.TxtBenchIntegrity.Text -like ((T 'bench.rel.status' '*' '*').Split('*')[0] + '*')) $ui.TxtBenchIntegrity.Text
+            $ui.TxtBenchSystemName.Text = 'Old RDS 2019'
+            $keepRel = $script:RelJob; $script:RelJob = @{ Kind = 'Check' }
+            try { & $click $ui.BtnBenchQuick; $refusedText = $script:LastToast; $pageText = $ui.TxtBenchIntegrity.Text } finally { $script:RelJob = $keepRel }
+            Test-Smoke 'integrity: while the integrity check runs the benchmark does not start, the reason is in the toast and on the page' (-not $script:BenchJob -and $refusedText -like '*integrity check*still running*' -and $pageText -like '*still running*') "$refusedText | $pageText"
+            # the desktop shortcut "AVDTune Benchmark" (like AVDTune.lnk, #15): only for an installed copy, into the test desktop
+            $script:ShortcutTestMode = 'Installed'; Update-BenchShortcutRow
+            & $click $ui.BtnBenchShortcut
+            $bl = Get-AVDTuneDesktopShortcut -Folder (Get-ShortcutDesktop) -InstallRoot $script:RelInstallRoot -Benchmark
+            Test-Smoke 'benchmark shortcut: created in the test desktop with -Benchmark, run as administrator; the button offers Remove' ($bl -and $bl.Matches -and $bl.RunAs -and $bl.Arguments.EndsWith(' -Benchmark') -and [string]$ui.BtnBenchShortcut.Content -eq (T 'bench.sc.remove') -and (Get-ShortcutDesktop) -like "$($script:StateRoot)*") ($bl | Out-String)
+            & $click $ui.BtnBenchShortcut
+            Test-Smoke 'benchmark shortcut: Remove deletes it again' (-not (Get-AVDTuneDesktopShortcut -Folder (Get-ShortcutDesktop) -Benchmark) -and [string]$ui.BtnBenchShortcut.Content -eq (T 'bench.sc.create')) $null
+            $script:ShortcutTestMode = 'Development'; Update-BenchShortcutRow
+            $ui.TxtBenchSystemName.Text = ''
+            & $click $ui.BtnBenchQuick
+            Test-Smoke 'benchmark only: without a system name nothing starts' (-not $script:BenchJob -and $script:LastToast -like '*name missing*') $script:LastToast
+            $ui.TxtBenchSystemName.Text = 'Old RDS 2019'; $ui.TxtBenchSystemNotes.Text = 'replaced by AVD'
+            & $click $ui.BtnBenchQuick
+            Test-Smoke 'benchmark only: a quick run starts with the name' ([bool]$script:BenchJob) $script:LastToast
+            Save-SmokeShot '35c-benchmark-only'
+            return $false
+        }
+        if ($script:BenchJob) { return $false }
+        $last = @(Get-AVDTuneBenchmarkResult -Root $script:StateRoot -Last)[0]
+        Test-Smoke 'benchmark only: the result is of kind benchmark-only with the name and no image version' ($last.kind -eq 'benchmark-only' -and $last.system.name -eq 'Old RDS 2019' -and $last.system.notes -eq 'replaced by AVD' -and $last.system.imageVersion -eq '') ($last | ConvertTo-Json -Depth 2 -Compress)
+        $script:BenchSmokeFile = Join-Path $env:AVDTUNE_SMOKE_OUT 'bench-old-rds.json'
+        & $click $ui.BtnBenchExportResult
+        Test-Smoke 'benchmark only: the result file is exported and passes the result check' ((Test-Path -LiteralPath $script:BenchSmokeFile) -and @(Test-AVDTuneBenchmarkResult -Result (Get-Content -LiteralPath $script:BenchSmokeFile -Raw | ConvertFrom-Json)).Count -eq 0) $script:LastToast
+        # back to the Golden Master (only the smoke does this): the file is imported there as comparison system
+        $script:BenchmarkOnly = $false; Update-NavVisibility; Show-Page 'Benchmark'; $window.UpdateLayout()
+        & $click $ui.BtnBenchImport; $window.UpdateLayout()
+        $sysRow = @($script:BenchCompare.Systems)
+        Test-Smoke 'import: the result file is a comparison system on the master, listed below the versions' ($sysRow.Count -eq 1 -and $sysRow[0].SystemName -eq 'Old RDS 2019' -and (Find-Text $ui.PanelBenchCompare 'Old RDS 2019') -and $script:LastToast -like '*Old RDS 2019*') $script:LastToast
+        & $click $ui.BtnBenchImport
+        Test-Smoke 'import: the same file twice is refused' ($script:LastToast -like '*imported already*' -and @($script:BenchCompare.Systems).Count -eq 1) $script:LastToast
+        $script:BenchSmokeFile = $null
+        Show-Page 'Overview'
         $true } }
     @{ Name = 'language page'; Do = {
         if ($script:OverviewJob -or $script:ReadyJob) { return $false }   # the fake machine is not thread safe

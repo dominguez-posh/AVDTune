@@ -18,10 +18,13 @@ Import-Module (Join-Path $PSScriptRoot 'AVDTune.psm1')
 
 $script:ShortcutName = 'AVDTune.lnk'
 $script:Description = 'AVDTune: Golden Master for Azure Virtual Desktop (runs as administrator)'
+# The second shortcut (#90, plan 6b): the same launcher with -Benchmark, for a system that is only measured
+$script:BenchShortcutName = 'AVDTune Benchmark.lnk'
+$script:BenchDescription = 'AVDTune Benchmark: only the benchmark, no setup and no sign-in (runs as administrator)'
 # MS-SHLLINK 2.1: ShellLinkHeader. HeaderSize 0x0000004C, LinkCLSID (the class ID of ShellLink, bytes below), LinkFlags (4 bytes) at offset 0x14
 $script:LnkClsid = [byte[]](0x01, 0x14, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46)
 
-function Get-AVDTuneShortcutName { $script:ShortcutName }
+function Get-AVDTuneShortcutName([switch]$Benchmark) { if ($Benchmark) { $script:BenchShortcutName } else { $script:ShortcutName } }
 
 function Get-AVDTuneUserDesktop { [Environment]::GetFolderPath('DesktopDirectory') }
 
@@ -41,13 +44,13 @@ function Test-AVDTunePublicDesktop {
 
 function Get-AVDTuneShortcutSpec {
     # What the shortcut must contain for an install folder
-    param([Parameter(Mandatory)][string]$InstallRoot)
+    param([Parameter(Mandatory)][string]$InstallRoot, [switch]$Benchmark)
     $root = [IO.Path]::GetFullPath($InstallRoot).TrimEnd('\')
     $ps = Join-Path ([Environment]::GetFolderPath('System')) 'WindowsPowerShell\v1.0\powershell.exe'
     $ico = Join-Path $root 'AVDTune.ico'
     [pscustomobject]@{
-        Target = $ps; Arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$(Join-Path $root 'Start-AVDTune.ps1')`""; WorkingDirectory = $root
-        Icon = $(if (Test-Path -LiteralPath $ico -PathType Leaf) { "$ico,0" } else { "$ps,0" }); Description = $script:Description
+        Target = $ps; Arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$(Join-Path $root 'Start-AVDTune.ps1')`"" + $(if ($Benchmark) { ' -Benchmark' } else { '' }); WorkingDirectory = $root
+        Icon = $(if (Test-Path -LiteralPath $ico -PathType Leaf) { "$ico,0" } else { "$ps,0" }); Description = $(if ($Benchmark) { $script:BenchDescription } else { $script:Description })
     }
 }
 
@@ -81,8 +84,8 @@ function Test-AVDTuneLnkRunAs([string]$Path) {
 
 function Get-AVDTuneDesktopShortcut {
     <# The AVDTune shortcut in a folder: Path, Target, Arguments, WorkingDirectory, Icon, RunAs, Matches (the spec of -InstallRoot); $null when there is none. #>
-    param([string]$Folder = (Get-AVDTuneUserDesktop), [string]$InstallRoot)
-    $path = Join-Path $Folder $script:ShortcutName
+    param([string]$Folder = (Get-AVDTuneUserDesktop), [string]$InstallRoot, [switch]$Benchmark)
+    $path = Join-Path $Folder (Get-AVDTuneShortcutName -Benchmark:$Benchmark)
     if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return $null }
     $shell = New-Object -ComObject WScript.Shell
     try {
@@ -92,7 +95,7 @@ function Get-AVDTuneDesktopShortcut {
     }
     finally { [void][Runtime.InteropServices.Marshal]::ReleaseComObject($shell) }
     if ($InstallRoot) {
-        $s = Get-AVDTuneShortcutSpec $InstallRoot
+        $s = Get-AVDTuneShortcutSpec $InstallRoot -Benchmark:$Benchmark
         $info.Matches = ($info.Target -ieq $s.Target -and $info.Arguments -ceq $s.Arguments -and $info.WorkingDirectory.TrimEnd('\') -ieq $s.WorkingDirectory -and $info.RunAs)
     }
     $info
@@ -104,12 +107,12 @@ function New-AVDTuneDesktopShortcut {
         Desktop and any folder of the Public or Default profile. An existing AVDTune.lnk there is replaced. Returns Get-AVDTuneDesktopShortcut.
     #>
     [CmdletBinding()]
-    param([Parameter(Mandatory)][string]$InstallRoot, [string]$Folder = (Get-AVDTuneUserDesktop))
+    param([Parameter(Mandatory)][string]$InstallRoot, [string]$Folder = (Get-AVDTuneUserDesktop), [switch]$Benchmark)
     if (-not $Folder) { throw 'The desktop folder of this account is not known.' }
     if (Test-AVDTunePublicDesktop $Folder) { throw "AVDTune never puts a shortcut on the Public Desktop ($Folder): it would be in the image for every user." }
     if (-not (Test-Path -LiteralPath $Folder -PathType Container)) { throw "The desktop folder $Folder does not exist." }
-    $spec = Get-AVDTuneShortcutSpec $InstallRoot
-    $path = Join-Path $Folder $script:ShortcutName
+    $spec = Get-AVDTuneShortcutSpec $InstallRoot -Benchmark:$Benchmark
+    $path = Join-Path $Folder (Get-AVDTuneShortcutName -Benchmark:$Benchmark)
     $shell = New-Object -ComObject WScript.Shell
     try {
         $l = $shell.CreateShortcut($path)
@@ -120,14 +123,14 @@ function New-AVDTuneDesktopShortcut {
     }
     finally { [void][Runtime.InteropServices.Marshal]::ReleaseComObject($shell) }
     Set-AVDTuneLnkRunAs $path
-    Get-AVDTuneDesktopShortcut -Folder $Folder -InstallRoot $InstallRoot
+    Get-AVDTuneDesktopShortcut -Folder $Folder -InstallRoot $InstallRoot -Benchmark:$Benchmark
 }
 
 function Remove-AVDTuneDesktopShortcut {
     <# Removes AVDTune.lnk from the desktop of the current user (or -Folder). Only that file; never the Public Desktop. Returns $true when one was removed. #>
-    param([string]$Folder = (Get-AVDTuneUserDesktop))
+    param([string]$Folder = (Get-AVDTuneUserDesktop), [switch]$Benchmark)
     if (Test-AVDTunePublicDesktop $Folder) { throw "AVDTune does not change the Public Desktop ($Folder); remove a shortcut there by hand." }
-    $path = Join-Path $Folder $script:ShortcutName
+    $path = Join-Path $Folder (Get-AVDTuneShortcutName -Benchmark:$Benchmark)
     if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return $false }
     Remove-Item -LiteralPath $path -Force
     $true

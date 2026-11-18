@@ -657,6 +657,115 @@ public static class StandIn { public static int Main(string[] a) {
             $rq = Invoke-AVDTuneBenchmark -Machine (New-Master) -Bench $bq -Root $rr -Mode Quick -SkipIdleCheck
             Test-Check 'report: a quick run writes no report and the quick result is not used as a previous version' (-not $rq.ReportPath -and (Get-AVDTuneBenchmarkVersionResults -Root $rr | Where-Object { $_.mode -ne 'full' }).Count -eq 0) $null
             Test-Check 'report: the result file with the report and the capacity stays free of secret-like names' ((Get-Content -LiteralPath $rep010.Path -Raw) -notmatch '(?i)password|secret|token|accountkey|sas=') $null
+
+            # ---- comparison per image version (#90)
+            Set-AVDTuneBenchmarkBaseline -Root $rr -RunId $made['2026.11.002'].RunId
+            Set-AVDTuneState -Root $rr -Values @{ ImageVersion = '2026.11.011' } | Out-Null
+            $made['2026.11.011'] = Invoke-AVDTuneBenchmark -Machine (New-Master) -Bench (New-AVDTuneFakeBench -Reference $ref -Config $config -Seed @{ Factor = 0.8 }) -Root $rr -Mode Full -SkipIdleCheck -Share $share -NoReport
+            $cmp = Get-AVDTuneBenchmarkVersionComparison -Root $rr -Config $config
+            $vers = @($cmp.Rows | ForEach-Object { $_.ImageVersion })
+            Test-Check 'comparison: one row per image version, oldest first, the quick run left out' (($vers -join ',') -eq '2026.11.002,2026.11.003,2026.11.010,2026.11.011' -and $cmp.Problems.Count -eq 0) "$($vers -join ',') | $($cmp.Problems -join '; ')"
+            $r010 = @($cmp.Rows | Where-Object { $_.ImageVersion -eq '2026.11.010' })[0]; $r011 = @($cmp.Rows | Where-Object { $_.ImageVersion -eq '2026.11.011' })[0]; $r002 = $cmp.Rows[0]
+            Test-Check 'comparison: rows are typed (AVDTune.BenchmarkRow, scores [double], Started a UTC [datetime])' ($r010.PSObject.TypeNames[0] -eq 'AVDTune.BenchmarkRow' -and $r010.HostScore -is [double] -and $r010.FslogixScore -is [double] -and $r010.Started -is [datetime] -and $r010.Started.Kind -eq 'Utc' -and $null -eq $r010.GpuScore) "$($r010.HostScore.GetType().Name) $($r010.Started.Kind)"
+            Test-Check 'comparison: 2026.11.010 against its previous version 2026.11.003 (host and FSLogix delta, green)' ($r010.PreviousImageVersion -eq '2026.11.003' -and $r010.VsPrevious.Host.DeltaPercent -eq $expect -and $r010.VsPrevious.Host.Class -eq 'better' -and $null -ne $r010.VsPrevious.Fslogix.DeltaPercent -and $r010.Light -eq 'green') "$($r010.VsPrevious.Host.DeltaPercent) $($r010.Light)"
+            Test-Check 'comparison: the baseline row says so and has no delta against itself; the others are compared with it' ($r002.IsBaseline -and $null -eq $r002.VsBaseline -and $null -eq $r002.VsPrevious -and $r002.Light -eq 'grey' -and $cmp.BaselineRunId -eq $made['2026.11.002'].RunId -and $r010.VsBaseline.Host.Class -eq 'better') "$($r002.Light) $($r010.VsBaseline.Host.DeltaPercent)"
+            Test-Check 'comparison: a worse version (factor 0.8 after 1.3) is red and names what got worse' ($r011.Light -eq 'red' -and $r011.VsPrevious.Host.Class -eq 'worse' -and $r011.VsPrevious.Host.DeltaPercent -lt -10 -and (@($r011.Worse) -join ' ') -like '*Host -*% vs previous*') (@($r011.Worse) -join '; ')
+            # numbers only as JSON numbers; a changed file is left out and named
+            Test-Check 'comparison: only JSON numbers are scores ("1200", true, 0, NaN, infinity are none)' ((ConvertTo-AVDTuneBenchNumber 1200) -eq 1200 -and (ConvertTo-AVDTuneBenchNumber 5.9) -eq 5.9 -and $null -eq (ConvertTo-AVDTuneBenchNumber '1200') -and $null -eq (ConvertTo-AVDTuneBenchNumber $true) -and $null -eq (ConvertTo-AVDTuneBenchNumber 0) -and $null -eq (ConvertTo-AVDTuneBenchNumber ([double]::NaN)) -and $null -eq (ConvertTo-AVDTuneBenchNumber ([double]::PositiveInfinity))) $null
+            $strScore = Get-AVDTuneBenchmarkResult -Root $rr -RunId $made['2026.11.003'].RunId | Select-Object -First 1
+            $strScore.scores.host.value = '9999'
+            Test-Check 'comparison: a score written as text gives no score in the typed row' ($null -eq (ConvertTo-AVDTuneBenchmarkRow $strScore).HostScore) $null
+            $tampered = Get-Content -LiteralPath $made['2026.11.003'].Path -Raw | ConvertFrom-Json
+            $tampered.runId = '20991231-000000-dead'; $tampered.system.imageVersion = '2026.11.099'; $tampered.scores.host.value = 99999
+            Write-AVDTuneFile (Join-Path (Get-AVDTuneBenchmarkResultFolder $rr) '20991231-000000-dead.json') ($tampered | ConvertTo-Json -Depth 12)
+            $cmpT = Get-AVDTuneBenchmarkVersionComparison -Root $rr -Config $config
+            Test-Check 'comparison: a changed result file (integrity hash) is left out and named, never a version row' (@($cmpT.Rows | Where-Object { $_.ImageVersion -eq '2026.11.099' }).Count -eq 0 -and (@($cmpT.Problems) -join ' ') -like '*20991231-000000-dead*integrity*') (@($cmpT.Problems) -join '; ')
+            # export
+            $csv = ConvertTo-AVDTuneBenchmarkComparisonText -Comparison $cmp -Format Csv
+            $lines = @($csv -split "`r`n" | Where-Object { $_ })
+            Test-Check 'export CSV: header and one line per version, scores and deltas as plain numbers' ($lines.Count -eq 5 -and $lines[0] -like 'Row,ImageVersion,System,*,HostScore,*HostVsPreviousPct,HostVsBaselinePct,*,Light' -and $lines[4] -like ('"version","2026.11.011",*,' + ([double]$r011.VsPrevious.Host.DeltaPercent).ToString('0.0', [Globalization.CultureInfo]::InvariantCulture) + ',*"red"')) $lines[4]
+            $keepCulture = [Threading.Thread]::CurrentThread.CurrentCulture
+            try { [Threading.Thread]::CurrentThread.CurrentCulture = 'de-DE'; $csvDe = ConvertTo-AVDTuneBenchmarkComparisonText -Comparison $cmp -Format Csv } finally { [Threading.Thread]::CurrentThread.CurrentCulture = $keepCulture }
+            Test-Check 'export CSV: numbers are invariant (a German Windows gives the same file)' ($csvDe -ceq $csv) $null
+            $evilCmp = Get-AVDTuneBenchmarkVersionComparison -Root $rr -Config $config
+            $evilCmp.Rows[0].VmSize = '=HYPERLINK("http://x","y")'; $evilCmp.Rows[1].VmSize = '+1'; $evilCmp.Rows[2].VmSize = '@SUM(A1)'; $evilCmp.Rows[3].VmSize = '-2+3'
+            $evilCsv = ConvertTo-AVDTuneBenchmarkComparisonText -Comparison $evilCmp -Format Csv
+            Test-Check 'export CSV: text cells that a spreadsheet reads as a formula (= + - @) start with an apostrophe, quotes doubled' ($evilCsv -like '*"''=HYPERLINK(""http://x"",""y"")"*' -and $evilCsv -like '*"''+1"*' -and $evilCsv -like '*"''@SUM(A1)"*' -and $evilCsv -like '*"''-2+3"*' -and $evilCsv -notmatch ',"=') $null
+            Test-Check 'export CSV: a cell helper without danger stays as it is' ((ConvertTo-AVDTuneCsvCell 'Standard_D8s_v5') -ceq '"Standard_D8s_v5"' -and (ConvertTo-AVDTuneCsvCell $null) -ceq '""') $null
+            $json = ConvertTo-AVDTuneBenchmarkComparisonText -Comparison $cmp -Format Json | ConvertFrom-Json
+            Test-Check 'export JSON: schema 1, threshold, baseline and the rows with the deltas' ($json.schemaVersion -eq 1 -and $json.thresholdPercent -eq 10 -and $json.baselineRunId -eq $cmp.BaselineRunId -and @($json.rows).Count -eq 4 -and $json.rows[3].Light -eq 'red' -and $json.rows[0].Baseline -eq 'yes') $null
+            $exp = Join-Path $rr 'export'; [void](New-Item -ItemType Directory -Path $exp)
+            $csvFile = Export-AVDTuneBenchmarkComparison -Comparison $cmp -Path (Join-Path $exp 'c.csv') -Format Csv
+            $jsonFile = Export-AVDTuneBenchmarkComparison -Comparison $cmp -Path (Join-Path $exp 'c.json') -Format Json
+            $csvBytes = [IO.File]::ReadAllBytes($csvFile); $jsonBytes = [IO.File]::ReadAllBytes($jsonFile)
+            Test-Check 'export: CSV with BOM (spreadsheet programs), JSON without, no secret-like text' ($csvBytes[0] -eq 0xEF -and $csvBytes[1] -eq 0xBB -and $jsonBytes[0] -eq [byte][char]'{' -and ([IO.File]::ReadAllText($csvFile) + [IO.File]::ReadAllText($jsonFile)) -notmatch '(?i)password|secret|token|accountkey') $null
+
+            # ---- benchmark-only mode (plan 6b)
+            Test-Check 'benchmark-only: a name is required, secret-like or overlong text is refused before anything starts' ((Get-ThrownText { Invoke-AVDTuneBenchmark -Machine (New-Master) -Bench (New-AVDTuneFakeBench -Reference $ref -Config $config) -Root $rr -Mode Quick -Kind 'benchmark-only' -SkipIdleCheck }) -like '*name missing*' -and (Get-ThrownText { Invoke-AVDTuneBenchmark -Machine (New-Master) -Bench (New-AVDTuneFakeBench -Reference $ref -Config $config) -Root $rr -Mode Quick -Kind 'benchmark-only' -SystemName 'Old RDS' -Notes 'admin password=abc' -SkipIdleCheck }) -like '*look like a secret*' -and @(Test-AVDTuneBenchmarkLabel -Name ('x' * 81) -Notes '').Count -eq 1 -and @(Test-AVDTuneBenchmarkLabel -Name 'x' -Notes ('password=' * 60)).Count -eq 1 -and @(Test-AVDTuneBenchmarkLabel -Name "a`tb" -Notes '').Count -eq 1 -and @(Test-AVDTuneBenchmarkLabel -Name 'Old RDS' -Notes "line 1`r`nline 2").Count -eq 0) $null
+            Test-Check 'benchmark-only: a system name outside that mode is refused' ((Get-ThrownText { Invoke-AVDTuneBenchmark -Machine (New-Master) -Bench (New-AVDTuneFakeBench -Reference $ref -Config $config) -Root $rr -Mode Quick -Kind manual -SystemName 'x' -SkipIdleCheck }) -like '*only for the benchmark-only mode*') $null
+            $logBefore = @(Get-AVDTuneChangeLog -Root $rr).Count
+            $bOnly = New-AVDTuneFakeBench -Reference $ref -Config $config -Seed @{ Factor = 0.9 }
+            $only = Invoke-AVDTuneBenchmark -Machine (New-Master) -Bench $bOnly -Root $rr -Mode Full -Kind 'benchmark-only' -SystemName 'Altsystem RDS 2019' -Notes 'to be replaced' -SkipIdleCheck -Share $share
+            $cmpO = Get-AVDTuneBenchmarkVersionComparison -Root $rr -Config $config
+            Test-Check 'benchmark-only: the result names the system, belongs to no image version, writes no change log, report or baseline and is no version row' ($only.Result.kind -eq 'benchmark-only' -and $only.Result.system.name -eq 'Altsystem RDS 2019' -and $only.Result.system.notes -eq 'to be replaced' -and $only.Result.system.imageVersion -eq '' -and -not $only.ChangeLogged -and -not $only.ReportPath -and @(Get-AVDTuneChangeLog -Root $rr).Count -eq $logBefore -and (Get-AVDTuneState $rr).BaselineBenchmark -eq $made['2026.11.002'].RunId -and @($cmpO.Rows).Count -eq 4 -and (Get-Leftover -Bench $bOnly -Root $rr).Count -eq 0) "$($only.Result.system.imageVersion) $($only.ChangeLogged)"
+            # result file and import as comparison system
+            $resFile = Export-AVDTuneBenchmarkResultFile -Root $rr -RunId $only.RunId -Path (Join-Path $exp 'old-rds.json')
+            Test-Check 'result file: exported, passes the result check, no secret-like text' (@(Test-AVDTuneBenchmarkResult -Result (Get-Content -LiteralPath $resFile -Raw | ConvertFrom-Json)).Count -eq 0 -and (Get-Content -LiteralPath $resFile -Raw) -notmatch '(?i)password|accountkey|token') $null
+            Test-Check 'result file: an invalid run id is refused' ((Get-ThrownText { Export-AVDTuneBenchmarkResultFile -Root $rr -RunId '..\x' -Path (Join-Path $exp 'x.json') }) -like '*Invalid run id*') $null
+            $imp = Import-AVDTuneBenchmarkSystem -Root $rr -Path $resFile
+            $sysFolder = Get-AVDTuneBenchmarkSystemFolder $rr
+            $sysAcl = Get-Acl -LiteralPath $sysFolder
+            Test-Check 'import: stored as comparison system in its own protected folder (no inherited rule, Administrators and SYSTEM)' ($imp.SystemName -eq 'Altsystem RDS 2019' -and (Test-Path -LiteralPath (Join-Path $sysFolder "$($only.RunId).json")) -and $sysAcl.AreAccessRulesProtected -and @($sysAcl.Access | Where-Object { $_.IsInherited }).Count -eq 0 -and @($sysAcl.Access | Where-Object { $_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value -eq 'S-1-5-18' }).Count -ge 1) $sysFolder
+            $cmpS = Get-AVDTuneBenchmarkVersionComparison -Root $rr -Config $config
+            Test-Check 'import: the comparison system is listed with the change of the newest version against it, the versions stay 4' (@($cmpS.Systems).Count -eq 1 -and $cmpS.Systems[0].SystemName -eq 'Altsystem RDS 2019' -and $null -ne $cmpS.Systems[0].NewestVsThis.Host.DeltaPercent -and @($cmpS.Rows).Count -eq 4 -and (ConvertTo-AVDTuneBenchmarkComparisonText -Comparison $cmpS -Format Csv) -like '*"system",*"Altsystem RDS 2019"*') $null
+            Test-Check 'import: the same run twice is refused' ((Get-ThrownText { Import-AVDTuneBenchmarkSystem -Root $rr -Path $resFile }) -like '*imported already*') $null
+            Test-Check 'import: a result of a master (kind manual) is no comparison system' ((Get-ThrownText { Import-AVDTuneBenchmarkSystem -Root $rr -Path $made['2026.11.010'].Path }) -like '*Only results of the benchmark-only mode*') $null
+            $bad = Get-Content -LiteralPath $resFile -Raw | ConvertFrom-Json; $bad.runId = 'other-1'; $bad.scores.host.value = 50000
+            [IO.File]::WriteAllText((Join-Path $exp 'changed.json'), ($bad | ConvertTo-Json -Depth 12))
+            $bad.integrity.sha256 = Get-AVDTuneBenchmarkIntegrityHash $bad; $bad.runId = '..\..\evil'; $bad.integrity.sha256 = Get-AVDTuneBenchmarkIntegrityHash $bad
+            [IO.File]::WriteAllText((Join-Path $exp 'evil-id.json'), ($bad | ConvertTo-Json -Depth 12))
+            $bad.runId = 'text-score-1'; $bad.scores.host.value = '50000'; $bad.integrity.sha256 = Get-AVDTuneBenchmarkIntegrityHash $bad
+            [IO.File]::WriteAllText((Join-Path $exp 'text-score.json'), ($bad | ConvertTo-Json -Depth 12))
+            $bad.runId = 'secret-1'; $bad.scores.host.value = 1000; $bad.system.notes = 'AccountKey=abc'; $bad.integrity.sha256 = Get-AVDTuneBenchmarkIntegrityHash $bad
+            [IO.File]::WriteAllText((Join-Path $exp 'secret.json'), ($bad | ConvertTo-Json -Depth 12))
+            [IO.File]::WriteAllText((Join-Path $exp 'not-json.json'), 'this is no json')
+            $big = [IO.File]::Open((Join-Path $exp 'big.json'), 'CreateNew'); try { $big.SetLength(6MB) } finally { $big.Dispose() }
+            Test-Check 'import: a changed file, a run id with a path, a score as text, secret-like content, no JSON and a 6 MB file are all refused, nothing stored' ((Get-ThrownText { Import-AVDTuneBenchmarkSystem -Root $rr -Path (Join-Path $exp 'changed.json') }) -like '*integrity*' -and (Get-ThrownText { Import-AVDTuneBenchmarkSystem -Root $rr -Path (Join-Path $exp 'evil-id.json') }) -like '*run id*' -and (Get-ThrownText { Import-AVDTuneBenchmarkSystem -Root $rr -Path (Join-Path $exp 'text-score.json') }) -like '*not a number*' -and (Get-ThrownText { Import-AVDTuneBenchmarkSystem -Root $rr -Path (Join-Path $exp 'secret.json') }) -like '*secret-like*' -and (Get-ThrownText { Import-AVDTuneBenchmarkSystem -Root $rr -Path (Join-Path $exp 'not-json.json') }) -like '*not a JSON*' -and (Get-ThrownText { Import-AVDTuneBenchmarkSystem -Root $rr -Path (Join-Path $exp 'big.json') }) -like '*larger than 5 MB*' -and @(Get-ChildItem -LiteralPath $sysFolder -File).Count -eq 1) $null
+            Copy-Item -LiteralPath (Join-Path $exp 'changed.json') -Destination (Join-Path $sysFolder 'other-1.json')
+            $cmpX = Get-AVDTuneBenchmarkVersionComparison -Root $rr -Config $config
+            Test-Check 'import: a changed file put into the systems folder by hand is left out and named' (@($cmpX.Systems).Count -eq 1 -and (@($cmpX.Problems) -join ' ') -like '*other-1.json*integrity*') (@($cmpX.Problems) -join '; ')
+
+            # ---- Finn's review of 3365b39 (#90)
+            Test-Check 'run id: the whole string (\z, a line break at the end is refused), 1-64 characters, no device name' ((Test-AVDTuneBenchRunId '20261118-090116-aeb1') -and -not (Test-AVDTuneBenchRunId "20261118-090116-aeb1`n") -and -not (Test-AVDTuneBenchRunId 'CON') -and -not (Test-AVDTuneBenchRunId 'nul') -and -not (Test-AVDTuneBenchRunId 'COM1') -and -not (Test-AVDTuneBenchRunId 'lpt9') -and -not (Test-AVDTuneBenchRunId 'Aux') -and -not (Test-AVDTuneBenchRunId ('a' * 65)) -and -not (Test-AVDTuneBenchRunId 5) -and (Test-AVDTuneBenchRunId 'COM10')) $null
+            $bad.runId = 'CON'; $bad.system.notes = ''; $bad.integrity.sha256 = Get-AVDTuneBenchmarkIntegrityHash $bad
+            [IO.File]::WriteAllText((Join-Path $exp 'con-id.json'), ($bad | ConvertTo-Json -Depth 12))
+            Test-Check 'import: a device name as run id (CON) is refused, export too' ((Get-ThrownText { Import-AVDTuneBenchmarkSystem -Root $rr -Path (Join-Path $exp 'con-id.json') }) -like '*run id*' -and (Get-ThrownText { Export-AVDTuneBenchmarkResultFile -Root $rr -RunId 'NUL' -Path (Join-Path $exp 'n.json') }) -like '*Invalid run id*') $null
+            Test-Check 'export CSV: a cell that starts with | (DDE) gets the apostrophe too' ((ConvertTo-AVDTuneCsvCell '|cmd /c calc') -ceq '"''|cmd /c calc"') (ConvertTo-AVDTuneCsvCell '|cmd /c calc')
+            # the systems folder is read only while it is admin-only; files above 5 MB are left out
+            Remove-Item -LiteralPath (Join-Path $sysFolder 'other-1.json') -Force
+            $sysSec = [IO.Directory]::GetAccessControl($sysFolder, 'Access'); $keepSec = $sysSec.GetSecurityDescriptorSddlForm('Access')
+            $sysSec.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule((New-Object Security.Principal.SecurityIdentifier 'S-1-1-0'), 'Modify', 'ContainerInherit, ObjectInherit', 'None', 'Allow'))); [IO.Directory]::SetAccessControl($sysFolder, $sysSec)
+            $open = Get-AVDTuneBenchmarkSystems -Root $rr
+            $sysSec = [IO.Directory]::GetAccessControl($sysFolder, 'Access'); $sysSec.SetSecurityDescriptorSddlForm($keepSec, 'Access'); [IO.Directory]::SetAccessControl($sysFolder, $sysSec)
+            Test-Check 'systems folder: writable for Everyone = nothing of it is read, the folder is named; with its own rules again it is read' (@($open.Results).Count -eq 0 -and (@($open.Problems) -join ' ') -like '*not an admin-only folder*' -and @((Get-AVDTuneBenchmarkSystems -Root $rr).Results).Count -eq 1) (@($open.Problems) -join '; ')
+            Test-Check 'systems folder: the strict test (what the elevated AVDTune runs) refuses a folder that a standard account owns; a folder outside the state folder is refused' (((Test-AVDTuneElevated) -or -not (Test-AVDTuneBenchSystemFolder -Folder $sysFolder -Root $rr -Strict)) -and -not (Test-AVDTuneBenchSystemFolder -Folder $exp -Root $sysFolder) -and (Test-AVDTuneBenchSystemFolder -Folder $sysFolder -Root $rr)) $null
+            $bigSys = [IO.File]::Open((Join-Path $sysFolder 'big-1.json'), 'CreateNew'); try { $bigSys.SetLength(6MB) } finally { $bigSys.Dispose() }
+            $withBig = Get-AVDTuneBenchmarkSystems -Root $rr
+            Remove-Item -LiteralPath (Join-Path $sysFolder 'big-1.json') -Force
+            Test-Check 'systems folder: a file above 5 MB is not read, it is named' (@($withBig.Results).Count -eq 1 -and (@($withBig.Problems) -join ' ') -like '*big-1.json: larger than 5 MB*') (@($withBig.Problems) -join '; ')
+            # exports: no link as target or folder, written next to it and moved in one step
+            $jx = Join-Path $rr 'junction-out'; [void](New-Item -ItemType Junction -Path $jx -Value $exp)
+            Test-Check 'export: a folder that is a link (junction) is refused, nothing written through it' ((Get-ThrownText { Export-AVDTuneBenchmarkComparison -Comparison $cmp -Path (Join-Path $jx 'x.csv') -Format Csv }) -like '*is a link*' -and -not (Test-Path -LiteralPath (Join-Path $exp 'x.csv'))) $null
+            [IO.Directory]::Delete($jx)
+            $over = Join-Path $exp 'over.csv'; [IO.File]::WriteAllText($over, 'old')
+            [void](Export-AVDTuneBenchmarkComparison -Comparison $cmp -Path $over -Format Csv)
+            Test-Check 'export: an existing file is replaced in one step (temp file next to it, moved), no temp file stays' ((Get-Content -LiteralPath $over -Raw) -like '*Row,ImageVersion*' -and @(Get-ChildItem -LiteralPath $exp -Force -Filter '*.tmp').Count -eq 0) $null
+            $exportSrc = [regex]::Match((Get-Content -LiteralPath (Join-Path $repo 'Modules\AVDTune.Benchmark.psm1') -Raw), '(?s)function Export-AVDTuneBenchmarkComparison \{.*?function Test-AVDTuneBenchmarkLabel').Value
+            Test-Check 'export (source): no WriteAllText to the chosen path, the export goes through Write-AVDTuneExportFile' ($exportSrc -notmatch 'WriteAllText' -and $exportSrc -match 'Write-AVDTuneExportFile') $null
+            # benchmark start: never while the integrity check runs or AVDTune is read only (normal mode and benchmark only)
+            Test-Check 'start block: integrity check running or a write block stop the start, nothing else does' ((Get-AVDTuneBenchStartBlock -IntegrityRunning $true -WriteBlock '') -like '*integrity check*still running*' -and (Get-AVDTuneBenchStartBlock -IntegrityRunning $false -WriteBlock 'files changed') -like '*read only: files changed*' -and (Get-AVDTuneBenchStartBlock -IntegrityRunning $false -WriteBlock $null) -eq '') $null
+            $pageSrc = Get-Content -LiteralPath (Join-Path $repo 'AVDTune-Benchmark.ps1') -Raw
+            Test-Check 'start block (source): Start-BenchRun and Start-BenchJob both ask Get-BenchStartBlock first, which reads the release job and Get-AVDTuneWriteBlock' ([regex]::Match($pageSrc, '(?s)function Start-BenchRun.*?\n\}').Value -match '(?s)\A[^\n]*\n\s*\$block = Get-BenchStartBlock' -and [regex]::Match($pageSrc, '(?s)function Start-BenchJob.*?Assert-NoOtherWriter').Value -match 'Get-BenchStartBlock' -and [regex]::Match($pageSrc, '(?s)function Get-BenchStartBlock.*?\n\}').Value -match 'RelJob.*Get-AVDTuneWriteBlock') $null
         # ---- security review fixes (finding 4, 5, 8, 9, 11)
         $shareText = [regex]::Match($adapterSrc, '(?s)\$b\.ShareMakeFolder = \{.*?\n    \}').Value
         Test-Check 'share folder (source): created in one step with a protected DACL (current admin, SYSTEM, Administrators), owner and foreign rules and the link flag checked afterwards' ($shareText -match 'SetAccessRuleProtection\(\$true' -and $shareText -match '\.Create\(\$sec\)' -and $shareText -match 'S-1-5-18' -and $shareText -match 'S-1-5-32-544' -and $shareText -match 'GetOwner' -and $shareText -match 'foreign owner or rule' -and $shareText -match 'ReparsePoint' -and $shareText -notmatch 'CreateDirectory\(') $null
@@ -722,6 +831,50 @@ public static class StandIn { public static int Main(string[] a) {
     catch { $engine = $null; $rsErr = $_.Exception.Message }
     finally { $rs.Dispose(); $env:AVDTUNE_FAKE = $keepFake; $env:AVDTUNE_ROOT = $keepRoot }
     Test-Check 'benchmark page (#67): the real adapter works in a runspace with exactly the page''s imports (EngineInfo gives a reason, never an unknown command)' ($engine -and $pageImports.Count -ge 3 -and $engine.Problem -notmatch 'is not recognized|nicht erkannt' -and -not $rsErr) "imports=$($pageImports -join ','); problem=$($engine.Problem); err=$rsErr"
+
+    # ---------------------------------------------------------------- stand-alone package (prepared, #90): Tools\New-AVDBenchmarkPackage.ps1 from a release
+    Add-Type -AssemblyName System.IO.Compression, System.IO.Compression.FileSystem
+    function Get-AVDTuneFileSha256Local([string]$Path) { $s = [Security.Cryptography.SHA256]::Create(); $f = [IO.File]::OpenRead($Path); try { ([BitConverter]::ToString($s.ComputeHash($f)) -replace '-', '').ToLowerInvariant() } finally { $f.Dispose(); $s.Dispose() } }
+    $pk = Join-Path $tmp 'pkg'
+    $tree = Join-Path $pk 'tree'
+    foreach ($rel in @(@(Get-ChildItem -LiteralPath (Join-Path $repo 'Modules') -Filter '*.psm1' | ForEach-Object { "Modules\$($_.Name)" }) + @(Get-ChildItem -LiteralPath (Join-Path $repo 'Bench\data') -File | ForEach-Object { "Bench\data\$($_.Name)" }) + 'VERSION', 'LICENSE', 'NOTICE', 'Start-AVDTune.ps1')) {
+        $dst = Join-Path $tree $rel; [void](New-Item -ItemType Directory -Path (Split-Path $dst -Parent) -Force); Copy-Item -LiteralPath (Join-Path $repo $rel) -Destination $dst
+    }
+    $fakeExe = Join-Path $pk 'AVDTune.Bench.exe'; [IO.File]::WriteAllBytes($fakeExe, [byte[]](1..64))
+    $relOut = Join-Path $pk 'release'
+    [void](& (Join-Path $repo 'Tools\New-AVDTuneRelease.ps1') -Root $tree -OutDir $relOut -Commit ('a' * 40) -CommitDate ([datetime]'2026-11-18T10:00:00Z') -BenchExe $fakeExe -RequireBench)
+    $pkg = & (Join-Path $repo 'Tools\New-AVDBenchmarkPackage.ps1') -ReleaseDir $relOut -OutDir (Join-Path $pk 'out') -RequireBench
+    $pm = Get-Content -LiteralPath $pkg.Manifest -Raw | ConvertFrom-Json
+    $pz = [IO.Compression.ZipFile]::OpenRead($pkg.Zip); try { $pNames = @($pz.Entries | ForEach-Object FullName) } finally { $pz.Dispose() }
+    $needMods = 'Modules/AVDTune.Benchmark.psm1', 'Modules/AVDTune.psm1', 'Modules/AVDTune.Release.psm1', 'Modules/AVDTune.Trust.psm1', 'Modules/AVDTune.Updates.psm1', 'Modules/AVDTune.UpdateBlock.psm1'
+    Test-Check 'stand-alone package: the engine and the modules it imports, the benchmark data, the measure program, licence; no window, no other page module' (@($needMods | Where-Object { $_ -notin $pNames }).Count -eq 0 -and $pNames -contains 'Bench/data/benchmark-B1.0.json' -and $pNames -contains 'Bench/bin/AVDTune.Bench.exe' -and $pNames -contains 'LICENSE' -and $pNames -notcontains 'Start-AVDTune.ps1' -and $pNames -notcontains 'Modules/AVDTune.Software.psm1' -and @($pNames | Where-Object { $_ -match '(?i)diskspd' }).Count -eq 0) ($pNames -join ',')
+    $relM = Get-Content -LiteralPath (Join-Path $relOut 'manifest.json') -Raw | ConvertFrom-Json
+    $hashOk = @($pm.Files | Where-Object { $f = $_; @($relM.Files | Where-Object { $_.Path -ceq $f.Path -and $_.Sha256 -ceq $f.Sha256 }).Count -ne 1 }).Count -eq 0
+    Test-Check 'stand-alone package: manifest names the source release (version, commit, ZIP hash), every file has the hash of the release, the entry script is still open' ($pm.Product -eq 'AVD-Benchmark' -and $pm.Source.Commit -eq ('a' * 40) -and $pm.Source.ZipSha256 -eq $relM.Zip.Sha256 -and $hashOk -and @($pm.Files).Count -eq $pNames.Count -and $pm.Entry -eq '' -and $pm.Zip.Sha256 -eq (Get-AVDTuneFileSha256Local $pkg.Zip)) $null
+    # counter-tests: a changed release ZIP, a manifest hash that does not fit an entry, an entry outside the manifest
+    $badRel = Join-Path $pk 'bad1'; Copy-Item -LiteralPath $relOut -Destination $badRel -Recurse
+    $bz = Join-Path $badRel $relM.Zip.Name; $bytes = [IO.File]::ReadAllBytes($bz); $bytes[$bytes.Length - 30] = $bytes[$bytes.Length - 30] -bxor 0xFF; [IO.File]::WriteAllBytes($bz, $bytes)
+    Test-Check 'stand-alone package: a changed release ZIP is refused' ((Get-ThrownText { & (Join-Path $repo 'Tools\New-AVDBenchmarkPackage.ps1') -ReleaseDir $badRel -OutDir (Join-Path $pk 'o1') }) -like '*does not match the SHA256*') $null
+    $badRel2 = Join-Path $pk 'bad2'; Copy-Item -LiteralPath $relOut -Destination $badRel2 -Recurse
+    $m2 = Get-Content -LiteralPath (Join-Path $badRel2 'manifest.json') -Raw | ConvertFrom-Json
+    @($m2.Files | Where-Object { $_.Path -eq 'Modules/AVDTune.Benchmark.psm1' })[0].Sha256 = ('0' * 64)
+    [IO.File]::WriteAllText((Join-Path $badRel2 'manifest.json'), ($m2 | ConvertTo-Json -Depth 5))
+    Test-Check 'stand-alone package: a file whose bytes do not fit the manifest is refused' ((Get-ThrownText { & (Join-Path $repo 'Tools\New-AVDBenchmarkPackage.ps1') -ReleaseDir $badRel2 -OutDir (Join-Path $pk 'o2') }) -like '*Modules/AVDTune.Benchmark.psm1 does not match*') $null
+    $badRel3 = Join-Path $pk 'bad3'; [void](New-Item -ItemType Directory -Path $badRel3)
+    $z3 = Join-Path $badRel3 $relM.Zip.Name; Copy-Item -LiteralPath (Join-Path $relOut $relM.Zip.Name) -Destination $z3
+    $za = [IO.Compression.ZipFile]::Open($z3, 'Update'); try { $ne = $za.CreateEntry('Modules/Extra.psm1'); $s = $ne.Open(); try { $s.WriteByte(65) } finally { $s.Dispose() } } finally { $za.Dispose() }
+    $m3 = Get-Content -LiteralPath (Join-Path $relOut 'manifest.json') -Raw | ConvertFrom-Json; $m3.Zip.Size = (Get-Item -LiteralPath $z3).Length; $m3.Zip.Sha256 = Get-AVDTuneFileSha256Local $z3
+    [IO.File]::WriteAllText((Join-Path $badRel3 'manifest.json'), ($m3 | ConvertTo-Json -Depth 5))
+    Test-Check 'stand-alone package: a file in the release ZIP that the manifest does not list is refused' ((Get-ThrownText { & (Join-Path $repo 'Tools\New-AVDBenchmarkPackage.ps1') -ReleaseDir $badRel3 -OutDir (Join-Path $pk 'o3') }) -like '*does not list*Modules/Extra.psm1*') $null
+    Test-Check 'stand-alone package: OutDir must be new or empty' ((Get-ThrownText { & (Join-Path $repo 'Tools\New-AVDBenchmarkPackage.ps1') -ReleaseDir $relOut -OutDir (Join-Path $pk 'out') }) -like '*not empty*') $null
+    $devRefused = @(foreach ($bp in @('CON', 'Modules/NUL.psm1', 'Bench/COM1', "Modules/AVDTune.psm1`n", 'a/../b')) {
+            $d = Join-Path $pk ('bad-' + [guid]::NewGuid().ToString('N').Substring(0, 6)); Copy-Item -LiteralPath $relOut -Destination $d -Recurse
+            $mm = Get-Content -LiteralPath (Join-Path $d 'manifest.json') -Raw | ConvertFrom-Json
+            $mm.Files = @($mm.Files) + [pscustomobject]@{ Path = $bp; Size = 1; Sha256 = ('0' * 64) }
+            [IO.File]::WriteAllText((Join-Path $d 'manifest.json'), ($mm | ConvertTo-Json -Depth 5))
+            if ((Get-ThrownText { & (Join-Path $repo 'Tools\New-AVDBenchmarkPackage.ps1') -ReleaseDir $d -OutDir (Join-Path $d 'o') }) -like '*Unsafe path in the manifest*') { $bp }
+        })
+    Test-Check 'stand-alone package: device names (CON, NUL, COM1), a line break at the end (\z) and .. in a manifest path are refused' ($devRefused.Count -eq 5) ($devRefused -join ',')
 
     Test-Check 'no file of the check run touched the real state folder' ($tmp -ne (Join-Path ([Environment]::GetFolderPath('CommonApplicationData')) 'AVDTune')) $tmp
 }

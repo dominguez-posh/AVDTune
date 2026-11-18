@@ -1115,10 +1115,11 @@ function Get-AVDTuneVersionSortKey([string]$Version) {
 }
 
 function Get-AVDTuneBenchmarkVersionResults {
-    # Per image version the newest full result; oldest version first
-    param([Parameter(Mandatory)][string]$Root)
+    # Per image version the newest full result; oldest version first. -Results: use these (already checked) results instead of reading the folder
+    param([Parameter(Mandatory)][string]$Root, [object[]]$Results)
     $by = @{}
-    foreach ($r in @(Get-AVDTuneBenchmarkResult -Root $Root)) {
+    $all = $(if ($PSBoundParameters.ContainsKey('Results')) { @($Results) } else { @(Get-AVDTuneBenchmarkResult -Root $Root) })
+    foreach ($r in $all) {
         if ($r.mode -ne 'full') { continue }
         $v = [string](Get-AVDTuneProp (Get-AVDTuneProp $r 'system') 'imageVersion')
         if (-not $v) { continue }
@@ -1129,8 +1130,8 @@ function Get-AVDTuneBenchmarkVersionResults {
 
 function Get-AVDTunePreviousVersionResult {
     # The result of the closest earlier image version with the same benchmark major version, or $null
-    param([Parameter(Mandatory)][string]$Root, [Parameter(Mandatory)][string]$ImageVersion)
-    $all = @(Get-AVDTuneBenchmarkVersionResults -Root $Root)
+    param([Parameter(Mandatory)][string]$Root, [Parameter(Mandatory)][string]$ImageVersion, [object[]]$Results)
+    $all = $(if ($PSBoundParameters.ContainsKey('Results')) { @($Results) } else { @(Get-AVDTuneBenchmarkVersionResults -Root $Root) })
     $key = Get-AVDTuneVersionSortKey $ImageVersion
     $cur = @($all | Where-Object { $_.system.imageVersion -ceq $ImageVersion } | Select-Object -First 1)
     $before = @($all | Where-Object { [string]::CompareOrdinal((Get-AVDTuneVersionSortKey ([string]$_.system.imageVersion)), $key) -lt 0 } | Where-Object { -not $cur -or $cur.Count -eq 0 -or ([string]$_.benchmarkVersion -split '\.')[0] -eq ([string]$cur[0].benchmarkVersion -split '\.')[0] })
@@ -1523,6 +1524,330 @@ function Compare-AVDTuneBenchmark {
 
 #endregion
 
+#region comparison per image version (#90) and comparison systems (plan 6b)
+
+function ConvertTo-AVDTuneBenchNumber {
+    # A score from a result file as [double], or $null: only JSON numbers count, finite and above 0 ("1200" as text, true, NaN or 0 are no score; a file can come from outside)
+    param($Value)
+    if ($null -eq $Value) { return $null }
+    if ($Value -is [int] -or $Value -is [long] -or $Value -is [double] -or $Value -is [decimal] -or $Value -is [single]) {
+        $d = [double]$Value
+        if ([double]::IsNaN($d) -or [double]::IsInfinity($d) -or $d -le 0) { return $null }
+        return $d
+    }
+    $null
+}
+
+function ConvertTo-AVDTuneBenchText {
+    # A text field of a result file for display and export: a string only, control characters removed, cut to $Max
+    param($Value, [int]$Max = 100)
+    if ($Value -isnot [string]) { return '' }
+    $t = [regex]::Replace($Value, '[\x00-\x1F\x7F]', ' ', [Text.RegularExpressions.RegexOptions]::None, [timespan]::FromMilliseconds(200)).Trim()
+    if ($t.Length -gt $Max) { $t = $t.Substring(0, $Max) }
+    $t
+}
+
+function ConvertTo-AVDTuneBenchmarkRow {
+    <# The typed row of one result (AVDTune.BenchmarkRow): texts are strings, scores [double] or $null, Started a UTC [datetime]. Only what the comparison and the export need. #>
+    param([Parameter(Mandatory)]$Result)
+    $sys = Get-AVDTuneProp $Result 'system'; $sc = Get-AVDTuneProp $Result 'scores'
+    $started = [datetime]::MinValue
+    [void][datetime]::TryParse([string](Get-AVDTuneProp $Result 'started'), [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]'AdjustToUniversal, AssumeUniversal', [ref]$started)
+    $hostBlock = Get-AVDTuneProp $sc 'host'
+    [pscustomobject]@{
+        PSTypeName = 'AVDTune.BenchmarkRow'
+        RunId = ConvertTo-AVDTuneBenchText (Get-AVDTuneProp $Result 'runId') 64
+        ImageVersion = ConvertTo-AVDTuneBenchText (Get-AVDTuneProp $sys 'imageVersion') 40
+        SystemName = ConvertTo-AVDTuneBenchText (Get-AVDTuneProp $sys 'name') 80
+        Notes = ConvertTo-AVDTuneBenchText (Get-AVDTuneProp $sys 'notes') 500
+        Kind = ConvertTo-AVDTuneBenchText (Get-AVDTuneProp $Result 'kind') 20
+        Mode = ConvertTo-AVDTuneBenchText (Get-AVDTuneProp $Result 'mode') 10
+        BenchmarkVersion = ConvertTo-AVDTuneBenchText (Get-AVDTuneProp $Result 'benchmarkVersion') 12
+        VmSize = ConvertTo-AVDTuneBenchText (Get-AVDTuneProp $sys 'vmSize') 64
+        Started = [datetime]$started
+        HostScore = ConvertTo-AVDTuneBenchNumber (Get-AVDTuneProp $hostBlock 'value')
+        HostPartial = ((Get-AVDTuneProp $hostBlock 'partial') -eq $true)
+        FslogixScore = ConvertTo-AVDTuneBenchNumber (Get-AVDTuneProp (Get-AVDTuneProp $sc 'fslogix') 'value')
+        GpuScore = ConvertTo-AVDTuneBenchNumber (Get-AVDTuneProp (Get-AVDTuneProp $sc 'gpu') 'value')
+        CapacityUsers = ConvertTo-AVDTuneBenchNumber (Get-AVDTuneProp (Get-AVDTuneProp $Result 'capacity') 'estimatedUsers')
+    }
+}
+
+function Get-AVDTuneBenchmarkSystemFolder([string]$Root) { Join-Path (Get-AVDTuneBenchmarkResultFolder $Root) 'systems' }
+
+function Test-AVDTuneBenchSystemFolder {
+    <# Is the folder of the comparison systems admin-only? No link on the way from the state folder down to it, and the folder itself admin-only (Test-AVDTuneAdminOnlyPath:
+       owner and writers only SYSTEM, Administrators, TrustedInstaller). The folders between (runs, runs\benchmark) are plain folders of the checked state folder and inherit
+       its protected rules; their owner can be the administrator's account, so they are checked for links only. A process that is not elevated (the checks) also accepts its
+       own account for the folder itself, the same rule as New-AVDTuneOwnFolderSecurity; AVDTune itself always runs elevated and gets the strict test. #>
+    param([Parameter(Mandatory)][string]$Folder, [Parameter(Mandatory)][string]$Root, [switch]$Strict)
+    $stop = [IO.Path]::GetFullPath($Root).TrimEnd('\')
+    $item = [IO.Path]::GetFullPath($Folder).TrimEnd('\')
+    if (-not $item.StartsWith($stop + '\', [StringComparison]::OrdinalIgnoreCase)) { return $false }
+    for ($p = $item; $p.Length -gt $stop.Length; $p = [IO.Path]::GetDirectoryName($p)) {
+        try { if (([IO.File]::GetAttributes($p) -band [IO.FileAttributes]::ReparsePoint) -ne 0) { return $false } } catch { return $false }
+    }
+    if ($Strict -or (Test-AVDTuneElevated)) { return [bool](Test-AVDTuneAdminOnlyPath -Path $Folder) }
+    $me = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+    $allowed = @('S-1-5-18', 'S-1-5-32-544', $me)
+    $sec = [IO.Directory]::GetAccessControl($Folder)
+    if ($sec.GetOwner([Security.Principal.SecurityIdentifier]).Value -notin $allowed) { return $false }
+    $write = 0x2 -bor 0x4 -bor 0x40 -bor 0x10000 -bor 0x40000 -bor 0x80000 -bor 0x40000000 -bor 0x10000000
+    foreach ($r in $sec.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier])) {
+        if ($r.AccessControlType -eq 'Allow' -and $r.IdentityReference.Value -notin $allowed -and (([int64]$r.FileSystemRights.value__ -band $write) -ne 0)) { return $false }
+    }
+    $true
+}
+
+function Test-AVDTuneBenchRunId {
+    # A run id that can be a file name: [A-Za-z0-9-], 1-64 characters, the whole string (\z, no line break at the end), no device name (CON, NUL, COM1 ...)
+    param([AllowNull()]$RunId)
+    $RunId -is [string] -and $RunId -match '\A[A-Za-z0-9-]{1,64}\z' -and $RunId -notmatch '(?i)\A(con|prn|aux|nul|com[1-9]|lpt[1-9])\z'
+}
+
+function Write-AVDTuneExportFile {
+    <# Writes an export to a file the administrator chose: the target and its folder must not be links (reparse points); written to a new temp file next to it
+       (CreateNew) and moved over the target in one step (Move-AVDTuneFileReplace), so a crash leaves the old or the new file. #>
+    param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][AllowEmptyString()][string]$Text, [switch]$Bom)
+    $full = [IO.Path]::GetFullPath($Path)
+    $dir = [IO.Path]::GetDirectoryName($full)
+    if (-not $dir -or -not [IO.Directory]::Exists($dir)) { throw "The folder of $full does not exist." }
+    if (([IO.File]::GetAttributes($dir) -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw "The folder $dir is a link: not exported there." }
+    if ([IO.Directory]::Exists($full)) { throw "$full is a folder." }
+    if ([IO.File]::Exists($full) -and ([IO.File]::GetAttributes($full) -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw "$full is a link: not overwritten." }
+    $temp = Join-Path $dir ('.' + [IO.Path]::GetFileName($full) + '.' + [guid]::NewGuid().ToString('N') + '.tmp')
+    $pre = (New-Object Text.UTF8Encoding ([bool]$Bom)).GetPreamble()
+    $body = (New-Object Text.UTF8Encoding $false).GetBytes($Text)
+    try {
+        $fs = New-Object IO.FileStream($temp, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+        try { $fs.Write($pre, 0, $pre.Length); $fs.Write($body, 0, $body.Length); $fs.Flush($true) } finally { $fs.Dispose() }
+        Move-AVDTuneFileReplace $temp $full
+    }
+    finally { if ([IO.File]::Exists($temp)) { [IO.File]::Delete($temp) } }
+    $full
+}
+
+function Get-AVDTuneBenchStartBlock {
+    # Why a benchmark may not start now ('' when it may): the integrity check of the tool still runs, or the tool is read only (write block, e.g. files that do not match the release) (Finn, #90)
+    param([bool]$IntegrityRunning, [AllowNull()][string]$WriteBlock)
+    if ($IntegrityRunning) { return 'the integrity check of AVDTune is still running' }
+    if ($WriteBlock) { return "AVDTune is read only: $WriteBlock" }
+    ''
+}
+
+function Get-AVDTuneBenchmarkSystems {
+    # The imported comparison systems (benchmark-only and stand-alone results, plan 6b), oldest first; a file that fails the result check is left out and named in Problems
+    param([Parameter(Mandatory)][string]$Root)
+    $folder = Get-AVDTuneBenchmarkSystemFolder $Root
+    $ok = @(); $problems = @()
+    if (Test-Path -LiteralPath $folder) {
+        # the folder is read only when it is admin-only (and no link on the way up to the state folder); otherwise nothing of it counts (Finn, #90)
+        if (-not (Test-AVDTuneBenchSystemFolder -Folder $folder -Root $Root)) { return [pscustomobject]@{ Results = @(); Problems = @("$folder is not an admin-only folder of AVDTune: its comparison systems are not read") } }
+        foreach ($f in @(Get-ChildItem -LiteralPath $folder -Filter '*.json' -File | Sort-Object Name)) {
+            if (($f.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { $problems += "$($f.Name): a link"; continue }
+            if ($f.Length -gt 5MB) { $problems += "$($f.Name): larger than 5 MB"; continue }
+            $r = $null
+            try { $r = Read-AVDTuneJson $f.FullName } catch { $problems += "$($f.Name): not readable"; continue }
+            $p = @(Test-AVDTuneBenchmarkResult -Result $r)
+            if ($p.Count -gt 0) { $problems += "$($f.Name): $($p -join '; ')" } else { $ok += $r }
+        }
+    }
+    [pscustomobject]@{ Results = @($ok); Problems = @($problems) }
+}
+
+function Get-AVDTuneBenchmarkVersionComparison {
+    <#
+        Comparison per image version (#90): per version the newest full result as a typed row (oldest version first), each with the change against the previous version
+        (Get-AVDTunePreviousVersionResult: closest earlier version, same benchmark major version) and against the baseline. Host score through Compare-AVDTuneBenchmark
+        (common measures, never across major versions or quick/full); FSLogix and GPU score only with the same major version and mode; capacity only on the same VM size.
+        Light: 'red' when one of them got worse by more than the threshold, 'green' when something was compared and nothing got worse, 'grey' when nothing could be compared.
+        Results that fail Test-AVDTuneBenchmarkResult (changed file, secret-like content, missing fields) are left out and named in Problems.
+        Systems: the imported comparison systems, each with the change of the newest version against it.
+    #>
+    param([Parameter(Mandatory)][string]$Root, $Config)
+    if (-not $Config) { $Config = Get-AVDTuneBenchmarkConfig }
+    $thr = [double]$Config.run.deltaThresholdPercent
+    $problems = @()
+    $valid = @()
+    foreach ($r in @(Get-AVDTuneBenchmarkResult -Root $Root)) {
+        $p = @(Test-AVDTuneBenchmarkResult -Result $r)
+        if ($p.Count -gt 0) { $problems += "$(ConvertTo-AVDTuneBenchText (Get-AVDTuneProp $r 'runId') 64): $($p -join '; ')" } else { $valid += $r }
+    }
+    $versions = @(Get-AVDTuneBenchmarkVersionResults -Root $Root -Results @($valid | Where-Object { $_.kind -notin 'benchmark-only', 'standalone' }))
+    $base = Get-AVDTuneBenchmarkBaseline -Root $Root
+    if ($base -and @($valid | Where-Object { $_.runId -ceq $base.runId }).Count -eq 0) { $base = $null }   # a baseline that failed the check is no baseline
+    $major = { param($v) if ([string]$v -match '^B(\d+)\.') { [int]$Matches[1] } else { -1 } }
+    $same = { param($a, $b) (& $major $a.benchmarkVersion) -eq (& $major $b.benchmarkVersion) -and (& $major $a.benchmarkVersion) -ge 0 -and [string]$a.mode -ceq [string]$b.mode }
+    $against = {
+        param($cur, $other)
+        $out = [ordered]@{ Host = $null; Fslogix = $null; Gpu = $null; Capacity = $null; Note = '' }
+        if (-not $other -or [string]$other.runId -ceq [string]$cur.runId) { return $null }
+        $c = Compare-AVDTuneBenchmark -Current $cur -Baseline $other -Config $Config
+        if (-not $c.Comparable) { $out.Note = [string]$c.Reason; return [pscustomobject]$out }
+        if ($c.Host) { $out.Host = [pscustomobject]@{ DeltaPercent = [double]$c.Host.DeltaPercent; Class = [string]$c.Host.Class } }
+        if ($c.CommonOnly) { $out.Note = 'gemeinsame Messungen' }
+        $rc = ConvertTo-AVDTuneBenchmarkRow $cur; $ro = ConvertTo-AVDTuneBenchmarkRow $other
+        if (& $same $cur $other) {
+            $out.Fslogix = Get-AVDTuneBenchDelta -Current $rc.FslogixScore -Previous $ro.FslogixScore -Threshold $thr
+            $out.Gpu = Get-AVDTuneBenchDelta -Current $rc.GpuScore -Previous $ro.GpuScore -Threshold $thr
+        }
+        if ($rc.VmSize -and $rc.VmSize -ceq $ro.VmSize) { $out.Capacity = Get-AVDTuneBenchDelta -Current $rc.CapacityUsers -Previous $ro.CapacityUsers -Threshold $thr }
+        [pscustomobject]$out
+    }
+    $lightOf = {
+        param([object[]]$Sets)
+        $ds = @(foreach ($s in $Sets) { if ($s) { foreach ($k in 'Host', 'Fslogix', 'Gpu', 'Capacity') { if ($s.$k) { $s.$k } } } })
+        if (@($ds | Where-Object { $_.Class -eq 'worse' }).Count -gt 0) { 'red' } elseif ($ds.Count -gt 0) { 'green' } else { 'grey' }
+    }
+    $rows = @()
+    $newest = $null
+    foreach ($v in $versions) {
+        $row = ConvertTo-AVDTuneBenchmarkRow $v
+        $prev = Get-AVDTunePreviousVersionResult -Root $Root -ImageVersion $row.ImageVersion -Results $versions
+        $vsPrev = & $against $v $prev
+        $vsBase = & $against $v $base
+        $worse = @()
+        foreach ($pair in @(@('previous', $vsPrev), @('baseline', $vsBase))) {
+            if (-not $pair[1]) { continue }
+            foreach ($k in 'Host', 'Fslogix', 'Gpu', 'Capacity') { $d = $pair[1].$k; if ($d -and $d.Class -eq 'worse') { $worse += ('{0} {1:0.0} % vs {2}' -f $k, [double]$d.DeltaPercent, $pair[0]) } }
+        }
+        $row | Add-Member -NotePropertyMembers ([ordered]@{
+                PreviousImageVersion = $(if ($prev) { ConvertTo-AVDTuneBenchText $prev.system.imageVersion 40 } else { '' })
+                IsBaseline = [bool]($base -and [string]$base.runId -ceq $row.RunId)
+                VsPrevious = $vsPrev; VsBaseline = $vsBase
+                Light = (& $lightOf @($vsPrev, $vsBase)); Worse = @($worse)
+            })
+        $rows += $row
+        $newest = $v
+    }
+    $sys = Get-AVDTuneBenchmarkSystems -Root $Root
+    $problems += @($sys.Problems)
+    $systems = @()
+    foreach ($s in $sys.Results) {
+        $row = ConvertTo-AVDTuneBenchmarkRow $s
+        $vs = $(if ($newest) { & $against $newest $s } else { $null })
+        $row | Add-Member -NotePropertyMembers ([ordered]@{ NewestVsThis = $vs; Light = (& $lightOf @($vs)) })
+        $systems += $row
+    }
+    [pscustomobject]@{ ThresholdPercent = $thr; BaselineRunId = $(if ($base) { [string]$base.runId } else { '' }); Rows = @($rows); Systems = @($systems); Problems = @($problems) }
+}
+
+function ConvertTo-AVDTuneCsvCell {
+    # One CSV text cell: quoted, quotes doubled; a cell that a spreadsheet would read as a formula (= + - @ |, tab, CR at the start; | starts a DDE call) gets a leading apostrophe
+    param([AllowNull()][string]$Text)
+    if ($null -eq $Text) { $Text = '' }
+    if ($Text -match '\A[=+\-@|\t\r]') { $Text = "'" + $Text }
+    '"' + $Text.Replace('"', '""') + '"'
+}
+
+function ConvertTo-AVDTuneBenchmarkComparisonText {
+    <# The comparison as CSV (RFC 4180, comma, invariant numbers, one row per version and per comparison system) or JSON (schemaVersion 1). No secrets: only typed rows. #>
+    param([Parameter(Mandatory)]$Comparison, [ValidateSet('Csv', 'Json')][string]$Format = 'Csv')
+    $inv = [Globalization.CultureInfo]::InvariantCulture
+    $num = { param($v) if ($null -eq $v) { '' } else { ([double]$v).ToString('0.###', $inv) } }
+    $pct = { param($set, $k) if ($set -and $set.$k -and $null -ne $set.$k.DeltaPercent) { ([double]$set.$k.DeltaPercent).ToString('0.0', $inv) } else { '' } }
+    $flat = @()
+    foreach ($r in @($Comparison.Rows) + @($Comparison.Systems)) {
+        $isSys = $null -ne $r.PSObject.Properties['NewestVsThis']
+        $o = [ordered]@{
+            Row = $(if ($isSys) { 'system' } else { 'version' }); ImageVersion = $r.ImageVersion; System = $r.SystemName; Kind = $r.Kind; Mode = $r.Mode; BenchmarkVersion = $r.BenchmarkVersion
+            RunId = $r.RunId; Started = $(if ($r.Started -gt [datetime]::MinValue) { $r.Started.ToString('yyyy-MM-ddTHH:mm:ssZ', $inv) } else { '' }); VmSize = $r.VmSize
+            HostScore = & $num $r.HostScore; FSLogixScore = & $num $r.FslogixScore; GPUScore = & $num $r.GpuScore; CapacityUsers = & $num $r.CapacityUsers
+            PreviousImageVersion = $(if ($isSys) { '' } else { $r.PreviousImageVersion }); Baseline = $(if ($isSys) { '' } elseif ($r.IsBaseline) { 'yes' } else { 'no' })
+        }
+        foreach ($k in 'Host', 'Fslogix', 'Gpu', 'Capacity') {
+            $n = $k.Replace('Fslogix', 'FSLogix').Replace('Gpu', 'GPU')
+            $o["${n}VsPreviousPct"] = $(if ($isSys) { '' } else { & $pct $r.VsPrevious $k })
+            $o["${n}VsBaselinePct"] = $(if ($isSys) { '' } else { & $pct $r.VsBaseline $k })
+        }
+        $o['HostNewestVsSystemPct'] = $(if ($isSys) { & $pct $r.NewestVsThis 'Host' } else { '' })
+        $o['Light'] = $r.Light
+        $flat += [pscustomobject]$o
+    }
+    if ($Format -eq 'Json') {
+        return ([ordered]@{ schemaVersion = 1; product = 'AVDTune'; exported = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ', $inv); thresholdPercent = $Comparison.ThresholdPercent; baselineRunId = $Comparison.BaselineRunId; rows = @($flat) } | ConvertTo-Json -Depth 5)
+    }
+    $numeric = '^(HostScore|FSLogixScore|GPUScore|CapacityUsers|.*Pct)$'
+    $cols = @('Row', 'ImageVersion', 'System', 'Kind', 'Mode', 'BenchmarkVersion', 'RunId', 'Started', 'VmSize', 'HostScore', 'FSLogixScore', 'GPUScore', 'CapacityUsers', 'PreviousImageVersion', 'Baseline',
+        'HostVsPreviousPct', 'HostVsBaselinePct', 'FSLogixVsPreviousPct', 'FSLogixVsBaselinePct', 'GPUVsPreviousPct', 'GPUVsBaselinePct', 'CapacityVsPreviousPct', 'CapacityVsBaselinePct', 'HostNewestVsSystemPct', 'Light')
+    $sb = New-Object System.Text.StringBuilder
+    [void]$sb.Append(($cols -join ',')).Append("`r`n")
+    foreach ($o in $flat) {
+        $cells = foreach ($c in $cols) { $v = [string]$o.$c; if ($c -match $numeric) { $v } else { ConvertTo-AVDTuneCsvCell $v } }
+        [void]$sb.Append(($cells -join ',')).Append("`r`n")
+    }
+    $sb.ToString()
+}
+
+function Export-AVDTuneBenchmarkComparison {
+    # Writes the comparison to a file the administrator chose (save dialog), like the change log export; CSV with BOM (spreadsheet programs), JSON without
+    param([Parameter(Mandatory)]$Comparison, [Parameter(Mandatory)][string]$Path, [ValidateSet('Csv', 'Json')][string]$Format = 'Csv')
+    $text = ConvertTo-AVDTuneBenchmarkComparisonText -Comparison $Comparison -Format $Format
+    Write-AVDTuneExportFile -Path $Path -Text $text -Bom:($Format -eq 'Csv')
+}
+
+function Test-AVDTuneBenchmarkLabel {
+    <# Name and notes of a system in benchmark-only mode (plan 6b): name 1-80 characters, notes up to 500, no control characters (notes may have line breaks) and nothing
+       that looks like a secret (they go into the result file and its export). Returns the problems, empty when fine. #>
+    param([AllowEmptyString()][string]$Name, [AllowEmptyString()][string]$Notes)
+    $p = @()
+    # length first: no pattern runs on long input
+    if ($Name.Length -gt 80) { $p += 'name longer than 80 characters' }
+    if ($Notes.Length -gt 500) { $p += 'notes longer than 500 characters' }
+    if ($p.Count -gt 0) { return $p }
+    if ([string]::IsNullOrWhiteSpace($Name)) { $p += 'name missing' }
+    elseif ($Name -match '[\x00-\x1F\x7F]') { $p += 'name has control characters' }
+    if ($Notes -and $Notes -match '[\x00-\x09\x0B\x0C\x0E-\x1F\x7F]') { $p += 'notes have control characters' }
+    foreach ($t in @($Name, $Notes)) {
+        if ($t -and ($t -match $script:SecretPattern -or $t -match '(?i)(password|passwd|pwd|secret|accountkey|sig)=')) { $p += 'name or notes look like a secret (password, key, token): leave them out'; break }
+    }
+    $p
+}
+
+function Import-AVDTuneBenchmarkSystem {
+    <#
+        Imports a result file of a benchmark-only or stand-alone run as comparison system (plan 6b). The file is untrusted data: at most 5 MB, no link, it must pass
+        Test-AVDTuneBenchmarkResult (fields, no secret-like content, integrity hash), kind benchmark-only or standalone, a run id of [A-Za-z0-9-] and a host score that is a number.
+        Stored as <results>\systems\<runId>.json (admin-only folder created in one step, file written like every state file); a run id that is there already is refused.
+    #>
+    param([Parameter(Mandatory)][string]$Root, [Parameter(Mandatory)][string]$Path)
+    $fi = New-Object IO.FileInfo $Path
+    if (-not $fi.Exists) { throw "The file $Path does not exist." }
+    if (($fi.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'The file is a link: not imported.' }
+    if ($fi.Length -gt 5MB) { throw 'The file is larger than 5 MB: not a benchmark result.' }
+    $text = [IO.File]::ReadAllText($fi.FullName).TrimStart([char]0xFEFF)
+    $obj = $null
+    try { $obj = $text | ConvertFrom-Json } catch { throw 'The file is not a JSON benchmark result.' }
+    if ($null -eq $obj -or $obj -isnot [pscustomobject]) { throw 'The file is not a JSON benchmark result.' }
+    $p = @(Test-AVDTuneBenchmarkResult -Result $obj)
+    if ($p.Count -gt 0) { throw "Not imported: $($p -join '; ')" }
+    if ($obj.kind -isnot [string] -or $obj.kind -notin 'benchmark-only', 'standalone') { throw 'Only results of the benchmark-only mode or the stand-alone script can be a comparison system.' }
+    if (-not (Test-AVDTuneBenchRunId $obj.runId)) { throw 'The run id of the file is not valid.' }
+    $hv = Get-AVDTuneProp (Get-AVDTuneProp $obj.scores 'host') 'value'
+    if ($null -ne $hv -and $null -eq (ConvertTo-AVDTuneBenchNumber $hv)) { throw 'The host score of the file is not a number.' }
+    $results = Get-AVDTuneBenchmarkResultFolder $Root
+    if (-not (Test-Path -LiteralPath $results)) { New-AVDTuneOwnFolder -Path $results }
+    $folder = Get-AVDTuneBenchmarkSystemFolder $Root
+    New-AVDTuneOwnFolder -Path $folder   # creates it with its protected ACL, or checks the one that is there (throws when it is not ours)
+    $dest = Join-Path $folder "$($obj.runId).json"
+    if (Test-Path -LiteralPath $dest) { throw "The comparison system $($obj.runId) is imported already." }
+    Write-AVDTuneFile $dest ($obj | ConvertTo-Json -Depth 12)
+    ConvertTo-AVDTuneBenchmarkRow $obj
+}
+
+function Export-AVDTuneBenchmarkResultFile {
+    # Copies a stored result (checked first) to a file the administrator chose: the result file of plan 6b for the import as comparison system elsewhere. Never a secret.
+    param([Parameter(Mandatory)][string]$Root, [Parameter(Mandatory)][string]$RunId, [Parameter(Mandatory)][string]$Path)
+    if (-not (Test-AVDTuneBenchRunId $RunId)) { throw 'Invalid run id.' }
+    $r = @(Get-AVDTuneBenchmarkResult -Root $Root -RunId $RunId)
+    if ($r.Count -eq 0) { throw "No benchmark result $RunId." }
+    $p = @(Test-AVDTuneBenchmarkResult -Result $r[0])
+    if ($p.Count -gt 0) { throw "The result is not exported: $($p -join '; ')" }
+    Write-AVDTuneExportFile -Path $Path -Text ($r[0] | ConvertTo-Json -Depth 12)
+}
+
+#endregion
+
 #region run
 
 function New-AVDTuneBenchmarkRunId { (Get-Date).ToString('yyyyMMdd-HHmmss', [Globalization.CultureInfo]::InvariantCulture) + '-' + [guid]::NewGuid().ToString('N').Substring(0, 4) }
@@ -1538,11 +1863,15 @@ function Invoke-AVDTuneBenchmark {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)]$Machine, [Parameter(Mandatory)]$Bench, [string]$Root = (Get-AVDTuneRoot),
-        [ValidateSet('Full', 'Quick')][string]$Mode = 'Full', [ValidateSet('baseline', 'healthcheck', 'manual')][string]$Kind = 'manual',
+        [ValidateSet('Full', 'Quick')][string]$Mode = 'Full', [ValidateSet('baseline', 'healthcheck', 'manual', 'benchmark-only')][string]$Kind = 'manual',
         [string]$User, [scriptblock]$Progress, [string]$DataPath = $script:DataDefault, [switch]$SkipIdleCheck,
-        [string]$Share, [switch]$Capacity, [switch]$NoReport
+        [string]$Share, [switch]$Capacity, [switch]$NoReport, [string]$SystemName, [string]$Notes
     )
     if ($Capacity -and $Mode -eq 'Quick') { throw 'The capacity simulation is not available in a quick run.' }
+    # benchmark-only (plan 6b): the system is named by hand; the result belongs to no image version, sets no baseline and writes no change log or version report
+    $only = $Kind -eq 'benchmark-only'
+    if ($only) { $lp = @(Test-AVDTuneBenchmarkLabel -Name $SystemName -Notes $Notes); if ($lp.Count -gt 0) { throw "The benchmark did not start: $($lp -join '; ')." } }
+    elseif ($SystemName -or $Notes) { throw 'A system name and notes are only for the benchmark-only mode.' }
     if (-not $PSBoundParameters.ContainsKey('Share')) { $Share = Get-AVDTuneBenchShare -Machine $Machine }
     $siteDir = Join-Path $DataPath 'speedometer-3.1'
     $config = Get-AVDTuneBenchmarkConfig -DataPath $DataPath
@@ -1637,6 +1966,7 @@ function Invoke-AVDTuneBenchmark {
             tools = [ordered]@{ engine = $(if ($engine) { [ordered]@{ version = [string]$engine.Version; sha256 = [string]$engine.Sha256 } } else { $null }); diskspd = [ordered]@{ version = [string]$config.diskspd.version; sha256 = [string]$config.diskspd.exeSha256 } }
             capacity = $capacityBlock
         }
+        if ($only) { $result.system.name = $SystemName.Trim(); $result.system.imageVersion = ''; $result.system.notes = $(if ($Notes) { $Notes.Trim() } else { '' }) }
         if ($gpuInfo -and $gpuInfo.hardware) { $result.system.gpu = [ordered]@{ adapter = [string]$gpuInfo.adapter; driver = [string]$gpuInfo.driver; vramMiB = $gpuInfo.vramMiB } }
         if ($capacityBlock) {
             $prevCap = @(Get-AVDTuneBenchmarkResult -Root $Root | Where-Object { (Get-AVDTuneProp $_ 'capacity') -and $_.system.vmSize -ceq $result.system.vmSize } | Select-Object -Last 1)
@@ -1672,6 +2002,10 @@ function Invoke-AVDTuneBenchmark {
     [void](Set-AVDTuneState -Root $Root -Values $values)
     $logged = $false
     $reportPath = $null
+    if ($only) {
+        & $say 'Done.' 100
+        return [pscustomobject]@{ RunId = $runId; Path = $path; Result = $obj; Summary = $label; ChangeLogged = $false; ReportPath = $null; Errors = @($errors); Warnings = @($warnings) }
+    }
     if ($state.ImageVersion -and -not $NoReport -and $Mode -eq 'Full') {
         try { $reportPath = Save-AVDTuneBenchmarkReport -Root $Root -ImageVersion ([string]$state.ImageVersion) -DataPath $DataPath } catch { $warnings += "The report was not written: $($_.Exception.Message)" }
     }
@@ -1710,4 +2044,7 @@ Export-ModuleMember -Function Get-AVDTuneBenchShare, Get-AVDTuneBenchShareHost, 
     Get-AVDTuneDiskspd, Test-AVDTuneBenchmarkPreconditions, Wait-AVDTuneUpdateIdle, Get-AVDTuneBenchmarkJournalPath, Get-AVDTuneBenchmarkRestoreScriptPath, New-AVDTuneBenchmarkRestoreScript,
     Start-AVDTuneBenchmarkQuiet, Stop-AVDTuneBenchmarkQuiet, Get-AVDTuneBenchmarkCrash, Repair-AVDTuneBenchmarkCrash, Test-AVDTuneBenchmarkClean, Get-AVDTuneBenchRestoreAction, Remove-AVDTuneDiskspdCache, Invoke-AVDTuneBenchDisk, Invoke-AVDTuneBenchNetwork,
     Invoke-AVDTuneBenchRun, ConvertTo-AVDTuneBenchAggregate, Get-AVDTuneBenchmarkSystem, Get-AVDTuneBenchmarkIntegrityHash, Test-AVDTuneBenchmarkResult, Get-AVDTuneBenchmarkResultFolder,
-    Get-AVDTuneBenchmarkResult, Set-AVDTuneBenchmarkBaseline, Get-AVDTuneBenchmarkBaseline, Compare-AVDTuneBenchmark, Invoke-AVDTuneBenchmark, Get-AVDTuneBenchmarkSummaryText, New-AVDTuneBenchmarkRunId
+    Get-AVDTuneBenchmarkResult, Set-AVDTuneBenchmarkBaseline, Get-AVDTuneBenchmarkBaseline, Compare-AVDTuneBenchmark, Invoke-AVDTuneBenchmark, Get-AVDTuneBenchmarkSummaryText, New-AVDTuneBenchmarkRunId,
+    ConvertTo-AVDTuneBenchNumber, ConvertTo-AVDTuneBenchText, ConvertTo-AVDTuneBenchmarkRow, Get-AVDTuneBenchmarkSystemFolder, Get-AVDTuneBenchmarkSystems, Get-AVDTuneBenchmarkVersionComparison,
+    ConvertTo-AVDTuneCsvCell, ConvertTo-AVDTuneBenchmarkComparisonText, Export-AVDTuneBenchmarkComparison, Test-AVDTuneBenchmarkLabel, Import-AVDTuneBenchmarkSystem, Export-AVDTuneBenchmarkResultFile,
+    Test-AVDTuneBenchSystemFolder, Test-AVDTuneBenchRunId, Write-AVDTuneExportFile, Get-AVDTuneBenchStartBlock

@@ -14,15 +14,16 @@ function Set-BenchBusy([bool]$Busy) {
     $window.Cursor = $(if ($Busy) { [System.Windows.Input.Cursors]::AppStarting } else { $null })
 }
 
-function Start-BenchJob([string]$Mode, [string]$Kind) {
+function Start-BenchJob([string]$Mode, [string]$Kind, [string]$SystemName = '', [string]$Notes = '') {
     if ($script:BenchJob) { throw 'A benchmark is already running.' }
     if ($script:UpdJob) { throw 'An update operation is running. Wait until it is done.' }
     if ($script:OptRun) { throw 'An optimization run is going. Wait until it is done.' }
+    $block = Get-BenchStartBlock; if ($block) { throw (T 'bench.rel.refused' $block) }   # also here: every start goes through this function (Finn, #90)
     Assert-NoOtherWriter
     $sync = [hashtable]::Synchronized(@{ Text = ''; Percent = 0 })
     $ps = New-AVDTunePowerShell
     [void]$ps.AddScript({
-            param($AppRoot, $Fake, $FakeBench, $Root, $Mode, $Kind, $Sync, $User, $Seed, $SharedMachine)
+            param($AppRoot, $Fake, $FakeBench, $Root, $Mode, $Kind, $Sync, $User, $Seed, $SharedMachine, $SystemName, $Notes)
             $ErrorActionPreference = 'Stop'
             Import-Module (Join-Path $AppRoot 'Modules\AVDTune.psm1') -Force
             Import-Module (Join-Path $AppRoot 'Modules\AVDTune.Benchmark.psm1') -Force
@@ -40,8 +41,9 @@ function Start-BenchJob([string]$Mode, [string]$Kind) {
             }
             else { $m = New-AVDTuneMachine; $b = New-AVDTuneBenchAdapter }
             $progress = { param($t, $p) $Sync.Text = $t; if ($null -ne $p) { $Sync.Percent = [int]$p } }
-            Invoke-AVDTuneBenchmark -Machine $m -Bench $b -Root $Root -Mode $Mode -Kind $Kind -User $User -Progress $progress -SkipIdleCheck:$skipIdle
-        }).AddArgument($script:AppRoot).AddArgument($(if ($script:TestMode) { $script:TestInfo.FakeScript } else { '' })).AddArgument($script:BenchFakeScript).AddArgument($script:StateRoot).AddArgument($Mode).AddArgument($Kind).AddArgument($sync).AddArgument([string]$env:USERNAME).AddArgument($script:BenchFakeSeed).AddArgument($(if ($script:TestMode) { $script:Machine } else { $null }))
+            $named = @{}; if ($Kind -eq 'benchmark-only') { $named.SystemName = $SystemName; $named.Notes = $Notes }   # plan 6b: name and notes only in that mode
+            Invoke-AVDTuneBenchmark -Machine $m -Bench $b -Root $Root -Mode $Mode -Kind $Kind -User $User -Progress $progress -SkipIdleCheck:$skipIdle @named
+        }).AddArgument($script:AppRoot).AddArgument($(if ($script:TestMode) { $script:TestInfo.FakeScript } else { '' })).AddArgument($script:BenchFakeScript).AddArgument($script:StateRoot).AddArgument($Mode).AddArgument($Kind).AddArgument($sync).AddArgument([string]$env:USERNAME).AddArgument($script:BenchFakeSeed).AddArgument($(if ($script:TestMode) { $script:Machine } else { $null })).AddArgument($SystemName).AddArgument($Notes)
     $task = Start-AVDTuneUiTask -Kind 'benchmark' -Title "Benchmark ($($Mode.ToLower()) run)" -Step 'Starting' -Percent 0   # no Retry: a run pauses Windows Update and the indexer and is started on the page after its confirmation
     $script:BenchJob = @{ PS = $ps; Handle = $ps.BeginInvoke(); Mode = $Mode; Sync = $sync; Task = $task }
     Set-ShutdownBlock $true
@@ -134,7 +136,7 @@ function Update-BenchmarkView {
             if (-not $cmp.Comparable) { $notes += $cmp.Reason; $cmp = $null }
             else { $notes += @($cmp.Notes); if ($cmp.Host) { $ui.TxtBenchMeta.Text += ('  Against the baseline: {0:+0.0;-0.0;0.0} %.' -f [double]$cmp.Host.DeltaPercent) } }
         }
-        elseif (-not $base) { $notes += 'No baseline yet: the first full run of the initial analysis becomes the baseline.' }
+        elseif (-not $base -and -not $script:BenchmarkOnly) { $notes += 'No baseline yet: the first full run of the initial analysis becomes the baseline.' }
         foreach ($c in $h.categories.PSObject.Properties) {
             $title = $script:BenchCatTitle[$c.Name]; if (-not $title) { $title = $c.Name }
             $cc = $null; if ($cmp -and $cmp.Categories.Contains($c.Name)) { $cc = $cmp.Categories[$c.Name] }
@@ -162,15 +164,178 @@ function Update-BenchmarkView {
         $t.Text = '{0}   {1,-5} {2,-8} Host {3}' -f ([datetime]$r.started).ToLocalTime().ToString('yyyy-MM-dd HH:mm'), $r.mode, $r.kind, $(if ($null -ne $r.scores.host.value) { $r.scores.host.value } else { '-' })
         [void]$ui.PanelBenchHistory.Children.Add($t)
     }
+    $ui.BoxBenchOnly.Visibility = ConvertTo-Vis ([bool]$script:BenchmarkOnly)
+    $ui.BoxBenchCompare.Visibility = ConvertTo-Vis (-not $script:BenchmarkOnly)   # the comparison per image version belongs to a Golden Master
+    if (-not $script:BenchmarkOnly) { Update-BenchCompareView }
+    Update-BenchIntegrity
+    if ($script:BenchmarkOnly) { Update-BenchShortcutRow }
+}
+
+# ---------------------------------------------------------------- integrity of the tool (Finn, #90): no start while the check runs or AVDTune is read only
+function Get-BenchStartBlock {
+    Get-AVDTuneBenchStartBlock -IntegrityRunning ([bool]($script:RelJob -and [string]$script:RelJob.Kind -in 'Start', 'Check')) -WriteBlock (Get-AVDTuneWriteBlock)
+}
+function Update-BenchIntegrity {
+    # the result of the integrity check on this page too (in benchmark-only mode the Overview is hidden), with the repair when the release offers it
+    $s = $script:Rel.Status
+    $key = if ($s) { [string]$s.Status } else { 'running' }
+    $block = Get-BenchStartBlock
+    $text = T 'bench.rel.status' (T "rel.pill.$key") $(if ($s) { [string]$s.Message } else { T 'rel.comparing' })
+    if ($block) { $text += "`r`n" + (T 'bench.rel.blocked' $block) }
+    $repair = $ui.BtnRelRepair.Visibility -eq 'Visible'
+    if ($block -and -not $repair -and $key -ne 'running') { $text += "`r`n" + (T 'bench.rel.hint') }
+    if ($ui.TxtBenchIntegrity.Text -ne $text) { $ui.TxtBenchIntegrity.Text = $text }
+    Set-Brush $ui.BoxBenchIntegrity ([System.Windows.Controls.Border]::BackgroundProperty) $(if ($block) { 'WarningBg' } else { 'Card' })
+    $ui.BtnBenchRelRepair.Visibility = ConvertTo-Vis $repair
+}
+Add-Click $ui.BtnBenchRelRepair { $ui.BtnRelRepair.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent))) }
+$script:Timer.Add_Tick({ try { if ($script:CurrentPage -eq 'Benchmark') { Update-BenchIntegrity } } catch { } })
+
+# ---------------------------------------------------------------- desktop shortcut "AVDTune Benchmark" (#90): the launcher with -Benchmark, like AVDTune.lnk (#15)
+function Update-BenchShortcutRow {
+    $installed = (Get-ShortcutMode) -eq 'Installed'
+    $link = $null; try { $link = Get-AVDTuneDesktopShortcut -Folder (Get-ShortcutDesktop) -InstallRoot $script:RelInstallRoot -Benchmark } catch { }
+    $ui.BtnBenchShortcut.Content = $(if ($link) { T 'bench.sc.remove' } else { T 'bench.sc.create' })
+    $ui.BtnBenchShortcut.IsEnabled = ($installed -or [bool]$link)
+    $ui.TxtBenchShortcut.Text = if (-not $installed -and -not $link) { T 'sc.state.notinstalled' }
+    elseif ($link -and -not $link.Matches) { T 'sc.state.wrong' $script:RelInstallRoot }
+    elseif ($link) { T 'bench.sc.ok' }
+    else { T 'sc.state.none' }
+}
+function Switch-BenchShortcut {
+    $folder = Get-ShortcutDesktop
+    if (Get-AVDTuneDesktopShortcut -Folder $folder -Benchmark) {
+        [void](Remove-AVDTuneDesktopShortcut -Folder $folder -Benchmark)
+        Add-RelProtocol 'Desktop shortcut AVDTune Benchmark removed' $folder
+        Show-Toast (T 'sc.toast.removed')
+    }
+    else {
+        $link = New-AVDTuneDesktopShortcut -InstallRoot $script:RelInstallRoot -Folder $folder -Benchmark
+        Add-RelProtocol 'Desktop shortcut AVDTune Benchmark created' "$($link.Path) -> $($link.Target) $($link.Arguments) (run as administrator)"
+        Show-Toast (T 'sc.toast.created')
+    }
+    Update-BenchShortcutRow
+}
+Add-Click $ui.BtnBenchShortcut { Switch-BenchShortcut }
+
+# ---------------------------------------------------------------- comparison per image version (#90), comparison systems (plan 6b)
+$script:BenchCompare = $null   # the comparison shown (exported as it is)
+$script:BenchSmokeFile = $null   # test hook: the path the save or open dialog would give (only honoured in the smoke run)
+function Select-BenchFile([switch]$Open, [string]$Title, [string]$Filter, [string]$FileName) {
+    if ($script:SmokeOn) { return $script:BenchSmokeFile }   # no dialog on the developer's desktop
+    $dlg = $(if ($Open) { New-Object Microsoft.Win32.OpenFileDialog } else { New-Object Microsoft.Win32.SaveFileDialog })
+    $dlg.Title = $Title; $dlg.Filter = $Filter
+    if (-not $Open) { $dlg.FileName = $FileName }
+    if ($dlg.ShowDialog()) { $dlg.FileName } else { $null }
+}
+function Format-BenchDelta($Set) {
+    # "Host +18.2 %, FSLogix +5.0 %" of a delta set; the parts that could not be compared are left out
+    if (-not $Set) { return '' }
+    $parts = @(foreach ($k in 'Host', 'Fslogix', 'Gpu', 'Capacity') { $d = $Set.$k; if ($d -and $null -ne $d.DeltaPercent) { '{0} {1:+0.0;-0.0;0.0} %' -f $(if ($k -eq 'Fslogix') { 'FSLogix' } elseif ($k -eq 'Gpu') { 'GPU' } else { $k }), [double]$d.DeltaPercent } })
+    if ($parts.Count -eq 0 -and $Set.Note) { return (T 'bench.cmp.notcomparable') }
+    $parts -join ', '
+}
+function New-BenchCompareRow($Row, [string]$Label) {
+    # one line: light (color and word, not color alone), version or system, the scores, the changes
+    $g = New-Object System.Windows.Controls.Grid; $g.Margin = '0,4,0,4'
+    foreach ($w in 110, 170, '*') { $c = New-Object System.Windows.Controls.ColumnDefinition; $c.Width = $w; [void]$g.ColumnDefinitions.Add($c) }
+    $pill = New-Object System.Windows.Controls.Border; Set-Brush $pill ([System.Windows.Controls.Border]::StyleProperty) 'Pill'; $pill.Padding = '10,2'; $pill.VerticalAlignment = 'Top'; $pill.HorizontalAlignment = 'Left'
+    $kind = switch ($Row.Light) { 'red' { @('ErrorBg', 'Danger') } 'green' { @('SuccessBg', 'Success') } default { @('Hover', 'MutedText') } }
+    Set-Brush $pill ([System.Windows.Controls.Border]::BackgroundProperty) $kind[0]
+    $pt = New-Object System.Windows.Controls.TextBlock; $pt.Text = T "bench.cmp.light.$($Row.Light)"; $pt.FontSize = 12; $pt.FontWeight = 'SemiBold'
+    Set-Brush $pt ([System.Windows.Controls.TextBlock]::ForegroundProperty) $kind[1]
+    $pill.Child = $pt
+    $name = New-Text $Label; $name.FontWeight = 'SemiBold'; $name.SetValue([System.Windows.Controls.Grid]::ColumnProperty, 1); $name.TextWrapping = 'Wrap'
+    $n = { param($v) if ($null -eq $v) { '-' } else { ([double]$v).ToString('0.#', [Globalization.CultureInfo]::CurrentCulture) } }
+    $lines = @(T 'bench.cmp.scores' (& $n $Row.HostScore) (& $n $Row.FslogixScore) (& $n $Row.GpuScore) (& $n $Row.CapacityUsers))
+    if ($Row.PSObject.Properties['NewestVsThis']) { $d = Format-BenchDelta $Row.NewestVsThis; if ($d) { $lines += T 'bench.cmp.vssys' $d } }
+    else {
+        $d = Format-BenchDelta $Row.VsPrevious; if ($d) { $lines += T 'bench.cmp.vsprev' $Row.PreviousImageVersion $d }
+        $d = Format-BenchDelta $Row.VsBaseline; if ($d) { $lines += T 'bench.cmp.vsbase' $d }
+    }
+    $detail = New-Text ($lines -join "`r`n"); $detail.TextWrapping = 'Wrap'; $detail.SetValue([System.Windows.Controls.Grid]::ColumnProperty, 2)
+    [System.Windows.Automation.AutomationProperties]::SetName($g, "$Label, $($pt.Text)")
+    foreach ($e in $pill, $name, $detail) { [void]$g.Children.Add($e) }
+    $g
+}
+function Update-BenchCompareView {
+    $cmp = Get-AVDTuneBenchmarkVersionComparison -Root $script:StateRoot
+    $script:BenchCompare = $cmp
+    $ui.TxtBenchCompareHint.Text = T 'bench.cmp.hint' $cmp.ThresholdPercent
+    $ui.PanelBenchCompare.Children.Clear()
+    if (@($cmp.Rows).Count -eq 0) { [void]$ui.PanelBenchCompare.Children.Add((New-Text (T 'bench.cmp.none') 'Hint')) }
+    foreach ($r in @($cmp.Rows | Sort-Object { Get-AVDTuneVersionSortKey $_.ImageVersion } -Descending)) {   # newest version on top
+        [void]$ui.PanelBenchCompare.Children.Add((New-BenchCompareRow $r $(if ($r.IsBaseline) { "$($r.ImageVersion) ($(T 'bench.cmp.base'))" } else { $r.ImageVersion })))
+    }
+    if (@($cmp.Systems).Count -gt 0) {
+        $h = New-Text (T 'bench.cmp.systems'); $h.FontWeight = 'SemiBold'; $h.Margin = '0,10,0,2'
+        [void]$ui.PanelBenchCompare.Children.Add($h)
+        foreach ($s in @($cmp.Systems)) { [void]$ui.PanelBenchCompare.Children.Add((New-BenchCompareRow $s $s.SystemName)) }
+    }
+    $ui.TxtBenchCompareProblems.Visibility = ConvertTo-Vis (@($cmp.Problems).Count -gt 0)
+    $ui.TxtBenchCompareProblems.Text = $(if (@($cmp.Problems).Count -gt 0) { T 'bench.cmp.problems' ((@($cmp.Problems) | Select-Object -First 5) -join '; ') } else { '' })
+    $has = (@($cmp.Rows).Count + @($cmp.Systems).Count) -gt 0
+    $ui.BtnBenchExportCsv.IsEnabled = $has; $ui.BtnBenchExportJson.IsEnabled = $has
+}
+function Export-BenchCompare([ValidateSet('Csv', 'Json')][string]$Format) {
+    if (-not $script:BenchCompare) { Update-BenchCompareView }
+    $ext = $Format.ToLowerInvariant()
+    $path = Select-BenchFile -Title (T 'bench.cmp.dlg.export') -Filter "$Format (*.$ext)|*.$ext" -FileName "AVDTune-benchmark-comparison.$ext"
+    if (-not $path) { return }
+    [void](Export-AVDTuneBenchmarkComparison -Comparison $script:BenchCompare -Path $path -Format $Format)
+    Show-Toast (T 'bench.cmp.exported' $path)
+}
+function Import-BenchSystem {
+    $path = Select-BenchFile -Open -Title (T 'bench.cmp.dlg.import') -Filter 'JSON (*.json)|*.json'
+    if (-not $path) { return }
+    $row = Import-AVDTuneBenchmarkSystem -Root $script:StateRoot -Path $path
+    [void](Add-AVDTuneProtocolNote -Protocol $script:Protocol -Group 'benchmark' -Subject "Comparison system imported: $($row.SystemName) ($($row.RunId))")
+    Save-Protocol
+    Update-BenchCompareView
+    Show-Toast (T 'bench.cmp.imported' $row.SystemName)
+}
+function Export-BenchResultFile {
+    $last = @(Get-AVDTuneBenchmarkResult -Root $script:StateRoot -Last)
+    if ($last.Count -eq 0) { throw (T 'bench.only.noresult') }
+    $safe = [regex]::Replace([string]$last[0].system.name, '[^A-Za-z0-9._-]', '-', [Text.RegularExpressions.RegexOptions]::None, [timespan]::FromMilliseconds(200))
+    $path = Select-BenchFile -Title (T 'bench.only.dlg') -Filter 'JSON (*.json)|*.json' -FileName "AVDTune-benchmark-$safe-$($last[0].runId).json"
+    if (-not $path) { return }
+    [void](Export-AVDTuneBenchmarkResultFile -Root $script:StateRoot -RunId ([string]$last[0].runId) -Path $path)
+    Show-Toast (T 'bench.only.exported' $path)
+}
+Add-Click $ui.BtnBenchExportCsv { Export-BenchCompare 'Csv' }
+Add-Click $ui.BtnBenchExportJson { Export-BenchCompare 'Json' }
+Add-Click $ui.BtnBenchImport { Import-BenchSystem }
+Add-Click $ui.BtnBenchExportResult { Export-BenchResultFile }
+
+# ---------------------------------------------------------------- benchmark-only mode (plan 6b)
+# Start-AVDTune.ps1 -Benchmark, or "Benchmark only" in the sign-in step of the first start: no setup, no sign-in, no snapshot gate, only the Benchmark page and the protocol.
+# The benchmark needs no write gate (it changes nothing permanent; its quiet mode has its own journal and undo); every other page stays hidden (Show-Page refuses them).
+function Enter-BenchmarkOnlyMode {
+    $script:BenchmarkOnly = $true
+    if ($script:OpenStage) { Close-Stage }
+    Update-NavVisibility
+    Show-Page 'Benchmark'
+    $ui.NavBenchmark.IsChecked = $true
+    [void](Add-AVDTuneProtocolNote -Protocol $script:Protocol -Group 'benchmark' -Subject 'Benchmark only: setup and sign-in skipped')
+    Save-Protocol
 }
 
 function Start-BenchRun([string]$Mode) {
+    $block = Get-BenchStartBlock
+    if ($block) { Update-BenchIntegrity; throw (T 'bench.rel.refused' $block) }   # before any question (Finn, #90)
+    $name = ''; $notes = ''
+    if ($script:BenchmarkOnly) {
+        $name = ([string]$ui.TxtBenchSystemName.Text).Trim(); $notes = ([string]$ui.TxtBenchSystemNotes.Text).Trim()
+        $lp = @(Test-AVDTuneBenchmarkLabel -Name $name -Notes $notes)
+        if ($lp.Count -gt 0) { throw (T 'bench.only.err.name' ($lp -join '; ')) }
+    }
     $ask = if ($Mode -eq 'Full') { 'Start a full benchmark (about 17 minutes)? Windows Update and the indexer are paused and started again. Nobody else may be signed in.' } else { 'Start a quick benchmark (about 3 minutes)? It is not compared with full runs.' }
     if (-not (Confirm-Action $ask 'Benchmark')) { return }
     $state = Get-AVDTuneState $script:StateRoot
-    $kind = if (-not (Get-AVDTuneProp $state 'BaselineBenchmark') -and $Mode -eq 'Full') { 'baseline' } else { 'manual' }
+    $kind = if ($script:BenchmarkOnly) { 'benchmark-only' } elseif (-not (Get-AVDTuneProp $state 'BaselineBenchmark') -and $Mode -eq 'Full') { 'baseline' } else { 'manual' }
     $ui.TxtBenchState.Text = 'Starting ...'; $ui.BarBench.Value = 0
-    Start-BenchJob $Mode $kind
+    Start-BenchJob $Mode $kind $name $notes
 }
 Add-Click $ui.BtnBenchFull { Start-BenchRun 'Full' }
 Add-Click $ui.BtnBenchQuick { Start-BenchRun 'Quick' }
