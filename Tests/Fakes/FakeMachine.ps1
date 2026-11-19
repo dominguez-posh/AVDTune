@@ -189,6 +189,7 @@ function New-AVDTuneFakeMachine {
     }.GetNewClosure()
     $m.BenchUsers = { @($store.BenchUsers) }.GetNewClosure()
     $m.BenchLeftovers = { param($Root) @($store.BenchLeftovers) }.GetNewClosure()
+    $m.StateAsideRemove = { param($Path) [void]$store.Log.Add("StateAsideRemove $Path"); $parent = Split-Path $Path -Parent; $leaf = Split-Path $Path -Leaf; if ($store.Dirs.ContainsKey($parent)) { $store.Dirs[$parent] = @(@($store.Dirs[$parent]) | Where-Object { $_ -ne $leaf }) } }.GetNewClosure()   # #111 N-1
     $m.BenchUserRemove = {
         param($Sid)
         [void]$store.Log.Add("BenchUserRemove $Sid")

@@ -548,7 +548,9 @@ function New-AVDTuneMachine {
     # Leftovers of an interrupted benchmark (audit #98): restore journal, restore script and task, work folders, test containers (Test-AVDTuneBenchmarkClean without the diskspd cache,
     # which the finish removes itself). The benchmark module is loaded on first use (it imports this module, so it cannot be imported at the top).
     $benchModule = Join-Path $PSScriptRoot 'AVDTune.Benchmark.psm1'
-    $m.BenchLeftovers = { param($Root) Import-Module $benchModule; @(Test-AVDTuneBenchmarkClean -Bench (New-AVDTuneBenchAdapter) -Root $Root | Where-Object { $_ -notlike 'diskspd cache*' }) }.GetNewClosure()
+    $m.BenchLeftovers = { param($Root, $Bench) Import-Module $benchModule; if (-not $Bench) { $Bench = New-AVDTuneBenchAdapter }; @(Test-AVDTuneBenchmarkClean -Bench $Bench -Root $Root | Where-Object { $_ -notlike 'diskspd cache*' }) }.GetNewClosure()   # -Bench: the checks pass a fake
+    # #111 N-1: a state folder set aside as untrusted, removed through handles (a link inside as a link; a link further up refuses)
+    $m.StateAsideRemove = { param($Path) [void](Remove-AVDTuneTreeSafe -Path $Path) }
     [pscustomobject]$m
 }
 

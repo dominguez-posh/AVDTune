@@ -789,7 +789,7 @@ public static class StandIn { public static int Main(string[] a) {
         $r98 = Join-Path ([IO.Path]::GetTempPath()) ('avdtune-bench-98-' + [guid]::NewGuid().ToString('N'))
         [void](New-Item -ItemType Directory -Path (Join-Path $r98 'benchmark\work\run-1') -Force); [void](New-Item -ItemType Directory -Path (Join-Path $r98 'tools\diskspd') -Force)
         Set-Content -LiteralPath (Get-AVDTuneBenchmarkJournalPath $r98) -Value '{}'
-        $real98 = @(& (New-AVDTuneMachine).BenchLeftovers $r98)
+        $real98 = @(& (New-AVDTuneMachine).BenchLeftovers $r98 (New-AVDTuneFakeBench -Reference $ref -Config $config))   # #111: a fake bench, nothing of the check machine is read
         Remove-Item -LiteralPath $r98 -Recurse -Force
         Test-Check 'leftovers (#98): the real machine member names the work folder and the restore journal of an interrupted run, not the diskspd cache' (($real98 -join '|') -like '*work folder run-1*' -and ($real98 -join '|') -like '*restore journal*' -and -not (($real98 -join '|') -like '*diskspd*')) ($real98 -join '|')
         # plausibility band against the reference (N4)
