@@ -12,8 +12,11 @@
         held open without write/delete sharing and checked against the pin through that handle, its Authenticode signature read (a broken one stops it; unsigned is
         allowed because the pin is the anchor, and recorded), started with its full path inside the lock Global\PackTune, in a job object with a timeout (an .msi through
         the checked msiexec of System32). The download folder is removed afterwards with Remove-AVDTuneTreeSafe.
-      * Not in this stage (plan 3e, later issues): step screenshots with UI Automation, the notes window, process recording, PDF, SharePoint upload, watched source,
-        "Neu installieren" from the recipe.
+      * Second stage (#93): the comparison also covers scheduled tasks, firewall rules, ODBC data sources, the machine environment, hosts entries and fonts;
+        "Reinstall" runs the recipe (the newest successful recording: same pinned file, same arguments, every check again); notes of the administrator written while
+        the recording runs (text only, bounded, cleaned of secrets); step images of the installer's windows (only when asked for: PrintWindow of the windows of the
+        installer's process tree, never the screen, never a window with a password field, bounded in number and size, kept in the admin-only record folder).
+      * Still open (plan 3e): click-exact steps with UI Automation names, blurring, process recording, PDF, watched source, the review before saving.
       * Every access to the master goes through the recording adapter ($R): New-AVDTuneRecordingAdapter is the real one (NOT exercised by the checks beyond construction,
         to be tried on a throw-away VM); Tests\Fakes\FakeRecording.ps1 is the fake.
 #>
@@ -28,8 +31,12 @@ $script:Fields = @('Name', 'Vendor', 'Version', 'Contact', 'Installer', 'Sha256'
 $script:Extensions = @('.msi', '.exe')
 $script:ArgPattern = '\A[A-Za-z0-9 _.,:;/=+@()\\"''-]{0,512}\z'   # no % & | < > ^ ` $ ! : the arguments are data, quoted per token
 $script:BrokenSignature = @('HashMismatch', 'NotSupportedFileFormat', 'Incompatible')
-$script:DefaultLimits = @{ Files = 200000; Depth = 8; RegistryKeys = 150000; RegistryDepth = 5; Shortcuts = 3000; ListPerArea = 2000 }
-$script:Areas = @('Programs', 'Files', 'Registry', 'Services', 'Shortcuts')
+$script:DefaultLimits = @{ Files = 200000; Depth = 8; RegistryKeys = 150000; RegistryDepth = 5; Shortcuts = 3000; ListPerArea = 2000; Tasks = 2000; Firewall = 5000; Odbc = 500; Environment = 500; Hosts = 2000; Fonts = 5000; Notes = 50; NoteLength = 500; StepImages = 40; StepImageBytes = 2097152; StepIntervalMs = 1500 }
+$script:Areas = @('Programs', 'Files', 'Registry', 'Services', 'Shortcuts', 'Tasks', 'Firewall', 'Odbc', 'Environment', 'Hosts', 'Fonts')   # Tasks..Fonts: #93
+$script:CleanedAreas = @('Services', 'Shortcuts', 'Tasks', 'Firewall', 'Odbc')   # string values that can hold a command line or a connection: cleaned by Protect-AVDTuneRecordingSnapshot
+$script:SecretName = '(?i)(passwor[dt]|passwd|pwd|kennwort|secret|token|api_?key|licen[cs]e|lizenz|serial|credential|(\A|_)(key|pat|sas)(\z|_))'   # an environment variable with such a name: its value is never stored
+$script:Kinds = @('Install', 'Update', 'Reinstall')
+$script:StepFilePattern = '\A[0-9a-f]{12}-[0-9]{3}-step-[0-9]{3}\.png\z'   # the only file names that become step images (unique per app and recording, so one folder can hold many)
 $script:RegexTimeout = [TimeSpan]::FromMilliseconds(200)
 
 #region details (pure)
@@ -173,6 +180,7 @@ function Test-AVDTuneRecordingSignature {
 #region recording (pure)
 
 function Get-AVDTuneRecordingLimits { $script:DefaultLimits.Clone() }
+function Get-AVDTuneRecordingAreas { @($script:Areas) }
 
 function Get-AVDTuneRecordingValueText($Value) {
     if ($null -eq $Value) { return '' }
@@ -222,7 +230,12 @@ function Protect-AVDTuneRecordingSnapshot {
                     foreach ($n in 'UninstallString', 'QuietUninstallString') { $o[$n] = (Remove-AVDTuneRecordingSecrets $o[$n]).Text }
                     $v = [pscustomobject]$o
                 }
-                elseif ($area -in 'Services', 'Shortcuts' -and $v -is [string]) { $v = (Remove-AVDTuneRecordingSecrets $v).Text }
+                elseif ($area -eq 'Environment' -and $v -is [string]) {
+                    # a variable whose name says secret loses its value whatever it looks like (#93); the others are cleaned like every command line
+                    $named = $false; try { $named = [regex]::IsMatch([string]$k, $script:SecretName, [Text.RegularExpressions.RegexOptions]::None, $script:RegexTimeout) } catch { $named = $true }
+                    $v = if ($named) { '(removed)' } else { (Remove-AVDTuneRecordingSecrets $v).Text }
+                }
+                elseif ($area -in $script:CleanedAreas -and $v -is [string]) { $v = (Remove-AVDTuneRecordingSecrets $v).Text }
                 $dst[$k] = $v
             }
         }
@@ -241,6 +254,186 @@ function Get-AVDTuneRecordingShortcutMode {
     foreach ($o in @($Owners)) { if (-not $o -or $o -notin $trusted) { return 'Name' } }
     if (@($Owners).Count -eq 0) { return 'Name' }
     'Parse'
+}
+
+function Get-AVDTuneRecordingLongValue {
+    # Pure: a value for the comparison, one line, at most -Max characters; a longer one (PATH) is cut and gets its length and the start of its SHA256, so a change behind the cut still shows
+    param([AllowEmptyString()][string]$Text, [int]$Max = 600)
+    $clean = Remove-AVDTuneControlCharacters $Text 100000
+    if ($clean.Length -le $Max) { return $clean }
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try { $h = ([BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($clean))) -replace '-', '').Substring(0, 12).ToLowerInvariant() } finally { $sha.Dispose() }
+    "$($clean.Substring(0, $Max))... ($($clean.Length) characters, sha256 $h)"
+}
+
+function ConvertFrom-AVDTuneRecordingHosts {
+    <#
+        Pure: the entries of a hosts file as name -> address(es). Comments and lines that are no "address name [name ...]" are left out; the address must parse as an
+        IP address, a name is letters, digits and . _ -. At most -Limit names and 512 KB of text (Truncated). The text is data: nothing of it is resolved or contacted.
+    #>
+    param([AllowEmptyString()][string]$Text, [int]$Limit = 2000)
+    $map = @{}; $cut = $false
+    if (-not $Text) { return @{ Map = $map; Truncated = $false } }
+    if ($Text.Length -gt 524288) { $Text = $Text.Substring(0, 524288); $cut = $true }
+    foreach ($line in $Text.Split([char[]]"`r`n", [StringSplitOptions]::RemoveEmptyEntries)) {
+        $l = $line; $i = $l.IndexOf('#'); if ($i -ge 0) { $l = $l.Substring(0, $i) }
+        $parts = @($l.Split([char[]]" `t", [StringSplitOptions]::RemoveEmptyEntries))
+        if ($parts.Count -lt 2 -or $parts[0].Length -gt 45) { continue }
+        $ip = $null; if (-not [Net.IPAddress]::TryParse($parts[0], [ref]$ip)) { continue }
+        foreach ($n in @($parts | Select-Object -Skip 1)) {
+            if ($n.Length -gt 255 -or $n -cnotmatch '\A[A-Za-z0-9._-]+\z') { continue }
+            $key = $n.ToLowerInvariant()
+            if ($map.ContainsKey($key)) { if (@($map[$key] -split ', ') -notcontains $ip.ToString()) { $map[$key] = Remove-AVDTuneControlCharacters "$($map[$key]), $ip" 200 }; continue }
+            if ($map.Count -ge $Limit) { $cut = $true; break }
+            $map[$key] = $ip.ToString()
+        }
+        if ($cut -and $map.Count -ge $Limit) { break }
+    }
+    @{ Map = $map; Truncated = $cut }
+}
+
+function ConvertFrom-AVDTuneRecordingTaskXml {
+    <#
+        Pure: what a scheduled task starts, from its definition (the XML of the task folder): "as <account>: <command> <arguments>" per program action, joined with ' ; '.
+        Parsed without DTD and without a resolver, at most 512 KB; a definition that does not parse is '(not readable)'. Nothing of it is run; the text is cleaned of
+        secrets by Protect-AVDTuneRecordingSnapshot like every command line.
+    #>
+    param([AllowEmptyString()][string]$Xml)
+    if (-not $Xml -or $Xml.Length -gt 524288) { return '(not readable)' }
+    $settings = New-Object Xml.XmlReaderSettings
+    $settings.DtdProcessing = [Xml.DtdProcessing]::Prohibit; $settings.XmlResolver = $null; $settings.MaxCharactersInDocument = 524288
+    $acts = New-Object System.Collections.ArrayList; $user = ''; $path = New-Object System.Collections.Stack; $cur = $null
+    $sr = New-Object IO.StringReader ($Xml.TrimStart([char]0xFEFF))
+    try {
+        $rd = [Xml.XmlReader]::Create($sr, $settings)
+        try {
+            while ($rd.Read()) {
+                if ($rd.NodeType -eq [Xml.XmlNodeType]::Element) {
+                    $name = $rd.LocalName
+                    if (-not $rd.IsEmptyElement) { $path.Push($name) }
+                    if ($name -ceq 'Exec') { $cur = @{ Command = ''; Arguments = '' }; if ($rd.IsEmptyElement) { $cur = $null } }
+                    elseif ($name -cin 'ComHandler', 'SendEmail', 'ShowMessage' -and $path.Count -le 3) { [void]$acts.Add("($name)") }
+                }
+                elseif ($rd.NodeType -eq [Xml.XmlNodeType]::Text -and $path.Count) {
+                    $top = [string]$path.Peek()
+                    if ($cur -and $top -cin 'Command', 'Arguments') { $cur[$top] = [string]$rd.Value }
+                    elseif (-not $user -and $top -cin 'UserId', 'GroupId') { $user = [string]$rd.Value }
+                }
+                elseif ($rd.NodeType -eq [Xml.XmlNodeType]::EndElement) {
+                    if ($path.Count) { [void]$path.Pop() }
+                    if ($rd.LocalName -ceq 'Exec' -and $cur) { [void]$acts.Add("$($cur.Command) $($cur.Arguments)".Trim()); $cur = $null }
+                }
+                if ($acts.Count -ge 20) { break }
+            }
+        }
+        finally { $rd.Dispose() }
+    }
+    catch { return '(not readable)' }
+    finally { $sr.Dispose() }
+    $text = if ($acts.Count) { $acts -join ' ; ' } else { '(no program action)' }
+    Remove-AVDTuneControlCharacters "$(if ($user) { "as $user`: " })$text" 600
+}
+
+function ConvertTo-AVDTuneRecordingNotes {
+    <#
+        Pure (#93, the notes window): the notes of a recording as data. Each note: Text (one line, control characters out, at most -MaxLength characters, cleaned by
+        Remove-AVDTuneRecordingSecrets), At (a time stamp, else '') and Step (the number of the step image that was the last one when it was written, 0..999).
+        Empty notes are left out, at most -Max notes are taken. Returns Notes, Cleaned (notes that lost something) and Dropped (over the limit, not text or empty).
+    #>
+    param($Notes, [int]$Max = $script:DefaultLimits.Notes, [int]$MaxLength = $script:DefaultLimits.NoteLength)
+    $out = New-Object System.Collections.ArrayList; $cleaned = 0; $dropped = 0
+    foreach ($n in @($Notes)) {
+        if ($null -eq $n) { continue }
+        $text = Get-AVDTuneRecordingProp $n 'Text'
+        if ($text -isnot [string]) { $dropped++; continue }
+        if ($out.Count -ge $Max) { $dropped++; continue }
+        $c = Remove-AVDTuneRecordingSecrets (Remove-AVDTuneControlCharacters $text $MaxLength)
+        if (-not $c.Text.Trim()) { $dropped++; continue }
+        if ($c.Cleaned) { $cleaned++ }
+        $at = Get-AVDTuneRecordingProp $n 'At'
+        if ($at -is [datetime]) { $at = $at.ToString('o') }   # ConvertFrom-Json turns a time stamp into a date
+        if ($at -isnot [string] -or $at -cnotmatch '\A[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]{5,20}(Z|[+-][0-9]{2}:[0-9]{2})?\z') { $at = '' }
+        $step = Get-AVDTuneRecordingProp $n 'Step'; if (-not ($step -is [int] -or $step -is [long]) -or $step -lt 0 -or $step -gt 999) { $step = 0 }
+        [void]$out.Add([pscustomobject][ordered]@{ At = $at; Step = [int]$step; Text = $c.Text.Trim() })
+    }
+    [pscustomobject]@{ Notes = $out.ToArray(); Cleaned = $cleaned; Dropped = $dropped }
+}
+
+function Add-AVDTuneRecordingNote {
+    <#
+        A note of the administrator while the recording runs (#93): into -Progress (the synchronized table the page shares with the job), under its lock. The text is
+        checked like at the end (ConvertTo-AVDTuneRecordingNotes: one line, length, secrets out). Refused when the job has taken the notes already (Reason closed),
+        when the limit is reached (full) or nothing is left of the text (empty). Returns Accepted, Reason, Text (as stored) and Cleaned.
+    #>
+    param([Parameter(Mandatory)][hashtable]$Progress, [AllowEmptyString()][string]$Text, [datetime]$At = (Get-Date))
+    $one = ConvertTo-AVDTuneRecordingNotes -Notes @(@{ Text = $Text; At = $At.ToString('o'); Step = 0 })
+    if (@($one.Notes).Count -ne 1) { return [pscustomobject]@{ Accepted = $false; Reason = 'empty'; Text = ''; Cleaned = $false } }
+    $note = $one.Notes[0]
+    [Threading.Monitor]::Enter($Progress.SyncRoot)
+    try {
+        if ($Progress['NotesClosed']) { return [pscustomobject]@{ Accepted = $false; Reason = 'closed'; Text = $note.Text; Cleaned = [bool]$one.Cleaned } }
+        if ($Progress['Notes'] -isnot [System.Collections.ArrayList]) { $Progress['Notes'] = New-Object System.Collections.ArrayList }
+        if ($Progress['Notes'].Count -ge $script:DefaultLimits.Notes) { return [pscustomobject]@{ Accepted = $false; Reason = 'full'; Text = $note.Text; Cleaned = [bool]$one.Cleaned } }
+        $s = $Progress['Steps']; if ($s -is [int] -and $s -ge 0 -and $s -le 999) { $note.Step = $s }
+        [void]$Progress['Notes'].Add($note)
+    }
+    finally { [Threading.Monitor]::Exit($Progress.SyncRoot) }
+    [pscustomobject]@{ Accepted = $true; Reason = ''; Text = $note.Text; Cleaned = [bool]$one.Cleaned }
+}
+
+function Close-AVDTuneRecordingNotes {
+    # The job takes the notes once, under the lock, and closes the list: a note that comes later is refused by Add-AVDTuneRecordingNote, not lost silently
+    param($Progress)
+    if ($Progress -isnot [hashtable]) { return @() }
+    [Threading.Monitor]::Enter($Progress.SyncRoot)
+    try { $Progress['NotesClosed'] = $true; $got = @(); if ($Progress['Notes'] -is [System.Collections.ArrayList]) { $got = @($Progress['Notes'].ToArray()) } }
+    finally { [Threading.Monitor]::Exit($Progress.SyncRoot) }
+    @((ConvertTo-AVDTuneRecordingNotes -Notes $got).Notes)
+}
+
+function ConvertTo-AVDTuneRecordingSteps {
+    <#
+        Pure (#93, step images): the steps of a record as data. Each step: Number (1..999), File (only <app id>-<nnn>-step-<kkk>.png of this app and recording),
+        Title (the window title: one line, 200 characters, cleaned of secrets), At and Process (the name of the program the window belongs to). Anything else is left out;
+        at most -Max steps.
+    #>
+    param($Steps, [Parameter(Mandatory)][string]$AppId, [Parameter(Mandatory)][int]$Number, [int]$Max = $script:DefaultLimits.StepImages)
+    $out = New-Object System.Collections.ArrayList; $prefix = "$AppId-$($Number.ToString('000'))-step-"
+    foreach ($s in @($Steps)) {
+        if ($null -eq $s -or $out.Count -ge $Max) { continue }
+        $n = Get-AVDTuneRecordingProp $s 'Number'; $file = Get-AVDTuneRecordingProp $s 'File'
+        if (-not ($n -is [int] -or $n -is [long]) -or $n -lt 1 -or $n -gt 999) { continue }
+        if ($file -isnot [string] -or $file -cnotmatch $script:StepFilePattern -or -not $file.StartsWith($prefix, [StringComparison]::Ordinal)) { continue }
+        $at = Get-AVDTuneRecordingProp $s 'At'; if ($at -is [datetime]) { $at = $at.ToString('o') }
+        [void]$out.Add([pscustomobject][ordered]@{ Number = [int]$n; File = $file
+                Title = (Remove-AVDTuneRecordingSecrets (Remove-AVDTuneControlCharacters ([string](Get-AVDTuneRecordingProp $s 'Title')) 200)).Text
+                At = Remove-AVDTuneControlCharacters ([string]$at) 40; Process = Remove-AVDTuneControlCharacters ([string](Get-AVDTuneRecordingProp $s 'Process')) 80 })
+    }
+    $out.ToArray()
+}
+
+function Select-AVDTuneRecordingProcessTree {
+    <#
+        Pure (#93): the processes whose windows may become step images: the descendants of -RootId (the AVDTune process that starts the installer) in -Processes
+        (Id, Parent, Start as ticks). A child counts only when it started after its parent (a reused process id of an ended parent is no parent) and both start
+        times are known. The root itself is never in the result: AVDTune's own windows (the notes window too) are never captured. At most 500 processes.
+    #>
+    param([Parameter(Mandatory)][int]$RootId, $Processes)
+    $byId = @{}; foreach ($p in @($Processes)) { if ($p) { $byId[[int](Get-AVDTuneRecordingProp $p 'Id')] = $p } }
+    if (-not $byId.ContainsKey($RootId)) { return @() }
+    $in = @{ $RootId = $true }; $out = New-Object System.Collections.ArrayList; $grew = $true
+    while ($grew -and $out.Count -lt 500) {
+        $grew = $false
+        foreach ($id in @($byId.Keys)) {
+            if ($in.ContainsKey($id) -or $out.Count -ge 500) { continue }
+            $p = $byId[$id]; $par = [int](Get-AVDTuneRecordingProp $p 'Parent')
+            if (-not $in.ContainsKey($par) -or $par -eq $id) { continue }
+            $s = Get-AVDTuneRecordingProp $p 'Start'; $ps = Get-AVDTuneRecordingProp $byId[$par] 'Start'
+            if (-not ($s -is [long] -or $s -is [int]) -or -not ($ps -is [long] -or $ps -is [int]) -or $s -lt $ps) { continue }
+            $in[$id] = $true; [void]$out.Add($id); $grew = $true
+        }
+    }
+    @($out | Sort-Object)
 }
 
 function Get-AVDTuneRecordingProposal {
@@ -276,8 +469,8 @@ function ConvertTo-AVDTuneRecordingHtml {
     $e = { param($v) [Net.WebUtility]::HtmlEncode([string]$v) }
     $a = $Record.App
     $sb = New-Object Text.StringBuilder
-    [void]$sb.Append("<!doctype html><html><head><meta charset=""utf-8""><meta http-equiv=""Content-Security-Policy"" content=""default-src 'none'; style-src 'unsafe-inline'""><title>$(& $e $a.Name) $(& $e $a.Version)</title>")
-    [void]$sb.Append('<style>body{font-family:Segoe UI,sans-serif;margin:24px;max-width:1100px}td,th{text-align:left;padding:2px 8px;vertical-align:top}table{border-collapse:collapse}tr:nth-child(even){background:#f3f3f3}code{word-break:break-all}</style></head><body>')
+    [void]$sb.Append("<!doctype html><html><head><meta charset=""utf-8""><meta http-equiv=""Content-Security-Policy"" content=""default-src 'none'; style-src 'unsafe-inline'; img-src 'self' data:""><title>$(& $e $a.Name) $(& $e $a.Version)</title>")
+    [void]$sb.Append('<style>body{font-family:Segoe UI,sans-serif;margin:24px;max-width:1100px}td,th{text-align:left;padding:2px 8px;vertical-align:top}table{border-collapse:collapse}tr:nth-child(even){background:#f3f3f3}code{word-break:break-all}img{max-width:100%;border:1px solid #999;margin:4px 0 12px}</style></head><body>')
     [void]$sb.Append("<h1>$(& $e $a.Name) $(& $e $a.Version)</h1><table>")
     $rows = @(@('Vendor', $a.Vendor), @('Kind', $Record.Kind), @('Result', $Record.Result), @('Exit code', $Record.ExitCode), @('Installer', "$($a.Installer) (SHA256 $($a.Sha256))"), @('Signature', $Record.Signature),
         @('Arguments', $a.Arguments), @('Started', $Record.Started), @('Ended', $Record.Ended), @('Administrator', $Record.User), @('Image version', $Record.ImageVersion), @('Contact or ticket', $a.Contact),
@@ -286,6 +479,24 @@ function ConvertTo-AVDTuneRecordingHtml {
         @('Cut areas', (@($Record.Changes.Truncated) -join ', ')))
     foreach ($r in $rows) { [void]$sb.Append("<tr><th>$(& $e $r[0])</th><td>$(& $e $r[1])</td></tr>") }
     [void]$sb.Append('</table>')
+    # the notes of the administrator (#93): text only, encoded like every value
+    $notes = @(Get-AVDTuneRecordingProp $Record 'Notes' | Where-Object { $_ })
+    if ($notes.Count) {
+        [void]$sb.Append("<h2>Notes of the administrator ($($notes.Count))</h2><table>")
+        foreach ($n in $notes) { [void]$sb.Append("<tr><td>$(& $e $n.At)</td><td>$(if ([int]$n.Step -gt 0) { "at step $([int]$n.Step)" })</td><td>$(& $e $n.Text)</td></tr>") }
+        [void]$sb.Append('</table>')
+    }
+    # the step images (#93): local files of the record folder, only names of the fixed pattern become an <img> (a relative link below steps\, nothing else is loaded)
+    $steps = @(Get-AVDTuneRecordingProp $Record 'Steps' | Where-Object { $_ })
+    if ($steps.Count) {
+        [void]$sb.Append("<h2>Steps ($($steps.Count))</h2>")
+        foreach ($st in $steps) {
+            [void]$sb.Append("<h3>Step $([int]$st.Number): $(& $e $st.Title)</h3><p>$(& $e $st.At) $(& $e $st.Process)</p>")
+            if ([string]$st.File -cmatch $script:StepFilePattern) { [void]$sb.Append("<img src=""steps/$(& $e $st.File)"" alt=""Step $([int]$st.Number)"">") }
+            foreach ($n in @($notes | Where-Object { [int]$_.Step -eq [int]$st.Number })) { [void]$sb.Append("<p><b>Note:</b> $(& $e $n.Text)</p>") }
+        }
+    }
+    $stepNote = [string](Get-AVDTuneRecordingProp $Record 'StepNote'); if ($stepNote) { [void]$sb.Append("<p>$(& $e $stepNote)</p>") }
     foreach ($area in $script:Areas) {
         $c = $Record.Changes.$area
         [void]$sb.Append("<h2>$(& $e $area): $($c.Counts.Added) added, $($c.Counts.Changed) changed, $($c.Counts.Removed) removed</h2><table>")
@@ -312,12 +523,59 @@ function New-AVDTuneRecordingFolder {
     $cur
 }
 
+function Test-AVDTuneRecordingPng {
+    # Pure: do these bytes start like a PNG file (signature and the IHDR chunk)? Only such files become step images.
+    param([byte[]]$Bytes)
+    if (-not $Bytes -or $Bytes.Length -lt 33) { return $false }
+    $sig = 137, 80, 78, 71, 13, 10, 26, 10
+    for ($i = 0; $i -lt 8; $i++) { if ($Bytes[$i] -ne $sig[$i]) { return $false } }
+    ([Text.Encoding]::ASCII.GetString($Bytes, 12, 4) -ceq 'IHDR')
+}
+
+function Import-AVDTuneRecordingSteps {
+    <#
+        The captured windows of a recording (#93) become its step images: <record folder>\steps\<app id>-<nnn>-step-<kkk>.png, the folder made with New-AVDTuneOwnFolder
+        (admin-only, like the record folder), each file with CreateNew and an admin-only ACL. -Captured: Path, Title, At, Process per image, in order. An image is taken
+        only when its source is a file (no link), not larger than the limit (StepImageBytes) and a PNG by its first bytes; at most StepImages images. What is left out
+        is counted in Note. Returns Steps (ConvertTo-AVDTuneRecordingSteps) and Note.
+    #>
+    param([Parameter(Mandatory)][string]$Folder, [Parameter(Mandatory)][string]$AppId, [Parameter(Mandatory)][int]$Number, $Captured, [hashtable]$Limits)
+    $lim = Get-AVDTuneRecordingLimits; if ($Limits) { foreach ($k in $Limits.Keys) { $lim[$k] = $Limits[$k] } }
+    $steps = New-Object System.Collections.ArrayList; $left = 0; $dir = $null
+    foreach ($c in @($Captured)) {
+        if (-not $c) { continue }
+        if ($steps.Count -ge [int]$lim.StepImages) { $left++; continue }
+        try {
+            $f = New-Object IO.FileInfo ([string](Get-AVDTuneRecordingProp $c 'Path'))
+            if (-not $f.Exists -or ($f.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or $f.Length -lt 33 -or $f.Length -gt [int64]$lim.StepImageBytes) { $left++; continue }
+            $fs = [IO.File]::Open($f.FullName, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+            try { $mem = New-Object IO.MemoryStream; $fs.CopyTo($mem); $bytes = $mem.ToArray() } finally { $fs.Dispose() }
+            if ($bytes.Length -gt [int64]$lim.StepImageBytes -or -not (Test-AVDTuneRecordingPng $bytes)) { $left++; continue }
+            if (-not $dir) { $dir = Join-Path $Folder 'steps'; New-AVDTuneOwnFolder -Path $dir }
+            $k = $steps.Count + 1
+            $name = "$AppId-$($Number.ToString('000'))-step-$($k.ToString('000')).png"
+            $out = New-AVDTuneAdminFile -Path (Join-Path $dir $name)
+            try { $out.Write($bytes, 0, $bytes.Length); $out.Flush($true) } finally { $out.Dispose() }
+            [void]$steps.Add(@{ Number = $k; File = $name; Title = Get-AVDTuneRecordingProp $c 'Title'; At = Get-AVDTuneRecordingProp $c 'At'; Process = Get-AVDTuneRecordingProp $c 'Process' })
+        }
+        catch { $left++ }
+    }
+    [pscustomobject]@{ Steps = @(ConvertTo-AVDTuneRecordingSteps -Steps $steps.ToArray() -AppId $AppId -Number $Number -Max ([int]$lim.StepImages))
+        Note = $(if ($left) { "$left captured window(s) were not taken as step images (limit of $($lim.StepImages) images or $($lim.StepImageBytes) bytes, or not a PNG file)." } else { '' }) }
+}
+
 function Save-AVDTuneRecordingRecord {
     # Writes record.json and documentation.html of a new recording number of the app. Returns the folder.
-    param([Parameter(Mandatory)][string]$Root, [Parameter(Mandatory)]$Record)
+    param([Parameter(Mandatory)][string]$Root, [Parameter(Mandatory)]$Record, $Captured, [hashtable]$Limits)
     if ([string]$Record.AppId -cnotmatch '\A[0-9a-f]{12}\z' -or $Record.Number -isnot [int] -or $Record.Number -lt 1 -or $Record.Number -gt 999) { throw 'The recording has no valid app id or number.' }
     $dir = New-AVDTuneRecordingFolder -Root $Root -Parts @($Record.AppId, $Record.Number.ToString('000'))
     if (Test-Path -LiteralPath (Join-Path $dir 'record.json')) { throw "$dir holds a recording already: not overwritten." }
+    if (@($Captured).Count -and $Captured) {
+        # the step images first (#93): the record and the documentation name only images that are in the folder
+        $got = Import-AVDTuneRecordingSteps -Folder $dir -AppId $Record.AppId -Number $Record.Number -Captured $Captured -Limits $Limits
+        $Record | Add-Member -NotePropertyName Steps -NotePropertyValue @($got.Steps) -Force
+        if ($got.Note) { $Record | Add-Member -NotePropertyName StepNote -NotePropertyValue (("$(Get-AVDTuneRecordingProp $Record 'StepNote') $($got.Note)").Trim()) -Force }
+    }
     Write-AVDTuneFile (Join-Path $dir 'documentation.html') (ConvertTo-AVDTuneRecordingHtml -Record $Record)
     Write-AVDTuneFile (Join-Path $dir 'record.json') ($Record | ConvertTo-Json -Depth 8)
     $dir
@@ -331,7 +589,7 @@ function ConvertFrom-AVDTuneRecordingRecord {
     $app = ConvertTo-AVDTuneRecordingApp -Raw (Get-AVDTuneProp $Json 'App') -Stored
     if (-not $app.Valid) { throw ($app.Errors -join ' ') }
     if ($app.App.Id -cne $AppId) { throw 'the app id does not match' }
-    $kind = Get-AVDTuneProp $Json 'Kind'; if ($kind -cnotin 'Install', 'Update') { throw 'unknown kind' }
+    $kind = Get-AVDTuneProp $Json 'Kind'; if ($kind -cnotin $script:Kinds) { throw 'unknown kind' }
     $result = Get-AVDTuneProp $Json 'Result'; if ($result -cnotin 'Changed', 'Failed') { throw 'unknown result' }
     $d = Get-AVDTuneProp $Json 'Detection'
     if ($null -ne $d) {
@@ -342,7 +600,8 @@ function ConvertFrom-AVDTuneRecordingRecord {
     [pscustomobject]@{ AppId = $AppId; Number = $Number; Kind = $kind; Result = $result; App = $app.App; Detection = $d
         Started = Remove-AVDTuneControlCharacters ([string](Get-AVDTuneProp $Json 'Started')) 40; User = Remove-AVDTuneControlCharacters ([string](Get-AVDTuneProp $Json 'User')) 80
         Silent = Remove-AVDTuneControlCharacters ([string](Get-AVDTuneProp $Json 'Silent')) 700; Uninstall = Remove-AVDTuneControlCharacters ([string](Get-AVDTuneProp $Json 'Uninstall')) 700
-        Signature = Remove-AVDTuneControlCharacters ([string](Get-AVDTuneProp $Json 'Signature')) 400; Counts = Get-AVDTuneProp $Json 'Counts' }
+        Signature = Remove-AVDTuneControlCharacters ([string](Get-AVDTuneProp $Json 'Signature')) 400; Counts = Get-AVDTuneProp $Json 'Counts'
+        Notes = @((ConvertTo-AVDTuneRecordingNotes -Notes (Get-AVDTuneProp $Json 'Notes')).Notes); Steps = @(ConvertTo-AVDTuneRecordingSteps -Steps (Get-AVDTuneProp $Json 'Steps') -AppId $AppId -Number $Number) }
 }
 
 function Get-AVDTuneRecordedApps {
@@ -369,6 +628,14 @@ function Get-AVDTuneRecordedApps {
         if ($versions.Count) { [void]$apps.Add([pscustomobject]@{ Id = $d.Name; Name = $versions[0].App.Name; Vendor = $versions[0].App.Vendor; Latest = $versions[0]; Versions = @($versions) }) }
     }
     [pscustomobject]@{ Apps = @($apps); Notes = @($notes) }
+}
+
+function Get-AVDTuneRecordingRecipe {
+    # Read only (#93): the recipe of an app = its newest successful recording (the pinned installer, the checked arguments, the timeout); $null when there is none
+    param([string]$Root = (Get-AVDTuneRoot), [Parameter(Mandatory)][string]$AppId)
+    $app = @((Get-AVDTuneRecordedApps -Root $Root).Apps | Where-Object { $_.Id -ceq $AppId })
+    if (-not $app.Count) { return $null }
+    @($app[0].Versions | Where-Object { $_.Result -eq 'Changed' } | Select-Object -First 1)[0]
 }
 
 function Get-AVDTuneRecordingStatus {
@@ -399,7 +666,7 @@ function Invoke-AVDTuneRecording {
         installer that is not cached yet. -Progress (a synchronized hashtable) gets Text = snapshot | install | compare. Returns Run, Record and Folder.
     #>
     param([Parameter(Mandatory)]$Machine, [Parameter(Mandatory)]$R, [Parameter(Mandatory)]$C, [Parameter(Mandatory)]$App, [string]$Root = (Get-AVDTuneRoot), $Context,
-        [ValidateSet('Install', 'Update')][string]$Kind = 'Install', [string]$User, [string]$SnapshotId, [hashtable]$Limits, $Progress)
+        [ValidateSet('Install', 'Update', 'Reinstall')][string]$Kind = 'Install', [string]$User, [string]$SnapshotId, [hashtable]$Limits, $Progress, [switch]$StepImages)
     if (-not (Test-AVDTuneWriteAllowed)) { throw 'The snapshot gate is not confirmed: nothing is installed or recorded.' }
     $chk = ConvertTo-AVDTuneRecordingApp -Raw $App
     if (-not $chk.Valid) { throw "Not recorded: $($chk.Errors -join ' ')" }
@@ -407,9 +674,17 @@ function Invoke-AVDTuneRecording {
     $known = @((Get-AVDTuneRecordedApps -Root $Root).Apps | Where-Object { $_.Id -eq $a.Id })
     if ($Kind -eq 'Update' -and -not $known.Count) { throw 'An update needs an app that has been recorded before.' }
     if ($Kind -eq 'Install' -and $known.Count) { throw 'This app has been recorded before: record an update instead.' }
+    if ($Kind -eq 'Reinstall') {
+        # "Reinstall" (#93) runs the recipe and nothing else: the same pinned file with the same arguments as the newest successful recording; the app above went
+        # through today's rules for the arguments like every new recording, and the fetch, the hold and the signature check below are the same as when it was recorded
+        $recipe = Get-AVDTuneRecordingRecipe -Root $Root -AppId $a.Id
+        if (-not $recipe) { throw 'Reinstall needs a successful recording of this app (the recipe): there is none.' }
+        foreach ($f in $script:Fields) { if ([string]$a.$f -cne [string]$recipe.App.$f) { throw "Reinstall takes the recipe as it was recorded: $f is not the one of recording $($recipe.Number.ToString('000')). Record an update for something new." } }
+    }
     $number = if ($known.Count) { [int]$known[0].Versions[0].Number + 1 } else { 1 }
     $lim = Get-AVDTuneRecordingLimits; if ($Limits) { foreach ($k in $Limits.Keys) { $lim[$k] = $Limits[$k] } }
     $say = { param($t) if ($Progress) { $Progress.Text = $t } }
+    $capture = $null
     $owner = Start-AVDTuneChange -Root $Root
     try {
         & $say 'snapshot'
@@ -437,11 +712,24 @@ function Invoke-AVDTuneRecording {
             }
             finally { & $rr.Unstage $st.Folder }
         }.GetNewClosure()
-        $title = "$(if ($Kind -eq 'Update') { 'Update' } else { 'Install' }) $($a.Name) $($a.Version) ($($a.Installer), SHA256 $($a.Sha256.Substring(0, 12)))"
+        $title = "$(if ($Kind -eq 'Update') { 'Update' } elseif ($Kind -eq 'Reinstall') { 'Reinstall' } else { 'Install' }) $($a.Name) $($a.Version) ($($a.Installer), SHA256 $($a.Sha256.Substring(0, 12)))"
         $step = New-AVDTuneStep -Id "software.custom-$($a.Id)" -Section Software -Title $title -Why 'Own software of the customer, installed and recorded (Software page, custom software).' -Risk High -Test $test -Apply $apply
         $started = (& $Machine.Now).ToString('o')
         & $say 'install'
-        $run = Invoke-AVDTune -Plan ([pscustomobject]@{ Name = "Custom software $($a.Name)"; Steps = @($step.Id) }) -Catalog @($step) -Machine $Machine -Root $Root -User $User -SnapshotId $SnapshotId
+        # step images (#93, only when asked for): the windows of the installer's process tree while the step runs. A capture that cannot start or fails never stops
+        # the install; the record says why there are no images. The capture folder is removed in the finally below.
+        $captured = @(); $stepNote = ''
+        if ($StepImages) {
+            if ((Get-AVDTuneRecordingProp $R 'StartCapture') -is [scriptblock]) { try { $capture = & $R.StartCapture $Root $lim $Progress } catch { $stepNote = "No step images: the capture did not start ($(Remove-AVDTuneControlCharacters $_.Exception.Message 200))." } }
+            else { $stepNote = 'No step images: this adapter cannot capture windows.' }
+        }
+        try { $run = Invoke-AVDTune -Plan ([pscustomobject]@{ Name = "Custom software $($a.Name)"; Steps = @($step.Id) }) -Catalog @($step) -Machine $Machine -Root $Root -User $User -SnapshotId $SnapshotId }
+        finally {
+            if ($capture) {
+                try { $shots = & $R.StopCapture $capture; $captured = @(Get-AVDTuneRecordingProp $shots 'Shots'); $sn = [string](Get-AVDTuneRecordingProp $shots 'Note'); if ($sn) { $stepNote = Remove-AVDTuneControlCharacters $sn 300 } }
+                catch { $stepNote = "No step images: the capture failed ($(Remove-AVDTuneControlCharacters $_.Exception.Message 200))." }
+            }
+        }
         & $say 'compare'
         $after = Protect-AVDTuneRecordingSnapshot (& $R.Snapshot $lim)
         $changes = Compare-AVDTuneRecordingSnapshot -Before $before -After $after -Max ([int]$lim.ListPerArea)
@@ -452,11 +740,15 @@ function Invoke-AVDTuneRecording {
             Schema = 1; AppId = $a.Id; Number = $number; Kind = $Kind; App = $a; Result = $(if ($res0.Status -eq 'Changed') { 'Changed' } else { 'Failed' }); Message = Remove-AVDTuneControlCharacters ([string]$res0.Message) 500
             ExitCode = $state.ExitCode; Signature = $state.Signature; Output = $state.Output; Started = $started; Ended = (& $Machine.Now).ToString('o'); User = $User; ImageVersion = (Get-AVDTuneState $Root).ImageVersion; RunId = $run.Id
             Detection = $prop.Detection; Silent = $prop.Silent; Uninstall = $prop.Uninstall; Counts = [pscustomobject]$counts; Changes = $changes
+            Notes = @(Close-AVDTuneRecordingNotes $Progress); Steps = @(); StepNote = $stepNote
         }
-        $folder = Save-AVDTuneRecordingRecord -Root $Root -Record $record
+        $folder = Save-AVDTuneRecordingRecord -Root $Root -Record $record -Captured $captured -Limits $lim
         [pscustomobject]@{ Run = $run; Record = $record; Folder = $folder }
     }
-    finally { Stop-AVDTuneChange -Root $Root -Owner $owner }
+    finally {
+        try { if ($capture -and (Get-AVDTuneRecordingProp $capture 'Folder')) { & $R.Unstage ([string](Get-AVDTuneRecordingProp $capture 'Folder')) } }
+        finally { Stop-AVDTuneChange -Root $Root -Owner $owner }
+    }
 }
 
 #endregion
@@ -524,6 +816,191 @@ function Read-AVDTuneRecordingProgram {
     finally { $base.Dispose() }
 }
 
+function Get-AVDTuneRecordingRegistryValues {
+    <#
+        Read only: the values of one key HKLM\<Path> (64-bit view) as name -> text (a string as it is, not expanded; a list joined with ';'; a number; anything else
+        only as its kind and size), each cut by Get-AVDTuneRecordingLongValue, at most -Limit values (Truncated). -Names: only these values. A missing key is empty.
+    #>
+    param([Parameter(Mandatory)][string]$Path, [int]$Limit = 1000, [string[]]$Names, [int]$ValueMax = 600)
+    $map = @{}; $cut = $false
+    $base = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::LocalMachine, [Microsoft.Win32.RegistryView]::Registry64)
+    try {
+        $k = $base.OpenSubKey($Path, $false)
+        if ($k) {
+            try {
+                foreach ($n in @($k.GetValueNames() | Sort-Object)) {
+                    if ($Names -and $Names -notcontains $n) { continue }
+                    if ($map.Count -ge $Limit) { $cut = $true; break }
+                    $v = $k.GetValue($n, $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+                    $text = if ($v -is [string]) { $v } elseif ($v -is [string[]]) { $v -join ';' } elseif ($v -is [int] -or $v -is [long]) { [string]$v } elseif ($v -is [byte[]]) { "(binary, $($v.Length) bytes)" } else { '(other)' }
+                    $map[(Remove-AVDTuneControlCharacters $n 200)] = Get-AVDTuneRecordingLongValue $text $ValueMax
+                }
+            }
+            finally { $k.Dispose() }
+        }
+    }
+    finally { $base.Dispose() }
+    @{ Map = $map; Truncated = $cut }
+}
+
+function Get-AVDTuneRecordingSystemArea {
+    <#
+        Read only (#93), one area of the snapshot of the real adapter, as Map and Truncated. Nothing is started and nothing is resolved:
+          Tasks        the definitions below <System32>\Tasks (the task folder of Windows: files of SYSTEM and Administrators), key = the task path, value = what it starts
+          Firewall     HKLM\SYSTEM\CurrentControlSet\Services\SharedAccess\Parameters\FirewallPolicy\FirewallRules (name -> rule text of Windows)
+          Odbc         the system data sources, 64 and 32 bit: driver, server and database; never the user name or password values of a data source
+          Environment  HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Environment (not expanded)
+          Hosts        <System32>\drivers\etc\hosts (no link, at most 512 KB), name -> address
+          Fonts        HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Fonts (name -> file)
+    #>
+    param([Parameter(Mandatory)][ValidateSet('Tasks', 'Firewall', 'Odbc', 'Environment', 'Hosts', 'Fonts')][string]$Area, [int]$Limit = 1000)
+    $sys = Get-AVDTuneSystemFolder System
+    switch ($Area) {
+        'Tasks' {
+            $root = Join-Path $sys 'Tasks'; $map = @{}; $cut = $false
+            $t = Get-AVDTuneRecordingFileTree -Roots @($root) -Exclude @() -Limit ($Limit * 2) -Depth 8
+            foreach ($p in @($t.Map.Keys | Sort-Object)) {
+                if ($t.Map[$p] -notlike 'f|*') { continue }
+                if ($map.Count -ge $Limit) { $cut = $true; break }
+                $text = '(not readable)'
+                try { $f = New-Object IO.FileInfo $p; if ($f.Length -le 524288 -and ($f.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0) { $text = ConvertFrom-AVDTuneRecordingTaskXml ([IO.File]::ReadAllText($p)) } } catch { }
+                $map[(Remove-AVDTuneControlCharacters $p.Substring($root.Length) 300)] = $text
+            }
+            return @{ Map = $map; Truncated = ($cut -or $t.Truncated) }
+        }
+        'Firewall' { return Get-AVDTuneRecordingRegistryValues -Path 'SYSTEM\CurrentControlSet\Services\SharedAccess\Parameters\FirewallPolicy\FirewallRules' -Limit $Limit -ValueMax 400 }
+        'Environment' { return Get-AVDTuneRecordingRegistryValues -Path 'SYSTEM\CurrentControlSet\Control\Session Manager\Environment' -Limit $Limit }
+        'Fonts' { return Get-AVDTuneRecordingRegistryValues -Path 'SOFTWARE\Microsoft\Windows NT\CurrentVersion\Fonts' -Limit $Limit -ValueMax 260 }
+        'Odbc' {
+            $map = @{}; $cut = $false
+            foreach ($b in @(@('64-bit', 'SOFTWARE\ODBC\ODBC.INI'), @('32-bit', 'SOFTWARE\WOW6432Node\ODBC\ODBC.INI'))) {
+                $src = Get-AVDTuneRecordingRegistryValues -Path "$($b[1])\ODBC Data Sources" -Limit $Limit -ValueMax 200
+                if ($src.Truncated) { $cut = $true }
+                foreach ($dsn in @($src.Map.Keys | Sort-Object)) {
+                    if ($map.Count -ge $Limit) { $cut = $true; break }
+                    $text = "Driver=$($src.Map[$dsn])"
+                    if ($dsn -notmatch '[\\/]') { $d = (Get-AVDTuneRecordingRegistryValues -Path "$($b[1])\$dsn" -Limit 10 -Names @('Server', 'ServerName', 'Database', 'Port', 'Description') -ValueMax 120).Map; foreach ($n in @($d.Keys | Sort-Object)) { $text += ";$n=$($d[$n])" } }
+                    $map["$($b[0])\$dsn"] = Remove-AVDTuneControlCharacters $text 600
+                }
+            }
+            return @{ Map = $map; Truncated = $cut }
+        }
+        'Hosts' {
+            $f = New-Object IO.FileInfo (Join-Path $sys 'drivers\etc\hosts')
+            if (-not $f.Exists) { return @{ Map = @{}; Truncated = $false } }
+            if (($f.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or $f.Length -gt 524288) { return @{ Map = @{}; Truncated = $true } }
+            return ConvertFrom-AVDTuneRecordingHosts -Text ([IO.File]::ReadAllText($f.FullName)) -Limit $Limit
+        }
+    }
+}
+
+$script:CaptureLoop = @'
+param($Module, $Sync, $Folder, $RootId, $MaxImages, $MaxBytes, $IntervalMs)
+$ErrorActionPreference = 'Stop'
+try {
+    Import-Module $Module
+    Import-Module (Join-Path (Split-Path $Module -Parent) 'AVDTune.Recording.psm1')
+    Initialize-AVDTuneRecordingCapture
+    Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes
+    $last = @{}; $n = 0
+    $isPassword = New-Object System.Windows.Automation.PropertyCondition ([System.Windows.Automation.AutomationElement]::IsPasswordProperty), $true
+    while (-not $Sync.Stop -and $n -lt $MaxImages) {
+        try {
+            $procs = @(foreach ($p in [AVDTune.Native.StepShot]::Processes()) { @{ Id = $p[0]; Parent = $p[1]; Start = $(try { ([Diagnostics.Process]::GetProcessById($p[0])).StartTime.Ticks } catch { $null }) } })
+            $tree = @(Select-AVDTuneRecordingProcessTree -RootId $RootId -Processes $procs)
+            if ($tree.Count) {
+                foreach ($w in [AVDTune.Native.StepShot]::Windows([int[]]$tree)) {
+                    if ($Sync.Stop -or $n -ge $MaxImages) { break }
+                    $h = [IntPtr]$w[0]
+                    # a window with a password field is never captured: the Win32 style of an edit control first, then UI Automation; a window that cannot be asked is left out
+                    if ([AVDTune.Native.StepShot]::HasPasswordEdit($h)) { $Sync.Skipped = [int]$Sync.Skipped + 1; continue }
+                    try { $el = [System.Windows.Automation.AutomationElement]::FromHandle($h); if ($el.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $isPassword)) { $Sync.Skipped = [int]$Sync.Skipped + 1; continue } } catch { continue }
+                    $bytes = [AVDTune.Native.StepShot]::Capture($h, 2400, 1800)
+                    if (-not $bytes -or $bytes.Length -gt $MaxBytes) { continue }
+                    $sha = [Security.Cryptography.SHA256]::Create(); try { $hash = [BitConverter]::ToString($sha.ComputeHash($bytes)) } finally { $sha.Dispose() }
+                    $key = [string]$w[0]; if ($last[$key] -ceq $hash) { continue }
+                    $last[$key] = $hash; $n++
+                    $path = Join-Path $Folder ('shot-' + $n.ToString('000') + '.png')
+                    $out = New-AVDTuneAdminFile -Path $path
+                    try { $out.Write($bytes, 0, $bytes.Length); $out.Flush($true) } finally { $out.Dispose() }
+                    $name = ''; try { $name = ([Diagnostics.Process]::GetProcessById([int]$w[1])).ProcessName } catch { }
+                    [void]$Sync.Shots.Add(@{ Path = $path; Title = [AVDTune.Native.StepShot]::Title($h); At = (Get-Date).ToString('o'); Process = $name })
+                    if ($Sync.Progress) { $Sync.Progress['Steps'] = $n }
+                }
+            }
+        }
+        catch { $Sync.Error = $_.Exception.Message }
+        [Threading.Thread]::Sleep($IntervalMs)
+    }
+}
+catch { $Sync.Error = $_.Exception.Message }
+'@
+
+function Initialize-AVDTuneRecordingCapture {
+    <#
+        Loads the native part of the step images (#93) once per process: the process list (parent of every process), the visible top-level windows of given processes,
+        the password style of edit controls and PrintWindow into a PNG (the window itself, also when it is covered; never the screen, so nothing else gets into the image).
+        NOT exercised by the checks (no window on the developer's desktop): to be tried on a throw-away VM.
+    #>
+    if ('AVDTune.Native.StepShot' -as [type]) { return }
+    Add-Type -ReferencedAssemblies System.Drawing -TypeDefinition @"
+using System; using System.Collections.Generic; using System.Runtime.InteropServices; using System.Text;
+namespace AVDTune.Native {
+    public static class StepShot {
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)] struct PROCESSENTRY32 { public uint dwSize; public uint cntUsage; public uint th32ProcessID; public IntPtr th32DefaultHeapID; public uint th32ModuleID; public uint cntThreads; public uint th32ParentProcessID; public int pcPriClassBase; public uint dwFlags; [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 260)] public string szExeFile; }
+        [StructLayout(LayoutKind.Sequential)] struct RECT { public int Left, Top, Right, Bottom; }
+        delegate bool EnumProc(IntPtr hwnd, IntPtr lParam);
+        [DllImport("kernel32.dll", SetLastError = true)] static extern IntPtr CreateToolhelp32Snapshot(uint flags, uint pid);
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] static extern bool Process32FirstW(IntPtr snap, ref PROCESSENTRY32 e);
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] static extern bool Process32NextW(IntPtr snap, ref PROCESSENTRY32 e);
+        [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr h);
+        [DllImport("user32.dll")] static extern bool EnumWindows(EnumProc cb, IntPtr lParam);
+        [DllImport("user32.dll")] static extern bool EnumChildWindows(IntPtr parent, EnumProc cb, IntPtr lParam);
+        [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr hwnd);
+        [DllImport("user32.dll")] static extern bool IsIconic(IntPtr hwnd);
+        [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint pid);
+        [DllImport("user32.dll")] static extern bool GetWindowRect(IntPtr hwnd, out RECT r);
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetWindowTextW(IntPtr hwnd, StringBuilder sb, int max);
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetClassNameW(IntPtr hwnd, StringBuilder sb, int max);
+        [DllImport("user32.dll", EntryPoint = "GetWindowLongW")] static extern int GetWindowLong(IntPtr hwnd, int index);
+        [DllImport("user32.dll")] static extern bool PrintWindow(IntPtr hwnd, IntPtr hdc, uint flags);
+        public static List<int[]> Processes() {
+            var list = new List<int[]>(); IntPtr snap = CreateToolhelp32Snapshot(2, 0);
+            if (snap == IntPtr.Zero || snap == new IntPtr(-1)) return list;
+            try { var e = new PROCESSENTRY32(); e.dwSize = (uint)Marshal.SizeOf(typeof(PROCESSENTRY32)); if (Process32FirstW(snap, ref e)) { do { list.Add(new int[] { (int)e.th32ProcessID, (int)e.th32ParentProcessID }); } while (Process32NextW(snap, ref e) && list.Count < 20000); } }
+            finally { CloseHandle(snap); }
+            return list;
+        }
+        public static List<long[]> Windows(int[] pids) {
+            var set = new HashSet<int>(pids); var list = new List<long[]>();
+            EnumWindows(delegate(IntPtr h, IntPtr l) {
+                uint pid; GetWindowThreadProcessId(h, out pid); RECT r;
+                if (set.Contains((int)pid) && IsWindowVisible(h) && !IsIconic(h) && GetWindowRect(h, out r) && r.Right - r.Left >= 160 && r.Bottom - r.Top >= 80 && list.Count < 20) list.Add(new long[] { h.ToInt64(), pid });
+                return true; }, IntPtr.Zero);
+            return list;
+        }
+        public static bool HasPasswordEdit(IntPtr hwnd) {
+            bool found = false;
+            EnumChildWindows(hwnd, delegate(IntPtr h, IntPtr l) {
+                var sb = new StringBuilder(64); GetClassNameW(h, sb, 64); string c = sb.ToString();
+                if ((c.IndexOf("Edit", StringComparison.OrdinalIgnoreCase) >= 0) && (GetWindowLong(h, -16) & 0x20) != 0) { found = true; return false; }
+                return true; }, IntPtr.Zero);
+            return found;
+        }
+        public static string Title(IntPtr hwnd) { var sb = new StringBuilder(260); GetWindowTextW(hwnd, sb, 260); return sb.ToString(); }
+        public static byte[] Capture(IntPtr hwnd, int maxWidth, int maxHeight) {
+            RECT r; if (!GetWindowRect(hwnd, out r)) return null;
+            int w = r.Right - r.Left, h = r.Bottom - r.Top; if (w < 1 || h < 1 || w > maxWidth || h > maxHeight) return null;
+            using (var bmp = new System.Drawing.Bitmap(w, h, System.Drawing.Imaging.PixelFormat.Format24bppRgb)) {
+                using (var g = System.Drawing.Graphics.FromImage(bmp)) { IntPtr dc = g.GetHdc(); bool ok; try { ok = PrintWindow(hwnd, dc, 2); } finally { g.ReleaseHdc(dc); } if (!ok) return null; }
+                using (var ms = new System.IO.MemoryStream()) { bmp.Save(ms, System.Drawing.Imaging.ImageFormat.Png); return ms.ToArray(); }
+            }
+        }
+    }
+}
+"@
+}
+
 function New-AVDTuneRecordingAdapter {
     <# The real adapter. NOT exercised by the checks beyond construction: written from the documentation, to be tried on a throw-away VM. #>
     $a = [ordered]@{ Kind = 'Real' }
@@ -559,6 +1036,11 @@ function New-AVDTuneRecordingAdapter {
         }
         finally { [void][Runtime.InteropServices.Marshal]::ReleaseComObject($shell) }
         if ($lt.Truncated -or $s.Shortcuts.Count -ge $Limits.Shortcuts) { $s.Truncated += 'Shortcuts' }
+        # #93: scheduled tasks, firewall rules, ODBC data sources, machine environment, hosts entries, fonts. Read only, bounded; an area that cannot be read is named as cut.
+        foreach ($area in 'Tasks', 'Firewall', 'Odbc', 'Environment', 'Hosts', 'Fonts') {
+            try { $got = Get-AVDTuneRecordingSystemArea -Area $area -Limit ([int]$Limits[$area]); $s[$area] = $got.Map; if ($got.Truncated) { $s.Truncated += $area } }
+            catch { $s[$area] = @{}; $s.Truncated += $area }
+        }
         $s
     }
     $a.Stage = {
@@ -600,6 +1082,26 @@ function New-AVDTuneRecordingAdapter {
         [pscustomobject]@{ ExitCode = $(if ($got.Value.TimedOut) { -1 } else { [int]$got.Value.ExitCode }); Output = [string]$got.Value.Output + [string]$got.Value.Error }
     }.GetNewClosure()   # like RunScript of the customizations: a step-like block (called only from the step of Invoke-AVDTuneRecording, under its marker); only exported functions inside (#78)
     $a.Unstage = { param($Folder) if ($Folder -and (Test-Path -LiteralPath $Folder)) { [void](Remove-AVDTuneTreeSafe -Path $Folder) } }
+    $a.StartCapture = {
+        # Step images (#93): a worker (New-AVDTunePowerShell) looks every StepIntervalMs at the windows of the processes this AVDTune process started (the installer and
+        # its children; never AVDTune's own windows) and writes each new picture of a window into a new admin-only download folder (<root>\temp\shots-<guid>).
+        param($Root, $Limits, $Progress)
+        Initialize-AVDTuneRecordingCapture
+        $dir = New-AVDTuneDownloadFolder -Root $Root -Prefix 'shots'
+        $sync = [hashtable]::Synchronized(@{ Stop = $false; Shots = [System.Collections.ArrayList]::Synchronized((New-Object System.Collections.ArrayList)); Error = ''; Skipped = 0; Progress = $Progress })
+        $ps = New-AVDTunePowerShell
+        [void]$ps.AddScript($script:CaptureLoop).AddArgument((Join-Path $PSScriptRoot 'AVDTune.psm1')).AddArgument($sync).AddArgument($dir).AddArgument([int]$PID).AddArgument([int]$Limits.StepImages).AddArgument([int]$Limits.StepImageBytes).AddArgument([int]$Limits.StepIntervalMs)
+        @{ Folder = $dir; Sync = $sync; PS = $ps; Handle = $ps.BeginInvoke() }
+    }
+    $a.StopCapture = {
+        # Ends the worker (it sees Stop within one interval; after 15 seconds it is stopped) and returns what it wrote: Shots (Path, Title, At, Process) and a Note
+        param($Capture)
+        $Capture.Sync.Stop = $true
+        try { if (-not $Capture.Handle.AsyncWaitHandle.WaitOne(15000)) { $Capture.PS.Stop() } } finally { $Capture.PS.Dispose() }
+        $note = @(); if ($Capture.Sync.Skipped) { $note += "$($Capture.Sync.Skipped) look(s) at a window with a password field were not captured." }
+        if ($Capture.Sync.Error) { $note += "The capture reported: $($Capture.Sync.Error)" }
+        @{ Shots = @($Capture.Sync.Shots.ToArray()); Note = ($note -join ' ') }
+    }
     $a.ReadProgram = { param($Key) Read-AVDTuneRecordingProgram $Key }
     $a.FileExists = { param($Path) $f = New-Object IO.FileInfo $Path; $f.Exists -and ($f.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0 }
     [pscustomobject]$a
@@ -610,4 +1112,7 @@ function New-AVDTuneRecordingAdapter {
 Export-ModuleMember -Function Get-AVDTuneRecordingProp, Test-AVDTuneRecordingArguments, Protect-AVDTuneRecordingSnapshot, Get-AVDTuneRecordingShortcutMode, Remove-AVDTuneRecordingSecrets, ConvertTo-AVDTuneRecordingApp, Split-AVDTuneRecordingArguments, Get-AVDTuneRecordingCommand, Test-AVDTuneRecordingSignature,
     Get-AVDTuneRecordingLimits, Get-AVDTuneRecordingValueText, Compare-AVDTuneRecordingSnapshot, Get-AVDTuneRecordingProposal, ConvertTo-AVDTuneRecordingHtml,
     Get-AVDTuneRecordingRoot, New-AVDTuneRecordingFolder, Save-AVDTuneRecordingRecord, ConvertFrom-AVDTuneRecordingRecord, Get-AVDTuneRecordedApps, Get-AVDTuneRecordingStatus,
+    Get-AVDTuneRecordingAreas, Get-AVDTuneRecordingLongValue, ConvertFrom-AVDTuneRecordingHosts, ConvertFrom-AVDTuneRecordingTaskXml, ConvertTo-AVDTuneRecordingNotes, Add-AVDTuneRecordingNote,
+    Close-AVDTuneRecordingNotes, ConvertTo-AVDTuneRecordingSteps, Select-AVDTuneRecordingProcessTree, Test-AVDTuneRecordingPng, Import-AVDTuneRecordingSteps, Get-AVDTuneRecordingRecipe,
+    Get-AVDTuneRecordingRegistryValues, Get-AVDTuneRecordingSystemArea, Initialize-AVDTuneRecordingCapture,
     Invoke-AVDTuneRecording, Get-AVDTuneRecordingFileTree, Get-AVDTuneRecordingRegistryTree, Read-AVDTuneRecordingProgram, New-AVDTuneRecordingAdapter
