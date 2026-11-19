@@ -25,6 +25,10 @@ function New-FakeJwt([hashtable]$Claims) { (ConvertTo-FakeBase64Url '{"alg":"non
 # AssignForbidden, NoCliGrant (no own consent for Graph CLI Tools), CliOrgGrant (Graph CLI Tools with setup scopes for the organization),
 # Apps (applications in the tenant: @{ id; appId; displayName; tags; publicClient; signInAudience; passwordCredentials; keyCredentials; web; spa;
 # identifierUris; owners; Federated }), Grants, ServicePrincipals
+# Site permissions (issue #96, AVDTune.SiteAccess.psm1): Sites (table 'host:/sites/name' in lower case -> site id; one made-up site is there), SitePermissions (list of
+# @{ id; SiteId; roles; AppId }), SiteSetupNoConsent (the sign-in for the site permission lacks Sites.FullControl.All), SiteGrantForbidden (403 to POST and DELETE of
+# a site permission, like an account without the SharePoint role), SiteReadBackOther (the new permission names another application when read back). Like the real
+# Graph, the site permission calls need a token with Sites.FullControl.All (the daily token with Sites.Selected gets 403).
 function New-AVDTuneFakeAuth {
     param([hashtable]$Seed = @{})
     $graphSp = @{ id = 'sp-graph-0001'; appId = '00000003-0000-0000-c000-000000000000'; oauth2PermissionScopes = @(
@@ -36,6 +40,7 @@ function New-AVDTuneFakeAuth {
         Consented = @{ 'https://graph.microsoft.com' = @('Group.Read.All', 'DeviceManagementApps.Read.All', 'Sites.Selected'); 'https://management.azure.com' = @('user_impersonation') }
         ExtraScopes = @{}; Domains = @{ 'contoso.example' = $script:FakeTenant }; DiscoveryOffline = $false; DiscoveryIssuer = ''
         AppForbidden = $false; GrantForbidden = $false; GraphOffline = $false; ArmSpMissing = $false; SpCreateFailures = 0; AssignForbidden = $false; NoCliGrant = $false; CliOrgGrant = $false
+        Sites = @{ 'contoso.sharepoint.com:/sites/avd-environment' = 'contoso.sharepoint.com,0a0a0a0a-1111-2222-3333-444444444444,0b0b0b0b-5555-6666-7777-888888888888' }; SitePermissions = (New-Object System.Collections.ArrayList); SiteSetupNoConsent = $false; SiteGrantForbidden = $false; SiteReadBackOther = $false
         Apps = (New-Object System.Collections.ArrayList); Grants = (New-Object System.Collections.ArrayList); ServicePrincipals = (New-Object System.Collections.ArrayList); NextId = 0 }
     foreach ($k in $Seed.Keys) { $store[$k] = $Seed[$k] }
     [void]$store.ServicePrincipals.Add($graphSp)
@@ -79,6 +84,8 @@ function New-AVDTuneFakeAuth {
         if ($setup) {
             $store.Counter++
             $scp = if ($store.SetupNoConsent) { 'User.Read' } else { 'Application.ReadWrite.All DelegatedPermissionGrant.ReadWrite.All User.Read' }
+            # the sign-in for the site permission (issue #96) asks for Sites.FullControl.All only
+            if (@($Scopes) -contains 'https://graph.microsoft.com/Sites.FullControl.All') { $scp = if ($store.SiteSetupNoConsent) { 'User.Read' } else { 'Sites.FullControl.All User.Read' } }
             $claims = @{ aud = 'https://graph.microsoft.com'; tid = $(if ($store.WrongTenant) { '99999999-0000-0000-0000-000000000000' } else { $store.Tenant }); upn = $store.Upn; name = $store.Name; oid = 'oid-fake'; scp = $scp; n = $store.Counter }
             return [pscustomobject]@{ access_token = (New-FakeJwt $claims); refresh_token = 'fake-refresh-setup'; expires_in = 3600; scope = $scp }
         }
@@ -165,6 +172,37 @@ function New-AVDTuneFakeAuth {
             if ($store.GrantForbidden -and $g.clientId -ne 'sp-cli-0001') { return $deny }
             $g.scope = $Body.scope
             return $none
+        }
+        if ($p -match '^/v1\.0/sites/') {
+            # site permissions (issue #96): only a token with Sites.FullControl.All may read or change them
+            $scpNow = ''; try { $part = $Token.Split('.')[1].Replace('-', '+').Replace('_', '/'); $part = $part.PadRight($part.Length + (4 - $part.Length % 4) % 4, '='); $scpNow = [string]([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($part)) | ConvertFrom-Json).scp } catch { }
+            $missing = [pscustomobject]@{ Status = 404; Body = (ConvertTo-FakeJson @{ error = @{ code = 'itemNotFound'; message = 'The resource could not be found.' } }); Error = '' }
+            $denySite = [pscustomobject]@{ Status = 403; Body = (ConvertTo-FakeJson @{ error = @{ code = 'accessDenied'; message = 'Access denied' } }); Error = '' }
+            if (@($scpNow -split ' ') -notcontains 'Sites.FullControl.All') { return $denySite }
+            if ($p -match '^/v1\.0/sites/([^/:]+):/(sites|teams)/([^/]+)$' -and $Method -eq 'GET') {
+                $key = ("$($Matches[1]):/$($Matches[2])/$($Matches[3])").ToLowerInvariant()
+                if (-not $store.Sites.ContainsKey($key)) { return $missing }
+                return (& $ok @{ id = $store.Sites[$key] })
+            }
+            $shape = { param($x) @{ id = $x.id; roles = @($x.roles); grantedToIdentitiesV2 = @(@{ application = @{ id = $x.AppId; displayName = 'AVDTune' } }); grantedToIdentities = @(@{ application = @{ id = $x.AppId; displayName = 'AVDTune' } }) } }
+            if ($p -match '^/v1\.0/sites/([^/]+)/permissions$') {
+                $siteId = $Matches[1]
+                if (@($store.Sites.Values) -notcontains $siteId) { return $missing }
+                if ($Method -eq 'GET') { return (& $ok @{ value = @($store.SitePermissions | Where-Object { $_.SiteId -eq $siteId } | ForEach-Object { & $shape $_ }) }) }
+                if ($Method -eq 'POST') {
+                    if ($store.SiteGrantForbidden) { return $denySite }
+                    $store.NextId++
+                    $new = @{ id = ('aTowaS50fG1zLnNwLmV4dHxmYWtl{0:d4}' -f $store.NextId); SiteId = $siteId; roles = @($Body.roles); AppId = [string]$Body.grantedToIdentities[0].application.id }
+                    [void]$store.SitePermissions.Add($new); return (& $ok (& $shape $new) 201)
+                }
+            }
+            if ($p -match '^/v1\.0/sites/([^/]+)/permissions/([^/]+)$') {
+                $siteId = $Matches[1]; $permId = $Matches[2]
+                $one = @($store.SitePermissions | Where-Object { $_.SiteId -eq $siteId -and $_.id -ceq $permId })
+                if ($one.Count -eq 0) { return $missing }
+                if ($Method -eq 'GET') { $o = & $shape $one[0]; if ($store.SiteReadBackOther) { $o.grantedToIdentitiesV2 = @(@{ application = @{ id = '99999999-8888-7777-6666-555555555555'; displayName = 'Other' } }); $o.grantedToIdentities = $o.grantedToIdentitiesV2 }; return (& $ok $o) }
+                if ($Method -eq 'DELETE') { if ($store.SiteGrantForbidden) { return $denySite }; $store.SitePermissions.Remove($one[0]); return $none }
+            }
         }
         [pscustomobject]@{ Status = 404; Body = $null; Error = "fake: no route for $Method $Path" }
     }.GetNewClosure()

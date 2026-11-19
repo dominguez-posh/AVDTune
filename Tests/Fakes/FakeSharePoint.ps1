@@ -7,7 +7,7 @@
 #   $sp = New-AVDTuneFakeSharePoint
 #   $ctx = New-AVDTuneSpContext -Token $sp.Token -SiteUrl $sp.SiteUrl -Transport $sp.Transport -Sleep $sp.Sleep
 # Switches in .Store: Offline (throws like a missing network), Throttle (the next n requests answer 429 with RetryAfter), RetryAfter (text of the header),
-# PageSize (collections answer in pages with @odata.nextLink), NextLinkTo (the first nextLink points there instead), Forbidden (403 to every write),
+# PageSize (collections answer in pages with @odata.nextLink), NextLinkTo (the first nextLink points there instead), Forbidden (403 to every write), NoAccess (403 to every request: the app registration has no role on the site, #96),
 # BadSiteId (the site lookup answers an id of another host), WrongSize (the read back size of an upload is one byte more), Redirect (a write answers 302),
 # DuplicateList (a second list of the change log name exists), Huge (an answer larger than 4 MB), NoHash (items without file.hashes).
 # Item metadata carries file.hashes.quickXorHash (here: Base64 of the SHA1 of the content, made up), so a file changed in the store (.Files) has another hash.
@@ -21,7 +21,7 @@ function New-AVDTuneFakeSharePoint {
     $siteHost = ([Uri]$SiteUrl).Host
     $siteName = ([Uri]$SiteUrl).AbsolutePath.Trim('/').Split('/')[1]
     $s = @{ Lists = [ordered]@{}; Files = @{}; Items = @{}; Log = (New-Object System.Collections.ArrayList); Bodies = (New-Object System.Collections.ArrayList); Waits = (New-Object System.Collections.ArrayList)
-        Offline = $false; Throttle = 0; RetryAfter = '7'; PageSize = 0; NextLinkTo = ''; Forbidden = $false; BadSiteId = $false; WrongSize = $false; Redirect = $false; DuplicateList = $false; Huge = $false; NoHash = $false
+        Offline = $false; Throttle = 0; RetryAfter = '7'; PageSize = 0; NextLinkTo = ''; Forbidden = $false; NoAccess = $false; BadSiteId = $false; WrongSize = $false; Redirect = $false; DuplicateList = $false; Huge = $false; NoHash = $false
         SiteId = "$siteHost,$([guid]::NewGuid()),$([guid]::NewGuid())"; DriveId = 'b!fakeDrive0001AVDTune'; NextItem = 1 }
     $sp = [ordered]@{ Store = $s; Log = $s.Log; Token = 'fake-sp-token-CCC'; SiteUrl = $SiteUrl }
     $answer = { param($status, $obj, $retry) $bytes = New-Object byte[] 0; if ($null -ne $obj) { $bytes = [Text.Encoding]::UTF8.GetBytes(($obj | ConvertTo-Json -Depth 10 -Compress)) }; @{ Status = $status; Headers = @{ RetryAfter = [string]$retry }; Stream = (New-Object IO.MemoryStream (, [byte[]]$bytes)); Close = { } } }
@@ -50,6 +50,7 @@ function New-AVDTuneFakeSharePoint {
         if ($uri.Host -ne 'graph.microsoft.com') { return (& $answer 404 $null '') }
         if ([string]$Headers['Authorization'] -ne "Bearer $($sp.Token)") { return (& $answer 401 @{ error = @{ code = 'InvalidAuthenticationToken' } } '') }
         if ($s.Throttle -gt 0) { $s.Throttle--; return (& $answer 429 @{ error = @{ code = 'TooManyRequests' } } $s.RetryAfter) }
+        if ($s.NoAccess) { return (& $answer 403 @{ error = @{ code = 'accessDenied' } } '') }
         if ($Method -ne 'GET' -and $s.Forbidden) { return (& $answer 403 @{ error = @{ code = 'accessDenied' } } '') }
         if ($Method -ne 'GET' -and $s.Redirect) { $r = & $answer 302 $null ''; return $r }
         if ($s.Huge) { $r = & $answer 200 $null ''; $r.Stream = New-Object IO.MemoryStream (, (New-Object byte[] (4MB + 10))); return $r }

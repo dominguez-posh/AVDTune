@@ -644,7 +644,9 @@ function New-AVDTuneAuthAdapter {
     $adapter.Graph = {
         # A Graph call of the setup: HTTPS to graph.microsoft.com, path below /v1.0/ only, no redirects, never throws
         param($Method, $Path, $Token, $Body)
-        if ($Method -notin 'GET', 'POST', 'PATCH' -or $Path -notmatch '^/v1\.0/[A-Za-z]' -or $Path -match '\.\.|#|@|\\' -or $Path -match '[\s\x00-\x1F]' -or [regex]::Matches($Path, '\?').Count -gt 1) { return [pscustomobject]@{ Status = 0; Body = $null; Error = 'Refused: not a Graph v1.0 path.' } }
+        # DELETE only for ONE permission of ONE site (the undo of the site grant, AVDTune.SiteAccess.psm1, issue #96); nothing else is ever deleted through this adapter
+        if ($Method -eq 'DELETE' -and $Path -cnotmatch '\A/v1\.0/sites/[A-Za-z0-9.,-]{1,400}/permissions/[A-Za-z0-9_=-]{1,402}\z') { return [pscustomobject]@{ Status = 0; Body = $null; Error = 'Refused: DELETE is only allowed for a site permission.' } }
+        if ($Method -notin 'GET', 'POST', 'PATCH', 'DELETE' -or $Path -notmatch '^/v1\.0/[A-Za-z]' -or $Path -match '\.\.|#|@|\\' -or $Path -match '[\s\x00-\x1F]' -or [regex]::Matches($Path, '\?').Count -gt 1) { return [pscustomobject]@{ Status = 0; Body = $null; Error = 'Refused: not a Graph v1.0 path.' } }
         Invoke-AVDTuneHttps -Url "https://graph.microsoft.com$Path" -Method $Method -Token $Token -Body $Body
     }
     $adapter.Refresh = {

@@ -5,12 +5,14 @@
     addresses (only graph.microsoft.com), site id, secret filter, Retry-After, the change log list (created with fixed columns, idempotent through EntryId, only new
     entries, missing columns added, two lists of the name refused), paging, throttling, refusals (foreign nextLink, foreign site id, 403, redirect, answer too large),
     the software list with the files of the recordings (confirmed by the size read back), the removal of confirmed records (Remove-AVDTuneTreeSafe, not after the
-    finish), the environment document (encoded, policy, no secrets) and the page and the fake.
+    finish), the environment document (encoded, policy, no secrets) and the page and the fake. Issue #96: the grant of the role write on the site (Modules\AVDTune.SiteAccess.psm1)
+    against the fake sign-in (Tests\Fakes\FakeServices.ps1): plan, confirmation hash, gate, journal, undo, the state for the readiness analysis.
 #>
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path $PSScriptRoot -Parent
-foreach ($m in 'AVDTune', 'AVDTune.SharePoint') { Import-Module (Join-Path $repo "Modules\$m.psm1") -Force }
+foreach ($m in 'AVDTune', 'AVDTune.SharePoint', 'AVDTune.Session', 'AVDTune.SiteAccess') { Import-Module (Join-Path $repo "Modules\$m.psm1") -Force }
 . (Join-Path $PSScriptRoot 'Fakes\FakeSharePoint.ps1')
+. (Join-Path $PSScriptRoot 'Fakes\FakeServices.ps1')   # the fake sign-in and its Graph: the site permission (issue #96)
 
 $script:failed = 0
 function Test-Check([string]$Name, [bool]$Ok, $Detail) { if ($Ok) { "PASS $Name" } else { $script:failed++; "FAIL $Name" + $(if ($null -ne $Detail) { "  -> $Detail" }) } }
@@ -203,13 +205,127 @@ try {
     [IO.File]::WriteAllText($doc.Path, "<html>$jwt</html>")
     Test-Check 'document (counter-test): a document that holds a token is not uploaded' ((Get-ThrownText { Send-AVDTuneSpEnvironmentDocument -Context (New-Context $sp14) -Root $tmp -Document $doc }) -like '*not uploaded*') $null
 
+    # ---------------------------------------------------------------- issue #96: the role write on the site of the environment (AVDTune.SiteAccess.psm1)
+    $saRoot = Join-Path $tmp 'siteaccess'
+    [void](Initialize-AVDTuneState -Root $saRoot)
+    [void](Start-AVDTuneImageVersion -Root $saRoot -Date ([datetime]'2026-11-18') -User 'admin1')
+    $saVer = [string](Get-AVDTuneState $saRoot).ImageVersion
+    Close-AVDTuneWriteGate
+    $saClient = '22222222-aaaa-bbbb-cccc-000000000001'; $saTenant = '11111111-2222-3333-4444-555555555555'; $setupApp = '14d82eec-204b-4c2f-b7e8-296a70dab67e'
+    $saSite = 'https://contoso.sharepoint.com/sites/AVD-Environment'
+    $auth = New-AVDTuneFakeAuth
+    $journalPath = Get-AVDTuneSiteAccessJournalPath $saRoot
+    $grant = { param($Hash, $A = $auth, $Client = $saClient) Grant-AVDTuneSiteAccess -Auth $A -Root $saRoot -ClientId $Client -TenantId $saTenant -ConfirmedHash $Hash -LoginHint 'admin.example@contoso.example' -User 'admin1' -SnapshotId 'snap-1' }
+    $revoke = { param($Hash, $A = $auth) Revoke-AVDTuneSiteAccess -Auth $A -Root $saRoot -TenantId $saTenant -ConfirmedHash $Hash -User 'admin1' -SnapshotId 'snap-1' }
+    $noSite = Get-AVDTuneSiteAccessPlan -Root $saRoot -ClientId $saClient -TenantId $saTenant
+    [void](Set-AVDTuneSpSettings -Root $saRoot -SiteUrl $saSite)
+    $plan = Get-AVDTuneSiteAccessPlan -Root $saRoot -ClientId $saClient -TenantId $saTenant
+    Test-Check 'site access plan: pure (no request), names the site, the app registration, the role write and the exact request; not ready without a site, without a sign-in or for the setup app' (-not $noSite.Ready -and $noSite.Problem -like '*No SharePoint site*' -and $plan.Ready -and $plan.SiteUrl -eq $saSite -and $plan.Role -ceq 'write' -and $plan.Scope -eq 'Sites.FullControl.All' -and $plan.Request.Method -eq 'POST' -and ($plan.Request.Body.roles -join ',') -ceq 'write' -and $plan.Request.Body.grantedToIdentities[0].application.id -eq $saClient -and $plan.Hash -match '\A[0-9a-f]{24}\z' -and $auth.Log.Count -eq 0 -and -not (Get-AVDTuneSiteAccessPlan -Root $saRoot -ClientId '' -TenantId $saTenant).Ready -and (Get-AVDTuneSiteAccessPlan -Root $saRoot -ClientId $setupApp -TenantId $saTenant).Problem -like "*never to Microsoft's setup app*") ($plan | ConvertTo-Json -Depth 6 -Compress)
+    Test-Check 'site access plan: the hash covers site, app registration and tenant' ($plan.Hash -ne (Get-AVDTuneSiteAccessPlan -Root $saRoot -ClientId '22222222-aaaa-bbbb-cccc-000000000002' -TenantId $saTenant).Hash -and $plan.Hash -ne (Get-AVDTuneSiteAccessPlan -Root $saRoot -ClientId $saClient -TenantId '11111111-2222-3333-4444-555555555556').Hash) $null
+    $tGate = Get-ThrownText { & $grant $plan.Hash }
+    Test-Check 'grant: refused without the snapshot gate, before any sign-in' ($tGate -like '*snapshot gate is not confirmed*' -and $auth.Log.Count -eq 0 -and -not (Test-Path -LiteralPath $journalPath)) $tGate
+    Open-AVDTuneWriteGate -SnapshotId 'snap-1' -ConfirmedBy 'Alex Example'
+    $rHash = & $grant 'wrong'; $rNone = & $grant ''
+    Test-Check 'grant: another or no confirmed plan hash sends nothing (no sign-in, no journal)' ($rHash.Status -eq 'Refused' -and $rNone.Status -eq 'Refused' -and $auth.Log.Count -eq 0 -and -not (Test-Path -LiteralPath $journalPath)) "$($rHash.Message)"
+    $lastBefore = [string](Get-AVDTuneProp (Get-AVDTuneState $saRoot) 'LastChange')
+    # the failures before anything is written
+    $aNo = New-AVDTuneFakeAuth; $aNo.Store.SiteSetupNoConsent = $true
+    $tNoConsent = Get-ThrownText { & $grant $plan.Hash $aNo }
+    $aTen = New-AVDTuneFakeAuth; $aTen.Store.WrongTenant = $true
+    $tTenant = Get-ThrownText { & $grant $plan.Hash $aTen }
+    $aCancel = New-AVDTuneFakeAuth; $aCancel.Store.Cancel = $true
+    $tCancel = Get-ThrownText { & $grant $plan.Hash $aCancel }
+    $aSite = New-AVDTuneFakeAuth; $aSite.Store.Sites = @{}
+    $tSite = Get-ThrownText { & $grant $plan.Hash $aSite }
+    Test-Check 'grant: a sign-in without Sites.FullControl.All, in another tenant or cancelled, and a site Graph does not know stop before the journal and before any write' ($tNoConsent -like '*no consent for Sites.FullControl.All*' -and $tTenant -like '*another tenant*' -and $tCancel -like '*cancelled*' -and $tSite -like '*does not know the site*' -and -not (Test-Path -LiteralPath $journalPath) -and @($aNo.Log + $aTen.Log + $aCancel.Log + $aSite.Log | Where-Object { $_ -like 'Graph POST*' -or $_ -like 'Graph DELETE*' }).Count -eq 0) "$tNoConsent | $tTenant | $tCancel | $tSite"
+    $aDeny = New-AVDTuneFakeAuth; $aDeny.Store.SiteGrantForbidden = $true
+    $rDeny = & $grant $plan.Hash $aDeny
+    $jDeny = @((Get-AVDTuneSiteAccessJournal -Root $saRoot).Grants)
+    Test-Check 'grant: a 403 to the POST (no SharePoint role) is Failed with the role named, the journal entry says Failed, nothing exists on the site' ($rDeny.Status -eq 'Failed' -and $rDeny.Message -like '*may not do this*SharePoint Administrator*' -and $jDeny.Count -eq 1 -and $jDeny[0].Status -eq 'Failed' -and $aDeny.Store.SitePermissions.Count -eq 0) $rDeny.Message
+    $aBack = New-AVDTuneFakeAuth; $aBack.Store.SiteReadBackOther = $true
+    $rBack = & $grant $plan.Hash $aBack
+    Test-Check 'grant: a permission that names another application when read back does not count (Failed) and the undo keeps it' ($rBack.Status -eq 'Failed' -and $rBack.Message -like '*when read back*' -and (Get-AVDTuneSiteAccessUndoPlan -Root $saRoot).Count -eq 0 -and @((Get-AVDTuneSiteAccessUndoPlan -Root $saRoot).Steps | Where-Object Action -eq 'Keep').Count -eq 2) $rBack.Message
+    [IO.File]::Delete($journalPath)
+    # the grant
+    $rOk = & $grant $plan.Hash
+    $perm = @($auth.Store.SitePermissions)
+    $jOk = @((Get-AVDTuneSiteAccessJournal -Root $saRoot).Grants)
+    $jText = [IO.File]::ReadAllText($journalPath)
+    $clog = @(Get-AVDTuneChangeLog -Root $saRoot -Version $saVer | Where-Object { $_.Component -eq 'SharePoint: site access' })
+    Test-Check 'grant: one permission with the role write for exactly this app registration on exactly this site, confirmed by reading it back' ($rOk.Status -eq 'Changed' -and $perm.Count -eq 1 -and $perm[0].AppId -eq $saClient -and ($perm[0].roles -join ',') -ceq 'write' -and $perm[0].SiteId -eq $auth.Store.Sites['contoso.sharepoint.com:/sites/avd-environment'] -and $rOk.PermissionId -ceq $perm[0].id -and $rOk.Message -like "*role write on $saSite*") ($rOk | ConvertTo-Json -Compress)
+    Test-Check 'grant: the sign-in is the setup app at the tenant of the environment with Sites.FullControl.All only; every request is a Graph v1.0 site call; one POST' (@($auth.Log | Where-Object { $_ -like 'SignIn*' }).Count -eq 1 -and @($auth.Log | Where-Object { $_ -like 'SignIn*' })[0] -eq "SignIn tenant=$saTenant client=setup hint=admin.example@contoso.example scopes=https://graph.microsoft.com/Sites.FullControl.All" -and @($auth.Log | Where-Object { $_ -like 'Graph *' -and $_ -notmatch '\AGraph (GET|POST) /v1\.0/sites/' }).Count -eq 0 -and @($auth.Log | Where-Object { $_ -like 'Graph POST*' }).Count -eq 1) ($auth.Log -join ' | ')
+    Test-Check 'grant: journal entry Done with site id, app registration, role and the permission id; no token in the journal, the change log or the result' ($jOk.Count -eq 1 -and $jOk[0].Status -eq 'Done' -and $jOk[0].PermissionId -ceq $perm[0].id -and $jOk[0].ClientId -eq $saClient -and $jOk[0].Role -ceq 'write' -and $jOk[0].SiteId -eq $perm[0].SiteId -and $jText -notmatch 'eyJ|fake-refresh|Bearer' -and (($rOk | ConvertTo-Json) + ($clog | ConvertTo-Json)) -notmatch 'eyJ|fake-refresh') $jText
+    Test-Check 'grant: change log entry of the category Azure (site and role named), LastChange not set (not a change of the master)' ($clog.Count -eq 1 -and $clog[0].Category -eq 'Azure' -and $clog[0].ChangeType -eq 'Added' -and $clog[0].Text -like "*Role write on the SharePoint site $saSite*$saClient*" -and [string](Get-AVDTuneProp (Get-AVDTuneState $saRoot) 'LastChange') -eq $lastBefore -and $null -eq (Get-AVDTuneLastChange -Root $saRoot)) ($clog | ConvertTo-Json -Compress)
+    $rAgain = & $grant $plan.Hash
+    Test-Check 'grant again: the registration holds write already, nothing is sent and nothing recorded' ($rAgain.Status -eq 'Unchanged' -and $auth.Store.SitePermissions.Count -eq 1 -and @((Get-AVDTuneSiteAccessJournal -Root $saRoot).Grants).Count -eq 1 -and @($auth.Log | Where-Object { $_ -like 'Graph POST*' }).Count -eq 1 -and (Get-AVDTuneSiteAccessPlan -Root $saRoot -ClientId $saClient -TenantId $saTenant).Recorded) $rAgain.Message
+    # the state for the readiness analysis (the Sites token of the daily sign-in, GET only)
+    $spA = New-AVDTuneFakeSharePoint -SiteUrl $saSite
+    $ctxA = { New-Context $spA }
+    $stGranted = Get-AVDTuneSiteAccessState -Root $saRoot -Context (& $ctxA) -ClientId $saClient
+    $stOther = Get-AVDTuneSiteAccessState -Root $saRoot -Context (& $ctxA) -ClientId '22222222-aaaa-bbbb-cccc-000000000002'
+    $spA.Store.NoAccess = $true; $stMissing = Get-AVDTuneSiteAccessState -Root $saRoot -Context (& $ctxA) -ClientId $saClient; $spA.Store.NoAccess = $false
+    $spA.Store.Offline = $true; $stOff = Get-AVDTuneSiteAccessState -Root $saRoot -Context (& $ctxA) -ClientId $saClient; $spA.Store.Offline = $false
+    $stNoToken = Get-AVDTuneSiteAccessState -Root $saRoot -Context $null -ClientId $saClient -NoTokenReason 'Not signed in.'
+    $stNoSite = Get-AVDTuneSiteAccessState -Root $tmp -Context (& $ctxA) -ClientId $saClient
+    Test-Check 'state: Granted with the own grant in the journal, Readable without it, Missing on 403, Unknown without a connection, NotSignedIn without a token; only GET requests' ($stGranted.State -eq 'Granted' -and $stOther.State -eq 'Readable' -and $stMissing.State -eq 'Missing' -and $stOff.State -eq 'Unknown' -and $stNoToken.State -eq 'NotSignedIn' -and $stNoToken.Detail -eq 'Not signed in.' -and @($spA.Log | Where-Object { $_ -notlike 'GET *' }).Count -eq 0) "$($stGranted.State) $($stOther.State) $($stMissing.State) $($stOff.State) $($stNoToken.State) $($stNoSite.State)"
+    # undo
+    $undo = Get-AVDTuneSiteAccessUndoPlan -Root $saRoot
+    $logBefore = $auth.Log.Count
+    $rUndoHash = & $revoke 'wrong'
+    Test-Check 'undo plan: from the journal only, one Delete with the recorded permission id; another hash changes nothing (no sign-in)' ($undo.Count -eq 1 -and $undo.Steps[0].Action -eq 'Delete' -and $undo.Steps[0].PermissionId -ceq $perm[0].id -and $rUndoHash.Status -eq 'Refused' -and $auth.Log.Count -eq $logBefore -and $auth.Store.SitePermissions.Count -eq 1) $rUndoHash.Message
+    Close-AVDTuneWriteGate
+    $tUndoGate = Get-ThrownText { & $revoke $undo.Hash }
+    Open-AVDTuneWriteGate -SnapshotId 'snap-1' -ConfirmedBy 'Alex Example'
+    $auth.Store.SiteGrantForbidden = $true; $rUndoDeny = & $revoke $undo.Hash; $auth.Store.SiteGrantForbidden = $false
+    Test-Check 'undo: refused without the gate; a 403 to the DELETE is Failed, the permission and the journal entry stay' ($tUndoGate -like '*snapshot gate*' -and $rUndoDeny.Status -eq 'Failed' -and $rUndoDeny.Message -like '*SharePoint Administrator*' -and $auth.Store.SitePermissions.Count -eq 1 -and (Get-AVDTuneSiteAccessUndoPlan -Root $saRoot).Count -eq 1) "$tUndoGate | $($rUndoDeny.Message)"
+    # a second permission of someone else on the same site must survive the undo
+    [void]$auth.Store.SitePermissions.Add(@{ id = 'aTowaS50fG1zLnNwLmV4dHxvdGhlcg'; SiteId = $perm[0].SiteId; roles = @('read'); AppId = '99999999-8888-7777-6666-555555555555' })
+    $rUndo = & $revoke $undo.Hash
+    $clogUndo = @(Get-AVDTuneChangeLog -Root $saRoot -Version $saVer | Where-Object { $_.Component -eq 'SharePoint: site access' -and $_.ChangeType -eq 'Removed' })
+    Test-Check 'undo: removes only the permission AVDTune granted (by its id), the other permission of the site stays; journal marked, change log entry, nothing left to take back' ($rUndo.Status -eq 'Reverted' -and $auth.Store.SitePermissions.Count -eq 1 -and $auth.Store.SitePermissions[0].AppId -eq '99999999-8888-7777-6666-555555555555' -and @($auth.Log | Where-Object { $_ -like 'Graph DELETE*' -and $_ -notlike "*/permissions/$($perm[0].id)" }).Count -eq 0 -and @((Get-AVDTuneSiteAccessJournal -Root $saRoot).Grants)[0].Undone -eq $true -and $clogUndo.Count -eq 1 -and (Get-AVDTuneSiteAccessUndoPlan -Root $saRoot).Steps.Count -eq 0 -and (Get-AVDTuneSiteAccessState -Root $saRoot -Context (& $ctxA) -ClientId $saClient).State -eq 'Readable') $rUndo.Message
+    # the journal is input: a permission that changed hands stays, one that is gone is closed, forged entries produce no step
+    $auth.Store.SitePermissions.Clear()
+    $rG2 = & $grant $plan.Hash
+    $auth.Store.SitePermissions[0].AppId = '99999999-8888-7777-6666-555555555555'
+    $u2 = Get-AVDTuneSiteAccessUndoPlan -Root $saRoot; $rForeign = & $revoke $u2.Hash
+    $keptForeign = $auth.Store.SitePermissions.Count
+    $auth.Store.SitePermissions.Clear()
+    $rGone = & $revoke (Get-AVDTuneSiteAccessUndoPlan -Root $saRoot).Hash
+    Test-Check 'undo: a permission that does not name AVDTune any more stays (no DELETE); one that is gone already is marked as taken back' ($rG2.Status -eq 'Changed' -and $rForeign.Status -eq 'Unchanged' -and $rForeign.Results[0].Message -like '*it stays*' -and $keptForeign -eq 1 -and $rGone.Status -eq 'Reverted' -and $rGone.Results[0].Message -like '*gone already*' -and (Get-AVDTuneSiteAccessUndoPlan -Root $saRoot).Steps.Count -eq 0) "$($rForeign.Message) | $($rGone.Message)"
+    $forged = @(
+        @{ SiteUrl = $saSite; SiteId = "fabrikam.sharepoint.com,$([guid]::NewGuid()),$([guid]::NewGuid())"; ClientId = $saClient; Role = 'write'; PermissionId = 'abc'; Status = 'Done'; Undone = $false }
+        @{ SiteUrl = $saSite; SiteId = $perm[0].SiteId; ClientId = $saClient; Role = 'write'; PermissionId = 'abc/../../groups'; Status = 'Done'; Undone = $false }
+        @{ SiteUrl = $saSite; SiteId = $perm[0].SiteId; ClientId = $setupApp; Role = 'write'; PermissionId = 'abc'; Status = 'Done'; Undone = $false }
+        @{ SiteUrl = $saSite; SiteId = $perm[0].SiteId; ClientId = $saClient; Role = 'fullcontrol'; PermissionId = 'abc'; Status = 'Done'; Undone = $false }
+        @{ SiteUrl = 'https://evil.example.com/sites/x'; SiteId = $perm[0].SiteId; ClientId = $saClient; Role = 'write'; PermissionId = 'abc'; Status = 'Done'; Undone = $false }
+        @{ SiteUrl = $saSite; SiteId = $perm[0].SiteId; ClientId = $saClient; Role = 'write'; PermissionId = 'abc'; Status = 'Done'; Undone = 'false' }
+        @{ SiteUrl = $saSite; SiteId = $perm[0].SiteId; ClientId = $saClient; Role = 'write'; PermissionId = ''; Status = 'Started'; Undone = $false }
+        @{ SiteUrl = $saSite; SiteId = $perm[0].SiteId; ClientId = $saClient; Role = 'write'; PermissionId = ''; Status = 'Done'; Undone = $false })
+    [IO.File]::WriteAllText($journalPath, (@{ Schema = 1; Grants = $forged } | ConvertTo-Json -Depth 5))
+    $uF = Get-AVDTuneSiteAccessUndoPlan -Root $saRoot
+    Test-Check 'journal as input: a site id of another host, a permission id with a path, the setup app, another role and another site address give no step; "false" as text is not true; an interrupted grant and one without an id are kept with the reason' ($uF.Steps.Count -eq 3 -and $uF.Count -eq 1 -and @($uF.Steps | Where-Object { $_.Action -eq 'Keep' -and ($_.Reason -like '*interrupted*' -or $_.Reason -like '*No permission id*') }).Count -eq 2 -and @($uF.Steps | Where-Object Action -eq 'Delete')[0].Index -eq 5) ($uF.Steps | ForEach-Object { "$($_.Index):$($_.Action)" })
+    [IO.File]::WriteAllText($journalPath, '{"Schema":2,"Grants":[]}')
+    Test-Check 'journal of a newer AVDTune is refused' ((Get-ThrownText { Get-AVDTuneSiteAccessUndoPlan -Root $saRoot }) -like '*newer AVDTune*') $null
+    [IO.File]::Delete($journalPath)
+    [void](Set-AVDTuneState -Root $saRoot -Values @{ Sealed = [ordered]@{ At = (Get-Date).ToString('o'); By = 'admin1' } })
+    $tSealed = Get-ThrownText { & $grant $plan.Hash }
+    Test-Check 'grant: not after the finish (a finished version takes no change)' ($null -ne $tSealed -and (Test-AVDTuneSealed -Root $saRoot) -and -not (Test-Path -LiteralPath $journalPath)) $tSealed
+    Close-AVDTuneWriteGate
+    # source
+    $saMod = [IO.File]::ReadAllText((Join-Path $repo 'Modules\AVDTune.SiteAccess.psm1')); $sesMod = [IO.File]::ReadAllText((Join-Path $repo 'Modules\AVDTune.Session.psm1'))
+    Test-Check 'site access module: no HTTP client of its own (only the Graph member of the sign-in adapter), the token dropped in finally, never the setup app as holder, no LastChange' ($saMod -notmatch 'Invoke-WebRequest|Invoke-RestMethod|HttpWebRequest|WebClient|Start-Process|Invoke-Expression|Set-AVDTuneLastChange|Start-AVDTuneChange' -and ([regex]::Matches($saMod, 'finally \{ \$token = \$null \}')).Count -eq 2 -and $saMod -match '\$client -ieq \$script:SetupClientId\) \{ return \$null \}' -and @([regex]::Matches($saMod, '& \$Auth\.Graph ')).Count -eq 1) $null
+    Test-Check 'adapter: DELETE passes only for one permission of one site (anchored with \A and \z), on graph.microsoft.com like every call of the adapter' ($sesMod -match [regex]::Escape("if (`$Method -eq 'DELETE' -and `$Path -cnotmatch '\A/v1\.0/sites/[A-Za-z0-9.,-]{1,400}/permissions/[A-Za-z0-9_=-]{1,402}\z') { return") -and $sesMod -match [regex]::Escape('Invoke-AVDTuneHttps -Url "https://graph.microsoft.com$Path" -Method $Method -Token $Token -Body $Body') -and '/v1.0/applications/abc' -cnotmatch '\A/v1\.0/sites/[A-Za-z0-9.,-]{1,400}/permissions/[A-Za-z0-9_=-]{1,402}\z' -and "/v1.0/sites/$($perm[0].SiteId)/permissions/$($perm[0].id)" -cmatch '\A/v1\.0/sites/[A-Za-z0-9.,-]{1,400}/permissions/[A-Za-z0-9_=-]{1,402}\z' -and "/v1.0/sites/a/permissions/b/../c" -cnotmatch '\A/v1\.0/sites/[A-Za-z0-9.,-]{1,400}/permissions/[A-Za-z0-9_=-]{1,402}\z') $null
+    $svcText = [IO.File]::ReadAllText((Join-Path $PSScriptRoot 'Fakes\FakeServices.ps1'))
+    Test-Check 'fake Graph: the site permission switches are used here, and like the real Graph the daily token (Sites.Selected) gets 403 for site permissions' (@('SiteSetupNoConsent', 'SiteGrantForbidden', 'SiteReadBackOther' | Where-Object { [IO.File]::ReadAllText($PSCommandPath) -notmatch "Store\.$_ = " }).Count -eq 0 -and $svcText -match "notcontains 'Sites\.FullControl\.All'\) \{ return \`$denySite \}") $null
+
+    # ---------------------------------------------------------------- module, fake, page
     # ---------------------------------------------------------------- module, fake, page
     $mod = [IO.File]::ReadAllText((Join-Path $repo 'Modules\AVDTune.SharePoint.psm1'))
     Test-Check 'module: no Invoke-WebRequest/Invoke-RestMethod, no automatic redirect, TLS added with -bor, the token only in the Authorization header' ($mod -notmatch 'Invoke-WebRequest|Invoke-RestMethod|Start-Process|Invoke-Expression' -and $mod -match 'AllowAutoRedirect = \$false' -and $mod -match 'SecurityProtocol -bor' -and $mod -match 'Authorization = "Bearer \$\(\$Context\.Token\)"') $null
     Test-Check 'module: records are removed with Remove-AVDTuneTreeSafe, the document folder made with New-AVDTuneOwnFolder' ($mod -match 'Remove-AVDTuneTreeSafe -Path \$folder' -and $mod -match 'New-AVDTuneOwnFolder -Path \$dir' -and $mod -notmatch 'Remove-Item') $null
     $fakeText = [IO.File]::ReadAllText((Join-Path $PSScriptRoot 'Fakes\FakeSharePoint.ps1'))
     Test-Check 'fake: loads FakeShared and the factory ends with ConvertTo-AVDTuneFakeShared (#80: shared with a runspace), its blocks are unbound' ($fakeText -match "Resolve-AVDTuneTestScript -Path \(Join-Path \`$PSScriptRoot 'FakeShared\.ps1'\)" -and $fakeText -match 'ConvertTo-AVDTuneFakeShared \(\[pscustomobject\]\$sp\)' -and $null -eq $sp.Transport.Module) $null
-    $switches = @('Offline', 'Throttle', 'RetryAfter', 'PageSize', 'NextLinkTo', 'Forbidden', 'BadSiteId', 'WrongSize', 'Redirect', 'DuplicateList', 'Huge', 'NoHash')
+    $switches = @('Offline', 'Throttle', 'RetryAfter', 'PageSize', 'NextLinkTo', 'Forbidden', 'BadSiteId', 'WrongSize', 'Redirect', 'DuplicateList', 'Huge', 'NoHash', 'NoAccess')
     $self = [IO.File]::ReadAllText($PSCommandPath)
     Test-Check 'fake: every switch is used by a check here' (@($switches | Where-Object { $self -notmatch "Store\.$_ = " }).Count -eq 0) (@($switches | Where-Object { $self -notmatch "Store\.$_ = " }) -join ', ')
     $page = [IO.File]::ReadAllText((Join-Path $repo 'AVDTune-SharePoint.ps1'))
