@@ -93,6 +93,7 @@ Import-Module (Join-Path $PSScriptRoot 'Modules\AVDTune.Recording.psm1') -Force 
 Import-Module (Join-Path $PSScriptRoot 'Modules\AVDTune.Printers.psm1') -Force   # printer drivers from a print server (#86): after Custom, whose registry adapter it uses
 Import-Module (Join-Path $PSScriptRoot 'Modules\AVDTune.Release.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'Modules\AVDTune.SharePoint.psm1') -Force   # change log, software list and environment document to SharePoint (#89)
+Import-Module (Join-Path $PSScriptRoot 'Modules\AVDTune.SiteAccess.psm1') -Force   # the role write on the SharePoint site of the environment (#96)
 Import-Module (Join-Path $PSScriptRoot 'Modules\AVDTune.Export.psm1') -Force   # the export ZIP (#91), uses the secret table of AVDTune.SharePoint
 # Test runs of several checkouts can run at the same time: one test mutex per test state folder
 $mutexName = if ($script:TestMode) {

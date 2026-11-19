@@ -1542,6 +1542,29 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
             }
         }
         $true } }
+    @{ Name = 'sharepoint site access (#96)'; Do = {
+        # the card of the Environment page: the role write on the site of the environment, granted and taken back through the fake sign-in and its Graph
+        $click = { param($b) $b.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent))) }
+        $st = $script:Services.Auth.Store
+        $site = [string]$script:SpFake.SiteUrl
+        Show-Page 'Environment'; $window.UpdateLayout()
+        Test-Smoke 'site access: without a site the card says so and offers nothing' ($ui.TxtEnvSpState.Text -eq (T 'env.sp.nosite') -and -not $ui.BtnEnvSpGrant.IsEnabled -and -not $ui.BtnEnvSpUndo.IsEnabled) $ui.TxtEnvSpState.Text
+        [void](Set-AVDTuneSpSettings -Root $script:StateRoot -SiteUrl $site)
+        Update-EnvView; $window.UpdateLayout()
+        Test-Smoke 'site access: with a site the card names it and offers the grant; nothing to take back yet' ($ui.TxtEnvSpState.Text -eq (T 'env.sp.open' $site 'write') -and $ui.BtnEnvSpGrant.IsEnabled -and -not $ui.BtnEnvSpUndo.IsEnabled) $ui.TxtEnvSpState.Text
+        $signInsBefore = @($st.Log | Where-Object { $_ -like 'SignIn*client=setup*Sites.FullControl.All' }).Count
+        $script:ConfirmAsked = ''
+        & $click $ui.BtnEnvSpGrant
+        $perms = @($st.SitePermissions)
+        Test-Smoke 'site access: the confirmation names the site, the role write and the app registration; one sign-in with Sites.FullControl.All; one permission write for AVDTune on the site' ($script:ConfirmAsked -like "*$site*write*$($script:StartContext.Session.ClientId)*Sites.FullControl.All*" -and (@($st.Log | Where-Object { $_ -like 'SignIn*client=setup*Sites.FullControl.All' }).Count - $signInsBefore) -eq 1 -and $perms.Count -eq 1 -and ($perms[0].roles -join ',') -ceq 'write' -and $perms[0].AppId -eq [string]$script:StartContext.Session.ClientId) "$($script:ConfirmAsked) | $($ui.TxtEnvSpResult.Text)"
+        Test-Smoke 'site access: the card shows the grant, offers only the undo; journal, change log (Azure) and protocol have it; the session keeps its tokens' ($ui.TxtEnvSpState.Text -eq (T 'env.sp.recorded' $site 'write') -and -not $ui.BtnEnvSpGrant.IsEnabled -and $ui.BtnEnvSpUndo.IsEnabled -and @((Get-AVDTuneSiteAccessJournal -Root $script:StateRoot).Grants | Where-Object { $_.Status -eq 'Done' }).Count -eq 1 -and @(Get-AVDTuneChangeLog -Root $script:StateRoot | Where-Object { $_.Component -eq 'SharePoint: site access' -and $_.Category -eq 'Azure' }).Count -eq 1 -and @($script:Protocol.Actions | Where-Object { $_.Subject -eq (T 'env.sp.protocol.grant' $site) -and $_.Result -eq 'ok' }).Count -eq 1 -and $script:StartContext.Session.Connected -and -not (Get-AVDTuneRunningWriter)) $ui.TxtEnvSpResult.Text
+        $script:ConfirmAsked = ''
+        & $click $ui.BtnEnvSpUndo
+        Test-Smoke 'site access: the undo asks with the permission, removes it and the card offers the grant again' ($script:ConfirmAsked -like "*Role write*$site*" -and $st.SitePermissions.Count -eq 0 -and $ui.BtnEnvSpGrant.IsEnabled -and -not $ui.BtnEnvSpUndo.IsEnabled -and @($script:Protocol.Actions | Where-Object { $_.Subject -eq (T 'env.sp.protocol.undo') -and $_.Result -eq 'ok' }).Count -eq 1) "$($script:ConfirmAsked) | $($ui.TxtEnvSpResult.Text)"
+        [void](Set-AVDTuneSpSettings -Root $script:StateRoot -SiteUrl '')
+        Update-EnvView
+        Show-Page 'Overview'
+        $true } }
     @{ Name = 'export and old snapshots (#91)'; Do = {
         # the cards of the change log view: the export ZIP (test mode: into <state>\exports) and the housekeeping of old OS disk snapshots against the fake ARM
         $click = { param($b) $b.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent))) }

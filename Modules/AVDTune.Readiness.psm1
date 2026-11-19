@@ -336,7 +336,7 @@ function Invoke-AVDTuneReadiness {
     #>
     [CmdletBinding()]
     param(
-        [Parameter(Mandatory)]$Machine, $Arm, [string]$Token, [string]$NoTokenReason, [string]$GalleryImageId, $Data, $UpdateBlock, [bool]$FSLogixApplies = $false, $FSLogixTest, [string]$Root
+        [Parameter(Mandatory)]$Machine, $Arm, [string]$Token, [string]$NoTokenReason, [string]$GalleryImageId, $Data, $UpdateBlock, [bool]$FSLogixApplies = $false, $FSLogixTest, [string]$Root, $SiteAccess
     )
     if (-not $Data) { $Data = Get-AVDTuneReadinessData }
     $now = & $Machine.Now
@@ -655,6 +655,20 @@ function Invoke-AVDTuneReadiness {
         $links = @(& $Machine.DirList $folder ([string]$Data.Hygiene.PublicDesktopFilter))
         if ($links.Count -gt 0) { Add-Row 'hy.public-shortcut' $hy 'yellow' ('AVDTune shortcut on the Public Desktop (every user of the image gets it): ' + (($links | ForEach-Object { Join-Path $folder $_ }) -join '; ') + '.') 'Delete it from the Public Desktop; AVDTune only puts its shortcut on the desktop of the signed-in administrator (Integrity and updates card).' -Found ($links -join '; ') }
         else { Add-Row 'hy.public-shortcut' $hy 'green' 'No AVDTune shortcut on the Public Desktop.' }
+    }
+
+    Invoke-Check 'hy.sharepoint-access' $hy {
+        # issue #96: a SharePoint site is set for the uploads, but AVDTune's app registration has no role on it (Sites.Selected gives none alone). $SiteAccess is
+        # Get-AVDTuneSiteAccessState of the caller (read with the Sites token of the sign-in); no site = no row; without a sign-in it cannot be checked (info, not open)
+        $state = [string](Get-AVDTuneProp $SiteAccess 'State'); $site = Remove-AVDTuneControlCharacters ([string](Get-AVDTuneProp $SiteAccess 'SiteUrl')) 300
+        if (-not $SiteAccess -or -not $site -or $state -eq 'NoSite') { return }
+        switch ($state) {
+            'Missing' { Add-Row 'hy.sharepoint-access' $hy 'yellow' "The SharePoint site $site is set for the change log, the software list and the environment document, but AVDTune's app registration has no role on it: the uploads would fail (403)." 'Grant the role write on the Environment page (SharePoint site of the environment), or have a SharePoint administrator grant it.' -Found $site }
+            'Granted' { Add-Row 'hy.sharepoint-access' $hy 'green' "AVDTune's app registration holds the role write on $site (granted by AVDTune) and the site can be read." -Found $site }
+            'Readable' { Add-Row 'hy.sharepoint-access' $hy 'info' "The SharePoint site $site can be read with the sign-in. Whether the role allows writing cannot be read (it was not granted by AVDTune); an upload shows it." -Found $site }
+            'NotSignedIn' { Add-Row 'hy.sharepoint-access' $hy 'info' "Not checked: the role on the SharePoint site $site can only be read while signed in.$(if ([string](Get-AVDTuneProp $SiteAccess 'Detail')) { ' ' + (Remove-AVDTuneControlCharacters ([string](Get-AVDTuneProp $SiteAccess 'Detail')) 200) })" -Found $site }
+            default { Add-Row 'hy.sharepoint-access' $hy 'info' "Not checked: the SharePoint site $site could not be read ($(Remove-AVDTuneControlCharacters ([string](Get-AVDTuneProp $SiteAccess 'Detail')) 200))." -Found $site }
+        }
     }
 
     Invoke-Check 'hy.default-hive' $hy {

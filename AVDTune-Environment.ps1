@@ -111,6 +111,7 @@ function Show-EnvPlan($Plan, [string]$Title) {
 }
 
 function Update-EnvView {
+    Update-EnvSpView   # the SharePoint card (#96) does not depend on the FSLogix answers below
     Initialize-EnvFields
     $a = Get-EnvAnswers
     if (-not $a) { $ui.TxtEnvState.Text = (T 'env.needfirstrun'); foreach ($b in $ui.BtnEnvPlan, $ui.BtnEnvUndoPlan, $ui.BtnEnvMasterTest, $ui.BtnEnvMasterApply) { $b.IsEnabled = $false }; return }
@@ -292,4 +293,71 @@ Add-Click $ui.BtnEnvMasterApply {
     foreach ($run in $r) { foreach ($x in @($run.Results)) { Register-StepResult $x } }
     $ui.TxtEnvMaster.Text = (@($r | ForEach-Object { $_.Results } | ForEach-Object { "$($_.Title): $($_.Status)" })) -join '; '
     Start-OverviewRefresh
+}
+
+# ---------------------------------------------------------------- SharePoint site of the environment: the role write for the uploads (issue #96)
+# Logic in Modules\AVDTune.SiteAccess.psm1. The site is the one of the SharePoint card (Protocol page); the holder is AVDTune's own app registration. The grant
+# and its undo need a second, short sign-in (Microsoft's setup app, Sites.FullControl.All): the sign-in window belongs to the window thread, so both run inline behind
+# a task (Invoke-UiTaskInline -Writer: the central lock of #49) after the confirmation of the plan, which names site and role. Test mode: the fake sign-in and its Graph.
+function Get-EnvSpIdentity {
+    # the app registration and its tenant: of the sign-in when signed in, otherwise what the sign-in saved in environment.json
+    $s = $script:StartContext.Session
+    if ($s -and $s.Connected) { return @{ ClientId = [string]$s.ClientId; TenantId = [string]$s.TenantId; Account = [string]$s.Account } }
+    $file = $null; try { $file = Get-AVDTuneEnvironmentFile $script:StateRoot } catch { }
+    $saved = Get-AVDTuneProp $file 'SignIn'
+    @{ ClientId = [string](Get-AVDTuneProp $saved 'ClientId'); TenantId = [string](Get-AVDTuneProp $saved 'TenantId'); Account = '' }
+}
+function Get-EnvSpPlan { $id = Get-EnvSpIdentity; Get-AVDTuneSiteAccessPlan -Root $script:StateRoot -ClientId $id.ClientId -TenantId $id.TenantId }
+function Update-EnvSpView {
+    $plan = Get-EnvSpPlan
+    $undo = $null; try { $undo = Get-AVDTuneSiteAccessUndoPlan -Root $script:StateRoot } catch { }
+    $sealed = Test-AVDTuneSealed -Root $script:StateRoot
+    $ui.TxtEnvSpState.Text = if (-not $plan.SiteUrl) { T 'env.sp.nosite' } elseif (-not $plan.Ready) { T 'env.sp.notready' $plan.SiteUrl } elseif ($plan.Recorded) { T 'env.sp.recorded' $plan.SiteUrl $plan.Role } else { T 'env.sp.open' $plan.SiteUrl $plan.Role }
+    $ui.BtnEnvSpGrant.IsEnabled = [bool]($plan.Ready -and -not $plan.Recorded -and -not $sealed)
+    $ui.BtnEnvSpUndo.IsEnabled = [bool]($undo -and $undo.Count -gt 0 -and -not $sealed)
+}
+function Complete-EnvSpStep([string]$Subject, $Result, [string]$ErrorText) {
+    $failed = [bool]($ErrorText -or $Result.Status -in 'Failed', 'Refused')
+    $text = Remove-PackTuneProtocolSecrets $(if ($ErrorText) { $ErrorText } else { [string]$Result.Message }) 400
+    $ui.TxtEnvSpResult.Text = $text
+    [void](Add-PackTuneProtocolAction -Protocol $script:Protocol -Category 'setup' -Subject $Subject -Result $(if ($failed) { 'failed' } else { 'ok' }) -Note $text)
+    Save-Protocol
+    Update-EnvSpView
+    if (-not $ErrorText) { Show-Toast $text }
+}
+Add-Click $ui.BtnEnvSpGrant {
+    $plan = Get-EnvSpPlan
+    if (-not $plan.Ready) { throw (T 'env.sp.notready' $plan.SiteUrl) }
+    if (-not (Test-AVDTuneWriteAllowed)) { throw (T 'ready.err.readonly') }; Assert-NoOtherWriter
+    # the confirmation names the site, the role and the app registration, and says what the sign-in leaves behind in the tenant
+    if (-not (Confirm-Action (T 'env.sp.ask' $plan.SiteUrl $plan.Role $plan.ClientId $plan.Hash) (T 'env.sp.title'))) { return }
+    $id = Get-EnvSpIdentity
+    $r = $null
+    try {
+        $r = Invoke-UiTaskInline -Kind 'siteaccess-grant' -Title (T 'env.sp.task.grant') -Step (T 'env.sp.task.step') -Writer -Block {
+            $res = Grant-AVDTuneSiteAccess -Auth (Get-StartAuth) -Root $script:StateRoot -ClientId $plan.ClientId -TenantId $plan.TenantId -ConfirmedHash $plan.Hash -LoginHint $id.Account -TempRoot (Get-StartTempRoot) -User (Get-EnvUser) -SnapshotId (Get-EnvGateSnapshot)
+            if ($res.Status -in 'Failed', 'Refused') { throw [string]$res.Message }
+            $res
+        }
+    }
+    catch { Complete-EnvSpStep (T 'env.sp.protocol.grant' $plan.SiteUrl) $null $_.Exception.Message; throw }
+    Complete-EnvSpStep (T 'env.sp.protocol.grant' $plan.SiteUrl) $r ''
+}
+Add-Click $ui.BtnEnvSpUndo {
+    $undo = Get-AVDTuneSiteAccessUndoPlan -Root $script:StateRoot
+    if ($undo.Count -eq 0) { Update-EnvSpView; return }
+    if (-not (Test-AVDTuneWriteAllowed)) { throw (T 'ready.err.readonly') }; Assert-NoOtherWriter
+    $lines = @($undo.Steps | Where-Object Action -eq 'Delete' | ForEach-Object { $_.Title }) -join "`n"
+    if (-not (Confirm-Action (T 'env.sp.undo.ask' $lines $undo.Hash) (T 'env.sp.title'))) { return }
+    $id = Get-EnvSpIdentity
+    $r = $null
+    try {
+        $r = Invoke-UiTaskInline -Kind 'siteaccess-undo' -Title (T 'env.sp.task.undo') -Step (T 'env.sp.task.step') -Writer -Block {
+            $res = Revoke-AVDTuneSiteAccess -Auth (Get-StartAuth) -Root $script:StateRoot -TenantId $id.TenantId -ConfirmedHash $undo.Hash -LoginHint $id.Account -TempRoot (Get-StartTempRoot) -User (Get-EnvUser) -SnapshotId (Get-EnvGateSnapshot)
+            if ($res.Status -in 'Failed', 'Refused') { throw [string]$res.Message }
+            $res
+        }
+    }
+    catch { Complete-EnvSpStep (T 'env.sp.protocol.undo') $null $_.Exception.Message; throw }
+    Complete-EnvSpStep (T 'env.sp.protocol.undo') $r ''
 }

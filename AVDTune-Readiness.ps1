@@ -60,6 +60,19 @@ function Get-ReadyToken {
     if (-not $s -or -not $s.Connected) { return @{ Token = ''; Reason = (T 'ready.err.nosignin') } }
     try { @{ Token = (Get-AVDTuneAccessToken -Session $s -Audience Arm); Reason = '' } } catch { @{ Token = ''; Reason = $_.Exception.Message } }
 }
+function Get-ReadySiteArgs {
+    # issue #96: what the analysis needs to read the role on the SharePoint site of the environment (only when a site is set): the Sites token of the sign-in for this
+    # one run (in memory, handed to the job, never kept) or the reason why there is none
+    $site = [string](Get-AVDTuneSpSettings -Root $script:StateRoot).SiteUrl
+    $a = @{ Site = $site; ClientId = ''; Token = ''; Reason = '' }
+    if (-not $site) { return $a }
+    $s = $script:StartContext.Session
+    if (-not $s -or -not $s.Connected) { $a.Reason = T 'ready.err.nosignin'; return $a }
+    $a.ClientId = [string]$s.ClientId
+    if ($script:TestMode) { return $a }
+    try { $a.Token = [string](Get-AVDTuneAccessToken -Session $s -Audience Sites) } catch { $a.Reason = $_.Exception.Message }
+    $a
+}
 function Get-ReadyKind {
     $had = @(Get-AVDTuneRun -Root $script:StateRoot | Where-Object { $_.PSObject.Properties['Kind'] -and $_.Kind -eq 'Erstanalyse' }).Count
     if ($had -gt 0) { 'Healthcheck' } else { 'Erstanalyse' }
@@ -83,13 +96,19 @@ function Start-ReadyJob([string]$Kind, [string]$FixId) {
     $tok = Get-ReadyToken
     $gate = Get-AVDTuneWriteGate
     $gallery = (Get-ReadySettings).GalleryImageId
+    $sp = $(if ($Kind -ne 'Fix') { Get-ReadySiteArgs } else { @{ Site = ''; ClientId = ''; Token = ''; Reason = '' } })
     if ($script:TestMode) {
         # Test mode runs inline on the UI thread: the fakes are closures of this runspace, and running them on a second thread while this one executes
         # script corrupts the engine state of the runspace. The real adapters have no such limit and run in the background.
         $res = $null; $err = ''
         try {
             $res = if ($Kind -eq 'Fix') { Invoke-AVDTuneReadinessFix -Machine $script:Machine -Root $script:StateRoot -FixId $FixId -User ([string]$env:USERNAME) -SnapshotId ([string]$gate.SnapshotId) }
-            else { Invoke-AVDTuneReadiness -Machine $script:Machine -Arm $script:ReadyFakeArm -Token $tok.Token -NoTokenReason $tok.Reason -GalleryImageId $gallery -FSLogixApplies (Test-FslApplies) -FSLogixTest (Get-AVDTuneFSLogixTestRecord -Root $script:StateRoot) -Root $script:StateRoot }
+            else {
+                # the fake Graph of the SharePoint card stands in for the site (its transport, no network)
+                $siteAccess = $null
+                if ($sp.Site) { $spCtx = $(if ($sp.ClientId -and $script:SpFake) { New-AVDTuneSpContext -Token $script:SpFake.Token -SiteUrl $sp.Site -Transport $script:SpFake.Transport -Sleep $script:SpFake.Sleep } else { $null }); $siteAccess = Get-AVDTuneSiteAccessState -Root $script:StateRoot -Context $spCtx -ClientId $sp.ClientId -NoTokenReason $sp.Reason }
+                Invoke-AVDTuneReadiness -Machine $script:Machine -Arm $script:ReadyFakeArm -Token $tok.Token -NoTokenReason $tok.Reason -GalleryImageId $gallery -FSLogixApplies (Test-FslApplies) -FSLogixTest (Get-AVDTuneFSLogixTestRecord -Root $script:StateRoot) -Root $script:StateRoot -SiteAccess $siteAccess
+            }
         }
         catch { $err = $_.Exception.Message }
         $script:ReadyJob = @{ Inline = $true; Result = $res; Err = $err; Kind = $Kind; FixId = $FixId; Task = (New-ReadyTask $Kind $FixId) }
@@ -99,7 +118,7 @@ function Start-ReadyJob([string]$Kind, [string]$FixId) {
     }
     $ps = New-AVDTunePowerShell
     [void]$ps.AddScript({
-            param($AppRoot, $Root, $Kind, $FixId, $Token, $Reason, $Gallery, $Gate, $User, $FslApplies, $FslTest)
+            param($AppRoot, $Root, $Kind, $FixId, $Token, $Reason, $Gallery, $Gate, $User, $FslApplies, $FslTest, $SpSite, $SpToken, $SpClient, $SpReason)
             $ErrorActionPreference = 'Stop'
             Import-Module (Join-Path $AppRoot 'Modules\AVDTune.psm1') -Force
             foreach ($part in 'Snapshot', 'UpdateBlock', 'Readiness', 'FSLogix') { Import-Module (Join-Path $AppRoot "Modules\AVDTune.$part.psm1") -Force }
@@ -108,8 +127,18 @@ function Start-ReadyJob([string]$Kind, [string]$FixId) {
                 if ($Gate) { Open-AVDTuneWriteGate -SnapshotId $Gate.SnapshotId -ConfirmedBy $Gate.ConfirmedBy -SnapshotCreated ([string](Get-AVDTuneProp $Gate 'SnapshotCreated')) }
                 Invoke-AVDTuneReadinessFix -Machine $m -Root $Root -FixId $FixId -User $User -SnapshotId $Gate.SnapshotId
             }
-            else { Invoke-AVDTuneReadiness -Machine $m -Arm (New-AVDTuneArmAdapter) -Token $Token -NoTokenReason $Reason -GalleryImageId $Gallery -FSLogixApplies $FslApplies -FSLogixTest $FslTest -Root $Root }
-        }).AddArgument($script:AppRoot).AddArgument($script:StateRoot).AddArgument($Kind).AddArgument($FixId).AddArgument($tok.Token).AddArgument($tok.Reason).AddArgument($gallery).AddArgument($gate).AddArgument([string]$env:USERNAME).AddArgument((Test-FslApplies)).AddArgument((Get-AVDTuneFSLogixTestRecord -Root $script:StateRoot))
+            else {
+                # issue #96: the role on the SharePoint site, read with the Sites token (one GET to Microsoft Graph, short waits); the token is dropped right after
+                $siteAccess = $null
+                if ($SpSite) {
+                    foreach ($part in 'SharePoint', 'SiteAccess') { Import-Module (Join-Path $AppRoot "Modules\AVDTune.$part.psm1") -Force }
+                    $spCtx = $(if ($SpToken) { New-AVDTuneSpContext -Token $SpToken -SiteUrl $SpSite -MaxRetries 1 -MaxWaitSeconds 10 } else { $null })
+                    try { $siteAccess = Get-AVDTuneSiteAccessState -Root $Root -Context $spCtx -ClientId $SpClient -NoTokenReason $SpReason } finally { if ($spCtx) { Close-AVDTuneSpContext $spCtx }; $SpToken = $null }
+                }
+                Invoke-AVDTuneReadiness -Machine $m -Arm (New-AVDTuneArmAdapter) -Token $Token -NoTokenReason $Reason -GalleryImageId $Gallery -FSLogixApplies $FslApplies -FSLogixTest $FslTest -Root $Root -SiteAccess $siteAccess
+            }
+        }).AddArgument($script:AppRoot).AddArgument($script:StateRoot).AddArgument($Kind).AddArgument($FixId).AddArgument($tok.Token).AddArgument($tok.Reason).AddArgument($gallery).AddArgument($gate).AddArgument([string]$env:USERNAME).AddArgument((Test-FslApplies)).AddArgument((Get-AVDTuneFSLogixTestRecord -Root $script:StateRoot)).AddArgument([string]$sp.Site).AddArgument([string]$sp.Token).AddArgument([string]$sp.ClientId).AddArgument([string]$sp.Reason)
+    $sp.Token = $null
     $script:ReadyJob = @{ PS = $ps; Handle = $ps.BeginInvoke(); Kind = $Kind; FixId = $FixId; Task = (New-ReadyTask $Kind $FixId) }
     Set-ReadyBusy $true
     Update-ReadyView

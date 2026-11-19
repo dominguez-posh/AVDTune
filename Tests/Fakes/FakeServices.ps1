@@ -40,7 +40,7 @@ function New-AVDTuneFakeAuth {
         Consented = @{ 'https://graph.microsoft.com' = @('Group.Read.All', 'DeviceManagementApps.Read.All', 'Sites.Selected'); 'https://management.azure.com' = @('user_impersonation') }
         ExtraScopes = @{}; Domains = @{ 'contoso.example' = $script:FakeTenant }; DiscoveryOffline = $false; DiscoveryIssuer = ''
         AppForbidden = $false; GrantForbidden = $false; GraphOffline = $false; ArmSpMissing = $false; SpCreateFailures = 0; AssignForbidden = $false; NoCliGrant = $false; CliOrgGrant = $false
-        Sites = @{ 'contoso.sharepoint.com:/sites/avd-environment' = 'contoso.sharepoint.com,0a0a0a0a-1111-2222-3333-444444444444,0b0b0b0b-5555-6666-7777-888888888888' }; SitePermissions = (New-Object System.Collections.ArrayList); SiteSetupNoConsent = $false; SiteGrantForbidden = $false; SiteReadBackOther = $false
+        Sites = @{ 'contoso.sharepoint.com:/sites/avd-environment' = 'contoso.sharepoint.com,aaaaaaaa-1111-2222-3333-444444444444,bbbbbbbb-5555-6666-7777-888888888888' }; SitePermissions = (New-Object System.Collections.ArrayList); SiteSetupNoConsent = $false; SiteGrantForbidden = $false; SiteReadBackOther = $false
         Apps = (New-Object System.Collections.ArrayList); Grants = (New-Object System.Collections.ArrayList); ServicePrincipals = (New-Object System.Collections.ArrayList); NextId = 0 }
     foreach ($k in $Seed.Keys) { $store[$k] = $Seed[$k] }
     [void]$store.ServicePrincipals.Add($graphSp)

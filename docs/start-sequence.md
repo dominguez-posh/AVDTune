@@ -32,7 +32,7 @@ AVDTune has its own app registration `AVDTune` (not PackTune's), created at the 
 | Token | Resource | Delegated permissions |
 |---|---|---|
 | Graph | Microsoft Graph | `Group.Read.All`, `DeviceManagementApps.Read.All` |
-| Sites | Microsoft Graph | `Sites.Selected` (plus the one-time site grant as in PackTune) |
+| Sites | Microsoft Graph | `Sites.Selected` (plus the one-time grant of the role write on the site: Environment page, docs/environment-wizard.md, issue 96) |
 | Arm | Azure Service Management (`797f4846-ba00-4fd7-ba43-dac1f8f63013`) | `user_impersonation` |
 | Storage | Azure Storage (`e406a681-f3d4-42a8-90b6-c2b029497af1`), optional | `user_impersonation` (issue 18; NTFS rows of the FSLogix check, see `docs\fslogix.md`; a registration without it signs in without this token) |
 
