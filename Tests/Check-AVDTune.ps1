@@ -411,6 +411,18 @@ try {
     $runFile107 = Add-AVDTuneRun -Root $r107 -Run $run107
     $runText107 = [IO.File]::ReadAllText($runFile107)
     Test-Check 'run record (#107): messages and nested notes are cleaned, an undo state (Before) and the object of the caller stay' ($runText107 -notmatch 'Geheim[56]x' -and $runText107 -match 'Password=KeepMe1' -and $run107.Id -and $run107.Results[0].Message -like '*Geheim5x') $runText107
+    # #107 N-3: an empty name and names that differ only in case (PowerShell 5.1 ConvertFrom-Json fails on both); a result whose copy fails still gives a record
+    $caseKeys = New-Object Collections.Hashtable; $caseKeys['a'] = 'lower'; $caseKeys['A'] = 'upper'; $caseKeys[''] = 'empty'
+    $runN3 = [pscustomobject][ordered]@{ Id = 'n3-keys'; Plan = 'p'; Results = @([pscustomobject]@{ Id = 'a.b'; Status = 'Changed'; Message = 'tool.exe --password Geheim7x'; After = $caseKeys }) }
+    $eN3 = $null; $fN3 = $null; try { $fN3 = Add-AVDTuneRun -Root $r107 -Run $runN3 } catch { $eN3 = $_.Exception.Message }
+    $tN3 = if ($fN3) { [IO.File]::ReadAllText($fN3) } else { '' }
+    Test-Check 'run record (#107 N-3): an empty name and names that differ only in case are written as they are, the message is cleaned' (-not $eN3 -and $tN3 -match '"a":\s*"lower"' -and $tN3 -match '"A":\s*"upper"' -and $tN3 -match '"":\s*"empty"' -and $tN3 -notmatch 'Geheim7x') "$eN3 $tN3"
+    $clash = New-Object Collections.Hashtable; $clash[1] = 'number'; $clash['1'] = 'text'   # two keys that are the same text: the copy cannot keep both
+    $boom = [pscustomobject]@{ Id = 'a.c'; Status = 'Failed'; Message = 'Kennwort: Geheim8x'; State = $clash }
+    $runBoom = [pscustomobject][ordered]@{ Id = 'n3-boom'; Plan = 'p'; Results = @($boom) }
+    $eB = $null; $fB = $null; try { $fB = Add-AVDTuneRun -Root $r107 -Run $runBoom } catch { $eB = $_.Exception.Message }
+    $tB = if ($fB) { [IO.File]::ReadAllText($fB) } else { [string](Get-Content -LiteralPath (Join-Path $r107 'runs\n3-boom.json') -Raw -ErrorAction SilentlyContinue) }
+    Test-Check 'run record (#107 N-3): when the copy fails the record is still written (serialized before the file exists), with the free texts removed and a note' (-not $eB -and $tB -match '"Id":\s*"n3-boom"' -and $tB -match '"Status":\s*"Failed"' -and $tB -match 'free texts removed' -and $tB -notmatch 'Geheim8x') "$eB | $tB"
     Test-Check 'html export encodes all text' ($html -like '*&lt;script&gt;alert(1)&lt;/script&gt;*' -and $html -notlike '*<script>*' -and $html -like '*a | b &amp; c*') $null
     Test-Check 'an empty version exports "No entries."' ((ConvertTo-AVDTuneChangeLogDocument -Root $tmp -Version '2030.01.001') -like '*No entries.*') $null
     $noFolder = $null; try { [void](Export-AVDTuneChangeLog -Root $tmp -Version '2026.11.003' -Path (Join-Path $tmp 'out\log.html')) } catch { $noFolder = $_.Exception.Message }

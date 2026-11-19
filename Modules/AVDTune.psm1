@@ -1938,9 +1938,9 @@ function Add-AVDTuneRun {
     if (-not $id) { $id = (Get-Date).ToString('yyyyMMdd-HHmmss', [Globalization.CultureInfo]::InvariantCulture) + '-' + [guid]::NewGuid().ToString('N').Substring(0, 4); $Run.Id = $id }
     if ($id -notmatch '^[A-Za-z0-9._-]{1,60}$') { throw "Invalid run id '$id'." }
     $path = Join-Path $folder "$id.json"
+    $bytes = (New-Object Text.UTF8Encoding $false).GetBytes((ConvertTo-AVDTuneRunJson $Run))   # free texts through the secret table (#107); serialized before the file exists (N-3)
     $stream = [IO.File]::Open($path, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write)   # throws when the record exists
     try {
-        $bytes = (New-Object Text.UTF8Encoding $false).GetBytes((ConvertTo-AVDTuneRunJson $Run))   # free texts through the secret table (#107)
         $stream.Write($bytes, 0, $bytes.Length)
     }
     finally { $stream.Dispose() }
@@ -2542,24 +2542,50 @@ function Protect-AVDTuneSecretText {
 # for undo (Before, After, Previous ...) stay as they are.
 $script:RunTextFields = @('Message', 'Detail', 'Details', 'Error', 'Errors', 'Note', 'Notes', 'Output', 'Reason', 'Text', 'Summary', 'Problem', 'Problems', 'Warning', 'Warnings', 'Hint', 'Log')
 
-function Protect-AVDTuneRunValue($Value, [bool]$Text) {
-    # The value with every string under a free text field cleaned; walks objects and arrays (a copy from ConvertFrom-Json)
+function Copy-AVDTuneRunValue($Value, [bool]$Text, [int]$Depth = 0) {
+    <#
+        A copy of a value of a run record for ConvertTo-Json (#107 N-3), walked on the object itself (no ConvertFrom-Json, which fails in PowerShell 5.1 on an empty
+        name or names that differ only in case): strings under a free text field pass the secret table, dictionaries keep every key as text (also an empty one and
+        keys that differ only in case), other objects become dictionaries of their properties; from depth 9 on a value is its text. Errors are not swallowed: the caller
+        then writes the record with the free texts removed.
+    #>
     if ($null -eq $Value) { return $null }
     if ($Value -is [string]) { if ($Text) { return (Protect-AVDTuneSecretText $Value) }; return $Value }
     if ($Value -is [ValueType]) { return $Value }
-    if ($Value -is [System.Collections.IList]) { $out = New-Object System.Collections.ArrayList; foreach ($i in $Value) { [void]$out.Add((Protect-AVDTuneRunValue $i $Text)) }; return ,$out.ToArray() }
-    if ($Value -is [pscustomobject]) {
-        foreach ($p in @($Value.PSObject.Properties)) { $p.Value = Protect-AVDTuneRunValue $p.Value ($Text -or ($script:RunTextFields -contains $p.Name)) }
-        return $Value
+    if ($Depth -ge 9) { $s = [string]$Value; if ($Text) { return (Protect-AVDTuneSecretText $s) }; return $s }
+    if ($Value -is [Collections.IDictionary]) {
+        $d = New-Object Collections.Specialized.OrderedDictionary   # case sensitive
+        foreach ($k in @($Value.Keys)) { $d.Add([string]$k, (Copy-AVDTuneRunValue $Value[$k] ($Text -or ($script:RunTextFields -contains [string]$k)) ($Depth + 1))) }
+        return $d
     }
-    $Value
+    if ($Value -is [Collections.IEnumerable]) {
+        $out = New-Object Collections.ArrayList
+        foreach ($i in $Value) { [void]$out.Add((Copy-AVDTuneRunValue $i $Text ($Depth + 1))) }
+        return , $out.ToArray()
+    }
+    $d = New-Object Collections.Specialized.OrderedDictionary
+    foreach ($p in @($Value.PSObject.Properties)) { $d.Add($p.Name, (Copy-AVDTuneRunValue $p.Value ($Text -or ($script:RunTextFields -contains $p.Name)) ($Depth + 1))) }
+    $d
 }
 
 function ConvertTo-AVDTuneRunJson {
-    <# Pure. The JSON of a run record with the free text fields cleaned by the secret table (#107); the object of the caller is not changed. #>
+    <#
+        Pure. The JSON of a run record with the free text fields cleaned by the secret table (#107); the object of the caller is not changed. When the copy or the JSON
+        fails (#107 N-3), the record still comes: the plain fields of the run and of every result, every free text '(removed)', and a note why.
+    #>
     param([Parameter(Mandatory)]$Run)
-    $copy = ($Run | ConvertTo-Json -Depth 8) | ConvertFrom-Json
-    (Protect-AVDTuneRunValue $copy $false) | ConvertTo-Json -Depth 8
+    try { return ((Copy-AVDTuneRunValue $Run $false) | ConvertTo-Json -Depth 10) }
+    catch { $why = $_.Exception.Message }
+    $plain = { param($o, $n) try { $v = if ($o -is [Collections.IDictionary]) { $o[$n] } else { Get-AVDTuneProp $o $n }; if ($null -eq $v -or $v -is [ValueType]) { $v } else { Protect-AVDTuneSecretText ([string]$v) } } catch { $null } }
+    $rs = @(); try { $rs = @(if ($Run -is [Collections.IDictionary]) { $Run['Results'] } else { Get-AVDTuneProp $Run 'Results' }) } catch { }
+    $results = @(foreach ($r in $rs) {
+            if ($null -eq $r) { continue }
+            [ordered]@{ Id = (& $plain $r 'Id'); Section = (& $plain $r 'Section'); Title = (& $plain $r 'Title'); Mode = (& $plain $r 'Mode'); Status = (& $plain $r 'Status'); Message = '(removed)' }
+        })
+    $out = [ordered]@{ RecordNote = "The record could not be copied in full ($(Protect-AVDTuneSecretText ([string]$why))): free texts removed." }
+    foreach ($n in 'Id', 'Plan', 'Kind', 'Started', 'Ended', 'User', 'SnapshotId', 'WhatIf', 'ImageVersion', 'Reboot') { $out[$n] = & $plain $Run $n }
+    $out.Results = $results
+    $out | ConvertTo-Json -Depth 4
 }
 
 #endregion
@@ -2946,7 +2972,7 @@ function Get-AVDTuneOverview {
 
 #endregion
 
-Export-ModuleMember -Function ConvertTo-AVDTuneMarkdownText, Read-AVDTuneResponseText, ConvertTo-AVDTuneXmlDocument, Test-AVDTuneHttpsHost, Invoke-AVDTuneHttpsGet, Write-AVDTuneExportFile, Invoke-AVDTuneSecretRules, Protect-AVDTuneSecretText, ConvertTo-AVDTuneRunJson, Test-AVDTunePrivateIp, Get-AVDTuneBenchUserLeftovers, Remove-AVDTuneBenchUserLeftover, Move-AVDTuneFileReplace, Get-AVDTuneDcFromNtDomain, Get-AVDTuneSystemFolder, Get-AVDTuneSystemModulePath, Set-AVDTuneSafeModulePath, Test-AVDTuneModulePathStable, Assert-AVDTuneModulePathStable, Get-AVDTuneModulePathProblems, New-AVDTunePowerShell, New-AVDTuneRunspacePool, Get-AVDTuneChocolateyRoot, Get-AVDTuneChildTool, Initialize-AVDTuneToolTemp, Get-AVDTuneChildEnvironment, Get-AVDTuneProfilePath, Get-AVDTuneHklmValue, New-AVDTuneChildStartInfo, Invoke-AVDTuneChildProcess, Invoke-AVDTuneProgram, Open-AVDTuneSystemProgram, New-AVDTuneDownloadFolder, New-AVDTuneOwnFolder, Test-AVDTuneOwnFolder, New-AVDTuneAdminFile, Set-AVDTuneProcessTemp, Initialize-AVDTuneTempParent, Test-AVDTuneWindowsSignature, Test-AVDTuneSystemProgramPath, Get-AVDTuneProp, Get-AVDTuneWebResponse, Test-AVDTuneElevated, Get-AVDTuneRoot, Test-AVDTuneDefaultRoot, Test-AVDTuneTestMode, Resolve-AVDTuneTestScript, Get-AVDTuneLongPath, Get-AVDTuneTestModeRefusal, Confirm-AVDTuneAction, ConvertTo-AVDTuneArgument, New-AVDTuneMachine, Invoke-AVDTuneMachine, Invoke-AVDTuneDefaultHiveUnload, Remove-AVDTuneTreeSafe,
+Export-ModuleMember -Function Copy-AVDTuneRunValue, ConvertTo-AVDTuneMarkdownText, Read-AVDTuneResponseText, ConvertTo-AVDTuneXmlDocument, Test-AVDTuneHttpsHost, Invoke-AVDTuneHttpsGet, Write-AVDTuneExportFile, Invoke-AVDTuneSecretRules, Protect-AVDTuneSecretText, ConvertTo-AVDTuneRunJson, Test-AVDTunePrivateIp, Get-AVDTuneBenchUserLeftovers, Remove-AVDTuneBenchUserLeftover, Move-AVDTuneFileReplace, Get-AVDTuneDcFromNtDomain, Get-AVDTuneSystemFolder, Get-AVDTuneSystemModulePath, Set-AVDTuneSafeModulePath, Test-AVDTuneModulePathStable, Assert-AVDTuneModulePathStable, Get-AVDTuneModulePathProblems, New-AVDTunePowerShell, New-AVDTuneRunspacePool, Get-AVDTuneChocolateyRoot, Get-AVDTuneChildTool, Initialize-AVDTuneToolTemp, Get-AVDTuneChildEnvironment, Get-AVDTuneProfilePath, Get-AVDTuneHklmValue, New-AVDTuneChildStartInfo, Invoke-AVDTuneChildProcess, Invoke-AVDTuneProgram, Open-AVDTuneSystemProgram, New-AVDTuneDownloadFolder, New-AVDTuneOwnFolder, Test-AVDTuneOwnFolder, New-AVDTuneAdminFile, Set-AVDTuneProcessTemp, Initialize-AVDTuneTempParent, Test-AVDTuneWindowsSignature, Test-AVDTuneSystemProgramPath, Get-AVDTuneProp, Get-AVDTuneWebResponse, Test-AVDTuneElevated, Get-AVDTuneRoot, Test-AVDTuneDefaultRoot, Test-AVDTuneTestMode, Resolve-AVDTuneTestScript, Get-AVDTuneLongPath, Get-AVDTuneTestModeRefusal, Confirm-AVDTuneAction, ConvertTo-AVDTuneArgument, New-AVDTuneMachine, Invoke-AVDTuneMachine, Invoke-AVDTuneDefaultHiveUnload, Remove-AVDTuneTreeSafe,
     New-AVDTuneStateSecurity, Initialize-AVDTuneState, Read-AVDTuneAclInfo, Get-AVDTuneStateSecurityProblems, Move-AVDTuneStateToQuarantine, New-AVDTuneProtectedFolder, Assert-AVDTuneStateSecurity, Get-AVDTuneStateSecurityReport, Get-AVDTuneState, Set-AVDTuneState, Test-AVDTuneImageVersion, Get-AVDTuneNextImageVersion, Start-AVDTuneImageVersion,
     Add-AVDTuneRun, Get-AVDTuneRun, Remove-AVDTuneOldRuns, Get-AVDTuneEnvInterrupted, Get-AVDTuneEnvHealthRow, Get-AVDTuneLastChange, Get-AVDTuneChangeTimes, Get-AVDTuneChangeMarker, Invoke-AVDTuneStateLock, Get-AVDTuneChangeStopError, Test-AVDTuneSealed, Assert-AVDTuneNotSealed, Test-AVDTuneChangeInProgress, Assert-AVDTuneNoForeignChange, Resolve-AVDTuneStaleChange, Start-AVDTuneChange, Stop-AVDTuneChange, Get-AVDTuneSnapshotClockBufferMinutes, ConvertTo-AVDTuneUtc, Get-AVDTuneSnapshotWindow, Test-AVDTuneSnapshotInWindow,New-AVDTuneStep, Invoke-AVDTuneStep, New-AVDTuneStepFromData, Get-AVDTuneStepCatalog, Invoke-AVDTune,
     Add-AVDTuneChangeLogEntry, Get-AVDTuneChangeLog, Get-AVDTuneChangeLogVersions, ConvertTo-AVDTuneChangeLogDocument, Export-AVDTuneChangeLog,
