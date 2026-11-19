@@ -336,7 +336,7 @@ function Get-AVDTuneOfficeRows {
     }
     $p = $s.Policy
     if ([string]$p.hideupdatenotifications -eq '1' -and [string]$p.hideenabledisableupdates -eq '1') { & $add (New-AVDTuneOfficeRow 'office.updateui' 'Update notifications and the update button' 'green' 'Hidden for users (policy).' '' $script:Src.Avd $true) }
-    else { & $add (New-AVDTuneOfficeRow 'office.updateui' 'Update notifications and the update button' 'yellow' 'Users still see the Office update notifications and the "Update options" button.' 'Press "Set update policies" (the two values of the AVD article).' $script:Src.Avd $true) }
+    else { & $add (New-AVDTuneOfficeRow 'office.updateui' 'Update notifications and the update button' 'yellow' 'Users still see the Office update notifications and the "Update options" button.' ($(if ([string]$p.hideupdatenotifications -ne '1') { 'Press "Set update policies" (hideupdatenotifications of the AVD article).' } else { '' }) + $(if ([string]$p.hideenabledisableupdates -ne '1') { ' Turn the update block on: it sets hideenabledisableupdates (one owner, #101).' } else { '' })) $script:Src.Avd $true) }
     & $add (New-AVDTuneOfficeRow 'office.multisession' 'Windows edition' 'info' $(if ($s.MultiSession) { 'Windows multi-session (EditionID ServerRdsh).' } else { 'Not Windows multi-session: the AVD article rules apply to multi-session hosts.' }) '' $script:Src.Avd $false 'ServerRdsh as the edition id of multi-session is from experience, not from Learn.')
     @($rows)
 }
@@ -573,11 +573,14 @@ function Invoke-AVDTuneOfficeUndo {
 
 #region update UI policies (registry steps)
 
+# The values the Office page owns (audit #101): hideenabledisableupdates belongs to the update block (updateblock.office-hide), which sets it in its end state; two owners undid each other.
+$script:PolicyNames = @('hideupdatenotifications')
+
 function Get-AVDTuneOfficePolicySteps {
-    # The two HKLM values of the AVD article that hide the update notifications and the update button; steps with Test/Apply/Undo (Undo puts back what was found, with its registry type).
-    # $Previous: name -> @{ Value; Type } (Type DWord, QWord or String).
-    param([hashtable]$Previous = @{})
-    foreach ($n in 'hideupdatenotifications', 'hideenabledisableupdates') {
+    # The HKLM value of the AVD article that the Office page owns (hideupdatenotifications; the update button value is the update block's, #101); steps with Test/Apply/Undo
+    # (Undo puts back what was found, with its registry type). $Previous: name -> @{ Value; Type } (Type DWord, QWord or String). -Names: only these (the undo of what was changed).
+    param([hashtable]$Previous = @{}, [string[]]$Names = $script:PolicyNames)
+    foreach ($n in @($script:PolicyNames | Where-Object { $_ -in $Names })) {
         $name = $n; $prev = $Previous[$name]; $key = $script:PolicyKey; $src = $script:Src.Avd   # $script: does not resolve inside a closure
         $test = { param($m) $v = & $m.RegGet $key $name; @{ Compliant = ($null -ne $v -and [string]$v -eq '1'); State = $v } }.GetNewClosure()
         $apply = { param($m) & $m.RegSet $key $name 1 'DWord' }.GetNewClosure()
@@ -618,22 +621,11 @@ function Get-AVDTunePolicyPrevious {
     if ($type -ceq 'DWord') { $v = ConvertTo-AVDTunePolicyDword $v }
     @{ Value = $v; Type = $type }
 }
-function Set-AVDTuneOfficePolicies {
-    [CmdletBinding()]
-    param([Parameter(Mandatory)]$Machine, [string]$Root = (Get-AVDTuneRoot), [string]$User, [string]$SnapshotId, [switch]$WhatIf)
-    $prev = @{}; foreach ($n in 'hideupdatenotifications', 'hideenabledisableupdates') { $p = Get-AVDTunePolicyPrevious -Machine $Machine -Name $n; if ($null -ne $p) { $prev[$n] = $p } }
-    $undoPath = Join-Path $Root 'config\office-policies-undo.json'
-    if (-not $WhatIf -and (Test-AVDTuneWriteAllowed) -and -not (Test-Path -LiteralPath $undoPath)) { Write-AVDTuneFile $undoPath ([ordered]@{ At = (& $Machine.Now).ToString('o'); Previous = $prev } | ConvertTo-Json -Depth 4) }
-    $steps = @(Get-AVDTuneOfficePolicySteps -Previous $prev)
-    Invoke-AVDTune -Plan ([pscustomobject]@{ Name = 'Office policies'; Steps = @($steps | ForEach-Object { $_.Id }) }) -Catalog $steps -Machine $Machine -Root $Root -User $User -SnapshotId $SnapshotId -WhatIf:$WhatIf
-}
-
-function Undo-AVDTuneOfficePolicies {
-    [CmdletBinding()]
-    param([Parameter(Mandatory)]$Machine, [string]$Root = (Get-AVDTuneRoot), [string]$User, [string]$SnapshotId, [switch]$WhatIf)
-    $undoPath = Join-Path $Root 'config\office-policies-undo.json'
-    $u = Read-AVDTuneJson $undoPath
-    if (-not $u) { throw 'There is nothing to undo: no Office policy change was recorded.' }
+function Read-AVDTuneOfficePolicyUndo {
+    <# config\office-policies-undo.json typed: Names (what the Office page changed) and Previous (name -> @{ Value; Type }). Missing file: empty. An older record without Names names every value in it and every value that was absent (#101). #>
+    param([Parameter(Mandatory)][string]$Root)
+    $u = Read-AVDTuneJson (Join-Path $Root 'config\office-policies-undo.json')
+    if (-not $u) { return [pscustomobject]@{ Names = @(); Previous = @{} } }
     # typed read: a record that is not exactly what Set wrote changes nothing ("1" is not 1, an unknown type is not put back)
     $prev = @{}; $pp = Get-AVDTuneProp $u 'Previous'
     if ($null -ne $pp) {
@@ -648,6 +640,41 @@ function Undo-AVDTuneOfficePolicies {
             $prev[$p.Name] = @{ Value = $val; Type = $type }
         }
     }
+    $nm = Get-AVDTuneProp $u 'Names'
+    if ($null -eq $nm) { $names = @('hideupdatenotifications', 'hideenabledisableupdates') }
+    else { $names = @(foreach ($x in @($nm)) { if ($x -isnot [string] -or $x -cnotin 'hideupdatenotifications', 'hideenabledisableupdates') { throw 'The undo record of the Office policies (config\office-policies-undo.json) names an unknown value. Nothing was changed.' }; $x }) }
+    [pscustomobject]@{ Names = @($names); Previous = $prev }
+}
+function Set-AVDTuneOfficePolicies {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)]$Machine, [string]$Root = (Get-AVDTuneRoot), [string]$User, [string]$SnapshotId, [switch]$WhatIf)
+    $prev = @{}; foreach ($n in $script:PolicyNames) { $p = Get-AVDTunePolicyPrevious -Machine $Machine -Name $n; if ($null -ne $p) { $prev[$n] = $p } }
+    $undoPath = Join-Path $Root 'config\office-policies-undo.json'
+    if (-not $WhatIf -and (Test-AVDTuneWriteAllowed)) {
+        Assert-AVDTuneNotSealed -Root $Root
+        # #101: recorded only for the values that change (already 1 is nothing to put back), the first value found per name stays
+        $old = Read-AVDTuneOfficePolicyUndo -Root $Root
+        $names = @(@($old.Names) | Where-Object { $_ }); $keep = $old.Previous
+        foreach ($n in $script:PolicyNames) {
+            if ($n -in $names) { continue }
+            $c = $prev[$n]; if ($c -and [string]$c.Type -ceq 'DWord' -and [int]$c.Value -eq 1) { continue }
+            $names += $n; if ($null -ne $c) { $keep[$n] = $c }
+        }
+        if ($names.Count -gt @($old.Names).Count) { Write-AVDTuneFile $undoPath ([ordered]@{ At = (& $Machine.Now).ToString('o'); Names = @($names); Previous = $keep } | ConvertTo-Json -Depth 4) }
+    }
+    $steps = @(Get-AVDTuneOfficePolicySteps -Previous $prev)
+    Invoke-AVDTune -Plan ([pscustomobject]@{ Name = 'Office policies'; Steps = @($steps | ForEach-Object { $_.Id }) }) -Catalog $steps -Machine $Machine -Root $Root -User $User -SnapshotId $SnapshotId -WhatIf:$WhatIf
+}
+
+function Undo-AVDTuneOfficePolicies {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)]$Machine, [string]$Root = (Get-AVDTuneRoot), [string]$User, [string]$SnapshotId, [switch]$WhatIf)
+    $undoPath = Join-Path $Root 'config\office-policies-undo.json'
+    if (-not (Test-Path -LiteralPath $undoPath)) { throw 'There is nothing to undo: no Office policy change was recorded.' }
+    $rec = Read-AVDTuneOfficePolicyUndo -Root $Root
+    $prev = $rec.Previous
+    # #101: only what the Office page changed; a value that was already 1 is done (an older record without Names: every owned name whose value was not 1)
+    $names = @(@($rec.Names) | Where-Object { $_ -in $script:PolicyNames -and -not ($prev[$_] -and [string]$prev[$_].Type -ceq 'DWord' -and [int]$prev[$_].Value -eq 1) })
     $changeOwner = $false
     if (-not $WhatIf) {
         if (-not (Test-AVDTuneWriteAllowed)) { throw 'The snapshot gate is not confirmed: AVDTune is read only until a snapshot newer than its last change is confirmed on the Overview.' }
@@ -655,7 +682,7 @@ function Undo-AVDTuneOfficePolicies {
     }
     try {
         if (-not $WhatIf) { [void](Set-AVDTuneState -Root $Root -Values @{ LastChange = (& $Machine.Now).ToString('o') }) }   # before the attempt: a failed undo may have changed the master
-        $steps = @(Get-AVDTuneOfficePolicySteps -Previous $prev)   # Mode Undo of a step puts back the value found before
+        $steps = @(Get-AVDTuneOfficePolicySteps -Previous $prev -Names $names)   # Mode Undo of a step puts back the value found before
         $results = foreach ($s in $steps) { Invoke-AVDTuneStep -Step $s -Machine $Machine -Mode Undo -WhatIf:$WhatIf }
         $run = [pscustomobject]@{ Plan = 'Office policies undo'; WhatIf = [bool]$WhatIf; Results = @($results) }
         if (-not $WhatIf) {
