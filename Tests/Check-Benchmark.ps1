@@ -837,7 +837,7 @@ public static class StandIn { public static int Main(string[] a) {
     function Get-AVDTuneFileSha256Local([string]$Path) { $s = [Security.Cryptography.SHA256]::Create(); $f = [IO.File]::OpenRead($Path); try { ([BitConverter]::ToString($s.ComputeHash($f)) -replace '-', '').ToLowerInvariant() } finally { $f.Dispose(); $s.Dispose() } }
     $pk = Join-Path $tmp 'pkg'
     $tree = Join-Path $pk 'tree'
-    foreach ($rel in @(@(Get-ChildItem -LiteralPath (Join-Path $repo 'Modules') -Filter '*.psm1' | ForEach-Object { "Modules\$($_.Name)" }) + @(Get-ChildItem -LiteralPath (Join-Path $repo 'Bench\data') -File | ForEach-Object { "Bench\data\$($_.Name)" }) + 'VERSION', 'LICENSE', 'NOTICE', 'Start-AVDTune.ps1')) {
+    foreach ($rel in @(@(Get-ChildItem -LiteralPath (Join-Path $repo 'Modules') -Filter '*.psm1' | ForEach-Object { "Modules\$($_.Name)" }) + @(Get-ChildItem -LiteralPath (Join-Path $repo 'Bench\data') -File | ForEach-Object { "Bench\data\$($_.Name)" }) + 'VERSION', 'LICENSE', 'NOTICE', 'Start-AVDTune.ps1', 'Invoke-AVDBenchmark.ps1')) {
         $dst = Join-Path $tree $rel; [void](New-Item -ItemType Directory -Path (Split-Path $dst -Parent) -Force); Copy-Item -LiteralPath (Join-Path $repo $rel) -Destination $dst
     }
     $fakeExe = Join-Path $pk 'AVDTune.Bench.exe'; [IO.File]::WriteAllBytes($fakeExe, [byte[]](1..64))
@@ -850,7 +850,7 @@ public static class StandIn { public static int Main(string[] a) {
     Test-Check 'stand-alone package: the engine and the modules it imports, the benchmark data, the measure program, licence; no window, no other page module' (@($needMods | Where-Object { $_ -notin $pNames }).Count -eq 0 -and $pNames -contains 'Bench/data/benchmark-B1.0.json' -and $pNames -contains 'Bench/bin/AVDTune.Bench.exe' -and $pNames -contains 'LICENSE' -and $pNames -notcontains 'Start-AVDTune.ps1' -and $pNames -notcontains 'Modules/AVDTune.Software.psm1' -and @($pNames | Where-Object { $_ -match '(?i)diskspd' }).Count -eq 0) ($pNames -join ',')
     $relM = Get-Content -LiteralPath (Join-Path $relOut 'manifest.json') -Raw | ConvertFrom-Json
     $hashOk = @($pm.Files | Where-Object { $f = $_; @($relM.Files | Where-Object { $_.Path -ceq $f.Path -and $_.Sha256 -ceq $f.Sha256 }).Count -ne 1 }).Count -eq 0
-    Test-Check 'stand-alone package: manifest names the source release (version, commit, ZIP hash), every file has the hash of the release, the entry script is still open' ($pm.Product -eq 'AVD-Benchmark' -and $pm.Source.Commit -eq ('a' * 40) -and $pm.Source.ZipSha256 -eq $relM.Zip.Sha256 -and $hashOk -and @($pm.Files).Count -eq $pNames.Count -and $pm.Entry -eq '' -and $pm.Zip.Sha256 -eq (Get-AVDTuneFileSha256Local $pkg.Zip)) $null
+    Test-Check 'stand-alone package: manifest names the source release (version, commit, ZIP hash), every file has the hash of the release, the entry script and the manifest inside the ZIP are named' ($pm.Product -eq 'AVD-Benchmark' -and $pm.Source.Commit -eq ('a' * 40) -and $pm.Source.ZipSha256 -eq $relM.Zip.Sha256 -and $hashOk -and @($pm.Files).Count -eq ($pNames.Count - 1) -and $pm.Entry -eq 'Invoke-AVDBenchmark.ps1' -and $pNames -contains 'Invoke-AVDBenchmark.ps1' -and $pNames[-1] -eq 'package-manifest.json' -and $pm.PackageManifest.Sha256 -match '\A[0-9a-f]{64}\z' -and $pm.Zip.Sha256 -eq (Get-AVDTuneFileSha256Local $pkg.Zip)) $null
     # counter-tests: a changed release ZIP, a manifest hash that does not fit an entry, an entry outside the manifest
     $badRel = Join-Path $pk 'bad1'; Copy-Item -LiteralPath $relOut -Destination $badRel -Recurse
     $bz = Join-Path $badRel $relM.Zip.Name; $bytes = [IO.File]::ReadAllBytes($bz); $bytes[$bytes.Length - 30] = $bytes[$bytes.Length - 30] -bxor 0xFF; [IO.File]::WriteAllBytes($bz, $bytes)
@@ -875,6 +875,69 @@ public static class StandIn { public static int Main(string[] a) {
             if ((Get-ThrownText { & (Join-Path $repo 'Tools\New-AVDBenchmarkPackage.ps1') -ReleaseDir $d -OutDir (Join-Path $d 'o') }) -like '*Unsafe path in the manifest*') { $bp }
         })
     Test-Check 'stand-alone package: device names (CON, NUL, COM1), a line break at the end (\z) and .. in a manifest path are refused' ($devRefused.Count -eq 5) ($devRefused -join ',')
+
+    # ---------------------------------------------------------------- the entry of the stand-alone package (#90 follow-up): Invoke-AVDBenchmark.ps1
+    # Run only with -VerifyOnly (the package against its manifest, no administrator, nothing of the package loaded, no benchmark on this computer); the rest by its source.
+    $entryPath = Join-Path $repo 'Invoke-AVDBenchmark.ps1'
+    $tkE = $null; $peE = $null
+    $entryAst = [System.Management.Automation.Language.Parser]::ParseFile($entryPath, [ref]$tkE, [ref]$peE)
+    $startAstE = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $repo 'Start-AVDTune.ps1'), [ref]$tkE, [ref]$null)
+    $firstE = @($entryAst.EndBlock.Statements)[0]
+    $cmdsE = @($entryAst.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] }, $true))
+    $beforeFirst = @($cmdsE | Where-Object { $_.Extent.StartOffset -lt $firstE.Extent.EndOffset })
+    Test-Check 'entry script: parses; its first statement sets PSModulePath with .NET only (no command and no variable before or in it), the same text as Start-AVDTune.ps1' (@($peE).Count -eq 0 -and $firstE.Extent.Text -match '\A\[Environment\]::SetEnvironmentVariable\(''PSModulePath'', ' -and $firstE.Extent.Text -ceq @($startAstE.EndBlock.Statements)[0].Extent.Text -and $beforeFirst.Count -eq 0 -and @($firstE.FindAll({ param($n) $n -is [System.Management.Automation.Language.VariableExpressionAst] }, $true)).Count -eq 0) $firstE.Extent.Text
+    # order of the top level: package check, then -VerifyOnly, elevation, admin-only folder, and only then the first module of the package
+    $topCmd = { param($pattern) @($cmdsE | Where-Object { $_.Extent.Text -match $pattern -and -not (& { $p = $_.Parent; while ($p) { if ($p -is [System.Management.Automation.Language.FunctionDefinitionAst]) { return $true }; $p = $p.Parent }; $false }) } | ForEach-Object { $_.Extent.StartOffset } | Sort-Object)[0] }
+    $entryText = [IO.File]::ReadAllText($entryPath)
+    $oCheck = & $topCmd '\ATest-AVDBenchmarkPackage '; $oAcl = & $topCmd '\AGet-AVDBenchmarkAclProblems '; $oImport = & $topCmd '\AImport-Module '
+    $oVerify = $entryText.IndexOf('if ($VerifyOnly) { exit 0 }'); $oElev = $entryText.IndexOf('IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) { Stop-AVDBenchmark 3')
+    Test-Check 'entry script: the package check comes first, then -VerifyOnly, the elevation check, the admin-only check of the folder, and only then the first Import-Module' ($oCheck -gt 0 -and $oCheck -lt $oVerify -and $oVerify -lt $oElev -and $oElev -lt $oAcl -and $oAcl -lt $oImport) "$oCheck $oVerify $oElev $oAcl $oImport"
+    $imports = @($cmdsE | Where-Object { $_.GetCommandName() -eq 'Import-Module' } | ForEach-Object { $_.Extent.Text })
+    $names = @($cmdsE | ForEach-Object { $_.GetCommandName() } | Where-Object { $_ })
+    Test-Check 'entry script: only the benchmark-only mode of the engine (no sign-in, no session, no window, no program started by the script itself); modules only from the package' (($entryText -match "Invoke-AVDTuneBenchmark [^\r\n]*-Kind 'benchmark-only'[^\r\n]*-SystemName \`$Name -Notes \`$Notes") -and $imports.Count -eq 2 -and @($imports | Where-Object { $_ -notmatch '\AImport-Module \(\[IO\.Path\]::Combine\(\$packageRoot, ''Modules'', ''AVDTune(\.Benchmark)?\.psm1''\)\) -Force\z' }).Count -eq 0 -and @($names | Where-Object { $_ -match '(?i)Session|SignIn|Connect-|Start-Process|Invoke-Expression|Invoke-WebRequest|Invoke-RestMethod|Add-Type' }).Count -eq 0 -and $entryText -notmatch '(?i)ProcessStartInfo|Presentation|AccessToken|Keevault|AVDTUNE_FAKE|AVDTUNE_ROOT') ($imports -join ' | ')
+    Test-Check 'entry script: plain ASCII' ($entryText -notmatch '[^\x00-\x7F]') $null
+
+    $psExe = Join-Path ([Environment]::GetFolderPath('System')) 'WindowsPowerShell\v1.0\powershell.exe'
+    function Invoke-EntryScript([string]$Script, [string]$More) {
+        $psi = New-Object System.Diagnostics.ProcessStartInfo $psExe
+        $psi.Arguments = "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$Script`" -VerifyOnly $More"
+        $psi.UseShellExecute = $false; $psi.CreateNoWindow = $true; $psi.RedirectStandardOutput = $true; $psi.RedirectStandardError = $true; $psi.RedirectStandardInput = $true
+        $psi.EnvironmentVariables.Remove('PSModulePath')   # a PowerShell 7 path of the caller must not reach Windows PowerShell
+        $p = [Diagnostics.Process]::Start($psi)
+        try {
+            $p.StandardInput.Close()
+            $errTask = $p.StandardError.ReadToEndAsync(); $out = $p.StandardOutput.ReadToEnd()
+            if (-not $p.WaitForExit(120000)) { try { $p.Kill() } catch { }; return [pscustomobject]@{ Exit = -1; Out = $out; Err = 'timeout' } }
+            [pscustomobject]@{ Exit = $p.ExitCode; Out = $out; Err = $errTask.Result }
+        }
+        finally { $p.Dispose() }
+    }
+    function Expand-Package([string]$Name) { $d = Join-Path $pk $Name; [IO.Compression.ZipFile]::ExtractToDirectory($pkg.Zip, $d); $d }
+    $good = Expand-Package 'x-good'
+    $rGood = Invoke-EntryScript (Join-Path $good 'Invoke-AVDBenchmark.ps1') ''
+    Test-Check 'entry script -VerifyOnly: the extracted package matches its manifest (exit 0, the count of files and the hash of the manifest are named, nothing else is started)' ($rGood.Exit -eq 0 -and $rGood.Out -like "*$(@($pm.Files).Count) files match package-manifest.json (SHA256 $($pm.PackageManifest.Sha256))*not pinned*" -and -not $rGood.Err.Trim()) "$($rGood.Exit) $($rGood.Out) $($rGood.Err)"
+    $rPin = Invoke-EntryScript (Join-Path $good 'Invoke-AVDBenchmark.ps1') "-ManifestSha256 $($pm.PackageManifest.Sha256)"
+    $rPinBad = Invoke-EntryScript (Join-Path $good 'Invoke-AVDBenchmark.ps1') ('-ManifestSha256 ' + ('0' * 64))
+    Test-Check 'entry script: -ManifestSha256 pins the manifest (the value of manifest.json next to the ZIP passes, another one stops with exit 2)' ($rPin.Exit -eq 0 -and $rPin.Out -notlike '*not pinned*' -and $rPinBad.Exit -eq 2 -and $rPinBad.Err -like '*does not have the SHA256 given with -ManifestSha256*') "$($rPin.Exit) $($rPinBad.Exit) $($rPinBad.Err)"
+    $bad = Expand-Package 'x-changed'; [IO.File]::AppendAllText((Join-Path $bad 'Modules\AVDTune.Benchmark.psm1'), "`r`n# changed")
+    $rBad = Invoke-EntryScript (Join-Path $bad 'Invoke-AVDBenchmark.ps1') ''
+    $bad2 = Expand-Package 'x-extra'; [IO.File]::WriteAllText((Join-Path $bad2 'Modules\Extra.psm1'), 'throw 1')
+    $rExtra = Invoke-EntryScript (Join-Path $bad2 'Invoke-AVDBenchmark.ps1') ''
+    $bad3 = Expand-Package 'x-missing'; [IO.File]::Delete((Join-Path $bad3 'Bench\bin\AVDTune.Bench.exe'))
+    $rMissing = Invoke-EntryScript (Join-Path $bad3 'Invoke-AVDBenchmark.ps1') ''
+    Test-Check 'entry script: a changed module, a file the manifest does not list and a missing file each stop with exit 2 and the name of the file' ($rBad.Exit -eq 2 -and $rBad.Err -like '*Modules/AVDTune.Benchmark.psm1 does not have the size*' -and $rExtra.Exit -eq 2 -and $rExtra.Err -like '*Modules/Extra.psm1 is not listed*' -and $rMissing.Exit -eq 2 -and $rMissing.Err -like '*Bench/bin/AVDTune.Bench.exe is missing*') "$($rBad.Exit) $($rBad.Err) | $($rExtra.Exit) $($rExtra.Err) | $($rMissing.Exit) $($rMissing.Err)"
+    $bad4 = Expand-Package 'x-samesize'; $mb = [IO.File]::ReadAllBytes((Join-Path $bad4 'VERSION')); $mb[0] = $mb[0] -bxor 1; [IO.File]::WriteAllBytes((Join-Path $bad4 'VERSION'), $mb)
+    $rHash = Invoke-EntryScript (Join-Path $bad4 'Invoke-AVDBenchmark.ps1') ''
+    $bad5 = Expand-Package 'x-manifest'; $im = Get-Content -LiteralPath (Join-Path $bad5 'package-manifest.json') -Raw | ConvertFrom-Json; $im.Files = @($im.Files) + [pscustomobject]@{ Path = '../outside.ps1'; Size = 1; Sha256 = ('0' * 64) }
+    [IO.File]::WriteAllText((Join-Path $bad5 'package-manifest.json'), ($im | ConvertTo-Json -Depth 5))
+    $rPath = Invoke-EntryScript (Join-Path $bad5 'Invoke-AVDBenchmark.ps1') ''
+    $rRepo = Invoke-EntryScript $entryPath ''
+    Test-Check 'entry script: a changed byte with the same size (SHA256), a manifest path that climbs, and a folder without package-manifest.json (this repo) stop with exit 2' ($rHash.Exit -eq 2 -and $rHash.Err -like '*VERSION does not match the SHA256*' -and $rPath.Exit -eq 2 -and $rPath.Err -like '*unsafe path*' -and $rRepo.Exit -eq 2 -and $rRepo.Err -like '*not an AVD-Benchmark package*') "$($rHash.Err) | $($rPath.Err) | $($rRepo.Exit) $($rRepo.Err)"
+    # the admin-only rule of the folder, by its functions alone (the folder of this check belongs to a user profile: it must be refused)
+    foreach ($fn in @($entryAst.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -in 'Get-AVDBenchmarkTree', 'Get-AVDBenchmarkAclProblems' }, $false))) { . ([scriptblock]::Create($fn.Extent.Text)) }
+    $aclBad = @(Get-AVDBenchmarkAclProblems -Root $good)
+    $aclSys = @(Get-AVDBenchmarkAclProblems -Root (Join-Path ([Environment]::GetFolderPath('System')) 'drivers\etc'))
+    Test-Check 'entry script: a package below a user profile is not admin-only (owner or write access named); a Windows folder passes; a share is refused' ($aclBad.Count -gt 0 -and @($aclBad | Where-Object { $_ -match 'belongs to S-1-|can be changed by S-1-' }).Count -gt 0 -and $aclSys.Count -eq 0 -and @(Get-AVDBenchmarkAclProblems -Root '\\server.example\share\pkg')[0] -like '*not a folder on a local drive*') (($aclBad | Select-Object -First 2) -join '; ') + ' / ' + ($aclSys -join '; ')
 
     Test-Check 'no file of the check run touched the real state folder' ($tmp -ne (Join-Path ([Environment]::GetFolderPath('CommonApplicationData')) 'AVDTune')) $tmp
 }

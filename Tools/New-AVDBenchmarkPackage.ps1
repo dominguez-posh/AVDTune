@@ -4,15 +4,17 @@
     Prepares the stand-alone package of the benchmark (repo AVD-Benchmark, docs\benchmark-design.md section 7, plan 6/6b, #90): AVD-Benchmark-<version>.zip and its
     manifest.json, made from a finished AVDTune release (the output of Tools\New-AVDTuneRelease.ps1), so the package carries exactly the engine of that release.
 .DESCRIPTION
-    Only a preparation: the entry script of the stand-alone package (Invoke-AVDBenchmark.ps1: elevated, no sign-in, IMDS facts, result kind 'standalone') is not
-    built yet, and the release workflow does not call this script yet. Both are open points of #90.
+    The entry script Invoke-AVDBenchmark.ps1 (repo root, part of the release) goes into the package root; it checks the package against package-manifest.json
+    before it loads anything and starts only the benchmark-only mode of the engine. Still open (#90): the release workflow does not call this script yet, and the
+    package is not published to the AVD-Benchmark repo.
     Steps:
       1. manifest.json of the release is read with its types checked (Product AVDTune, Version x.y.z[-ea.N], Zip, Files); the ZIP must have the size and SHA256 of the manifest.
       2. Every entry of the ZIP must be listed in the manifest with a safe relative path and its SHA256 (no entry outside the list, no '..', no link).
       3. Taken: Modules/AVDTune.Benchmark.psm1 and every module it imports (Import-Module (Join-Path $PSScriptRoot '<name>.psm1'), followed through), Bench/data/*,
-         Bench/bin/AVDTune.Bench.exe, LICENSE, NOTICE, VERSION. Nothing else (no window, no setup, no sign-in module).
-      4. Written: AVD-Benchmark-<version>.zip (entries sorted, time stamp of the release) and manifest.json (Schema 1: Product AVD-Benchmark, Version, Source {Product,
-         Version, Commit, ZipSha256}, Date, Zip {Name, Size, Sha256}, Files [{Path, Size, Sha256}]) into -OutDir (new or empty).
+         Bench/bin/AVDTune.Bench.exe, Invoke-AVDBenchmark.ps1 (the entry), LICENSE, NOTICE, VERSION. Nothing else (no window, no setup, no sign-in module).
+      4. Written: AVD-Benchmark-<version>.zip (entries sorted, time stamp of the release; its last entry package-manifest.json is what the entry script checks the
+         extracted package against: Schema 1, Product, Version, Source, Date, Entry, Files) and manifest.json (the same plus Zip {Name, Size, Sha256} and
+         PackageManifest {Name, Sha256}: the value for -ManifestSha256 of the entry script) into -OutDir (new or empty).
     diskspd is never in the package (its binary licence forbids it, design section 6); it is downloaded and checked at run time as in AVDTune.
 .PARAMETER ReleaseDir
     The folder with manifest.json and AVDTune-<version>.zip of the release.
@@ -90,8 +92,9 @@ while ($queue.Count -gt 0) {
     $text = (New-Object Text.UTF8Encoding $false).GetString($content[$mod])
     foreach ($hit in [regex]::Matches($text, "Import-Module \(Join-Path \`$PSScriptRoot '([A-Za-z0-9.]+\.psm1)'\)", [Text.RegularExpressions.RegexOptions]::None, [timespan]::FromSeconds(2))) { $queue.Enqueue('Modules/' + $hit.Groups[1].Value) }
 }
-foreach ($k in $content.Keys) { if ($k -like 'Bench/data/*' -or $k -eq 'Bench/bin/AVDTune.Bench.exe' -or $k -in 'LICENSE', 'NOTICE', 'VERSION') { [void]$take.Add($k) } }
+foreach ($k in $content.Keys) { if ($k -like 'Bench/data/*' -or $k -eq 'Bench/bin/AVDTune.Bench.exe' -or $k -in 'Invoke-AVDBenchmark.ps1', 'LICENSE', 'NOTICE', 'VERSION') { [void]$take.Add($k) } }
 if (-not $take.Contains('Bench/data/benchmark-B1.0.json')) { throw 'The release has no benchmark data (Bench/data).' }
+if (-not $take.Contains('Invoke-AVDBenchmark.ps1')) { throw 'The release has no entry script (Invoke-AVDBenchmark.ps1).' }
 if ($RequireBench -and -not $take.Contains('Bench/bin/AVDTune.Bench.exe')) { throw 'The release has no measure program (Bench/bin/AVDTune.Bench.exe): no package with -RequireBench.' }
 if (@($take | Where-Object { $_ -match '(?i)diskspd' }).Count -gt 0) { throw 'diskspd is never put into the package (its licence forbids it).' }
 
@@ -110,15 +113,27 @@ try {
         $s = $entry.Open(); try { $s.Write($content[$p], 0, $content[$p].Length) } finally { $s.Dispose() }
         [void]$files.Add([ordered]@{ Path = $p; Size = [int64]$content[$p].Length; Sha256 = $listed[$p] })
     }
+    # the manifest inside the package: what Invoke-AVDBenchmark.ps1 checks the extracted files against (it cannot name the ZIP that holds it)
+    $inner = [ordered]@{
+        Schema = 1; Product = 'AVD-Benchmark'; Version = $m.Version
+        Source = [ordered]@{ Product = 'AVDTune'; Version = $m.Version; Commit = [string]$m.Commit; ZipSha256 = $m.Zip.Sha256 }
+        Date = [string]$m.Date; Entry = 'Invoke-AVDBenchmark.ps1'; Files = @($files)
+    }
+    $innerBytes = (New-Object Text.UTF8Encoding $false).GetBytes(($inner | ConvertTo-Json -Depth 5))
+    $entry = $z.CreateEntry('package-manifest.json', [IO.Compression.CompressionLevel]::Optimal); $entry.LastWriteTime = $stamp
+    $s = $entry.Open(); try { $s.Write($innerBytes, 0, $innerBytes.Length) } finally { $s.Dispose() }
 }
 finally { $z.Dispose() }
+$innerStream = New-Object IO.MemoryStream (, $innerBytes)
+$innerSha = Get-StreamSha256 $innerStream
 $os = [IO.File]::OpenRead($outZip)
 try { $zipSha = Get-StreamSha256 $os } finally { $os.Dispose() }
 $manifest = [ordered]@{
     Schema = 1; Product = 'AVD-Benchmark'; Version = $m.Version
     Source = [ordered]@{ Product = 'AVDTune'; Version = $m.Version; Commit = [string]$m.Commit; ZipSha256 = $m.Zip.Sha256 }
-    Date = [string]$m.Date; Entry = ''   # Invoke-AVDBenchmark.ps1 is not built yet (#90)
+    Date = [string]$m.Date; Entry = 'Invoke-AVDBenchmark.ps1'
     Zip = [ordered]@{ Name = $name; Size = (Get-Item -LiteralPath $outZip).Length; Sha256 = $zipSha }
+    PackageManifest = [ordered]@{ Name = 'package-manifest.json'; Sha256 = $innerSha }
     Files = @($files)
 }
 [IO.File]::WriteAllText((Join-Path $OutDir 'manifest.json'), ($manifest | ConvertTo-Json -Depth 5), (New-Object Text.UTF8Encoding $false))
