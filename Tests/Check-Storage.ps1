@@ -267,7 +267,9 @@ try {
     Test-Check 'a hash confirmed for one share does not set another share (counter-test L3)' ($rw.Status -eq 'Failed' -and $wrongShare.Files.Store.Puts.Count -eq 0) $rw.Message
     Test-Check 'a set ACL (or attempt) sets LastChange (checklist: every write)' ($null -ne (Get-AVDTuneState $tmp).LastChange) $null
     $srcSt = Get-Content -LiteralPath (Join-Path $repo 'Modules\AVDTune.Storage.psm1') -Raw
-    Test-Check 'the key list is cleared in finally, like the key (counter-test L1)' ($srcSt -match 'finally \{ \$key = \$null; \$keys = \$null;') $null
+    $keyBlock = [regex]::Match($srcSt, "(?s)KeyMapAdd.*?'st\.acl\.key'").Value
+    Test-Check 'key fallback (#108 N8): only keys[0] is kept (the answer with both is dropped at once), the mapping is removed right after the ACL read' ($srcSt -match "\[0\]\.value; \`$keys = \`$null" -and $keyBlock -match 'KeyMapRemove') $null
+    Test-Check 'the key list is cleared in finally, like the key (counter-test L1)' ($srcSt -match 'finally \{ \$key = \$null; \$keys = \$null\b') $null
     $rr = & $call (New-Env -FilesSeed @{ Forbidden = $true }) 'x'
     Test-Check 'the current ACL cannot be read: nothing is set' ($rr.Status -eq 'Failed' -and $rr.Message -like '*nothing is set*') $null
 

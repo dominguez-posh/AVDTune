@@ -32,6 +32,8 @@ try {
     Test-Check 'a manual note is recorded' ($note.Category -eq 'setup' -and $note.Result -eq 'ok') $null
     $secret = Add-AVDTuneProtocolNote -Protocol $p -Subject 'login' -Note 'password=hunter2 and Bearer abcdefghijklmnop'
     Test-Check 'secrets are removed from texts' ($secret.Note -notlike '*hunter2*' -and $secret.Note -notlike '*abcdefghijklmnop*') $secret.Note
+    $secret107 = Add-AVDTuneProtocolNote -Protocol $p -Subject 'net use \\print1\share Geheim1x /user:dom\svc' -Note 'tool.exe --password Geheim2x; Kennwort: Geheim3x'
+    Test-Check 'protocol (#107): the shared secret table runs in front of the cleaner of the copy (net use, --password, Kennwort:)' ("$($secret107.Subject) $($secret107.Note)" -notmatch 'Geheim\dx' -and (Remove-PackTuneProtocolSecrets '-Password Geheim4x' 200) -notmatch 'Geheim') "$($secret107.Subject) | $($secret107.Note)"
 
     $en = ConvertTo-PackTuneProtocolText -Protocol $p -Language en -Format Text -End ([datetime]'2026-11-20T10:30:00')
     Test-Check 'English text: AVDTune title, image label, groups' ($en -like 'AVDTune session protocol*' -and $en -like '*Image: GM-TEST01 2026.11.001*' -and $en -like '*Optimization:*' -and $en -like '*Windows updates: failed (Download failed)*' -and $en -notlike '*PackTune*') $en

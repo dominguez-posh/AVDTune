@@ -4,6 +4,16 @@
 # groups and wording without touching the copy. The field "Tenant" of the shared protocol holds the image (computer name and
 # image version) and is labelled "Image".
 . (Join-Path $PSScriptRoot 'Shared\PackTune-Protocol.ps1')
+Import-Module (Join-Path $PSScriptRoot 'Modules\AVDTune.psm1')   # the shared secret table (#107); a no-op when the window loaded it already
+
+# The protocol cleaner of the copy, with AVDTune's secret table in front (#107): every protocol text, the task bar and the notes of the administrator pass both.
+# The copy stays untouched; the shared function is kept under another name and called after the table.
+${function:Remove-PackTuneProtocolSecretsShared} = ${function:Remove-PackTuneProtocolSecrets}
+function Remove-PackTuneProtocolSecrets {
+    param([AllowEmptyString()][string]$Text, [int]$MaxLength = 200)
+    if (-not $Text) { return "" }
+    Remove-PackTuneProtocolSecretsShared (Protect-AVDTuneSecretText $Text) $MaxLength
+}
 
 $script:ProtocolCategories = @('setup', 'update', 'software', 'optimization', 'fslogix', 'vdi', 'userexperience', 'updateblock', 'benchmark', 'seal', 'other')
 $script:ProtocolText = @{

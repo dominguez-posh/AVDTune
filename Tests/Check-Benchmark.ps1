@@ -65,6 +65,7 @@ try {
     $p = ConvertFrom-AVDTuneDiskspdXml -Xml $fx
     Test-Check 'diskspd fixture: seconds, IOPS (sum of threads / seconds), MiB/s' ((Near $p.Seconds 12 0.001) -and (Near $p.Iops (4 * 51856 / 12.0) 0.01) -and (Near $p.ReadMiBps (4 * 148717568 / 1MB / 12.0) 0.001)) "$($p.Iops) $($p.ReadMiBps)"
     Test-Check 'diskspd fixture: latency percentiles p50/p99 read and write' ((Near $p.ReadLatencyP50 1.502 1e-9) -and (Near $p.ReadLatencyP99 4.12 1e-9) -and (Near $p.WriteLatencyP50 1.87 1e-9) -and (Near $p.WriteLatencyP99 5.4 1e-9)) $null
+    Test-Check 'diskspd (#108 N5): XML with a DOCTYPE is refused (no DTD, no resolver)' (Test-Throws { ConvertFrom-AVDTuneDiskspdXml -Xml ('<?xml version="1.0"?><!DOCTYPE Results [<!ENTITY x SYSTEM "file:///c:/windows/win.ini">]>' + $fx.Substring($fx.IndexOf('<Results'))) }) $null
     Test-Check 'diskspd: not XML, no TimeSpan, no targets are errors' ((Test-Throws { ConvertFrom-AVDTuneDiskspdXml -Xml 'nope' }) -and (Test-Throws { ConvertFrom-AVDTuneDiskspdXml -Xml '<Results/>' }) -and (Test-Throws { ConvertFrom-AVDTuneDiskspdXml -Xml '<Results><TimeSpan><TestTimeSeconds>5</TestTimeSeconds></TimeSpan></Results>' })) $null
     Test-Check 'diskspd: a missing percentile is $null, not a guess' ($null -eq (ConvertFrom-AVDTuneDiskspdXml -Xml ($fx -replace '<Percentile>99</Percentile>', '<Percentile>98</Percentile>')).ReadLatencyP99) $null
     Test-Check 'diskspd: decimal numbers parse the same in any culture' ((& { $old = [Threading.Thread]::CurrentThread.CurrentCulture; try { [Threading.Thread]::CurrentThread.CurrentCulture = 'de-DE'; (ConvertFrom-AVDTuneDiskspdXml -Xml $fx).ReadLatencyP50 } finally { [Threading.Thread]::CurrentThread.CurrentCulture = $old } }) -eq 1.502) $null
@@ -264,7 +265,8 @@ try {
     Test-Check 'restore task: Windows PowerShell by its full path, not a lookup through PATH' ($act.Execute -eq 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe' -and $act.Argument -like '*-File "C:\x\restore.ps1"') $act.Execute
     Test-Check 'restore task: the real system folder gives an existing powershell.exe' (Test-Path -LiteralPath (Get-AVDTuneBenchRestoreAction -ScriptPath 'x').Execute) $null
     $src = Get-Content -LiteralPath (Join-Path $repo 'Modules\AVDTune.Benchmark.psm1') -Raw
-    Test-Check 'downloads add TLS 1.2 to the protocols, they do not overwrite them' (([regex]::Matches($src, 'SecurityProtocol = \[Net.ServicePointManager\]::SecurityProtocol -bor')).Count -eq 2 -and $src -notmatch 'SecurityProtocol = \[Net.SecurityProtocolType\]::Tls12') $null
+    $httpsGet = & (Get-Module AVDTune) { (Get-Command Invoke-AVDTuneHttpsGet).ScriptBlock.ToString() }
+    Test-Check 'downloads go through Invoke-AVDTuneHttpsGet (#108 N3), which adds TLS 1.2 to the protocols and does not overwrite them' (([regex]::Matches($src, 'Invoke-AVDTuneHttpsGet -Url \$Url -AllowedHosts \$script:DownloadHosts')).Count -eq 2 -and $src -notmatch 'WebClient|SecurityProtocol = \[Net.SecurityProtocolType\]::Tls12' -and $httpsGet -match 'SecurityProtocol = \[Net.ServicePointManager\]::SecurityProtocol -bor') $null
     Test-Check 'the restore task uses no bare powershell.exe' ($src -notmatch "-Execute 'powershell.exe'") $null
     $b = New-AVDTuneFakeBench -Reference $ref -Config $config
     [void](Get-AVDTuneDiskspd -Bench $b -Root $tmp -Config $config)

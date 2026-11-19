@@ -42,6 +42,8 @@ try {
     Test-Check 'details: refused (counter-tests): no name, a non-installer or a path, & % and open quotes in the arguments, control characters, timeouts out of 60..14400, a bad version' ($wrong.Count -eq 0) ($wrong -join ', ')
     $nolib = ConvertTo-AVDTuneRecordingApp -Raw $form -FromForm
     Test-Check 'details: without the library manifest there is no SHA256, so nothing can be recorded' (-not $nolib.Valid -and ($nolib.Errors -join ' ') -like '*SHA256*') ($nolib.Errors -join ' ')
+    $rec107 = @('net use \\print1\share Geheim1x /user:dom\svc', 'setup.exe --password Geheim2x', 'Set-Thing -ClientSecret Geheim3x') | ForEach-Object { Remove-AVDTuneRecordingSecrets $_ }
+    Test-Check 'recording (#107): the shared secret table runs first (net use, --password, -ClientSecret)' (@($rec107 | Where-Object { $_.Text -match 'Geheim\dx' -or -not $_.Cleaned }).Count -eq 0) (($rec107 | ForEach-Object Text) -join ' | ')
     $f = $form.Clone(); $f.LicenseNotes = 'Lizenzschluessel: ABCD1-EFGH2-IJKL3-MNOP4, Passwort=geheim123 bei Fragen Herrn Muster'
     $cl = ConvertTo-AVDTuneRecordingApp -Raw $f -FromForm -Library $lib
     Test-Check 'details: keys and passwords in the licence notes are cleaned and the form says so' ($cl.Valid -and $cl.Cleaned -and $cl.App.LicenseNotes -notmatch 'geheim123|ABCD1-EFGH2' -and $cl.App.LicenseNotes -like '*Herrn Muster*') $cl.App.LicenseNotes

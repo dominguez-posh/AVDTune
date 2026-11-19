@@ -257,6 +257,7 @@ function Copy-AVDTunePrinterExport {
     #>
     param([Parameter(Mandatory)]$P, [Parameter(Mandatory)]$Session, [Parameter(Mandatory)]$Export, [Parameter(Mandatory)][string]$Local)
     $base = [IO.Path]::GetFullPath($Local).TrimEnd([char]92) + '\'
+    $sum = 0L
     foreach ($e in @($Export.Files)) {
         $rel = [string]$e.Path
         if (-not (Test-AVDTunePrinterRelPath $rel) -or [bool]$e.Link) { throw "The export has a path that is not allowed or a link: $rel." }
@@ -265,7 +266,13 @@ function Copy-AVDTunePrinterExport {
         $seg = $rel.Split([char]92); $dir = $base.TrimEnd([char]92)
         $last = if ([bool](Get-AVDTuneProp $e 'Dir')) { $seg.Count } else { $seg.Count - 1 }
         for ($i = 0; $i -lt $last; $i++) { $dir = "$dir\$($seg[$i])"; & $P.LocalMkdir $dir }
-        if (-not [bool](Get-AVDTuneProp $e 'Dir')) { & $P.LocalWriteNew $target (& $P.RemoteReadFile $Session ([string]$Export.Source + '\' + $rel)) }
+        if (-not [bool](Get-AVDTuneProp $e 'Dir')) {
+            # #108 N2: the limits hold before anything is written, per file against the length of the list, in sum against MaxBytes
+            $bytes = [byte[]](& $P.RemoteReadFile $Session ([string]$Export.Source + '\' + $rel))
+            if ([int64]$bytes.Length -ne [int64]$e.Length) { throw "$rel has $($bytes.Length) bytes, the list of the export said $([int64]$e.Length): not copied." }
+            $sum += $bytes.Length; if ($sum -gt $script:MaxBytes) { throw "The export is larger than $($script:MaxBytes) bytes: not copied." }
+            & $P.LocalWriteNew $target $bytes
+        }
     }
 }
 
