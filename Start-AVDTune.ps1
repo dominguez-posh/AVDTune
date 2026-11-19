@@ -668,7 +668,7 @@ function Get-ShutdownBlockReason {
     if ($h -ne [IntPtr]::Zero -and [AVDTune.ShutdownBlock]::ShutdownBlockReasonQuery($h, $sb, [ref]$size)) { $sb.ToString() } else { '' }
 }
 function Invoke-SessionEnding($EventArgs) {
-    if (-not $script:UpdJob -and -not $script:BenchJob -and -not $script:SealJob) { return }
+    if (-not (Get-CloseHoldReason)) { return }   # #104 N1: the same reasons as closing the window (every writer job, not only updates, benchmark and finish)
     $EventArgs.Cancel = $true
     Show-Toast (T 'shell.sessionend')
 }

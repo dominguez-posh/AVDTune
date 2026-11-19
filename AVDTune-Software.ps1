@@ -63,7 +63,7 @@ try {
         $m = New-AVDTuneMachine; $u = New-AVDTuneUpdateAdapter
         if ($SiteUrl -and $Tokens -and $Tokens.Sites -and $Tokens.Graph) { $ctx = New-AVDTuneLibraryContext -SitesToken $Tokens.Sites -GraphToken $Tokens.Graph -SiteUrl $SiteUrl -Library $Library }
     }
-    if ($Gate) { Open-AVDTuneWriteGate -SnapshotId $Gate.SnapshotId -ConfirmedBy $Gate.ConfirmedBy }
+    if ($Gate) { Open-AVDTuneWriteGate -SnapshotId $Gate.SnapshotId -ConfirmedBy $Gate.ConfirmedBy -SnapshotCreated ([string](Get-AVDTuneProp $Gate 'SnapshotCreated')) }
     $progress = { param($t) $Sync.Text = $t }
     switch ($Kind) {
         'Scan' {

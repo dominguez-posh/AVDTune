@@ -2438,6 +2438,8 @@ function Invoke-AVDTune {
     $selected = @(@($Plan.Steps) | ForEach-Object { [string]$_ })
     foreach ($id in $selected) { if (-not $byId.ContainsKey($id)) { throw "The plan names the unknown step '$id'." } }
     $started = & $Machine.Now
+    # #104 N10: with a closed write gate nothing is written at all (no marker, no LastChange, no run record); every step would be refused anyway
+    if (-not $WhatIf -and -not (Test-AVDTuneWriteAllowed)) { throw 'The snapshot gate is not confirmed: AVDTune is read only until a snapshot newer than its last change is confirmed on the Overview.' }
     $changeOwner = $false; if (-not $WhatIf) { $changeOwner = Start-AVDTuneChange -Root $Root }   # marker: the first change of the version starts here, no new version or snapshot counts while it runs (#27)
     try {
     $results = New-Object System.Collections.ArrayList

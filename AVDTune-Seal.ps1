@@ -59,7 +59,7 @@ function Start-SealJob {
                 $fin = New-AVDTuneFakeFinish -Seed $(if ($FakeSeed) { $FakeSeed } else { @{} })
             }
             else { $m = New-AVDTuneMachine; $fin = New-AVDTuneFinishAdapter -Root $Root }
-            if ($Block) { Set-AVDTuneWriteBlock $Block } elseif ($Gate) { Open-AVDTuneWriteGate -SnapshotId $Gate.SnapshotId -ConfirmedBy $Gate.ConfirmedBy }
+            if ($Block) { Set-AVDTuneWriteBlock $Block } elseif ($Gate) { Open-AVDTuneWriteGate -SnapshotId $Gate.SnapshotId -ConfirmedBy $Gate.ConfirmedBy -SnapshotCreated ([string](Get-AVDTuneProp $Gate 'SnapshotCreated')) }
             # the CURRENT sign-in session of the window, read each time (a new sign-in replaces the object in the context)
             Invoke-AVDTuneFinish -Machine $m -Fin $fin -Root $Root -User $User -SnapshotId $Gate.SnapshotId -SessionProvider { $Ctx.Session } -Progress { param($t, $p) $Sync.Text = $t; $Sync.Percent = $p }
         }).AddArgument($script:AppRoot).AddArgument($script:StateRoot).AddArgument($wg).AddArgument([string]$env:USERNAME).AddArgument($script:StartContext).AddArgument($sync).AddArgument((Get-AVDTuneWriteBlock)).AddArgument($(if ($script:TestMode) { $script:TestInfo.FakeScript } else { '' })).AddArgument($script:SealFakeScript).AddArgument($script:SealFakeSeed).AddArgument($(if ($script:TestMode) { $script:Machine } else { $null }))

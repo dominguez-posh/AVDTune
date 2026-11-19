@@ -108,6 +108,8 @@ try {
     foreach ($f in $forms) { $r = Add-AVDTuneCustomItem -Root $tmp -Raw $f -Library $libRows; if (-not $r.Valid) { throw "fixture $($f.Name): $($r.Errors -join ' ')" } }
     $dupe = Add-AVDTuneCustomItem -Root $tmp -Raw @{ Kind = 'Hosts'; Name = 'crm'; Address = '10.0.0.8'; HostName = 'x.example.test' } -Library $libRows
     Test-Check 'a second item of the same kind and name is refused' (-not $dupe.Valid -and ($dupe.Errors -join ' ') -like '*already*') $null
+    $dupT = Add-AVDTuneCustomItem -Root $tmp -Raw @{ Kind = 'Registry'; Name = 'Proxy again'; Path = 'HKLM:\SOFTWARE\Contoso'; ValueName = 'proxy'; ValueType = 'DWord'; Value = '0' } -Library $libRows
+    Test-Check 'a second item that changes the same value is refused (#104 N7: the undo record would take the value of the first one as the origin)' (-not $dupT.Valid -and ($dupT.Errors -join ' ') -like "*'Proxy' already changes the same value*") ($dupT.Errors -join ' ')
     $saved = Get-AVDTuneCustomizations -Root $tmp -Forbidden $forbidden
     Test-Check 'ten items saved, read back typed and valid' ($saved.Items.Count -eq 10 -and $saved.Invalid.Count -eq 0 -and -not $saved.Problem) ($saved.Invalid | ConvertTo-Json -Compress)
     $ids = @{}; foreach ($i in $saved.Items) { $ids[$i.Name] = $i.Id }

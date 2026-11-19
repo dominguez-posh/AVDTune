@@ -410,6 +410,18 @@ function Set-AVDTuneHostsEntry {
 function Get-AVDTuneCustomPath([string]$Root) { Join-Path $Root 'config\customizations.json' }
 function Get-AVDTuneCustomUndoPath([string]$Root) { Join-Path $Root 'config\customizations-undo.json' }
 
+function Get-AVDTuneCustomTargetKey {
+    # #104 N7: the value an item changes (registry value, ini key, rules of one principal on a folder, font registration); '' for kinds that keep their own origin per entry.
+    # Two items with the same key would record the origin twice (the second one records the value of the first), so the second one is refused.
+    param([Parameter(Mandatory)]$Item)
+    switch ([string]$Item.Kind) {
+        'Registry' { "registry|$($Item.Path)|$($Item.ValueName)".ToLowerInvariant() }
+        'Ini' { "ini|$($Item.Path)|$($Item.Section)|$($Item.Key)".ToLowerInvariant() }
+        'Folder' { "folder|$($Item.Path)|$($Item.Principal)".ToLowerInvariant() }
+        'Font' { "font|$(Get-AVDTuneCustomFontValueName $Item)".ToLowerInvariant() }
+        default { '' }
+    }
+}
 function Get-AVDTuneCustomizations {
     <# The saved items, each validated again (types exact). Returns Items (valid ones), Invalid (@{ Id; Kind; Name; Errors }) and Problem (the file itself). #>
     param([string]$Root = (Get-AVDTuneRoot), $Forbidden)
@@ -418,13 +430,15 @@ function Get-AVDTuneCustomizations {
     $items = New-Object System.Collections.ArrayList; $invalid = New-Object System.Collections.ArrayList
     if ($j -and (Get-AVDTuneProp $j 'Schema') -ne 1) { $problem = 'The list of customizations has an unknown schema: not used.'; $j = $null }
     if (-not $Forbidden) { $Forbidden = Get-AVDTuneCustomForbiddenFolders -Root $Root }
-    $ids = @{}
+    $ids = @{}; $targets = @{}
     foreach ($raw in @(Get-AVDTuneProp $j 'Items')) {
         if ($null -eq $raw) { continue }
         $r = ConvertTo-AVDTuneCustomItem -Raw $raw -Forbidden $Forbidden
         $id = [string](Get-AVDTuneProp $raw 'Id')
         if ($r.Valid -and $ids.ContainsKey($id)) { $r = [pscustomobject]@{ Valid = $false; Errors = @('The id is used twice.'); Item = $r.Item } }
-        if ($r.Valid) { $ids[$id] = $true; [void]$items.Add($r.Item) }
+        $tk = if ($r.Valid) { Get-AVDTuneCustomTargetKey $r.Item } else { '' }
+        if ($tk -and $targets.ContainsKey($tk)) { $r = [pscustomobject]@{ Valid = $false; Errors = @("Another entry ('$($targets[$tk])') already changes the same value."); Item = $r.Item } }
+        if ($r.Valid) { $ids[$id] = $true; if ($tk) { $targets[$tk] = [string]$r.Item.Name }; [void]$items.Add($r.Item) }
         else { [void]$invalid.Add([pscustomobject]@{ Id = (Remove-AVDTuneControlCharacters $id 20); Kind = (Remove-AVDTuneControlCharacters ([string](Get-AVDTuneProp $raw 'Kind')) 20); Name = (Remove-AVDTuneControlCharacters ([string](Get-AVDTuneProp $raw 'Name')) 80); Errors = @($r.Errors) }) }
     }
     [pscustomobject]@{ Items = @($items); Invalid = @($invalid); Problem = $problem }
@@ -447,6 +461,9 @@ function Add-AVDTuneCustomItem {
     if ($cur.Problem) { throw $cur.Problem }
     $same = @($cur.Items | Where-Object { $_.Kind -eq $r.Item.Kind -and $_.Name -ieq $r.Item.Name })
     if ($same.Count -gt 0) { return [pscustomobject]@{ Valid = $false; Errors = @("There is already a $($r.Item.Kind) named '$($r.Item.Name)'."); Item = $r.Item } }
+    $tk = Get-AVDTuneCustomTargetKey $r.Item
+    $dup = @(if ($tk) { $cur.Items | Where-Object { (Get-AVDTuneCustomTargetKey $_) -eq $tk } })
+    if ($dup.Count -gt 0) { return [pscustomobject]@{ Valid = $false; Errors = @("The entry '$($dup[0].Name)' already changes the same value: change that one instead."); Item = $r.Item } }   # #104 N7
     Save-AVDTuneCustomizations -Root $Root -Items (@($cur.Items) + $r.Item)
     $r
 }

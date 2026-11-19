@@ -623,7 +623,7 @@ function Start-FslJob([string]$Kind, [hashtable]$Arg = @{}) {
                 $c = $Common.Clone(); $c.Machine = New-AVDTuneMachine; $c.F = New-AVDTuneFSLogixAdapter; $c.Progress = { param($t) $Sync.Text = $t }
                 if ($Kind -eq 'Storage') { $c.Arm = New-AVDTuneArmAdapter; $c.Files = New-AVDTuneFilesAdapter; $c.Ldap = New-AVDTuneLdapAdapter; $c.FakeLdap = $false }
                 if ($Kind -in 'Acl', 'AclUndo') { $c.Files = New-AVDTuneFilesAdapter }
-                if ($Gate) { Open-AVDTuneWriteGate -SnapshotId $Gate.SnapshotId -ConfirmedBy $Gate.ConfirmedBy }
+                if ($Gate) { Open-AVDTuneWriteGate -SnapshotId $Gate.SnapshotId -ConfirmedBy $Gate.ConfirmedBy -SnapshotCreated ([string](Get-AVDTuneProp $Gate 'SnapshotCreated')) }
                 & ([scriptblock]::Create($WorkerText)) $Kind $c
             }).AddArgument($script:AppRoot).AddArgument($Kind).AddArgument($common).AddArgument($gate).AddArgument($sync).AddArgument($script:FslWorkerText)
         $script:FslJob = @{ PS = $ps; Handle = $ps.BeginInvoke(); Kind = $Kind; Sync = $sync; Write = [bool]$Arg.Write; Task = (New-FslTask $Kind ([bool]$Arg.Write)); Common = $common }

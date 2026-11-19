@@ -272,9 +272,11 @@ try {
     $st = Get-AVDTuneIntegrityStatus -AppRoot $app -InstallRoot $inst -StateRoot $state -Http $http
     Set-AVDTuneIntegrityBlock $st
     Test-Check 'unverified: AVDTune stays read only (the gate cannot be opened)' ((Get-ThrownText { Open-AVDTuneWriteGate -SnapshotId 's1' -ConfirmedBy 'admin1' }) -like '*read only*') $null
-    Test-Check 'continue without the check: a wrong or empty name is refused and the block stays' ((Get-ThrownText { Confirm-AVDTuneUnverified -StateRoot $state -Name 'wrong' -Expected 'GM-TEST01' }) -like '*Type the name*' -and (Get-ThrownText { Confirm-AVDTuneUnverified -StateRoot $state -Name '' -Expected 'GM-TEST01' }) -like '*Type the name*' -and (Get-AVDTuneWriteBlock)) $null
+    Test-Check 'continue without the check: a wrong or empty name is refused and the block stays' ((Get-ThrownText { Confirm-AVDTuneUnverified -StateRoot $state -Name 'wrong' -Expected 'GM-TEST01' -Status $st }) -like '*Type the name*' -and (Get-ThrownText { Confirm-AVDTuneUnverified -StateRoot $state -Name '' -Expected 'GM-TEST01' -Status $st }) -like '*Type the name*' -and (Get-AVDTuneWriteBlock)) $null
     $logBefore = @(Get-AVDTuneChangeLog -Root $state).Count
-    $c = Confirm-AVDTuneUnverified -StateRoot $state -Name 'GM-TEST01' -Expected 'GM-TEST01' -User 'admin1'
+    $badText = Get-ThrownText { Confirm-AVDTuneUnverified -StateRoot $state -Name 'GM-TEST01' -Expected 'GM-TEST01' -User 'admin1' -Status ([pscustomobject]@{ Status = 'bad'; Blocked = $true; Message = 'files differ' }) }
+    Test-Check 'continue without the check (#104 N3): a copy whose files differ (bad) is never lifted, even with the right name; the block stays' ($badText -like '*Only an unverified copy*' -and (Get-AVDTuneWriteBlock)) $badText
+    $c = Confirm-AVDTuneUnverified -StateRoot $state -Name 'GM-TEST01' -Expected 'GM-TEST01' -User 'admin1' -Status $st
     Test-Check 'continue without the check: the typed name lifts the block and writes a change log entry' ($c.ChangeLog -and -not (Get-AVDTuneWriteBlock) -and @(Get-AVDTuneChangeLog -Root $state).Count -eq $logBefore + 1 -and $c.Text -like '*without the integrity check*') $null
     [IO.File]::WriteAllText($cachePath, $cacheText); $http.Store.Offline = $false
 

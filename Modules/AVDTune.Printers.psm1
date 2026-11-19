@@ -657,6 +657,7 @@ function Invoke-AVDTunePrinterRun {
         foreach ($d in @($Drivers)) {
             if (-not (Test-AVDTunePrinterServerName $d.Server)) { throw "Not the FQDN of a print server: $($d.Server)." }
             if (-not (Test-AVDTunePrinterDriverName $d.Name)) { throw "Not a valid driver name: $($d.Name)." }
+            if (@(@($Drivers) | Where-Object { $_ -and ([string]$_.Name) -ieq [string]$d.Name }).Count -gt 1) { throw "The driver $($d.Name) is in the plan twice (#104 N7: its undo record would take the state after the first one). Choose one server for it." }
             if (-not [regex]::IsMatch([string]$d.Thumbprint, '\A[0-9A-F]{40}\z', 'None', $script:Rx)) { throw "$($d.Name) has no confirmed signer." }
             $s = New-AVDTunePrinterDriverStep -Driver $d -P $P -Credential $Credential -Root $Root -Signers $signers
             [void]$steps.Add($s); $byStep[$s.Id] = @{ Driver = $d; Existed = [bool](Get-AVDTunePrinterLocal -P $P -Name $d.Name) }

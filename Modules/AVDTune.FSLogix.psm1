@@ -753,7 +753,7 @@ function Save-AVDTuneRedirections {
     $test = { param($m) $cur = & $F.ReadText $target; @{ Compliant = ($null -ne $cur -and $cur -ceq $Xml); State = $(if ($null -eq $cur) { 'absent' } else { "$($cur.Length) characters" }) } }.GetNewClosure()
     $apply = { param($m) & $F.WriteText $target $Xml }.GetNewClosure()
     [void]$steps.Add((New-AVDTuneStep -Id 'fslogix.redirections.file' -Section FSLogix -Title "redirections.xml ($($v.Excludes.Count) excludes, $($v.Includes.Count) includes)" -Why 'Keeps stateless cache folders out of the profile container.' -SourceUrl "$script:Learn/concepts-redirections-xml" -Test $test -Apply $apply))
-    if (-not $WhatIf -and (Test-AVDTuneWriteAllowed)) { Write-AVDTuneUndoFile (Join-Path $Root 'config\redirections-undo.json') ([ordered]@{ Target = $target; Before = $before } | ConvertTo-Json) }
+    if (-not $WhatIf -and (Test-AVDTuneWriteAllowed)) { Assert-AVDTuneNotSealed -Root $Root; Write-AVDTuneUndoFile (Join-Path $Root 'config\redirections-undo.json') ([ordered]@{ Target = $target; Before = $before } | ConvertTo-Json) }
     Invoke-AVDTune -Plan ([pscustomobject]@{ Name = 'FSLogix redirections'; Steps = @($steps | ForEach-Object { $_.Id }) }) -Catalog @($steps) -Machine $Machine -Root $Root -User $User -SnapshotId $SnapshotId -WhatIf:$WhatIf
 }
 
@@ -858,7 +858,7 @@ function Set-AVDTuneFSLogixDefender {
     $test = { param($m) $s = Get-AVDTuneFSLogixDefenderState -F $F -VhdLocations $VhdLocations; $open = @($s.Items | Where-Object { -not $_.Present -and $skipSet -notcontains $_.Value.ToLowerInvariant() }); @{ Compliant = ($open.Count -eq 0); State = "$(@($s.Items).Count - $open.Count - $skipped.Count) of $(@($s.Items).Count) present$(if ($skipped.Count -gt 0) { ", $($skipped.Count) deselected" })" } }.GetNewClosure()
     $apply = { param($m) foreach ($i in $todo) { & $F.DefenderAdd $i.Kind $i.Value } }.GetNewClosure()
     $step = New-AVDTuneStep -Id 'fslogix.defender.exclusions' -Section FSLogix -Title "FSLogix Defender exclusions ($($todo.Count) to add$(if ($skipped.Count -gt 0) { ", $($skipped.Count) deselected and not set: " + (($skipped | ForEach-Object { $_.Value }) -join '; ') }))" -Why 'Microsoft asks to exclude FSLogix from antivirus scanning; scanning causes slow logons and locked containers.' -SourceUrl $state.Source -Test $test -Apply $apply
-    if (-not $WhatIf -and $todo.Count -gt 0 -and (Test-AVDTuneWriteAllowed)) { Write-AVDTuneUndoFile (Join-Path $Root 'config\fslogix-defender-undo.json') ([ordered]@{ Added = $undoList } | ConvertTo-Json -Depth 4) }
+    if (-not $WhatIf -and $todo.Count -gt 0 -and (Test-AVDTuneWriteAllowed)) { Assert-AVDTuneNotSealed -Root $Root; Write-AVDTuneUndoFile (Join-Path $Root 'config\fslogix-defender-undo.json') ([ordered]@{ Added = $undoList } | ConvertTo-Json -Depth 4) }
     Invoke-AVDTune -Plan ([pscustomobject]@{ Name = 'FSLogix Defender exclusions'; Steps = @($step.Id) }) -Catalog @($step) -Machine $Machine -Root $Root -User $User -SnapshotId $SnapshotId -WhatIf:$WhatIf
 }
 

@@ -324,6 +324,13 @@ try {
     $log = @(Get-AVDTuneChangeLog -Root $tmp)
     Test-Check 'plan: both steps changed, one run record, reboot noted' ((($run.Results | ForEach-Object { $_.Status }) -join ',') -eq 'Changed,Changed' -and $run.Reboot -and @(Get-AVDTuneRun -Root $tmp).Count -eq $runsBefore + 1 -and (Get-AVDTuneState $tmp).LastRunId -eq $run.Id) (($run.Results | ForEach-Object { $_.Status }) -join ',')
     Test-Check 'plan: an automatic change log entry per change, with version, run, user and snapshot' ($log.Count -eq 2 -and $log[0].Source -eq 'Step' -and $log[0].Version -eq '2026.11.003' -and $log[0].RunId -eq $run.Id -and $log[0].User -eq 'admin1' -and $log[0].SnapshotId -eq 'snap-1' -and $log[0].Category -eq 'Optimization') ($log.Count)
+    # #104 N10: with a closed write gate Invoke-AVDTune writes nothing (no LastChange, no run record) and says why
+    $gate10 = Get-AVDTuneWriteGate; Close-AVDTuneWriteGate
+    $lc10 = (Get-AVDTuneState $tmp).LastChange; $runs10 = @(Get-AVDTuneRun -Root $tmp).Count
+    $m10 = New-AVDTuneFakeMachine
+    $t10 = $null; try { [void](Invoke-AVDTune -Plan $plan -Catalog $catalog -Machine $m10 -Root $tmp -User 'admin1') } catch { $t10 = $_.Exception.Message }
+    Open-AVDTuneWriteGate -SnapshotId $gate10.SnapshotId -ConfirmedBy $gate10.ConfirmedBy -SnapshotCreated ([string](Get-AVDTuneProp $gate10 'SnapshotCreated'))
+    Test-Check 'plan with a closed write gate (#104 N10): refused before anything, no LastChange, no run record, nothing on the machine' ($t10 -like '*snapshot gate is not confirmed*' -and [string](Get-AVDTuneState $tmp).LastChange -eq [string]$lc10 -and @(Get-AVDTuneRun -Root $tmp).Count -eq $runs10 -and $m10.Log.Count -eq 0) $t10
     $run2 = Invoke-AVDTune -Plan $plan -Catalog $catalog -Machine $pm -Root $tmp -User 'admin1'
     Test-Check 'plan again: all unchanged, no new change log entry' ((($run2.Results | ForEach-Object { $_.Status }) -join ',') -eq 'Unchanged,Unchanged' -and @(Get-AVDTuneChangeLog -Root $tmp).Count -eq 2) (($run2.Results | ForEach-Object { $_.Status }) -join ',')
     $failCatalog = @($lazy, $step, $catalog[0])

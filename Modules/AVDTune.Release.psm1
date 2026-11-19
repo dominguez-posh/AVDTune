@@ -452,8 +452,10 @@ function Set-AVDTuneIntegrityBlock {
 }
 
 function Confirm-AVDTuneUnverified {
-    # "Continue without the check": only with the typed name of this computer; written to the change log (when there is an image version), the caller writes the protocol
-    param([Parameter(Mandatory)][string]$StateRoot, [string]$Name, [Parameter(Mandatory)][string]$Expected, [string]$User)
+    # "Continue without the check": only with the typed name of this computer; written to the change log (when there is an image version), the caller writes the protocol.
+    # #104 N3: only for the status 'unverified' (no manifest reachable); a status 'bad' (files differ from the release) or 'failed' is never lifted here.
+    param([Parameter(Mandatory)][string]$StateRoot, [string]$Name, [Parameter(Mandatory)][string]$Expected, [string]$User, [Parameter(Mandatory)]$Status)
+    if ([string](Get-AVDTuneProp $Status 'Status') -cne 'unverified') { throw "Only an unverified copy (no manifest reachable) can continue without the check; this one is '$([string](Get-AVDTuneProp $Status 'Status'))'." }
     if (-not $Name -or ([string]$Name).Trim() -cne $Expected) { throw "Type the name of this computer ($Expected) to continue without the check." }
     $text = 'AVDTune continued without the integrity check of its files (no manifest from GitHub and none cached); confirmed by typing the computer name.'
     $logged = Write-AVDTuneReleaseLog -StateRoot $StateRoot -Text $text -User $User -ChangeType Note

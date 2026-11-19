@@ -43,7 +43,7 @@ try {
         $m = New-AVDTuneMachine; $c = New-AVDTuneCustomAdapter; $r = New-AVDTuneRecordingAdapter
         if ($SiteUrl -and $Tokens -and $Tokens.Sites) { $ctx = New-AVDTuneLibraryContext -SitesToken $Tokens.Sites -GraphToken $Tokens.Graph -SiteUrl $SiteUrl -Library $Library }
     }
-    if ($Gate) { Open-AVDTuneWriteGate -SnapshotId $Gate.SnapshotId -ConfirmedBy $Gate.ConfirmedBy }
+    if ($Gate) { Open-AVDTuneWriteGate -SnapshotId $Gate.SnapshotId -ConfirmedBy $Gate.ConfirmedBy -SnapshotCreated ([string](Get-AVDTuneProp $Gate 'SnapshotCreated')) }
     switch ($Kind) {
         'Status' {
             $lib = $null; $libError = ''

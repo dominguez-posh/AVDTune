@@ -806,7 +806,7 @@ function Set-AVDTuneOfficeFix {
     if (-not $already -and $null -ne $prev -and $prev.Type -cne $d.Type) { throw "The earlier value of $($d.Name) has the registry type $($prev.Type), the fix writes $($d.Type) and Undo would not put it back. Nothing was changed." }
     # the record of the earlier value is written once and never overwritten (an older record is the way back); nothing is written when there is nothing to change
     $created = $false
-    if (-not $WhatIf -and -not $already -and (Test-AVDTuneWriteAllowed) -and -not (Test-Path -LiteralPath $undoPath)) { Write-AVDTuneFile $undoPath ([ordered]@{ At = (& $Machine.Now).ToString('o'); Previous = $prev } | ConvertTo-Json -Depth 4); $created = $true }
+    if (-not $WhatIf -and -not $already -and (Test-AVDTuneWriteAllowed) -and -not (Test-Path -LiteralPath $undoPath)) { Assert-AVDTuneNotSealed -Root $Root; Write-AVDTuneFile $undoPath ([ordered]@{ At = (& $Machine.Now).ToString('o'); Previous = $prev } | ConvertTo-Json -Depth 4); $created = $true }
     $run = $null
     try { $run = Invoke-AVDTune -Plan ([pscustomobject]@{ Name = "Office fix: $Name"; Steps = @($step.Id) }) -Catalog @($step) -Machine $Machine -Root $Root -User $User -SnapshotId $SnapshotId -WhatIf:$WhatIf }
     finally {

@@ -127,6 +127,10 @@ try {
     }
     Test-Check 'undo (#100): read typed against the catalog: "false" as a DWord, a foreign key, an unknown id are refused, nothing written' ($refused -eq 3) "$refused of 3"
     Remove-Item -LiteralPath $up -Force
+    # #104 N5/N6 (source): a finished version takes no undo record and no optimization run: the Sealed check comes before the write of the record / the step loop
+    $fsSrc = [IO.File]::ReadAllText((Join-Path $repo 'Modules\AVDTune.FSLogix.psm1')); $offSrc = [IO.File]::ReadAllText((Join-Path $repo 'Modules\AVDTune.Office.psm1')); $optSrc = [IO.File]::ReadAllText((Join-Path $repo 'Modules\AVDTune.Optimization.psm1'))
+    $optFn = [regex]::Match($optSrc, '(?s)function Invoke-AVDTuneOptimization \{.*?foreach \(\$it in \$items\)').Value
+    Test-Check 'Sealed before undo records (#104 N5/N6, source): redirections, Defender exclusions, FSLogix settings, Office fix and policies; optimization up front' (([regex]::Matches($fsSrc, 'Assert-AVDTuneNotSealed -Root \$Root; (Write-AVDTuneUndoFile|Save-AVDTuneFSLogixUndo)')).Count -eq 3 -and $offSrc -match 'Assert-AVDTuneNotSealed -Root \$Root; Write-AVDTuneFile \$undoPath' -and $offSrc -match '(?s)Assert-AVDTuneNotSealed -Root \$Root\s+# #101' -and $optFn -match 'if \(-not \$WhatIf\) \{ Assert-AVDTuneNotSealed -Root \$Root \}') $null
     # ---------------------------------------------------------------- groups
     $f = New-AVDTuneFakeFSLogix
     $g = Get-AVDTuneFSLogixGroups -F $f

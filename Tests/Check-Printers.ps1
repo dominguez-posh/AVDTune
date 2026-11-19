@@ -183,6 +183,10 @@ try {
     $closedOk = (-not $closed103 -and $pj2.Store.TrustedHosts -ceq 'admin1.example.test,print1.example.test' -and (Test-Path (Get-AVDTunePrinterJournalPath $rootJ2)))
     $open103 = Repair-AVDTunePrinterTrustedHosts -P $pj2 -Root $rootJ2 -User 'admin1'
     Test-Check 'TrustedHosts repair (#103): nothing with a closed write gate; with the gate: put back, LastChange set, a change log entry' ($closedOk -and $open103 -and $pj2.Store.TrustedHosts -ceq 'admin1.example.test' -and $null -ne (Get-AVDTuneLastChange -Root $rootJ2) -and @(Get-AVDTuneChangeLog -Root $rootJ2 | Where-Object { $_.Component -eq 'printers.trustedhosts' }).Count -eq 1) "closed ok $closedOk, open $open103"
+    $twice = @($plan[0], $plan[0])
+    $rootT = Join-Path $tmp 'twice104'; [void](Initialize-AVDTuneState -Root $rootT)
+    $twiceText = Get-ThrownText { Invoke-AVDTunePrinterRun -Machine $m -P $p -Root $rootT -Drivers $twice -Credential $cred -User 'admin1' -SnapshotId 'snap-1' }
+    Test-Check 'run (#104 N7): a driver twice in the plan is refused before anything runs' ($twiceText -like '*in the plan twice*') $twiceText
     $u = Invoke-AVDTunePrinterRun -Machine $m -P $p -Root $tmp -Mode Undo -User 'admin1' -SnapshotId 'snap-1'
     Test-Check 'undo: the policies as before (restriction absent, the old list entry back) and the drivers AVDTune added removed; the record is empty' (-not $st.Registry.ContainsKey("$pol\pointandprint|restrictdriverinstallationtoadministrators") -and $st.Registry["$pol\packagepointandprint\listofservers|old.example.test"].Value -eq 'old.example.test' -and -not $st.Registry.ContainsKey("$pol\packagepointandprint\listofservers|$srv") -and $st.Local.Count -eq 0 -and $null -eq (Read-AVDTunePrinterUndo $tmp).Policy -and (Read-AVDTunePrinterUndo $tmp).Drivers.Count -eq 0) (($u.Run.Results | ForEach-Object { "$($_.Id)=$($_.Status) $($_.Message)" }) -join ' | ')
 

@@ -67,7 +67,7 @@ function Get-RelTaskTitle([string]$Kind, [string]$Argument) {
 }
 function Start-RelJob([string]$Kind, [string]$Argument = '') {
     if ($script:RelJob) { throw (T 'rel.err.busy') }
-    if ($Kind -notin 'Start', 'Check') { Assert-NoOtherWriter }   # install, repair and back change AVDTune: never next to another writer (#49)
+    if ($Kind -notin 'Start', 'Check') { Assert-NoOtherWriter -AllowWriteBlock:($Kind -eq 'Repair') }   # #104 N4: the repair is the way out of a write block   # install, repair and back change AVDTune: never next to another writer (#49)
     $ctx = @{
         Kind = $Kind; Argument = $Argument; AppRoot = $script:AppRoot; InstallRoot = $script:RelInstallRoot; StateRoot = $script:StateRoot; User = [string]$env:USERNAME
         Version = $(if ($script:Rel.Info.Version) { $script:Rel.Info.Version } else { [string]$script:ToolVersion }); EarlyAccess = [bool](Get-AVDTuneReleaseSettings $script:StateRoot).EarlyAccess
@@ -223,7 +223,7 @@ Add-Click $ui.BtnRelBack {
     Start-RelJob 'Back'; if ($script:RelJob.Inline) { Complete-RelJob }
 }
 Add-Click $ui.BtnRelSkip {
-    $r = Confirm-AVDTuneUnverified -StateRoot $script:StateRoot -Name $ui.TxtRelSkipName.Text -Expected $script:Rel.ComputerName -User ([string]$env:USERNAME)
+    $r = Confirm-AVDTuneUnverified -StateRoot $script:StateRoot -Name $ui.TxtRelSkipName.Text -Expected $script:Rel.ComputerName -User ([string]$env:USERNAME) -Status $script:Rel.Status
     Add-RelProtocol 'AVDTune continued without the integrity check' $r.Text 'skipped'
     $script:Rel.Status.Blocked = $false
     $script:Rel.Status.Message = $script:Rel.Status.Message + ' ' + (T 'rel.skipped')
