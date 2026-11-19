@@ -546,6 +546,10 @@ function New-AVDTuneMachine {
     # Temporary standard users of the benchmark that a crash left behind (#92, Finn M1): found and removed before the finish
     $m.BenchUsers = { Get-AVDTuneBenchUserLeftovers }
     $m.BenchUserRemove = { param($Sid) Remove-AVDTuneBenchUserLeftover -Sid $Sid }
+    # Leftovers of an interrupted benchmark (audit #98): restore journal, restore script and task, work folders, test containers (Test-AVDTuneBenchmarkClean without the diskspd cache,
+    # which the finish removes itself). The benchmark module is loaded on first use (it imports this module, so it cannot be imported at the top).
+    $benchModule = Join-Path $PSScriptRoot 'AVDTune.Benchmark.psm1'
+    $m.BenchLeftovers = { param($Root) Import-Module $benchModule; @(Test-AVDTuneBenchmarkClean -Bench (New-AVDTuneBenchAdapter) -Root $Root | Where-Object { $_ -notlike 'diskspd cache*' }) }.GetNewClosure()
     [pscustomobject]$m
 }
 

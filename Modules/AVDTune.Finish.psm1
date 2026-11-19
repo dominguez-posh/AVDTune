@@ -384,6 +384,11 @@ function Test-AVDTuneFinishGate {
         $left = @(); try { $left = @(& $Machine.BenchUsers) } catch { [void]$reasons.Add("The temporary benchmark users could not be checked ($($_.Exception.Message)).") }
         if ($left.Count -gt 0) { [void]$reasons.Add("Temporary benchmark user(s) left behind: $(@($left | ForEach-Object { $_.Name }) -join ', '). Remove them with the readiness fix and run the analysis again.") }
     }
+    # audit #98: no finish while an interrupted benchmark left its restore task, journal, work folders or a test container (diskspd is removed by the finish itself)
+    if ($Machine -and $Machine.PSObject.Properties['BenchLeftovers']) {
+        $bl = @(); try { $bl = @(& $Machine.BenchLeftovers $Root) } catch { [void]$reasons.Add("The leftovers of the benchmark could not be checked ($($_.Exception.Message)).") }
+        if ($bl.Count -gt 0) { [void]$reasons.Add("An interrupted benchmark left something behind: $($bl -join '; '). Repair it on the Benchmark page and run the analysis again.") }
+    }
     if (-not (Test-AVDTuneWriteAllowed)) { [void]$reasons.Add('The snapshot gate is not confirmed: AVDTune is read only until a snapshot of today is confirmed on the Overview.') }
     $state = Get-AVDTuneState $Root
     $version = [string](Get-AVDTuneProp $state 'ImageVersion')

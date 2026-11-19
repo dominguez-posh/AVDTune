@@ -112,6 +112,11 @@ try {
     $buText = Get-ThrownText { Invoke-AVDTuneFinish -Machine $bum -Fin (New-AVDTuneFakeFinish -Seed (Get-Fake $root)) -Root $root -User 'admin1' }
     $sealSrc = [IO.File]::ReadAllText((Join-Path $repo 'AVDTune-Seal.ps1'))
     Test-Check 'gate (#92 M1): a temporary benchmark user left behind blocks the finish (gate and Invoke, named); a clean machine passes; the Seal page asks with its machine' (-not $bug.Allowed -and ($bug.Reasons -join ' ') -like '*avdtb-0123456789ab*readiness fix*' -and $buText -like '*avdtb-0123456789ab*' -and (Test-AVDTuneFinishGate -Root $root -Machine (New-Master)).Allowed -and ([regex]::Matches($sealSrc, 'Test-AVDTuneFinishGate -Root \$script:StateRoot -Machine \$script:Machine')).Count -eq 3 -and ([regex]::Matches($sealSrc, 'Test-AVDTuneFinishGate')).Count -eq 4) ($bug.Reasons -join '|')
+    # audit #98: an interrupted benchmark (restore task, journal, work folder) blocks the finish even after a green healthcheck
+    $blm = New-AVDTuneFakeMachine -Seed @{ BenchLeftovers = @('restore journal', 'scheduled task AVDTune-BenchmarkRestore') }
+    $blg = Test-AVDTuneFinishGate -Root $root -Machine $blm
+    $blText = Get-ThrownText { Invoke-AVDTuneFinish -Machine $blm -Fin (New-AVDTuneFakeFinish -Seed (Get-Fake $root)) -Root $root -User 'admin1' }
+    Test-Check 'gate (#98): leftovers of an interrupted benchmark block the finish (gate and Invoke, named), nothing is written' (-not $blg.Allowed -and ($blg.Reasons -join ' ') -like '*interrupted benchmark*restore journal*AVDTune-BenchmarkRestore*Benchmark page*' -and $blText -like '*AVDTune-BenchmarkRestore*' -and (Test-AVDTuneFinishGate -Root $root -Machine (New-Master)).Allowed -and -not (Get-AVDTuneFinishRecord $root)) ($blg.Reasons -join '|')
     $old = New-Root
     [void](Save-Healthcheck -Root $old)
     $s = Get-AVDTuneState $old

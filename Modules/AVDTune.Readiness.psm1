@@ -670,6 +670,13 @@ function Invoke-AVDTuneReadiness {
         else { Add-Row 'hy.bench-users' $hy 'green' 'No temporary benchmark user left behind.' }
     }
 
+    Invoke-Check 'hy.bench-leftovers' $hy {
+        # an interrupted benchmark (audit #98): the SYSTEM restore task, restore script and journal, work folders or an attached test container would go into the image
+        $left = @(& $Machine.BenchLeftovers $(if ($Root) { $Root } else { Get-AVDTuneRoot }))
+        if ($left.Count -gt 0) { Add-Row 'hy.bench-leftovers' $hy 'red' ('Leftovers of an interrupted benchmark: ' + ($left -join '; ') + '. They must not go into the image (the restore task would run on every session host).') 'Open the Benchmark page and repair the interrupted benchmark (or restart AVDTune and repair it there); remove what is still listed afterwards, then run the analysis again.' -Found ($left -join '; ') }
+        else { Add-Row 'hy.bench-leftovers' $hy 'green' 'No leftovers of an interrupted benchmark.' }
+    }
+
     # ---- families (needs the flags of the checks above)
     Invoke-Check 'hw.families' $hw {
         $fams = @(Get-AVDTuneReadinessFamilies -Data $Data -OsArch $osArch -StornvmeProblem $flags.Stornvme -Gen1 $flags.Gen1 -ManaMissing $flags.ManaMissing -DriveDUse $flags.DriveD)
