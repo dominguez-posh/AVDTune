@@ -180,6 +180,8 @@ function New-AVDTuneFakeAuth {
 #   image id -> source VM id; Paging = $true (every list comes in two pages) }. Without Search only this subscription and no gallery are listed.
 # Issue #64 (what Azure knows about the VM): Net (@{ VNet; Subnet }, the subnet of the NICs; default vnet-example/snet-avd), StorageAccounts (array of @{ Name; Kind; Public; PrivateEndpoints; Auth }), DnsZones (array of zone names).
 # Switches in .Store: Offline, ReadForbidden, WriteForbidden, DiskMissing, PollsUntilReady (GETs of a new snapshot that say Creating), CreateFails, Unauthorized, VmForbidden, NicForbidden, GalleryForbidden, StorageForbidden, DnsForbidden
+# Issue #91 (snapshot housekeeping): DeleteForbidden (403 on DELETE of a snapshot); .Store.Deleted lists the IDs that were deleted (Azure answers 202, the snapshot is gone). Gallery versions may carry Regions (target regions).
+# TamperGet ('Source', 'Name' or 'UniqueId'): the GET of ONE snapshot by ID (not the list) answers with another source disk, another name or another sourceUniqueId (#91 N2).
 function New-AVDTuneFakeArm {
     param([hashtable]$Seed = @{})
     $rg = if ($Seed.ResourceGroup) { $Seed.ResourceGroup } else { 'rg-example' }
@@ -187,7 +189,7 @@ function New-AVDTuneFakeArm {
     $subId = $script:FakeSubscription
     $diskId = "/subscriptions/$script:FakeSubscription/resourceGroups/$rg/providers/Microsoft.Compute/disks/$vm`_osdisk"
     $store = @{ Offline = $false; ReadForbidden = $false; WriteForbidden = $false; DiskMissing = $false; PollsUntilReady = 1; CreateFails = $false; Unauthorized = $false
-        DiskId = $diskId; ResourceGroup = $rg; Snapshots = @{}; Polls = @{}; Log = (New-Object System.Collections.ArrayList); LastPut = $null; Location = 'westeurope'; NextLinkPage = $false; EvilLink = $false
+        DiskId = $diskId; ResourceGroup = $rg; Snapshots = @{}; DeleteForbidden = $false; Deleted = (New-Object System.Collections.ArrayList); TamperGet = ''; Polls = @{}; Log = (New-Object System.Collections.ArrayList); LastPut = $null; Location = 'westeurope'; NextLinkPage = $false; EvilLink = $false
         DiskUniqueId = $(if ($Seed.DiskUniqueId) { $Seed.DiskUniqueId } else { '' }); VmForbidden = $false; NicForbidden = $false; GalleryForbidden = $false; StorageForbidden = $false; DnsForbidden = $false
         Net = $(if ($Seed.Net) { $Seed.Net } else { @{ VNet = 'vnet-example'; Subnet = 'snet-avd' } }); StorageAccounts = @(@($Seed.StorageAccounts) | Where-Object { $_ }); DnsZones = @(@($Seed.DnsZones) | Where-Object { $_ }); VmSeed = $(if ($Seed.Vm) { $Seed.Vm } else { @{} }); Galleries = $(if ($Seed.Galleries) { $Seed.Galleries } else { @{} })
         Search = $(if ($Seed.Search) { $Seed.Search } else { @{ Subscriptions = @(@{ Id = $script:FakeSubscription; Name = 'Example subscription' }); Galleries = @() } }) }
@@ -297,7 +299,8 @@ function New-AVDTuneFakeArm {
                     $src = @{}; if ($_.SourceVm) { $src.virtualMachineId = $_.SourceVm }; if ($_.SourceId) { $src.id = $_.SourceId }
                     $sp = @{ source = $src }; if ($_.OsDiskSourceId) { $sp.osDiskImage = @{ source = @{ id = $_.OsDiskSourceId } } }
                     $published = if ($_.Published) { ([datetime]$_.Published).ToUniversalTime().ToString('o') } else { '2026-11-01T00:00:00Z' }
-                    @{ id = "$p/$($_.Name)"; name = $_.Name; properties = @{ provisioningState = 'Succeeded'; storageProfile = $sp; publishingProfile = @{ publishedDate = $published } } } })
+                    $pp = @{ publishedDate = $published }; if ($_.Regions) { $pp.targetRegions = @($_.Regions | ForEach-Object { @{ name = $_ } }) }
+                    @{ id = "$p/$($_.Name)"; name = $_.Name; properties = @{ provisioningState = 'Succeeded'; storageProfile = $sp; publishingProfile = $pp } } })
             return [pscustomobject]@{ Status = 200; Body = (ConvertTo-FakeJson (& $page $vs)); Error = '' }
         }
         if ($Method -eq 'GET' -and $lower -match '^/subscriptions/[^/]+/resourcegroups/[^/]+/providers/microsoft\.compute/images/[^/]+$') {
@@ -329,6 +332,11 @@ function New-AVDTuneFakeArm {
             return [pscustomobject]@{ Status = 200; Body = (ConvertTo-FakeJson @{ value = $all }); Error = '' }
         }
         if ($lower -like '*/providers/microsoft.compute/snapshots/*') {
+            if ($Method -eq 'DELETE') {
+                if ($store.DeleteForbidden) { return [pscustomobject]@{ Status = 403; Body = (ConvertTo-FakeJson @{ error = @{ code = 'AuthorizationFailed'; message = 'does not have authorization to perform action Microsoft.Compute/snapshots/delete' } }); Error = '' } }
+                if ($store.Snapshots.ContainsKey($lower)) { $store.Snapshots.Remove($lower); [void]$store.Deleted.Add($p); return [pscustomobject]@{ Status = 202; Body = $null; Error = '' } }
+                return [pscustomobject]@{ Status = 204; Body = $null; Error = '' }
+            }
             if ($Method -eq 'PUT') {
                 if ($store.WriteForbidden) { return [pscustomobject]@{ Status = 403; Body = (ConvertTo-FakeJson @{ error = @{ code = 'AuthorizationFailed'; message = 'does not have authorization to perform action Microsoft.Compute/snapshots/write' } }); Error = '' } }
                 $store.LastPut = $Body
@@ -352,7 +360,13 @@ function New-AVDTuneFakeArm {
                     if ($store.CreateFails) { $e.properties.provisioningState = 'Failed' }
                     elseif ($store.Polls[$lower] -gt $store.PollsUntilReady) { $e.properties.provisioningState = 'Succeeded'; $e.properties.completionPercent = 100 } else { $e.properties.completionPercent = 40 }
                 }
-                return [pscustomobject]@{ Status = 200; Body = (ConvertTo-FakeJson $e); Error = '' }
+                $out = ConvertTo-FakeJson $e
+                switch ([string]$store.TamperGet) {
+                    'Source' { $out.properties.creationData.sourceResourceId = $store.DiskId + '-other' }
+                    'Name' { $out.name = "$($out.name)-other" }
+                    'UniqueId' { $out.properties.creationData | Add-Member -NotePropertyName sourceUniqueId -NotePropertyValue '99999999-0000-0000-0000-000000000001' -Force }
+                }
+                return [pscustomobject]@{ Status = 200; Body = $out; Error = '' }
             }
         }
         [pscustomobject]@{ Status = 404; Body = $null; Error = "fake: no route for $Method $p" }

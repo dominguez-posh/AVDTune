@@ -435,7 +435,8 @@ try {
     # PowerShell ends a line at a lone CR that editors and git do not show: a method chain split there runs as two statements
     # (AVDTune-Readiness.ps1 lost the last two AddArgument calls; the real start failed, the test mode runs that path inline)
     # build output (Bench\bin, obj, out after Bench\build.ps1) is not ours to check (#51)
-    $loneCr = @(Get-ChildItem -LiteralPath $repo -Recurse -File -Include '*.ps1', '*.psm1', '*.psd1' | Where-Object { $_.FullName.Substring($repo.Length) -notmatch '\\(\.git|bin|obj|out)\\' } |
+    # -Include is not applied with -LiteralPath in Windows PowerShell 5.1: the extension is filtered here (the README screenshots are binary, #91)
+    $loneCr = @(Get-ChildItem -LiteralPath $repo -Recurse -File | Where-Object { $_.Extension -in '.ps1', '.psm1', '.psd1' -and $_.FullName.Substring($repo.Length) -notmatch '\\(\.git|bin|obj|out)\\' } |
         Where-Object { [regex]::IsMatch([IO.File]::ReadAllText($_.FullName), "`r(?!`n)") } | ForEach-Object { $_.FullName.Substring($repo.Length + 1) })
     Test-Check 'no script contains a lone CR (it splits a statement for PowerShell but not in the editor)' ($loneCr.Count -eq 0) ($loneCr -join ', ')
 
