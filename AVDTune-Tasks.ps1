@@ -194,7 +194,7 @@ $script:WriterButtons = @(
     'BtnFslRedirUndo', 'BtnFslDefAdd', 'BtnFslDefUndo', 'BtnFslInstall', 'BtnFslAclSet', 'BtnFslTestWrite', 'BtnFslStorage', 'BtnLangInstall', 'BtnLangApply', 'BtnLangUndo',
     'BtnOffInstall', 'BtnOffRemove', 'BtnOffUndo', 'BtnOffPolicies', 'BtnOffPoliciesUndo', 'BtnOffFixUndo', 'BtnOptApply', 'BtnOptUndo', 'BtnRelInstall', 'BtnRelRepair',
     'BtnRelBack', 'BtnSealRun', 'BtnSealRepair', 'BtnSwUpdateAll', 'BtnUpdAll', 'BtnUpdSelected', 'BtnRepairDism', 'BtnRepairSfc', 'BtnBlockOn', 'BtnBlockOff',
-    'BtnBlockRepair', 'BtnWmInstall', 'BtnWmRemove', 'BtnWmLegacy')
+    'BtnBlockRepair', 'BtnWmInstall', 'BtnWmRemove', 'BtnWmLegacy', 'BtnSnapDelete')
 function New-AVDTuneWriterLockCommand {
     if (-not ('AVDTune.WriterLockCommand' -as [type])) {
         Add-Type -TypeDefinition @'
