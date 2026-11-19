@@ -104,7 +104,7 @@ The ACL rows of the storage check read the NTFS rights over the Azure Files REST
 
 The Storage token is optional. An app registration made before issue 18 has no consent for it: the sign-in still works with the other three tokens, the protocol and the FSLogix page say "No Storage token ..." with the reason, and the ACL rows stay "not checkable" (or the key fallback that you confirm for a run). Nothing is changed silently. To retrofit: Overview, sign-in step, "Set up again (authorize this administrator)": the setup (after its confirmation) adds Azure Storage `user_impersonation` to the registration, adds the Azure Storage service principal to the tenant if it is missing, and grants your consent for it (the same path as for Azure Service Management). Other administrators do the same with their own account. Without the roles for that (Application Administrator, Privileged Role Administrator) an administrator does it in the Entra admin center: API permissions > Azure Storage > `user_impersonation`, then grant consent.
 
-## Real test on the throwaway VM (after docs\test-vm.md steps 1 to 4)
+## Real test on the throwaway VM (after docs\test-vm.md sections A to C)
 
 | # | Step | Expected |
 |---|---|---|

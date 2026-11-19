@@ -40,7 +40,7 @@ Issue 32, plan section 1b (phase 3). Code: `Modules\AVDTune.Environment.psm1`, p
 - `LoadCredKeyFromProfile` from plan section 1b is not on the Entra Kerberos page of Learn and is not set.
 - The page runs plan, create and undo on the window thread behind a task in the bar (like the changes of the FSLogix page): the window waits while Azure works. A background runspace is a follow-up.
 
-## Real test (throwaway tenant, after docs\test-vm.md steps 1 to 4)
+## Real test (throwaway tenant, after docs\test-vm.md sections A to C)
 
 | # | Step | Expected |
 |---|---|---|
