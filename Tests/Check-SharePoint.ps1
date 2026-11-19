@@ -60,6 +60,8 @@ try {
     $spaced = @('Set-Thing -Password Geheim1 -Force', 'setup.exe /S /p Geheim1', 'net use \\print1\share /user:dom\svc Geheim1', 'net use \\print1\share Geheim1 /user:dom\svc', 'app secret abc8Q~AbCdEfGhIjKlMnOpQrStUvWxYz0123')
     $leaks = @($spaced | Where-Object { (Protect-AVDTuneSpText $_ 500) -match 'Geheim1|AbCdEfGhIj' })
     Test-Check 'secret filter (B3): -Password X, /p X, net use with the password before or after /user:, an Entra client secret with ~' ($leaks.Count -eq 0 -and @($spaced | Where-Object { Test-AVDTuneSpSecretFree $_ }).Count -eq 0) (($spaced | ForEach-Object { Protect-AVDTuneSpText $_ 500 }) -join ' | ')
+    $dashes = @('tool.exe --password Geheim1', 'az login --client-secret Geheim1', 'cli --api-key=Geheim1', 'cli --token: Geheim1', 'Winlogon\DefaultPassword = Geheim1', 'ApiPassword=Geheim1', '"ClientToken": "Geheim1"')
+    Test-Check 'secret filter (#107): --password X with two hyphens, --client-secret, --api-key=' (@($dashes | Where-Object { (Protect-AVDTuneSpText $_ 500) -match 'Geheim1' -or (Test-AVDTuneSpSecretFree $_) }).Count -eq 0) (($dashes | ForEach-Object { Protect-AVDTuneSpText $_ 500 }) -join ' | ')
     $again = @(@('Passwort=(removed)', '-Password (removed)', 'net use \\print1\share /user:dom\svc (removed)', '?sv=(removed)&sig=(removed)') | Where-Object { -not (Test-AVDTuneSpSecretFree $_) })
     Test-Check 'secret table: what it replaced is not found again (a cleaned text passes)' ($again.Count -eq 0) ($again -join ' | ')
     # review B1: an error answer comes wrapped by PowerShell (MethodInvocationException with an inner WebException)

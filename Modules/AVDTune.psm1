@@ -1934,7 +1934,7 @@ function Add-AVDTuneRun {
     $path = Join-Path $folder "$id.json"
     $stream = [IO.File]::Open($path, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write)   # throws when the record exists
     try {
-        $bytes = (New-Object Text.UTF8Encoding $false).GetBytes(($Run | ConvertTo-Json -Depth 8))
+        $bytes = (New-Object Text.UTF8Encoding $false).GetBytes((ConvertTo-AVDTuneRunJson $Run))   # free texts through the secret table (#107)
         $stream.Write($bytes, 0, $bytes.Length)
     }
     finally { $stream.Dispose() }
@@ -2472,10 +2472,87 @@ function Invoke-AVDTune {
 
 #endregion
 
+#region secrets: one table (#107)
+
+# One table of secret patterns (Finn's review of #89, B2/B3; shared since #107): Add-AVDTuneChangeLogEntry and Add-AVDTuneRun clean with it themselves, the protocol
+# cleaner and the task bar (AVDTune-Protocol.ps1), the recording and SharePoint (Protect-AVDTuneSpText replaces, Test-AVDTuneSpSecretFree refuses a file) use it too. It covers the rules of Remove-AVDTuneRecordingSecrets (#87) and of the protocol cleaner of PackTune and more. Every replacement
+# is idempotent (a placeholder it wrote is not found again), so a text the recording or the protocol already cleaned is "secret free". Values are delimited by spaces,
+# quotes, commas and semicolons, so the closing quote of a JSON string stays where it is.
+$script:SecretValue = '("[^"]*"|''[^'']*''|[^\s"'',;<>]+)'
+$script:SecretRules = @(
+    # a JWT (access or id token)
+    @('eyJ[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}(\.[A-Za-z0-9_\-]*)?', '(token removed)'),
+    # Authorization values
+    @('(?i)\b(bearer|basic)\s+[A-Za-z0-9._~+/=\-]{8,}', '$1 (removed)'),
+    # name = value and name: value (also "name": "value" of JSON); key only with "=" (a "Registry key: HKLM\..." stays); compound names too: DefaultPassword = X,
+    # ApiPassword=X, ClientToken: X (#107)
+    @("(?i)\b([A-Za-z_]*?(?:password|passwort|kennwort|secret|token)|pwd|pass|client_?secret|access_?token|refresh_?token|apikey|api[_-]?key|accountkey|account_key|sharedaccesskey|sas|pin|serial|seriennummer|pidkey|product\s*key|licen[cs]e\s*key|lizenzschl(\u00fc|ue)ssel|schl(\u00fc|ue)ssel)""?\s*[=:]\s*(?!\((removed|key removed|token removed|not shown)\))$($script:SecretValue)", '$1=(removed)'),
+    @("(?i)\bkey\s*=\s*(?!\((removed|key removed)\))$($script:SecretValue)", 'key=(removed)'),
+    # parameters with the value after a space: -Password X, --password X (#107), -ClientSecret X, /p X, /p:X, /pass X
+    @("(?i)(?<![\w-])(--?(password|passwort|kennwort|pwd|secret|client[-_]?secret|access[-_]?token|token|api[-_]?key|account[-_]?key|pidkey|product[-_]?key|key))(\s+|:)(?!\(removed\))$($script:SecretValue)", '$1 (removed)'),
+    @("(?i)(?<![\w/])(/(p|pw|pwd|pass|password))(\s+|:)(?!\(removed\))(?!/)$($script:SecretValue)", '$1 (removed)'),
+    # net use \\server\share <password> /user:x and net use ... /user:x <password>
+    @("(?i)(\bnet(\.exe)?\s+use\s+[^\s/]+)\s+(?![/*]|\(removed\))$($script:SecretValue)", '$1 (removed)'),
+    @("(?i)(\bnet(\.exe)?\s+use\b[^\r\n]*?/user:\S+)\s+(?![/*]|\(removed\))$($script:SecretValue)", '$1 (removed)'),
+    # SAS and other secret query values (also a SAS without sig)
+    @('(?i)([?&](sig|token|code|key|access_token|sv|se|st|sp|spr|sr|srt|ss|si|skoid|sktid|skt|ske|sks|skv|sdd)=)(?!\(removed\))[^&\s"''<>]+', '$1(removed)'),
+    # an Entra client secret (contains ~)
+    @('(?<![\w~.-])[A-Za-z0-9_.\-]{3,8}~[A-Za-z0-9_.~\-]{20,}', '(removed)'),
+    # a product key (upper case and digits in groups, at least one digit); a GUID and hyphenated words stay
+    @('(?-i)\b(?=[A-Z0-9-]*\d)(?![0-9A-F]{8}-[0-9A-F]{4}-)[A-Z0-9]{4,8}(-[A-Z0-9]{4,8}){3,}\b', '(key removed)'),
+    # base64 with padding (a storage key: 88 characters ending ==)
+    @('[A-Za-z0-9+/]{30,}={1,2}', '(removed)'),
+    # a long run of mixed upper case, lower case and digits (keys, tokens); hex hashes and names with hyphens stay
+    @('\b(?=[A-Za-z0-9+/_]*[0-9])(?=[A-Za-z0-9+/_]*[A-Z])(?=[A-Za-z0-9+/_]*[a-z])[A-Za-z0-9+/_]{40,}', '(removed)')
+)
+
+function Invoke-AVDTuneSecretRules {
+    # Pure. The text with every rule of the table applied; $null when a rule ran into its timeout (the caller fails closed)
+    param([AllowEmptyString()][string]$Text)
+    $t = $Text
+    foreach ($r in $script:SecretRules) { try { $t = [regex]::Replace($t, $r[0], $r[1], [Text.RegularExpressions.RegexOptions]::None, [TimeSpan]::FromSeconds(2)) } catch { return $null } }
+    $t
+}
+
+function Protect-AVDTuneSecretText {
+    <# Pure. A free text with everything the secret table finds replaced; '(removed)' when a rule ran into its timeout (fail closed). No length limit. #>
+    param([AllowEmptyString()][string]$Text)
+    if (-not $Text) { return '' }
+    $t = Invoke-AVDTuneSecretRules $Text
+    if ($null -eq $t) { return '(removed)' }
+    $t
+}
+
+# Free text fields of a run record (#107): their strings pass the secret table before the record is written. Ids, paths and the states a step reads back
+# for undo (Before, After, Previous ...) stay as they are.
+$script:RunTextFields = @('Message', 'Detail', 'Details', 'Error', 'Errors', 'Note', 'Notes', 'Output', 'Reason', 'Text', 'Summary', 'Problem', 'Problems', 'Warning', 'Warnings', 'Hint', 'Log')
+
+function Protect-AVDTuneRunValue($Value, [bool]$Text) {
+    # The value with every string under a free text field cleaned; walks objects and arrays (a copy from ConvertFrom-Json)
+    if ($null -eq $Value) { return $null }
+    if ($Value -is [string]) { if ($Text) { return (Protect-AVDTuneSecretText $Value) }; return $Value }
+    if ($Value -is [ValueType]) { return $Value }
+    if ($Value -is [System.Collections.IList]) { $out = New-Object System.Collections.ArrayList; foreach ($i in $Value) { [void]$out.Add((Protect-AVDTuneRunValue $i $Text)) }; return ,$out.ToArray() }
+    if ($Value -is [pscustomobject]) {
+        foreach ($p in @($Value.PSObject.Properties)) { $p.Value = Protect-AVDTuneRunValue $p.Value ($Text -or ($script:RunTextFields -contains $p.Name)) }
+        return $Value
+    }
+    $Value
+}
+
+function ConvertTo-AVDTuneRunJson {
+    <# Pure. The JSON of a run record with the free text fields cleaned by the secret table (#107); the object of the caller is not changed. #>
+    param([Parameter(Mandatory)]$Run)
+    $copy = ($Run | ConvertTo-Json -Depth 8) | ConvertFrom-Json
+    (Protect-AVDTuneRunValue $copy $false) | ConvertTo-Json -Depth 8
+}
+
+#endregion
+
 #region change log
 
 function Remove-AVDTuneControlCharacters([string]$Text, [int]$MaxLength) {
-    # Free text of the change log: single line, no control characters, limited length. Secrets are cleaned by the caller (protocol cleaner).
+    # Free text: single line, no control characters, limited length. Secrets: Add-AVDTuneChangeLogEntry cleans with the secret table itself (#107).
     if (-not $Text) { return '' }
     $clean = [regex]::Replace($Text, '[\x00-\x1F\x7F]+', ' ').Trim()
     if ($clean.Length -gt $MaxLength) { $clean = $clean.Substring(0, $MaxLength - 3) + '...' }
@@ -2496,16 +2573,18 @@ function Add-AVDTuneChangeLogEntry {
     if (-not (Test-AVDTuneImageVersion $Version)) { throw "Invalid image version '$Version' (YYYY.MM.NNN)." }
     if ($ChangeType -notin $script:ChangeTypes) { throw "Unknown change type '$ChangeType' ($($script:ChangeTypes -join ', '))." }
     $path = Join-Path $Root 'changelog.json'
-    $log = Read-AVDTuneJson $path
-    if ($null -eq $log) { $log = [pscustomobject]@{ Schema = $script:StateSchema; Entries = @() } }
     $entry = [pscustomobject][ordered]@{
         Id = [guid]::NewGuid().ToString('N').Substring(0, 12); Version = $Version; At = $At.ToString('o')
-        Category = (Remove-AVDTuneControlCharacters $Category 40); Component = (Remove-AVDTuneControlCharacters $Component 80); ChangeType = $ChangeType
-        Text = (Remove-AVDTuneControlCharacters $Text 500); User = (Remove-AVDTuneControlCharacters $User 80); SnapshotId = (Remove-AVDTuneControlCharacters $SnapshotId 300)
+        Category = (Remove-AVDTuneControlCharacters (Protect-AVDTuneSecretText $Category) 40); Component = (Remove-AVDTuneControlCharacters (Protect-AVDTuneSecretText $Component) 80); ChangeType = $ChangeType
+        Text = (Remove-AVDTuneControlCharacters (Protect-AVDTuneSecretText $Text) 500); User = (Remove-AVDTuneControlCharacters (Protect-AVDTuneSecretText $User) 80); SnapshotId = (Remove-AVDTuneControlCharacters $SnapshotId 300)
         RunId = (Remove-AVDTuneControlCharacters $RunId 60); Source = $Source; ToolVersion = $script:ToolVersion
     }
-    $log.Entries = @(@($log.Entries) | Where-Object { $_ }) + $entry
-    Write-AVDTuneFile $path ($log | ConvertTo-Json -Depth 6)
+    Invoke-AVDTuneStateLock {   # read, change and write under the state lock, so two writers of the process do not lose an entry (#107)
+        $log = Read-AVDTuneJson $path
+        if ($null -eq $log) { $log = [pscustomobject]@{ Schema = $script:StateSchema; Entries = @() } }
+        $log.Entries = @(@($log.Entries) | Where-Object { $_ }) + $entry
+        Write-AVDTuneFile $path ($log | ConvertTo-Json -Depth 6)
+    }
     $entry
 }
 
@@ -2729,7 +2808,7 @@ function Get-AVDTuneOverview {
 
 #endregion
 
-Export-ModuleMember -Function Test-AVDTunePrivateIp, Get-AVDTuneBenchUserLeftovers, Remove-AVDTuneBenchUserLeftover, Move-AVDTuneFileReplace, Get-AVDTuneDcFromNtDomain, Get-AVDTuneSystemFolder, Get-AVDTuneSystemModulePath, Set-AVDTuneSafeModulePath, Test-AVDTuneModulePathStable, Assert-AVDTuneModulePathStable, Get-AVDTuneModulePathProblems, New-AVDTunePowerShell, New-AVDTuneRunspacePool, Get-AVDTuneChocolateyRoot, Get-AVDTuneChildTool, Initialize-AVDTuneToolTemp, Get-AVDTuneChildEnvironment, Get-AVDTuneProfilePath, Get-AVDTuneHklmValue, New-AVDTuneChildStartInfo, Invoke-AVDTuneChildProcess, Invoke-AVDTuneProgram, Open-AVDTuneSystemProgram, New-AVDTuneDownloadFolder, New-AVDTuneOwnFolder, Test-AVDTuneOwnFolder, New-AVDTuneAdminFile, Set-AVDTuneProcessTemp, Initialize-AVDTuneTempParent, Test-AVDTuneWindowsSignature, Test-AVDTuneSystemProgramPath, Get-AVDTuneProp, Get-AVDTuneWebResponse, Test-AVDTuneElevated, Get-AVDTuneRoot, Test-AVDTuneDefaultRoot, Test-AVDTuneTestMode, Resolve-AVDTuneTestScript, Get-AVDTuneLongPath, Get-AVDTuneTestModeRefusal, Confirm-AVDTuneAction, ConvertTo-AVDTuneArgument, New-AVDTuneMachine, Invoke-AVDTuneMachine, Invoke-AVDTuneDefaultHiveUnload, Remove-AVDTuneTreeSafe,
+Export-ModuleMember -Function Invoke-AVDTuneSecretRules, Protect-AVDTuneSecretText, ConvertTo-AVDTuneRunJson, Test-AVDTunePrivateIp, Get-AVDTuneBenchUserLeftovers, Remove-AVDTuneBenchUserLeftover, Move-AVDTuneFileReplace, Get-AVDTuneDcFromNtDomain, Get-AVDTuneSystemFolder, Get-AVDTuneSystemModulePath, Set-AVDTuneSafeModulePath, Test-AVDTuneModulePathStable, Assert-AVDTuneModulePathStable, Get-AVDTuneModulePathProblems, New-AVDTunePowerShell, New-AVDTuneRunspacePool, Get-AVDTuneChocolateyRoot, Get-AVDTuneChildTool, Initialize-AVDTuneToolTemp, Get-AVDTuneChildEnvironment, Get-AVDTuneProfilePath, Get-AVDTuneHklmValue, New-AVDTuneChildStartInfo, Invoke-AVDTuneChildProcess, Invoke-AVDTuneProgram, Open-AVDTuneSystemProgram, New-AVDTuneDownloadFolder, New-AVDTuneOwnFolder, Test-AVDTuneOwnFolder, New-AVDTuneAdminFile, Set-AVDTuneProcessTemp, Initialize-AVDTuneTempParent, Test-AVDTuneWindowsSignature, Test-AVDTuneSystemProgramPath, Get-AVDTuneProp, Get-AVDTuneWebResponse, Test-AVDTuneElevated, Get-AVDTuneRoot, Test-AVDTuneDefaultRoot, Test-AVDTuneTestMode, Resolve-AVDTuneTestScript, Get-AVDTuneLongPath, Get-AVDTuneTestModeRefusal, Confirm-AVDTuneAction, ConvertTo-AVDTuneArgument, New-AVDTuneMachine, Invoke-AVDTuneMachine, Invoke-AVDTuneDefaultHiveUnload, Remove-AVDTuneTreeSafe,
     New-AVDTuneStateSecurity, Initialize-AVDTuneState, Read-AVDTuneAclInfo, Get-AVDTuneStateSecurityProblems, Move-AVDTuneStateToQuarantine, New-AVDTuneProtectedFolder, Assert-AVDTuneStateSecurity, Get-AVDTuneStateSecurityReport, Get-AVDTuneState, Set-AVDTuneState, Test-AVDTuneImageVersion, Get-AVDTuneNextImageVersion, Start-AVDTuneImageVersion,
     Add-AVDTuneRun, Get-AVDTuneRun, Remove-AVDTuneOldRuns, Get-AVDTuneEnvInterrupted, Get-AVDTuneEnvHealthRow, Get-AVDTuneLastChange, Get-AVDTuneChangeTimes, Get-AVDTuneChangeMarker, Invoke-AVDTuneStateLock, Get-AVDTuneChangeStopError, Test-AVDTuneSealed, Assert-AVDTuneNotSealed, Test-AVDTuneChangeInProgress, Assert-AVDTuneNoForeignChange, Resolve-AVDTuneStaleChange, Start-AVDTuneChange, Stop-AVDTuneChange, Get-AVDTuneSnapshotClockBufferMinutes, ConvertTo-AVDTuneUtc, Get-AVDTuneSnapshotWindow, Test-AVDTuneSnapshotInWindow,New-AVDTuneStep, Invoke-AVDTuneStep, New-AVDTuneStepFromData, Get-AVDTuneStepCatalog, Invoke-AVDTune,
     Add-AVDTuneChangeLogEntry, Get-AVDTuneChangeLog, Get-AVDTuneChangeLogVersions, ConvertTo-AVDTuneChangeLogDocument, Export-AVDTuneChangeLog,

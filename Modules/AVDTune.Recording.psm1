@@ -44,7 +44,8 @@ function Remove-AVDTuneRecordingSecrets {
     <# Pure. Licence notes and other free text: passwords, keys and product keys go out before anything is stored. Returns Text and Cleaned (something was taken out). #>
     param([AllowEmptyString()][string]$Text)
     if (-not $Text) { return [pscustomobject]@{ Text = ''; Cleaned = $false } }
-    $t = $Text
+    $t = Invoke-AVDTuneSecretRules $Text   # the shared table of AVDTune.psm1 first (#107), then the stricter rules of the recording
+    if ($null -eq $t) { return [pscustomobject]@{ Text = ''; Cleaned = $true } }
     $rules = @(
         @('(?i)\b(password|passwort|kennwort|pwd|pass|secret|token|pin|key|schl(ü|ue)ssel|licen[cs]e\s*key|lizenzschl(ü|ue)ssel|serial|seriennummer)\s*[=:]\s*\S+', '$1=(removed)'),
         # a GUID (product code, {xxxxxxxx-xxxx-...}) is no key: it stays (uninstall strings, keys of the registry)

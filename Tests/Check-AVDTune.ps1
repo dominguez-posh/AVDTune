@@ -347,6 +347,27 @@ try {
     $md = ConvertTo-AVDTuneChangeLogDocument -Root $tmp -Version '2026.12.001' -Format Markdown -ImageName 'GM-TEST01'
     Test-Check 'markdown export: title, header, escaped pipe' ($md -like '# Change log GM-TEST01 2026.12.001*' -and $md -like '*| Date | Category | Component | Change | Text | User |*' -and $md -like '*a \| b & c*') $null
     $html = ConvertTo-AVDTuneChangeLogDocument -Root $tmp -Version '2026.12.001' -Format Html
+    # #107: the change log and run records clean free texts with the shared secret table themselves (the callers do not)
+    $r107 = Join-Path $tmp 'secrets107'; [void](Initialize-AVDTuneState -Root $r107)
+    $dirty107 = @('net use \\print1\share Geheim1x /user:dom\svc', 'Kennwort: Geheim2x', 'Set-Thing -Password Geheim3x -Force', 'tool.exe --password Geheim4x')
+    foreach ($d in $dirty107) { [void](Add-AVDTuneChangeLogEntry -Root $r107 -Version '2026.11.001' -Category 'Other' -Component 'note' -ChangeType Note -Text $d -User 'admin1') }
+    $log107 = [IO.File]::ReadAllText((Join-Path $r107 'changelog.json'))
+    Test-Check 'change log (#107): net use, Kennwort:, -Password and --password in a note do not reach changelog.json' ($log107 -notmatch 'Geheim\dx' -and ([regex]::Matches($log107, '\(removed\)')).Count -ge 4) $log107
+    $compound107 = @('Set HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon\DefaultPassword = Winter2026!', 'ApiPassword=Hunter2x')
+    $c107 = @($compound107 | ForEach-Object { (Add-AVDTuneChangeLogEntry -Root $r107 -Version '2026.11.001' -Category 'Other' -ChangeType Note -Text $_).Text })
+    Test-Check 'change log (#107): compound names (DefaultPassword = X, ApiPassword=X) are cleaned too, also in a step title' (($c107 -join ' ') -notmatch 'Winter2026|Hunter2x' -and ($c107 -join ' ') -like '*Winlogon\DefaultPassword=(removed)*') ($c107 -join ' | ')
+    # #107: the change log is read, changed and written under the state lock: while another thread holds it, a new entry waits
+    $lockPs = [PowerShell]::Create(); $held = New-Object Threading.ManualResetEvent $false
+    [void]$lockPs.AddScript({ param($Held) $m = New-Object Threading.Mutex($false, 'Local\AVDTuneStateFile'); [void]$m.WaitOne(); $Held.Set() | Out-Null; Start-Sleep -Milliseconds 2500; $m.ReleaseMutex(); $m.Dispose() }).AddArgument($held)
+    $lockAsync = $lockPs.BeginInvoke()
+    [void]$held.WaitOne(10000)
+    $sw = [Diagnostics.Stopwatch]::StartNew(); [void](Add-AVDTuneChangeLogEntry -Root $r107 -Version '2026.11.001' -Category 'Other' -ChangeType Note -Text 'locked'); $sw.Stop()
+    [void]$lockPs.EndInvoke($lockAsync); $lockPs.Dispose(); $held.Dispose()
+    Test-Check 'change log (#107): a new entry waits for the state lock another thread holds' ($sw.ElapsedMilliseconds -ge 1500) "$($sw.ElapsedMilliseconds) ms"
+    $run107 = [pscustomobject][ordered]@{ Id = $null; Plan = 'p'; Results = @([pscustomobject]@{ Id = 'a.b'; Message = 'tool.exe --password Geheim5x'; Before = [pscustomobject]@{ Value = 'Password=KeepMe1' }; Detail = [pscustomobject]@{ Note = 'Kennwort: Geheim6x' } }) }
+    $runFile107 = Add-AVDTuneRun -Root $r107 -Run $run107
+    $runText107 = [IO.File]::ReadAllText($runFile107)
+    Test-Check 'run record (#107): messages and nested notes are cleaned, an undo state (Before) and the object of the caller stay' ($runText107 -notmatch 'Geheim[56]x' -and $runText107 -match 'Password=KeepMe1' -and $run107.Id -and $run107.Results[0].Message -like '*Geheim5x') $runText107
     Test-Check 'html export encodes all text' ($html -like '*&lt;script&gt;alert(1)&lt;/script&gt;*' -and $html -notlike '*<script>*' -and $html -like '*a | b &amp; c*') $null
     Test-Check 'an empty version exports "No entries."' ((ConvertTo-AVDTuneChangeLogDocument -Root $tmp -Version '2030.01.001') -like '*No entries.*') $null
     $exp = Export-AVDTuneChangeLog -Root $tmp -Version '2026.11.003' -Path (Join-Path $tmp 'out\log.html')
