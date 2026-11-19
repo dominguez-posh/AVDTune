@@ -57,6 +57,8 @@ try {
     $badUrl = @($urls.GetEnumerator() | Where-Object { (Test-AVDTuneReleaseUrl $_.Key) -ne $_.Value } | ForEach-Object Key)
     Test-Check 'URL rule: https, default port, no credentials, only github.com and its download hosts (exact host)' ($badUrl.Count -eq 0) ($badUrl -join ' ')
     $real = New-AVDTuneReleaseHttp
+    $dl = & (Get-Module AVDTune.Release) { (Get-Command Invoke-AVDTuneHttpDownload).ScriptBlock.ToString() }
+    Test-Check 'real HTTP adapter: system proxy without Windows credentials, a 407 ends with a note (#106)' ($dl -notmatch 'CredentialCache]::DefaultCredentials|UseDefaultCredentials\s*=\s*\$true' -and $dl -match 'Proxy\.Credentials\s*=\s*\$null' -and $dl -match '-eq 407') $null
     Test-Check 'real HTTP adapter refuses an http address and a foreign host before any connection' ((Get-ThrownText { & $real.GetText 'http://github.com/o/r' 1000 }) -like 'Refused*' -and (Get-ThrownText { & $real.GetFile 'https://evil.example/x.zip' (Join-Path $tmp 'x.zip') 1000 }) -like 'Refused*' -and -not (Test-Path (Join-Path $tmp 'x.zip'))) $null
     Test-Check 'safe paths: plain relative names only' ((Test-AVDTuneSafeRelativePath 'Modules/AVDTune.psm1') -and -not (Test-AVDTuneSafeRelativePath '../x') -and -not (Test-AVDTuneSafeRelativePath 'a/../b') -and -not (Test-AVDTuneSafeRelativePath 'C:/x') -and -not (Test-AVDTuneSafeRelativePath '/x') -and -not (Test-AVDTuneSafeRelativePath 'a\b') -and -not (Test-AVDTuneSafeRelativePath 'a/nul.txt') -and -not (Test-AVDTuneSafeRelativePath 'a.') -and -not (Test-AVDTuneSafeRelativePath 'a:stream')) $null
 

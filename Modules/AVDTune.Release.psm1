@@ -197,11 +197,13 @@ function Invoke-AVDTuneHttpDownload {
         if (-not (Test-AVDTuneReleaseUrl $current)) { throw 'Refused: a redirect leads to an address that is not https on an allowed GitHub host.' }
         $req = [Net.HttpWebRequest]::Create($current)
         $req.AllowAutoRedirect = $false; $req.Method = 'GET'; $req.Timeout = 30000; $req.ReadWriteTimeout = 30000; $req.UserAgent = 'AVDTune'
-        $req.Proxy = [Net.WebRequest]::GetSystemWebProxy(); $req.Proxy.Credentials = [Net.CredentialCache]::DefaultCredentials
+        # System proxy without credentials (#106): the elevated process never answers a proxy's 407 with the administrator's Windows sign-in
+        $req.Proxy = [Net.WebRequest]::GetSystemWebProxy(); $req.Proxy.Credentials = $null; $req.UseDefaultCredentials = $false; $req.Credentials = $null
         $resp = $null
         try { $resp = $req.GetResponse() } catch [Net.WebException] { $resp = $_.Exception.Response; if (-not $resp) { throw "No connection to $(([Uri]$current).Host): $($_.Exception.Message)" } }
         try {
             $code = [int]$resp.StatusCode
+            if ($code -eq 407) { throw 'The proxy asks for a sign-in (407). AVDTune does not send Windows credentials to a proxy; allow github.com and its download hosts without sign-in on the proxy.' }
             if ($code -in 301, 302, 303, 307, 308) {
                 $loc = [string]$resp.Headers['Location']
                 if (-not $loc) { throw 'Redirect without a target.' }
