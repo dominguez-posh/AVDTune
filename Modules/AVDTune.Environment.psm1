@@ -230,7 +230,7 @@ function Get-AVDTuneEnvResource {
 function Get-AVDTuneEnvPollPath([string]$Url) {
     # A polling URL is absolute: only the ARM host and a subscription path are followed, nothing else
     $p = ConvertTo-AVDTuneArmPath $Url
-    if ($p -notmatch "^/subscriptions/$($script:Guid)/[A-Za-z0-9/._()-]+(\?[A-Za-z0-9=&_.%+/~:-]{1,2000})?$" -or $p -match '\.\.') { throw 'Azure returned a polling link that is not followed.' }
+    if ($p -notmatch "\A/subscriptions/$($script:Guid)/[A-Za-z0-9/._()-]+(\?[A-Za-z0-9=&_.%+/~:-]{1,2000})?\z" -or $p -match '\.\.') { throw 'Azure returned a polling link that is not followed.' }
     $p
 }
 

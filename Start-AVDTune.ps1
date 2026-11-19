@@ -516,7 +516,7 @@ function Save-ProtocolFile([string]$Path) {
     }
     else {
         $format = if ($Path -match '\.md$') { 'Markdown' } else { 'Text' }
-        [IO.File]::WriteAllText($Path, (ConvertTo-PackTuneProtocolText -Protocol $script:Protocol -Language $script:Settings.ProtocolLanguage -Format $format -End (Get-Date)), (New-Object Text.UTF8Encoding $true))
+        [void](Write-AVDTuneExportFile -Path $Path -Text (ConvertTo-PackTuneProtocolText -Protocol $script:Protocol -Language $script:Settings.ProtocolLanguage -Format $format -End (Get-Date)) -Bom)   # no link, temp file and one move (#108 N9)
     }
 }
 Add-Click $ui.BtnProtocolSave {

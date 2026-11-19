@@ -63,6 +63,9 @@ try {
         $ix = Read-Inventory $px $tmp
         Test-Check "export (N1): $($case[0]) makes the driver a problem, nothing is left on either side" ((Get-Printer1 $ix 'Floor 1 Color').Problem -like $case[1] -and $px.Store.LocalFolders.Count -eq 0 -and $px.Store.RemoteFolders.Count -eq 0) (Get-Printer1 $ix 'Floor 1 Color').Problem
     }
+    $pg = New-AVDTuneFakePrinters; $pg.Store.GrowFile = 'amd64\driver.dll'
+    $ig = Read-Inventory $pg $tmp
+    Test-Check 'export (#108 N2): a file with more bytes than the list said is refused before it is written, nothing is left' ((Get-Printer1 $ig 'Floor 1 Color').Problem -like '*the list of the export said*' -and $pg.Store.LocalFolders.Count -eq 0 -and $pg.Store.RemoteFolders.Count -eq 0) (Get-Printer1 $ig 'Floor 1 Color').Problem
     $pb = New-AVDTuneFakePrinters; $pb.Store.Servers[$srv].Printers += @{ Name = 'Wild'; ShareName = 'Wild'; Shared = $true; DriverName = 'Bad*Driver' }
     $ib = Read-Inventory $pb $tmp
     Test-Check 'inventory (N3): a driver name with a wildcard is a problem, never exported' ((Get-Printer1 $ib 'Wild').Problem -like '*driver name is not valid*' -and @($pb.Store.Log | Where-Object { $_ -like '*Bad*' }).Count -eq 0) (Get-Printer1 $ib 'Wild').Problem

@@ -74,7 +74,7 @@ function Get-AVDTuneReleaseFeedUrl { "https://github.com/$($script:Repo)/release
 
 function Test-AVDTuneSafeRelativePath([string]$Path) {
     # Forward slashes, plain names only: no drive, no stream, no "..", no trailing dot or space, no device names. The release script uses the same rule.
-    if ($Path -notmatch '^[A-Za-z0-9._ -]+(/[A-Za-z0-9._ -]+)*$') { return $false }
+    if ($Path -cnotmatch '\A[A-Za-z0-9._ -]+(/[A-Za-z0-9._ -]+)*\z') { return $false }   # \z: a trailing line feed does not pass (#108 N6)
     if ($Path -match '(^|/)\.{1,2}(/|$)' -or $Path -match '[. ](/|$)') { return $false }
     if ($Path -match '(?i)(^|/)(con|prn|aux|nul|com\d|lpt\d)(\.[^/]*)?(/|$)') { return $false }
     $true
@@ -191,7 +191,7 @@ function Invoke-AVDTuneHttp([scriptblock]$Call, [string]$Url) {
 function Invoke-AVDTuneHttpDownload {
     # Real download: HTTPS, TLS 1.2, redirects followed by hand (at most 5) and every hop checked against the host list, size capped, timeouts
     param([Parameter(Mandatory)][string]$Url, [Parameter(Mandatory)][long]$MaxBytes, [string]$Path)
-    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+    [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12   # added, never overwritten (process wide, #108 N1)
     $current = $Url
     for ($hop = 0; $hop -le 5; $hop++) {
         if (-not (Test-AVDTuneReleaseUrl $current)) { throw 'Refused: a redirect leads to an address that is not https on an allowed GitHub host.' }

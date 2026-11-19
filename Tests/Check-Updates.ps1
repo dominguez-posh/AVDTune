@@ -447,13 +447,12 @@ try {
         'AVDTune.psm1|New-AVDTuneChildStartInfo' = 'builds the one ProcessStartInfo'
         'AVDTune.psm1|Invoke-AVDTuneChildProcess' = 'the one Process.Start (job object, timeout)'
         'AVDTune.Printers.psm1|New-AVDTunePrinterAdapter' = 'pnputil /export-driver inside the fixed Invoke-Command block that runs on the print server (#86): AVDTune and its central start are not there; full path from the server''s System folder; pnputil on the master goes through Invoke-AVDTuneProgram'
-        'AVDTune.psm1|Move-AVDTuneStateToQuarantine' = 'icacls /setowner on the state folder that is being set aside: the central start needs the verified <state>\temp, which does not exist at that moment; full path from SystemDirectory, root only (no /T)'
     }
     $productFiles = @(Get-ChildItem -LiteralPath (Join-Path $repo 'Modules') -Filter '*.psm1') + @(Get-ChildItem -LiteralPath $repo -Filter '*.ps1') + @(Get-ChildItem -LiteralPath (Join-Path $repo 'Watermark') -Filter '*.ps1') + @(Get-ChildItem -LiteralPath (Join-Path $repo 'Shared') -Recurse -File | Where-Object { $_.Extension -in '.ps1', '.psm1' })
     $startHits = @(foreach ($f in $productFiles) { & $findStarts ([IO.File]::ReadAllText($f.FullName)) $f.Name })
     $startBad = @($startHits | Where-Object { -not $startAllowed.ContainsKey($_.Key) } | ForEach-Object { "$($_.Key):$($_.Line) $($_.Why)" })
     $startUnused = @($startAllowed.Keys | Where-Object { $k = $_; -not ($startHits | Where-Object { $_.Key -eq $k }) })
-    Test-Check "child start (#53): no program start in the product outside the central start (New-AVDTuneChildStartInfo, Invoke-AVDTuneChildProcess) and the listed exception (icacls of the quarantine); $($productFiles.Count) files" ($productFiles.Count -gt 30 -and $startBad.Count -eq 0 -and $startUnused.Count -eq 0) "outside: $($startBad -join '; ') | unused exception: $($startUnused -join ', ')"
+    Test-Check "child start (#53): no program start in the product outside the central start (New-AVDTuneChildStartInfo, Invoke-AVDTuneChildProcess) and the listed exception (pnputil on the print server; the icacls of the quarantine goes through the central start since #108 N11); $($productFiles.Count) files" ($productFiles.Count -gt 30 -and $startBad.Count -eq 0 -and $startUnused.Count -eq 0) "outside: $($startBad -join '; ') | unused exception: $($startUnused -join ', ')"
     # #76: one copy of the job object start; Benchmark, Updates (Language runs DISM through it), Office and the machine adapter use it
     $modSrc = @{}; foreach ($f in @(Get-ChildItem -LiteralPath (Join-Path $repo 'Modules') -Filter '*.psm1')) { $modSrc[$f.Name] = [IO.File]::ReadAllText($f.FullName) }
     $jobCopies = @($modSrc.Keys | Where-Object { $modSrc[$_] -match 'CreateJobObject' })

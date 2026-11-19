@@ -75,7 +75,7 @@ function New-AVDTuneFakePrinters {
         foreach ($k in @($store.RemoteFolders.Keys)) {
             if ($Path.StartsWith($k + '\')) {
                 $r = $store.RemoteFolders[$k]; $rel = $Path.Substring($k.Length + 1)
-                foreach ($x in @($r.Files)) { if ($x.Path -eq $rel) { $store.ReadDriver = $r.Driver; $store.ReadLength = $x.Length; [void]$store.Reads.Add($rel); return , (New-Object byte[] 4) } }
+                foreach ($x in @($r.Files)) { if ($x.Path -eq $rel) { $store.ReadDriver = $r.Driver; $store.ReadLength = $x.Length; [void]$store.Reads.Add($rel); $n = [int]$x.Length; if ($store.GrowFile -and $rel -eq $store.GrowFile) { $n++ }; return , (New-Object byte[] $n) } }   # as many bytes as the list says (GrowFile: one more, the file grew after the listing)
             }
         }
         throw "No file $Path in an export."

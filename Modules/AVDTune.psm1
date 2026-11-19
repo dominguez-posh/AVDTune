@@ -323,8 +323,7 @@ function Write-AVDTuneAccessFile {
 function Get-AVDTuneTaskInfoFromXml {
     # What matters of a scheduled task definition: first action, principal (group or user, as SID), logon trigger, enabled
     param([Parameter(Mandatory)][string]$Xml)
-    $doc = New-Object System.Xml.XmlDocument
-    $doc.LoadXml($Xml)
+    $doc = ConvertTo-AVDTuneXmlDocument $Xml   # no DTD, no resolver (#108 N5)
     $one = { param($xp) $n = $doc.SelectSingleNode($xp); if ($n) { [string]$n.InnerText } else { '' } }
     $toSid = { param($v) if (-not $v) { return '' }; if ($v -match '^S-1-') { return $v }; if ($v -match '^(BUILTIN\\)?Users$') { return 'S-1-5-32-545' }; if ($v -match '^(BUILTIN\\)?Administrators$') { return 'S-1-5-32-544' }; try { ([Security.Principal.NTAccount]$v).Translate([Security.Principal.SecurityIdentifier]).Value } catch { $v } }
     $enabled = & $one "//*[local-name()='Settings']/*[local-name()='Enabled']"
@@ -428,9 +427,9 @@ function New-AVDTuneMachine {
         # Azure instance metadata: only reachable inside Azure; $null elsewhere
         try {
             $request = [System.Net.HttpWebRequest]::Create('http://169.254.169.254/metadata/instance?api-version=2021-02-01')
-            $request.Headers.Add('Metadata', 'true'); $request.Timeout = 2500; $request.Proxy = $null
+            $request.Headers.Add('Metadata', 'true'); $request.Timeout = 2500; $request.ReadWriteTimeout = 2500; $request.Proxy = $null
             $response = $request.GetResponse()
-            try { (New-Object IO.StreamReader($response.GetResponseStream())).ReadToEnd() | ConvertFrom-Json } finally { $response.Close() }
+            try { Read-AVDTuneResponseText -Response $response -MaxBytes 1MB | ConvertFrom-Json } finally { $response.Close() }   # bounded read (#108 N12)
         }
         catch { $null }
     }
@@ -1706,9 +1705,12 @@ function Move-AVDTuneStateToQuarantine {
     $icacls = Join-Path $(if ($script:ChildEnvHooks.Windows -and (Test-AVDTuneTestMode).Enabled) { Join-Path $script:ChildEnvHooks.Windows 'System32' } else { [Environment]::SystemDirectory }) 'icacls.exe'   # the Windows folder is a hook of the checks (test mode only)
     $ErrorActionPreference = 'Continue'   # icacls writes its refusal to stderr; that must not stop the quarantine
     # root only; a failure is fine, the rename below decides. icacls only after its Windows signature, held until it has ended (#71 review B3); a failed check skips it
+    # through the one process start (#108 N11): job object and a time limit; TEMP is the Windows TEMP folder because <state>\temp is not verified at this moment
     $held = $null
     try { $held = Open-AVDTuneSystemProgram -Path $icacls } catch { }
-    if ($held) { try { [void](& $icacls $Root '/setowner' '*S-1-5-32-544' '/C' '/L' '/Q' 2>&1) } catch { } finally { $held.Dispose() } }
+    if ($held) {
+        try { [void](Invoke-AVDTuneChildProcess -FileName $icacls -Arguments ((@($Root, '/setowner', '*S-1-5-32-544', '/C', '/L', '/Q') | ForEach-Object { ConvertTo-AVDTuneArgument $_ }) -join ' ') -TimeoutMs 60000 -CleanEnvironment -Tool base -TempDir (Join-Path ([Environment]::GetFolderPath('Windows')) 'Temp')) } catch { } finally { $held.Dispose() }
+    }
     $parent = Split-Path $Root -Parent
     $stamp = (Get-Date).ToString('yyyyMMdd-HHmmss', [Globalization.CultureInfo]::InvariantCulture)
     $target = Join-Path $parent "$(Split-Path $Root -Leaf).untrusted-$stamp"
@@ -2549,6 +2551,124 @@ function ConvertTo-AVDTuneRunJson {
 
 #endregion
 
+#region bounded input: responses, downloads, XML, export files (#108)
+
+function Read-AVDTuneResponseText {
+    <# The body of a web response as text, at most -MaxBytes (more throws: nothing larger is held in memory). A BOM decides the encoding, UTF-8 otherwise. #>
+    param([Parameter(Mandatory)]$Response, [long]$MaxBytes = 16MB)
+    $in = $Response.GetResponseStream()
+    $buf = New-Object IO.MemoryStream
+    try {
+        $chunk = New-Object byte[] 65536; $total = [int64]0
+        while (($n = $in.Read($chunk, 0, $chunk.Length)) -gt 0) {
+            $total += $n; if ($total -gt $MaxBytes) { throw "The answer is larger than $MaxBytes bytes: not read." }
+            $buf.Write($chunk, 0, $n)
+        }
+        $buf.Position = 0
+        $reader = New-Object IO.StreamReader($buf, (New-Object Text.UTF8Encoding $false), $true)
+        try { $reader.ReadToEnd() } finally { $reader.Dispose() }
+    }
+    finally { $in.Dispose(); $buf.Dispose() }
+}
+
+function ConvertTo-AVDTuneXmlDocument {
+    <# Pure. An XML text as XmlDocument without DTD (a DOCTYPE throws) and without a resolver (no external entity, no file or URL is opened). #>
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$Xml)
+    $settings = New-Object Xml.XmlReaderSettings
+    $settings.DtdProcessing = [Xml.DtdProcessing]::Prohibit; $settings.XmlResolver = $null
+    $doc = New-Object Xml.XmlDocument
+    $doc.XmlResolver = $null
+    $sr = New-Object IO.StringReader $Xml
+    $reader = [Xml.XmlReader]::Create($sr, $settings)
+    try { $doc.Load($reader) } finally { $reader.Dispose(); $sr.Dispose() }
+    $doc
+}
+
+function Test-AVDTuneHttpsHost {
+    <# Pure. $true for an https address on the default port without credentials whose host is on -AllowedHosts (exact, or '*.example.com' for its sub hosts). #>
+    param([string]$Url, [string[]]$AllowedHosts)
+    $u = $null
+    if (-not [Uri]::TryCreate($Url, [UriKind]::Absolute, [ref]$u)) { return $false }
+    if ($u.Scheme -ne 'https' -or $u.UserInfo -or -not $u.IsDefaultPort) { return $false }
+    $h = $u.Host.ToLowerInvariant()
+    foreach ($a in @($AllowedHosts)) { $a = ([string]$a).ToLowerInvariant(); if ($h -eq $a -or ($a.StartsWith('*.') -and $h.EndsWith($a.Substring(1)))) { return $true } }
+    $false
+}
+
+function Invoke-AVDTuneHttpsGet {
+    <#
+        A GET with the redirects followed by hand (at most -MaxHops), every hop https on a host of -AllowedHosts, TLS 1.2 added, timeouts for the connection and every read,
+        the body capped at -MaxBytes (the announced length and what really comes). With -Path the body is written to that new file (CreateNew), with -ResolveOnly only the
+        final address is returned (a range of one byte is asked for), otherwise the text. -GetResponse replaces $req.GetResponse() for the checks.
+    #>
+    param([Parameter(Mandatory)][string]$Url, [Parameter(Mandatory)][string[]]$AllowedHosts, [long]$MaxBytes = 64MB, [string]$Path, [int]$TimeoutMs = 30000, [int]$MaxHops = 5,
+        [switch]$ResolveOnly, [scriptblock]$GetResponse)
+    [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+    $current = $Url
+    for ($hop = 0; $hop -le $MaxHops; $hop++) {
+        if (-not (Test-AVDTuneHttpsHost $current $AllowedHosts)) { throw "Refused: $current is not an https address on an allowed host." }
+        $req = [Net.HttpWebRequest]::Create($current)
+        $req.AllowAutoRedirect = $false; $req.Method = 'GET'; $req.Timeout = $TimeoutMs; $req.ReadWriteTimeout = $TimeoutMs; $req.UserAgent = 'AVDTune'
+        $req.Proxy = [Net.WebRequest]::GetSystemWebProxy(); $req.Proxy.Credentials = $null; $req.UseDefaultCredentials = $false   # no Windows sign-in to a proxy (#106)
+        if ($ResolveOnly) { $req.AddRange([long]0, [long]0) }
+        $resp = $null
+        try { $resp = if ($GetResponse) { & $GetResponse $req } else { $req.GetResponse() } }
+        catch { $resp = Get-AVDTuneWebResponse $_.Exception; if (-not $resp) { throw "No connection to $(([Uri]$current).Host): $($_.Exception.Message)" } }
+        try {
+            $code = [int]$resp.StatusCode
+            if ($code -in 301, 302, 303, 307, 308) {
+                $loc = [string]$resp.Headers['Location']
+                if (-not $loc) { throw 'Redirect without a target.' }
+                $current = (New-Object Uri ([Uri]$current), $loc).AbsoluteUri
+                continue
+            }
+            if ($code -eq 407) { throw 'The proxy asks for a sign-in (407). AVDTune does not send Windows credentials to a proxy.' }
+            if ($code -notin 200, 206) { throw "$(([Uri]$current).Host) answered $code." }
+            if ($ResolveOnly) { return $current }
+            if ([int64]$resp.ContentLength -gt $MaxBytes) { throw "The download is larger than $MaxBytes bytes." }
+            $in = $resp.GetResponseStream()
+            $out = if ($Path) { New-Object IO.FileStream($Path, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None) } else { New-Object IO.MemoryStream }
+            try {
+                $buffer = New-Object byte[] 81920; $total = [int64]0
+                while (($n = $in.Read($buffer, 0, $buffer.Length)) -gt 0) {
+                    $total += $n; if ($total -gt $MaxBytes) { throw "The download is larger than $MaxBytes bytes." }
+                    $out.Write($buffer, 0, $n)
+                }
+                if (-not $Path) { return [Text.Encoding]::UTF8.GetString($out.ToArray()) }
+                return
+            }
+            catch { if ($Path) { $out.Dispose(); $out = $null; if ([IO.File]::Exists($Path)) { [IO.File]::Delete($Path) } }; throw }
+            finally { if ($out) { $out.Dispose() }; $in.Dispose() }
+        }
+        finally { $resp.Close() }
+    }
+    throw 'Too many redirects.'
+}
+
+function Write-AVDTuneExportFile {
+    <# Writes an export to a file the administrator chose: the target and its folder must not be links (reparse points); written to a new temp file next to it
+       (CreateNew) and moved over the target in one step (Move-AVDTuneFileReplace), so a crash leaves the old or the new file. A missing folder is not created. #>
+    param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][AllowEmptyString()][string]$Text, [switch]$Bom)
+    $full = [IO.Path]::GetFullPath($Path)
+    $dir = [IO.Path]::GetDirectoryName($full)
+    if (-not $dir -or -not [IO.Directory]::Exists($dir)) { throw "The folder of $full does not exist." }
+    if (([IO.File]::GetAttributes($dir) -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw "The folder $dir is a link: not exported there." }
+    if ([IO.Directory]::Exists($full)) { throw "$full is a folder." }
+    if ([IO.File]::Exists($full) -and ([IO.File]::GetAttributes($full) -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw "$full is a link: not overwritten." }
+    $temp = Join-Path $dir ('.' + [IO.Path]::GetFileName($full) + '.' + [guid]::NewGuid().ToString('N') + '.tmp')
+    $pre = (New-Object Text.UTF8Encoding ([bool]$Bom)).GetPreamble()
+    $body = (New-Object Text.UTF8Encoding $false).GetBytes($Text)
+    try {
+        $fs = New-Object IO.FileStream($temp, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+        try { $fs.Write($pre, 0, $pre.Length); $fs.Write($body, 0, $body.Length); $fs.Flush($true) } finally { $fs.Dispose() }
+        Move-AVDTuneFileReplace $temp $full
+    }
+    finally { if ([IO.File]::Exists($temp)) { [IO.File]::Delete($temp) } }
+    $full
+}
+
+#endregion
+
 #region change log
 
 function Remove-AVDTuneControlCharacters([string]$Text, [int]$MaxLength) {
@@ -2609,6 +2729,13 @@ function Get-AVDTuneChangeLogVersions {
 
 function ConvertTo-AVDTuneHtmlText([string]$Text) { [Net.WebUtility]::HtmlEncode($Text) }
 
+function ConvertTo-AVDTuneMarkdownText([string]$Text) {
+    # Pure. A table cell of a Markdown export (#108 N10): no HTML, link, code or table syntax of the text takes effect (\ | ` [ ] escaped, < > & as entities)
+    if (-not $Text) { return '' }
+    $t = $Text.Replace('&', '&amp;').Replace('<', '&lt;').Replace('>', '&gt;')
+    [regex]::Replace($t, '([\\|`\[\]])', '\$1')
+}
+
 function ConvertTo-AVDTuneChangeLogDocument {
     # The change log of one version as Markdown or as a self-contained HTML page (all text encoded)
     param([string]$Root = (Get-AVDTuneRoot), [Parameter(Mandatory)][string]$Version, [ValidateSet('Markdown', 'Html')][string]$Format = 'Markdown', [string]$ImageName)
@@ -2624,13 +2751,13 @@ function ConvertTo-AVDTuneChangeLogDocument {
         if ($rows.Count -eq 0) { $out.Add('No entries.') }
         else {
             $out.Add('| ' + ($header -join ' | ') + ' |'); $out.Add('|' + (('---|') * $header.Count))
-            foreach ($row in $rows) { $out.Add('| ' + (@($row | ForEach-Object { ([string]$_).Replace('|', '\|') }) -join ' | ') + ' |') }
+            foreach ($row in $rows) { $out.Add('| ' + (@($row | ForEach-Object { ConvertTo-AVDTuneMarkdownText ([string]$_) }) -join ' | ') + ' |') }
         }
         return (($out -join "`r`n") + "`r`n")
     }
     $html = New-Object System.Text.StringBuilder
     [void]$html.AppendLine('<!DOCTYPE html>')
-    [void]$html.AppendLine('<html lang="en"><head><meta charset="utf-8"><title>' + (ConvertTo-AVDTuneHtmlText $title) + '</title>')
+    [void]$html.AppendLine('<html lang="en"><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src ''none''; style-src ''unsafe-inline''"><title>' + (ConvertTo-AVDTuneHtmlText $title) + '</title>')
     [void]$html.AppendLine('<style>body{font-family:"Segoe UI",sans-serif;margin:32px;color:#1b1b1b}table{border-collapse:collapse;width:100%}th,td{border-bottom:1px solid #e5e5e5;padding:8px 10px;text-align:left;vertical-align:top}th{background:#f3f3f3}</style></head><body>')
     [void]$html.AppendLine('<h1>' + (ConvertTo-AVDTuneHtmlText $title) + '</h1>')
     if ($rows.Count -eq 0) { [void]$html.AppendLine('<p>No entries.</p>') }
@@ -2648,9 +2775,7 @@ function Export-AVDTuneChangeLog {
     param([string]$Root = (Get-AVDTuneRoot), [Parameter(Mandatory)][string]$Version, [Parameter(Mandatory)][string]$Path, [ValidateSet('Markdown', 'Html')][string]$Format, [string]$ImageName)
     if (-not $Format) { $Format = if ($Path -match '\.html?$') { 'Html' } else { 'Markdown' } }
     $text = ConvertTo-AVDTuneChangeLogDocument -Root $Root -Version $Version -Format $Format -ImageName $ImageName
-    $folder = Split-Path $Path -Parent
-    if ($folder -and -not (Test-Path -LiteralPath $folder)) { New-Item -ItemType Directory -Path $folder -Force | Out-Null }
-    [IO.File]::WriteAllText($Path, $text, (New-Object Text.UTF8Encoding $true))
+    [void](Write-AVDTuneExportFile -Path $Path -Text $text -Bom)   # no link as target or folder, temp file and one move (#108 N9); a missing folder is not created
     $Path
 }
 
@@ -2808,7 +2933,7 @@ function Get-AVDTuneOverview {
 
 #endregion
 
-Export-ModuleMember -Function Invoke-AVDTuneSecretRules, Protect-AVDTuneSecretText, ConvertTo-AVDTuneRunJson, Test-AVDTunePrivateIp, Get-AVDTuneBenchUserLeftovers, Remove-AVDTuneBenchUserLeftover, Move-AVDTuneFileReplace, Get-AVDTuneDcFromNtDomain, Get-AVDTuneSystemFolder, Get-AVDTuneSystemModulePath, Set-AVDTuneSafeModulePath, Test-AVDTuneModulePathStable, Assert-AVDTuneModulePathStable, Get-AVDTuneModulePathProblems, New-AVDTunePowerShell, New-AVDTuneRunspacePool, Get-AVDTuneChocolateyRoot, Get-AVDTuneChildTool, Initialize-AVDTuneToolTemp, Get-AVDTuneChildEnvironment, Get-AVDTuneProfilePath, Get-AVDTuneHklmValue, New-AVDTuneChildStartInfo, Invoke-AVDTuneChildProcess, Invoke-AVDTuneProgram, Open-AVDTuneSystemProgram, New-AVDTuneDownloadFolder, New-AVDTuneOwnFolder, Test-AVDTuneOwnFolder, New-AVDTuneAdminFile, Set-AVDTuneProcessTemp, Initialize-AVDTuneTempParent, Test-AVDTuneWindowsSignature, Test-AVDTuneSystemProgramPath, Get-AVDTuneProp, Get-AVDTuneWebResponse, Test-AVDTuneElevated, Get-AVDTuneRoot, Test-AVDTuneDefaultRoot, Test-AVDTuneTestMode, Resolve-AVDTuneTestScript, Get-AVDTuneLongPath, Get-AVDTuneTestModeRefusal, Confirm-AVDTuneAction, ConvertTo-AVDTuneArgument, New-AVDTuneMachine, Invoke-AVDTuneMachine, Invoke-AVDTuneDefaultHiveUnload, Remove-AVDTuneTreeSafe,
+Export-ModuleMember -Function ConvertTo-AVDTuneMarkdownText, Read-AVDTuneResponseText, ConvertTo-AVDTuneXmlDocument, Test-AVDTuneHttpsHost, Invoke-AVDTuneHttpsGet, Write-AVDTuneExportFile, Invoke-AVDTuneSecretRules, Protect-AVDTuneSecretText, ConvertTo-AVDTuneRunJson, Test-AVDTunePrivateIp, Get-AVDTuneBenchUserLeftovers, Remove-AVDTuneBenchUserLeftover, Move-AVDTuneFileReplace, Get-AVDTuneDcFromNtDomain, Get-AVDTuneSystemFolder, Get-AVDTuneSystemModulePath, Set-AVDTuneSafeModulePath, Test-AVDTuneModulePathStable, Assert-AVDTuneModulePathStable, Get-AVDTuneModulePathProblems, New-AVDTunePowerShell, New-AVDTuneRunspacePool, Get-AVDTuneChocolateyRoot, Get-AVDTuneChildTool, Initialize-AVDTuneToolTemp, Get-AVDTuneChildEnvironment, Get-AVDTuneProfilePath, Get-AVDTuneHklmValue, New-AVDTuneChildStartInfo, Invoke-AVDTuneChildProcess, Invoke-AVDTuneProgram, Open-AVDTuneSystemProgram, New-AVDTuneDownloadFolder, New-AVDTuneOwnFolder, Test-AVDTuneOwnFolder, New-AVDTuneAdminFile, Set-AVDTuneProcessTemp, Initialize-AVDTuneTempParent, Test-AVDTuneWindowsSignature, Test-AVDTuneSystemProgramPath, Get-AVDTuneProp, Get-AVDTuneWebResponse, Test-AVDTuneElevated, Get-AVDTuneRoot, Test-AVDTuneDefaultRoot, Test-AVDTuneTestMode, Resolve-AVDTuneTestScript, Get-AVDTuneLongPath, Get-AVDTuneTestModeRefusal, Confirm-AVDTuneAction, ConvertTo-AVDTuneArgument, New-AVDTuneMachine, Invoke-AVDTuneMachine, Invoke-AVDTuneDefaultHiveUnload, Remove-AVDTuneTreeSafe,
     New-AVDTuneStateSecurity, Initialize-AVDTuneState, Read-AVDTuneAclInfo, Get-AVDTuneStateSecurityProblems, Move-AVDTuneStateToQuarantine, New-AVDTuneProtectedFolder, Assert-AVDTuneStateSecurity, Get-AVDTuneStateSecurityReport, Get-AVDTuneState, Set-AVDTuneState, Test-AVDTuneImageVersion, Get-AVDTuneNextImageVersion, Start-AVDTuneImageVersion,
     Add-AVDTuneRun, Get-AVDTuneRun, Remove-AVDTuneOldRuns, Get-AVDTuneEnvInterrupted, Get-AVDTuneEnvHealthRow, Get-AVDTuneLastChange, Get-AVDTuneChangeTimes, Get-AVDTuneChangeMarker, Invoke-AVDTuneStateLock, Get-AVDTuneChangeStopError, Test-AVDTuneSealed, Assert-AVDTuneNotSealed, Test-AVDTuneChangeInProgress, Assert-AVDTuneNoForeignChange, Resolve-AVDTuneStaleChange, Start-AVDTuneChange, Stop-AVDTuneChange, Get-AVDTuneSnapshotClockBufferMinutes, ConvertTo-AVDTuneUtc, Get-AVDTuneSnapshotWindow, Test-AVDTuneSnapshotInWindow,New-AVDTuneStep, Invoke-AVDTuneStep, New-AVDTuneStepFromData, Get-AVDTuneStepCatalog, Invoke-AVDTune,
     Add-AVDTuneChangeLogEntry, Get-AVDTuneChangeLog, Get-AVDTuneChangeLogVersions, ConvertTo-AVDTuneChangeLogDocument, Export-AVDTuneChangeLog,

@@ -507,16 +507,19 @@ function Invoke-AVDTuneStorageCheck {
             $key = $null
             try {
                 $keys = Invoke-AVDTuneStorageArm -Arm $Arm -Token $ArmToken -Method POST -Path "$($acc.Id)/listKeys?api-version=$script:StorageApi" -Action 'Microsoft.Storage/storageAccounts/listKeys/action' -Scope $share.Account
-                $key = [string]@(Get-AVDTuneProp $keys 'keys')[0].value
+                $key = [string]@(Get-AVDTuneProp $keys 'keys')[0].value; $keys = $null   # only the first key; the answer with both is dropped at once (#108 N8)
                 $ctx.KeyUsed = $true
-                & $F.KeyMapAdd "\\$($share.Host)\$($share.Share)" "Azure\$($share.Account)" $key
-                $key = $null
-                $sddl = & $F.ShareAcl "\\$($share.Host)\$($share.Share)"
+                try {
+                    & $F.KeyMapAdd "\\$($share.Host)\$($share.Share)" "Azure\$($share.Account)" $key
+                    $key = $null
+                    $sddl = & $F.ShareAcl "\\$($share.Host)\$($share.Share)"
+                }
+                finally { $key = $null; try { & $F.KeyMapRemove "\\$($share.Host)\$($share.Share)" } catch { } }   # the mapping lives only for the ACL read (#108 N8)
                 if (-not $sddl) { Add (New-AVDTuneStRow 'st.acl.key' 5 'ACL through the account key' 'red' 'The key fallback was used (confirmed for this run) but the ACL could not be read through the SMB mapping.' 'Check port 445 and the share.' -Source $aclSource -Verified $false) }
                 else { Add (New-AVDTuneStRow 'st.acl.key' 5 'ACL through the account key' 'yellow' 'The ACL was read with the account key (fallback, confirmed for this run). The key was used in memory only and the mapping was removed; the change log says so.' 'Give the administrator Storage File Data Privileged Reader so the key is not needed.' -Source $aclSource -Verified $false) }
             }
             catch { Add (New-AVDTuneStRow 'st.acl.key' 5 'ACL through the account key' 'red' "The key fallback failed: $($_.Exception.Message)" '' -Source $aclSource -Verified $false) }
-            finally { $key = $null; $keys = $null; try { & $F.KeyMapRemove "\\$($share.Host)\$($share.Share)" } catch { } }
+            finally { $key = $null; $keys = $null }
         }
         else { Add (New-AVDTuneStRow 'st.acl.key' 5 'ACL through the account key' 'info' 'The account key is not used: it gives full access and is only a fallback, after you confirm it for this run.' -Source $aclSource -Verified $false) }
     }

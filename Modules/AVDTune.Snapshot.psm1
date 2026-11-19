@@ -649,7 +649,7 @@ function New-AVDTuneArmAdapter {
         [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
         try {
             $request = [System.Net.HttpWebRequest]::Create("https://management.azure.com$Path")
-            $request.Method = $Method; $request.Timeout = 60000; $request.AllowAutoRedirect = $false
+            $request.Method = $Method; $request.Timeout = 60000; $request.ReadWriteTimeout = 60000; $request.AllowAutoRedirect = $false
             $request.Headers.Add('Authorization', "Bearer $Token")
             $request.Accept = 'application/json'
             if ($null -ne $Body) {
@@ -665,7 +665,7 @@ function New-AVDTuneArmAdapter {
             if (-not $response) { return [pscustomobject]@{ Status = 0; Body = $null; Error = $_.Exception.Message } }
         }
         try {
-            $text = (New-Object IO.StreamReader($response.GetResponseStream())).ReadToEnd()
+            $text = Read-AVDTuneResponseText -Response $response -MaxBytes 32MB   # bounded read (#108 N12)
             $parsed = $null; if ($text.Trim()) { try { $parsed = $text | ConvertFrom-Json } catch { } }
             $hs = @{}; foreach ($k in $response.Headers.AllKeys) { $hs[[string]$k] = [string]$response.Headers[$k] }   # Azure-AsyncOperation, Location, Retry-After of asynchronous operations (environment wizard)
             [pscustomobject]@{ Status = [int]$response.StatusCode; Body = $parsed; Error = ''; Headers = $hs }
