@@ -125,6 +125,8 @@ try {
     Open-AVDTuneWriteGate -SnapshotId 'snap-1' -ConfirmedBy 'Alex Example'
     $noLib = Invoke-AVDTuneCustomRun -Machine $m -C $c -Root $tmp -Mode Apply -Ids @($ids['Readme'])
     Test-Check 'a library file that is not cached needs the library: the step fails with the reason, nothing is copied' ($noLib.Run.Results[0].Status -eq 'Failed' -and $noLib.Run.Results[0].Message -like '*not in the cache*' -and -not $c.Store.Files.ContainsKey('c:\apps\readme.txt')) $noLib.Run.Results[0].Message
+    $rmRec = (Read-AVDTuneCustomUndo $tmp)[$ids['Readme']]
+    Test-Check 'undo record (#102): written before the first write: a failed step keeps the state before (a crash would too)' ($null -ne $rmRec -and $null -ne (Get-AVDTuneProp $rmRec 'Before')) ((Read-AVDTuneCustomUndo $tmp).Keys -join ',')
     $c.Store.Tamper['readme.txt'] = [Text.Encoding]::UTF8.GetBytes('evil')
     $tam = Invoke-AVDTuneCustomRun -Machine $m -C $c -Root $tmp -Mode Apply -Ids @($ids['Readme']) -Context @{ Fake = $true }
     Test-Check 'a download that does not match the pinned SHA256 is refused and not used' ($tam.Run.Results[0].Status -eq 'Failed' -and $tam.Run.Results[0].Message -like '*SHA256*' -and -not $c.Store.Files.ContainsKey('c:\apps\readme.txt')) $tam.Run.Results[0].Message

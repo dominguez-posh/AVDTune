@@ -806,12 +806,20 @@ function Invoke-AVDTuneCustomRun {
         [void]$steps.Add($s); $byStep[$s.Id] = $i
     }
     if ($steps.Count -eq 0) { return [pscustomobject]@{ Run = $null; Skipped = @($skipped) } }
+    # audit #102: the state before goes into the undo record BEFORE the first write (a crash or a failed step keeps the origin); after the run a provisional entry
+    # whose step changed nothing is taken out again
+    $provisional = @()
+    if ($Mode -eq 'Apply' -and -not $WhatIf -and (Test-AVDTuneWriteAllowed)) {
+        Assert-AVDTuneNotSealed -Root $Root
+        foreach ($i in @($byStep.Values)) { if (-not $undo.ContainsKey($i.Id)) { $undo[$i.Id] = [ordered]@{ Id = $i.Id; Kind = $i.Kind; At = (& $Machine.Now).ToString('o'); Before = $before[$i.Id] }; $provisional += $i.Id } }
+        if ($provisional.Count -gt 0) { Write-AVDTuneCustomUndo $Root $undo }
+    }
     $run = Invoke-AVDTune -Plan ([pscustomobject]@{ Name = "Customizations $($Mode.ToLower())"; Steps = @($steps | ForEach-Object { $_.Id }) }) -Catalog @($steps) -Machine $Machine -Root $Root -User $User -SnapshotId $SnapshotId -WhatIf:$WhatIf
     if (-not $WhatIf) {
         $changed = $false
         foreach ($r in @($run.Results)) {
             $i = $byStep[$r.Id]; if (-not $i) { continue }
-            if ($Mode -eq 'Apply' -and $r.Status -eq 'Changed' -and -not $undo.ContainsKey($i.Id)) { $undo[$i.Id] = [ordered]@{ Id = $i.Id; Kind = $i.Kind; At = (& $Machine.Now).ToString('o'); Before = $before[$i.Id] }; $changed = $true }
+            if ($Mode -eq 'Apply' -and $i.Id -in $provisional -and $r.Status -notin 'Changed', 'Failed') { $undo.Remove($i.Id); $changed = $true }   # nothing changed: no undo record (a failed step may have changed part of it: the record stays)
             if ($Mode -eq 'Undo' -and $r.Status -in 'Changed', 'Unchanged' -and $undo.ContainsKey($i.Id)) { $undo.Remove($i.Id); $changed = $true }
         }
         if ($changed) { Write-AVDTuneCustomUndo $Root $undo }

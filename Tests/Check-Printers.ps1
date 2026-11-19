@@ -141,6 +141,38 @@ try {
     Write-AVDTuneFile (Get-AVDTunePrinterJournalPath $rootJ) '{"Schema":1,"Old":"admin1.example.test","Server":"print1.example.test"}'
     $pj = New-AVDTuneFakePrinters; $pj.Store.TrustedHosts = 'admin1.example.test,print1.example.test'
     Test-Check 'TrustedHosts journal of the first version: the start sets TrustedHosts back exactly and removes the journal; without a journal nothing happens' ((Repair-AVDTunePrinterTrustedHosts -P $pj -Root $rootJ) -and $pj.Store.TrustedHosts -ceq 'admin1.example.test' -and -not (Test-Path (Get-AVDTunePrinterJournalPath $rootJ)) -and -not (Repair-AVDTunePrinterTrustedHosts -P $pj -Root $rootJ)) $pj.Store.TrustedHosts
+    # audit #102: the undo record is written before the first write; the server list step fails after it removed the foreign entry: the origin is still known and the
+    # undo brings the foreign entry back
+    $rootF = Join-Path $tmp 'fail102'; [void](Initialize-AVDTuneState -Root $rootF)
+    Save-AVDTunePrinterState -Root $rootF -State ([pscustomobject]@{ Servers = @($srv); Drivers = @() })
+    $pf = New-AVDTuneFakePrinters
+    $pf.Store.Registry['hklm:\software\policies\microsoft\windows nt\printers\packagepointandprint\listofservers|foreign.example.test'] = @{ Value = 'foreign.example.test'; Kind = 'String' }
+    $pf.Store.Registry['hklm:\software\policies\microsoft\windows nt\printers\pointandprint|restrictdriverinstallationtoadministrators'] = @{ Value = 1; Kind = 'DWord' }   # already set: only the list step writes (no Changed step to record after the run)
+    $origSet = $pf.RegSet
+    $pf.RegSet = { param($Path, $Name, $Value, $Type) if ($Path -like '*ListOfServers') { throw 'fake: write refused' }; & $origSet $Path $Name $Value $Type }.GetNewClosure()
+    $rf = Invoke-AVDTunePrinterRun -Machine $m -P $pf -Root $rootF -Drivers @() -Policy -User 'admin1' -SnapshotId 'snap-1'
+    $uf = Read-AVDTunePrinterUndo $rootF
+    Test-Check 'undo record (#102): the server list step failed after removing the foreign entry; the record written before the run keeps it' (@($rf.Run.Results | Where-Object { $_.Id -eq 'printers.policy-serverlist' -and $_.Status -eq 'Failed' }).Count -eq 1 -and -not $pf.Store.Registry.ContainsKey('hklm:\software\policies\microsoft\windows nt\printers\packagepointandprint\listofservers|foreign.example.test') -and [string]$uf.Policy.List.'foreign.example.test' -eq 'foreign.example.test') $(try { Get-Content (Get-AVDTunePrinterUndoPath $rootF) -Raw -ErrorAction Stop } catch { "no undo record" })
+    $pf.RegSet = $origSet
+    [void](Invoke-AVDTunePrinterRun -Machine $m -P $pf -Root $rootF -Mode Undo -User 'admin1' -SnapshotId 'snap-1')
+    Test-Check 'undo (#102): after the failed run the foreign entry is back' ($pf.Store.Registry.ContainsKey('hklm:\software\policies\microsoft\windows nt\printers\packagepointandprint\listofservers|foreign.example.test')) $null
+    # a value someone else changed after AVDTune is not overwritten by the undo; the record stays
+    $rootO = Join-Path $tmp 'other102'; [void](Initialize-AVDTuneState -Root $rootO)
+    Save-AVDTunePrinterState -Root $rootO -State ([pscustomobject]@{ Servers = @($srv); Drivers = @() })
+    $po = New-AVDTuneFakePrinters
+    [void](Invoke-AVDTunePrinterRun -Machine $m -P $po -Root $rootO -Drivers @() -Policy -User 'admin1' -SnapshotId 'snap-1')
+    $po.Store.Registry['hklm:\software\policies\microsoft\windows nt\printers\pointandprint|restrictdriverinstallationtoadministrators'] = @{ Value = 0; Kind = 'DWord' }
+    $po.Store.Registry['hklm:\software\policies\microsoft\windows nt\printers\packagepointandprint\listofservers|gpo.example.test'] = @{ Value = 'gpo.example.test'; Kind = 'String' }
+    $ro = Invoke-AVDTunePrinterRun -Machine $m -P $po -Root $rootO -Mode Undo -User 'admin1' -SnapshotId 'snap-1'
+    Test-Check 'undo (#102): a restriction and a list someone else changed since are not overwritten (failed with the reason), the record stays' (@($ro.Run.Results | Where-Object { $_.Status -eq 'Failed' -and $_.Message -like '*someone else*' }).Count -eq 1 -and $po.Store.Registry['hklm:\software\policies\microsoft\windows nt\printers\pointandprint|restrictdriverinstallationtoadministrators'].Value -eq 0 -and $po.Store.Registry.ContainsKey('hklm:\software\policies\microsoft\windows nt\printers\packagepointandprint\listofservers|gpo.example.test') -and $null -ne (Read-AVDTunePrinterUndo $rootO).Policy) (($ro.Run.Results | ForEach-Object { "$($_.Id)=$($_.Status):$($_.Message)" }) -join ' | ')
+    # typed read: "false" is not false, a list entry that is not a host name, a driver without a valid name
+    $typedBad = 0
+    foreach ($bad in '{"Schema":1,"Policy":{"Restrict":{"Exists":"false"},"ListFlag":{"Exists":false},"List":{}},"Drivers":{}}', '{"Schema":1,"Policy":{"Restrict":{"Exists":false},"ListFlag":{"Exists":false},"List":{"a b":"x;y"}},"Drivers":{}}', '{"Schema":1,"Policy":null,"Drivers":{"x*":{"Name":"x*","Version":"1","Server":"print1.example.test","Existed":false}}}') {
+        Write-AVDTuneFile (Get-AVDTunePrinterUndoPath $rootO) $bad
+        $logN = $po.Store.Log.Count
+        if ((Get-ThrownText { Invoke-AVDTunePrinterRun -Machine $m -P $po -Root $rootO -Mode Undo -User 'admin1' -SnapshotId 'snap-1' }) -like '*not usable*' -and $po.Store.Log.Count -eq $logN) { $typedBad++ }
+    }
+    Test-Check 'undo record (#102): read typed: "false" for Exists, a list entry that is not a host name and a driver name with a wildcard are refused, nothing is written' ($typedBad -eq 3) "$typedBad of 3"
     $u = Invoke-AVDTunePrinterRun -Machine $m -P $p -Root $tmp -Mode Undo -User 'admin1' -SnapshotId 'snap-1'
     Test-Check 'undo: the policies as before (restriction absent, the old list entry back) and the drivers AVDTune added removed; the record is empty' (-not $st.Registry.ContainsKey("$pol\pointandprint|restrictdriverinstallationtoadministrators") -and $st.Registry["$pol\packagepointandprint\listofservers|old.example.test"].Value -eq 'old.example.test' -and -not $st.Registry.ContainsKey("$pol\packagepointandprint\listofservers|$srv") -and $st.Local.Count -eq 0 -and $null -eq (Read-AVDTunePrinterUndo $tmp).Policy -and (Read-AVDTunePrinterUndo $tmp).Drivers.Count -eq 0) (($u.Run.Results | ForEach-Object { "$($_.Id)=$($_.Status) $($_.Message)" }) -join ' | ')
 
