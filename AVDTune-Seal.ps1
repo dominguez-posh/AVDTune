@@ -18,17 +18,20 @@ function Update-SealView {
     $gate = Test-AVDTuneFinishGate -Root $script:StateRoot -Machine $script:Machine
     $crash = Get-AVDTuneFinishCrash -Root $script:StateRoot
     $state = Get-AVDTuneState $script:StateRoot
-    $pair = if ($script:SealJob) { @('AccentSubtle', 'Primary', 'Running') } elseif ($crash) { @('ErrorBg', 'Danger', 'Interrupted') } elseif ([bool]$state.Sealed) { @('SuccessBg', 'Success', 'Finished') } elseif ($gate.Allowed) { @('SuccessBg', 'Success', 'Allowed') } else { @('WarningBg', 'Warning', 'Locked') }
+    # #99: a finished version with a sign-in again (tokens, or a sign-in profile anywhere in <state>\temp) is no longer clean
+    $notClean = $false
+    if ([bool]$state.Sealed) { $s = $script:StartContext.Session; $notClean = ([bool]$s -and -not (Test-AVDTuneSessionClear -Session $s)) -or @(Find-AVDTuneSignInProfiles -Folder (Join-Path $script:StateRoot 'temp')).Count -gt 0 }
+    $pair = if ($script:SealJob) { @('AccentSubtle', 'Primary', 'Running') } elseif ($crash) { @('ErrorBg', 'Danger', 'Interrupted') } elseif ($notClean) { @('ErrorBg', 'Danger', (T 'seal.pill.notclean')) } elseif ([bool]$state.Sealed) { @('SuccessBg', 'Success', 'Finished') } elseif ($gate.Allowed) { @('SuccessBg', 'Success', 'Allowed') } else { @('WarningBg', 'Warning', 'Locked') }
     Set-Brush $ui.PillSeal ([System.Windows.Controls.Border]::BackgroundProperty) $pair[0]
     $ui.TxtSealPill.Text = $pair[2]; Set-Brush $ui.TxtSealPill ([System.Windows.Controls.TextBlock]::ForegroundProperty) $pair[1]
-    $ui.TxtSealGate.Text = $(if ($gate.Allowed) { (T 'seal.gate.ok' $($gate.Version)) } else { (T 'seal.gate.locked') + (@($gate.Reasons) -join ' ') })
+    $ui.TxtSealGate.Text = $(if ($notClean) { (T 'seal.notclean' $([string]$state.ImageVersion)) } elseif ($gate.Allowed) { (T 'seal.gate.ok' $($gate.Version)) } else { (T 'seal.gate.locked') + (@($gate.Reasons) -join ' ') })
     $ui.TxtSealNotes.Text = (@($gate.Notes) -join ' ')
     $ui.BtnSealRun.IsEnabled = ($gate.Allowed -and -not $script:SealJob)
     $ui.BoxSealCrash.Visibility = ConvertTo-Vis ([bool]$crash -and -not $script:SealJob)   # a running finish has an active journal by design
     if ($crash) { $ui.TxtSealCrash.Text = (T 'seal.crash' $(([datetime]$crash.Started).ToString('yyyy-MM-dd HH:mm')) $($crash.User)) }
     if ($script:SealLast) { $ui.TxtSealResult.Text = [string]$script:SealLast }
     $ui.PanelSealSteps.Children.Clear()
-    foreach ($line in 'Delete the files directly in the Windows temp folder and the error report folders (sub folders and links are not entered and are counted as skipped; a read-only file with more than one link stays; a file in use stays).', 'Empty the Windows Update download cache (Windows Update and BITS are stopped for it and started again at once).', 'Remove the downloaded benchmark tool (diskspd).', 'Update block on, no maintenance mode left.', 'Remove every token and the sign-in profiles, and check that no token is in AVDTune files (only the state folder is checked, not export locations you chose yourself).', 'Close the image version in state.json; write the run record and the change log.') {
+    foreach ($line in 'Delete the files directly in the Windows temp folder and the error report folders (sub folders and links are not entered and are counted as skipped; a read-only file with more than one link stays; a file in use stays).', 'Empty the Windows Update download cache (Windows Update and BITS are stopped for it and started again at once).', 'Remove the downloaded benchmark tool (diskspd).', 'Empty the work folders of AVDTune (state temp folder except the running window) and what it can build again (tools, logs except security.log, exports, documents, library cache); history, undo records and configuration stay.', 'Update block on, no maintenance mode left.', 'Remove every token and the sign-in profiles, and check that no token is in AVDTune files (only the state folder is checked, not export locations you chose yourself).', 'Close the image version in state.json; write the run record and the change log.') {
         $t = New-Object System.Windows.Controls.TextBlock; $t.Text = [string][char]0x2022 + ' ' + $line; $t.TextWrapping = 'Wrap'; $t.Margin = '0,2,0,2'
         [void]$ui.PanelSealSteps.Children.Add($t)
     }
@@ -56,7 +59,7 @@ function Start-SealJob {
                 $fin = New-AVDTuneFakeFinish -Seed $(if ($FakeSeed) { $FakeSeed } else { @{} })
             }
             else { $m = New-AVDTuneMachine; $fin = New-AVDTuneFinishAdapter -Root $Root }
-            if ($Block) { Set-AVDTuneWriteBlock $Block } elseif ($Gate) { Open-AVDTuneWriteGate -SnapshotId $Gate.SnapshotId -ConfirmedBy $Gate.ConfirmedBy }
+            if ($Block) { Set-AVDTuneWriteBlock $Block } elseif ($Gate) { Open-AVDTuneWriteGate -SnapshotId $Gate.SnapshotId -ConfirmedBy $Gate.ConfirmedBy -SnapshotCreated ([string](Get-AVDTuneProp $Gate 'SnapshotCreated')) }
             # the CURRENT sign-in session of the window, read each time (a new sign-in replaces the object in the context)
             Invoke-AVDTuneFinish -Machine $m -Fin $fin -Root $Root -User $User -SnapshotId $Gate.SnapshotId -SessionProvider { $Ctx.Session } -Progress { param($t, $p) $Sync.Text = $t; $Sync.Percent = $p }
         }).AddArgument($script:AppRoot).AddArgument($script:StateRoot).AddArgument($wg).AddArgument([string]$env:USERNAME).AddArgument($script:StartContext).AddArgument($sync).AddArgument((Get-AVDTuneWriteBlock)).AddArgument($(if ($script:TestMode) { $script:TestInfo.FakeScript } else { '' })).AddArgument($script:SealFakeScript).AddArgument($script:SealFakeSeed).AddArgument($(if ($script:TestMode) { $script:Machine } else { $null }))

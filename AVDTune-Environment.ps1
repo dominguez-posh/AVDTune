@@ -140,7 +140,7 @@ $ErrorActionPreference = 'Stop'
 foreach ($n in 'AVDTune', 'AVDTune.Snapshot', 'AVDTune.Environment') { Import-Module (Join-Path $AppRoot "Modules\$n.psm1") -Force }
 # test mode: the fake ARM of the window (its store is shared, so the page sees what was made) with the helpers of its script in this runspace
 if ($FakeScript) { . $FakeScript; $arm = $SharedArm } else { $arm = New-AVDTuneArmAdapter }
-if ($Gate) { Open-AVDTuneWriteGate -SnapshotId $Gate.SnapshotId -ConfirmedBy $Gate.ConfirmedBy }
+if ($Gate) { Open-AVDTuneWriteGate -SnapshotId $Gate.SnapshotId -ConfirmedBy $Gate.ConfirmedBy -SnapshotCreated ([string](Get-AVDTuneProp $Gate 'SnapshotCreated')) }
 $closed = @()
 if ($Kind -in 'Plan', 'UndoPlan' -and @(Get-AVDTuneEnvInterrupted -Root $Root).Count -gt 0) { $Sync.Text = 'interrupted'; $closed = @(Resolve-AVDTuneEnvInterrupted -Arm $arm -Token $A.Token -Root $Root -User $A.User) }
 $Sync.Text = 'azure'

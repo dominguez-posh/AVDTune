@@ -13,6 +13,7 @@ Import-Module (Join-Path $repo 'Modules\AVDTune.psm1') -Force
 $script:failed = 0
 function Test-Check([string]$Name, [bool]$Ok, $Detail) { if ($Ok) { "PASS $Name" } else { $script:failed++; "FAIL $Name" + $(if ($null -ne $Detail) { "  -> $Detail" }) } }
 function Test-Throws([scriptblock]$Block) { try { & $Block | Out-Null; $false } catch { $true } }
+function Get-ThrownText([scriptblock]$Block) { try { & $Block | Out-Null; $null } catch { $_.Exception.Message } }
 function Remove-AVDTuneTestTree([string]$Path) {
     # deletes a test folder; links are removed as links (their targets stay)
     $d = New-Object IO.DirectoryInfo $Path
@@ -324,6 +325,13 @@ try {
     $log = @(Get-AVDTuneChangeLog -Root $tmp)
     Test-Check 'plan: both steps changed, one run record, reboot noted' ((($run.Results | ForEach-Object { $_.Status }) -join ',') -eq 'Changed,Changed' -and $run.Reboot -and @(Get-AVDTuneRun -Root $tmp).Count -eq $runsBefore + 1 -and (Get-AVDTuneState $tmp).LastRunId -eq $run.Id) (($run.Results | ForEach-Object { $_.Status }) -join ',')
     Test-Check 'plan: an automatic change log entry per change, with version, run, user and snapshot' ($log.Count -eq 2 -and $log[0].Source -eq 'Step' -and $log[0].Version -eq '2026.11.003' -and $log[0].RunId -eq $run.Id -and $log[0].User -eq 'admin1' -and $log[0].SnapshotId -eq 'snap-1' -and $log[0].Category -eq 'Optimization') ($log.Count)
+    # #104 N10: with a closed write gate Invoke-AVDTune writes nothing (no LastChange, no run record) and says why
+    $gate10 = Get-AVDTuneWriteGate; Close-AVDTuneWriteGate
+    $lc10 = (Get-AVDTuneState $tmp).LastChange; $runs10 = @(Get-AVDTuneRun -Root $tmp).Count
+    $m10 = New-AVDTuneFakeMachine
+    $t10 = $null; try { [void](Invoke-AVDTune -Plan $plan -Catalog $catalog -Machine $m10 -Root $tmp -User 'admin1') } catch { $t10 = $_.Exception.Message }
+    Open-AVDTuneWriteGate -SnapshotId $gate10.SnapshotId -ConfirmedBy $gate10.ConfirmedBy -SnapshotCreated ([string](Get-AVDTuneProp $gate10 'SnapshotCreated'))
+    Test-Check 'plan with a closed write gate (#104 N10): refused before anything, no LastChange, no run record, nothing on the machine' ($t10 -like '*snapshot gate is not confirmed*' -and [string](Get-AVDTuneState $tmp).LastChange -eq [string]$lc10 -and @(Get-AVDTuneRun -Root $tmp).Count -eq $runs10 -and $m10.Log.Count -eq 0) $t10
     $run2 = Invoke-AVDTune -Plan $plan -Catalog $catalog -Machine $pm -Root $tmp -User 'admin1'
     Test-Check 'plan again: all unchanged, no new change log entry' ((($run2.Results | ForEach-Object { $_.Status }) -join ',') -eq 'Unchanged,Unchanged' -and @(Get-AVDTuneChangeLog -Root $tmp).Count -eq 2) (($run2.Results | ForEach-Object { $_.Status }) -join ',')
     $failCatalog = @($lazy, $step, $catalog[0])
@@ -345,10 +353,69 @@ try {
     Test-Check 'versions list: newest first, with started versions' ((@(Get-AVDTuneChangeLogVersions -Root $tmp) -join ',') -eq '2026.12.001,2026.11.003,2026.11.002,2026.11.001') (@(Get-AVDTuneChangeLogVersions -Root $tmp) -join ',')
     [void](Add-AVDTuneChangeLogEntry -Root $tmp -Version '2026.12.001' -Category 'Other' -Component '<script>alert(1)</script>' -ChangeType Note -Text 'a | b & c')
     $md = ConvertTo-AVDTuneChangeLogDocument -Root $tmp -Version '2026.12.001' -Format Markdown -ImageName 'GM-TEST01'
-    Test-Check 'markdown export: title, header, escaped pipe' ($md -like '# Change log GM-TEST01 2026.12.001*' -and $md -like '*| Date | Category | Component | Change | Text | User |*' -and $md -like '*a \| b & c*') $null
+    Test-Check 'markdown export: title, header, escaped pipe' ($md -like '# Change log GM-TEST01 2026.12.001*' -and $md -like '*| Date | Category | Component | Change | Text | User |*' -and $md -like '*a \| b &amp; c*') $null
+    Test-Check 'markdown export (#108 N10): no HTML, link or code of a text takes effect (< > & as entities, backtick and brackets escaped), html has the CSP that loads nothing' ($md -like '*&lt;script&gt;alert(1)&lt;/script&gt;*' -and $md -notlike '*<script>*' -and (ConvertTo-AVDTuneMarkdownText 'see [x](http://e) `y`') -eq 'see \[x\](http://e) \`y\`' -and (ConvertTo-AVDTuneChangeLogDocument -Root $tmp -Version '2026.12.001' -Format Html) -like "*http-equiv=`"Content-Security-Policy`" content=`"default-src 'none'; style-src 'unsafe-inline'`"*") $null
     $html = ConvertTo-AVDTuneChangeLogDocument -Root $tmp -Version '2026.12.001' -Format Html
+    # #107: the change log and run records clean free texts with the shared secret table themselves (the callers do not)
+    $r107 = Join-Path $tmp 'secrets107'; [void](Initialize-AVDTuneState -Root $r107)
+    $dirty107 = @('net use \\print1\share Geheim1x /user:dom\svc', 'Kennwort: Geheim2x', 'Set-Thing -Password Geheim3x -Force', 'tool.exe --password Geheim4x')
+    foreach ($d in $dirty107) { [void](Add-AVDTuneChangeLogEntry -Root $r107 -Version '2026.11.001' -Category 'Other' -Component 'note' -ChangeType Note -Text $d -User 'admin1') }
+    $log107 = [IO.File]::ReadAllText((Join-Path $r107 'changelog.json'))
+    Test-Check 'change log (#107): net use, Kennwort:, -Password and --password in a note do not reach changelog.json' ($log107 -notmatch 'Geheim\dx' -and ([regex]::Matches($log107, '\(removed\)')).Count -ge 4) $log107
+    $compound107 = @('Set HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon\DefaultPassword = Winter2026!', 'ApiPassword=Hunter2x')
+    $c107 = @($compound107 | ForEach-Object { (Add-AVDTuneChangeLogEntry -Root $r107 -Version '2026.11.001' -Category 'Other' -ChangeType Note -Text $_).Text })
+    Test-Check 'change log (#107): compound names (DefaultPassword = X, ApiPassword=X) are cleaned too, also in a step title' (($c107 -join ' ') -notmatch 'Winter2026|Hunter2x' -and ($c107 -join ' ') -like '*Winlogon\DefaultPassword=(removed)*') ($c107 -join ' | ')
+    # #107: the change log is read, changed and written under the state lock: while another thread holds it, a new entry waits
+    $lockPs = [PowerShell]::Create(); $held = New-Object Threading.ManualResetEvent $false
+    [void]$lockPs.AddScript({ param($Held) $m = New-Object Threading.Mutex($false, 'Local\AVDTuneStateFile'); [void]$m.WaitOne(); $Held.Set() | Out-Null; Start-Sleep -Milliseconds 2500; $m.ReleaseMutex(); $m.Dispose() }).AddArgument($held)
+    $lockAsync = $lockPs.BeginInvoke()
+    [void]$held.WaitOne(10000)
+    $sw = [Diagnostics.Stopwatch]::StartNew(); [void](Add-AVDTuneChangeLogEntry -Root $r107 -Version '2026.11.001' -Category 'Other' -ChangeType Note -Text 'locked'); $sw.Stop()
+    [void]$lockPs.EndInvoke($lockAsync); $lockPs.Dispose(); $held.Dispose()
+    Test-Check 'change log (#107): a new entry waits for the state lock another thread holds' ($sw.ElapsedMilliseconds -ge 1500) "$($sw.ElapsedMilliseconds) ms"
+    # ---------------------------------------------------------------- #108: bounded input
+    $dtd = '<?xml version="1.0"?><!DOCTYPE t [<!ENTITY a "aaaaaaaaaa"><!ENTITY b "&a;&a;&a;&a;&a;&a;&a;&a;&a;&a;">]><Task><Actions><Exec><Command>&b;</Command></Exec></Actions></Task>'
+    Test-Check 'XML (#108 N5): a DOCTYPE is refused (no DTD, no resolver), plain task XML still reads' ((Test-Throws { ConvertTo-AVDTuneXmlDocument $dtd }) -and (Test-Throws { Get-AVDTuneTaskInfoFromXml $dtd }) -and (Get-AVDTuneTaskInfoFromXml '<Task><Actions><Exec><Command>C:\x.exe</Command></Exec></Actions></Task>').Execute -eq 'C:\x.exe') $null
+    function New-FakeWebResponse([int]$Code, [byte[]]$Body = @(), [string]$Location, [long]$Length = -2) {
+        $o = [pscustomobject]@{ StatusCode = $Code; Headers = @{ Location = $Location }; ContentLength = $(if ($Length -ne -2) { $Length } else { $Body.Length }); Body = $Body }
+        $o | Add-Member -MemberType ScriptMethod -Name GetResponseStream -Value { New-Object IO.MemoryStream (, [byte[]]$this.Body) }
+        $o | Add-Member -MemberType ScriptMethod -Name Close -Value { }
+        $o
+    }
+    $big = New-FakeWebResponse 200 ([Text.Encoding]::UTF8.GetBytes('x' * 3000))
+    Test-Check 'bounded read (#108 N7/N12): an answer over the limit throws, one within is read' ((Test-Throws { Read-AVDTuneResponseText -Response $big -MaxBytes 2000 }) -and (Read-AVDTuneResponseText -Response (New-FakeWebResponse 200 ([Text.Encoding]::UTF8.GetBytes('{"a":1}'))) -MaxBytes 2000) -eq '{"a":1}') $null
+    $srcAll = @{}; foreach ($n in 'AVDTune.psm1', 'AVDTune.Session.psm1', 'AVDTune.Snapshot.psm1') { $srcAll[$n] = [IO.File]::ReadAllText((Join-Path $repo "Modules\$n")) }
+    Test-Check 'bounded read (#108 N7/N12): IMDS, the Graph/sign-in calls and ARM read through Read-AVDTuneResponseText with a ReadWriteTimeout, no ReadToEnd of a response' (@($srcAll.Keys | Where-Object { $srcAll[$_] -match 'GetResponseStream\(\)\)\)\.ReadToEnd\(\)' -or $srcAll[$_] -notmatch 'Read-AVDTuneResponseText -Response \$response' -or $srcAll[$_] -notmatch '\$request\.ReadWriteTimeout = ' }).Count -eq 0) $null
+    $hops = @{ 'https://github.com/a' = (New-FakeWebResponse 302 -Location 'https://objects.githubusercontent.com/b'); 'https://objects.githubusercontent.com/b' = (New-FakeWebResponse 200 ([byte[]](1..10))) }
+    $fakeGet = { param($Req) $r = $hops[$Req.RequestUri.AbsoluteUri]; if (-not $r) { throw "fake: no answer for $($Req.RequestUri)" }; $r }.GetNewClosure()
+    $dl108 = Join-Path $tmp 'dl108.bin'
+    Invoke-AVDTuneHttpsGet -Url 'https://github.com/a' -AllowedHosts 'github.com', 'objects.githubusercontent.com' -Path $dl108 -MaxBytes 100 -GetResponse $fakeGet
+    $resolved = Invoke-AVDTuneHttpsGet -Url 'https://github.com/a' -AllowedHosts 'github.com', 'objects.githubusercontent.com' -ResolveOnly -GetResponse $fakeGet
+    $hops['https://github.com/c'] = New-FakeWebResponse 302 -Location 'http://objects.githubusercontent.com/b'
+    $hops['https://github.com/d'] = New-FakeWebResponse 302 -Location 'https://evil.example/b'
+    $hops['https://github.com/e'] = New-FakeWebResponse 200 ([byte[]](1..200)) -Length 50
+    $hops['https://github.com/f'] = New-FakeWebResponse 302 -Location 'https://github.com/f'
+    $tooBig = Join-Path $tmp 'dl108-big.bin'
+    $errs108 = @(
+        (Get-ThrownText { Invoke-AVDTuneHttpsGet -Url 'https://github.com/c' -AllowedHosts 'github.com', 'objects.githubusercontent.com' -GetResponse $fakeGet }),
+        (Get-ThrownText { Invoke-AVDTuneHttpsGet -Url 'https://github.com/d' -AllowedHosts 'github.com' -GetResponse $fakeGet }),
+        (Get-ThrownText { Invoke-AVDTuneHttpsGet -Url 'https://github.com/e' -AllowedHosts 'github.com' -Path $tooBig -MaxBytes 100 -GetResponse $fakeGet }),
+        (Get-ThrownText { Invoke-AVDTuneHttpsGet -Url 'https://github.com/f' -AllowedHosts 'github.com' -GetResponse $fakeGet }))
+    Test-Check 'downloads (#108 N3): redirects hop by hop, http and a foreign host refused, more than the limit (also with a smaller announced length) refused and the file removed, at most 5 hops' ([IO.File]::ReadAllBytes($dl108).Length -eq 10 -and $resolved -eq 'https://objects.githubusercontent.com/b' -and $errs108[0] -like 'Refused*' -and $errs108[1] -like 'Refused*evil.example*' -and $errs108[2] -like '*larger than 100*' -and -not (Test-Path -LiteralPath $tooBig) -and $errs108[3] -eq 'Too many redirects.' -and (Test-AVDTuneHttpsHost 'https://dl.download.microsoft.com/x' '*.download.microsoft.com') -and -not (Test-AVDTuneHttpsHost 'https://download.microsoft.com.evil.example/x' '*.download.microsoft.com')) ($errs108 -join ' | ')
+    $startSrc = [IO.File]::ReadAllText((Join-Path $repo 'Start-AVDTune.ps1'))
+    $saveSrc = [regex]::Match($startSrc, '(?s)function Save-ProtocolFile.*?\r?\n\}').Value
+    Test-Check 'export (#108 N9): the protocol is saved through Write-AVDTuneExportFile, no WriteAllText to the chosen path' ($saveSrc -match 'Write-AVDTuneExportFile' -and $saveSrc -notmatch 'WriteAllText') $saveSrc
+    $quarSrc = & (Get-Module AVDTune) { (Get-Command Move-AVDTuneStateToQuarantine).ScriptBlock.ToString() }
+    Test-Check 'quarantine (#108 N11): icacls runs through Invoke-AVDTuneChildProcess (job object, time limit), not as a native call' ($quarSrc -match 'Invoke-AVDTuneChildProcess -FileName \$icacls' -and $quarSrc -match '-TimeoutMs' -and $quarSrc -notmatch '& \$icacls') $null
+    $run107 = [pscustomobject][ordered]@{ Id = $null; Plan = 'p'; Results = @([pscustomobject]@{ Id = 'a.b'; Message = 'tool.exe --password Geheim5x'; Before = [pscustomobject]@{ Value = 'Password=KeepMe1' }; Detail = [pscustomobject]@{ Note = 'Kennwort: Geheim6x' } }) }
+    $runFile107 = Add-AVDTuneRun -Root $r107 -Run $run107
+    $runText107 = [IO.File]::ReadAllText($runFile107)
+    Test-Check 'run record (#107): messages and nested notes are cleaned, an undo state (Before) and the object of the caller stay' ($runText107 -notmatch 'Geheim[56]x' -and $runText107 -match 'Password=KeepMe1' -and $run107.Id -and $run107.Results[0].Message -like '*Geheim5x') $runText107
     Test-Check 'html export encodes all text' ($html -like '*&lt;script&gt;alert(1)&lt;/script&gt;*' -and $html -notlike '*<script>*' -and $html -like '*a | b &amp; c*') $null
     Test-Check 'an empty version exports "No entries."' ((ConvertTo-AVDTuneChangeLogDocument -Root $tmp -Version '2030.01.001') -like '*No entries.*') $null
+    $noFolder = $null; try { [void](Export-AVDTuneChangeLog -Root $tmp -Version '2026.11.003' -Path (Join-Path $tmp 'out\log.html')) } catch { $noFolder = $_.Exception.Message }
+    Test-Check 'export (#108 N9): a missing folder is not created, the export says so' ($noFolder -like '*does not exist*' -and -not (Test-Path -LiteralPath (Join-Path $tmp 'out'))) $noFolder
+    New-Item -ItemType Directory -Path (Join-Path $tmp 'out') | Out-Null
     $exp = Export-AVDTuneChangeLog -Root $tmp -Version '2026.11.003' -Path (Join-Path $tmp 'out\log.html')
     $expMd = Export-AVDTuneChangeLog -Root $tmp -Version '2026.11.003' -Path (Join-Path $tmp 'out\log.md')
     Test-Check 'export picks the format from the extension and writes files' ((Get-Content $exp -Raw) -like '<!DOCTYPE html>*' -and (Get-Content $expMd -Raw) -like '# Change log*') $null
@@ -414,7 +481,8 @@ try {
     # PowerShell ends a line at a lone CR that editors and git do not show: a method chain split there runs as two statements
     # (AVDTune-Readiness.ps1 lost the last two AddArgument calls; the real start failed, the test mode runs that path inline)
     # build output (Bench\bin, obj, out after Bench\build.ps1) is not ours to check (#51)
-    $loneCr = @(Get-ChildItem -LiteralPath $repo -Recurse -File -Include '*.ps1', '*.psm1', '*.psd1' | Where-Object { $_.FullName.Substring($repo.Length) -notmatch '\\(\.git|bin|obj|out)\\' } |
+    # -Include is not applied with -LiteralPath in Windows PowerShell 5.1: the extension is filtered here (the README screenshots are binary, #91)
+    $loneCr = @(Get-ChildItem -LiteralPath $repo -Recurse -File | Where-Object { $_.Extension -in '.ps1', '.psm1', '.psd1' -and $_.FullName.Substring($repo.Length) -notmatch '\\(\.git|bin|obj|out)\\' } |
         Where-Object { [regex]::IsMatch([IO.File]::ReadAllText($_.FullName), "`r(?!`n)") } | ForEach-Object { $_.FullName.Substring($repo.Length + 1) })
     Test-Check 'no script contains a lone CR (it splits a statement for PowerShell but not in the editor)' ($loneCr.Count -eq 0) ($loneCr -join ', ')
 

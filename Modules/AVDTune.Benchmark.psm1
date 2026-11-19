@@ -27,6 +27,7 @@ Import-Module (Join-Path $PSScriptRoot 'AVDTune.Release.psm1')   # Open-AVDTuneV
 $script:DataDefault = Join-Path (Split-Path $PSScriptRoot -Parent) 'Bench\data'
 $script:RestoreTaskName = 'AVDTune-BenchmarkRestore'
 $script:QuietServices = @('wuauserv', 'UsoSvc', 'WSearch')
+$script:DownloadHosts = @('github.com', 'objects.githubusercontent.com', 'release-assets.githubusercontent.com', 'download.microsoft.com', '*.download.microsoft.com')   # downloads of the benchmark (#108 N3)
 $script:SecretPattern = '(?i)password|passwd|secret|token|credential|apikey|accountkey|sastoken|connectionstring'
 
 #region data
@@ -164,7 +165,7 @@ function ConvertFrom-AVDTuneDiskspdXml {
     #>
     param([Parameter(Mandatory)][string]$Xml)
     $inv = [Globalization.CultureInfo]::InvariantCulture
-    try { $doc = [xml]$Xml } catch { throw "diskspd output is not XML: $($_.Exception.Message)" }
+    try { $doc = ConvertTo-AVDTuneXmlDocument $Xml } catch { throw "diskspd output is not XML: $($_.Exception.Message)" }   # no DTD, no resolver (#108 N5)
     $span = $doc.SelectSingleNode('//Results/TimeSpan')
     if (-not $span) { throw 'diskspd XML: no TimeSpan element.' }
     $secNode = $span.SelectSingleNode('TestTimeSeconds')
@@ -393,10 +394,8 @@ function New-AVDTuneBenchAdapter {
     }
     $b.Download = {
         param([string]$Url, [string]$Path)
-        if ($Url -notmatch '^https://') { throw 'Only https downloads are allowed.' }
-        [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
-        $wc = New-Object System.Net.WebClient
-        try { $wc.DownloadFile($Url, $Path) } finally { $wc.Dispose() }
+        # every hop https on a host of the list, at most 64 MB, timeouts (#108 N3); the hash of the data file is checked afterwards as before
+        Invoke-AVDTuneHttpsGet -Url $Url -AllowedHosts $script:DownloadHosts -MaxBytes 64MB -Path $Path -TimeoutMs 60000
     }
     $b.HashFile = { param($Path) (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant() }
     $b.FileLength = { param($Path) (Get-Item -LiteralPath $Path).Length }
@@ -486,8 +485,7 @@ namespace AVDTuneBenchNative {
     $b.NetDownload = {
         # N parallel HTTP range streams, data discarded (never written), stops after the seconds; returns bytes and seconds
         param([string]$Url, [int]$Streams, [int]$Seconds, [long]$TotalBytes)
-        if ($Url -notmatch '^https://') { throw 'Only https downloads are allowed.' }
-        [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+        $Url = Invoke-AVDTuneHttpsGet -Url $Url -AllowedHosts $script:DownloadHosts -ResolveOnly -TimeoutMs 15000   # redirects resolved hop by hop first (#108 N3); the streams do not follow any
         [Net.ServicePointManager]::DefaultConnectionLimit = [math]::Max(16, $Streams * 2)
         $bytes = New-Object long[] 1
         $errs = New-Object int[] 1
@@ -499,7 +497,7 @@ namespace AVDTuneBenchNative {
             while ([DateTime]::UtcNow -lt $Stop) {
                 try {
                     $req = [System.Net.HttpWebRequest]::Create($Url)
-                    $req.AddRange([long]$From, [long]$To); $req.Timeout = 15000; $req.ReadWriteTimeout = 15000
+                    $req.AddRange([long]$From, [long]$To); $req.Timeout = 15000; $req.ReadWriteTimeout = 15000; $req.AllowAutoRedirect = $false
                     $resp = $req.GetResponse(); $s = $resp.GetResponseStream()
                     $buf = New-Object byte[] 65536
                     while ([DateTime]::UtcNow -lt $Stop) { $n = $s.Read($buf, 0, $buf.Length); if ($n -le 0) { break }; [void][System.Threading.Interlocked]::Add([ref]$Bytes[0], [long]$n) }
@@ -1605,27 +1603,6 @@ function Test-AVDTuneBenchRunId {
     $RunId -is [string] -and $RunId -match '\A[A-Za-z0-9-]{1,64}\z' -and $RunId -notmatch '(?i)\A(con|prn|aux|nul|com[1-9]|lpt[1-9])\z'
 }
 
-function Write-AVDTuneExportFile {
-    <# Writes an export to a file the administrator chose: the target and its folder must not be links (reparse points); written to a new temp file next to it
-       (CreateNew) and moved over the target in one step (Move-AVDTuneFileReplace), so a crash leaves the old or the new file. #>
-    param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][AllowEmptyString()][string]$Text, [switch]$Bom)
-    $full = [IO.Path]::GetFullPath($Path)
-    $dir = [IO.Path]::GetDirectoryName($full)
-    if (-not $dir -or -not [IO.Directory]::Exists($dir)) { throw "The folder of $full does not exist." }
-    if (([IO.File]::GetAttributes($dir) -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw "The folder $dir is a link: not exported there." }
-    if ([IO.Directory]::Exists($full)) { throw "$full is a folder." }
-    if ([IO.File]::Exists($full) -and ([IO.File]::GetAttributes($full) -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw "$full is a link: not overwritten." }
-    $temp = Join-Path $dir ('.' + [IO.Path]::GetFileName($full) + '.' + [guid]::NewGuid().ToString('N') + '.tmp')
-    $pre = (New-Object Text.UTF8Encoding ([bool]$Bom)).GetPreamble()
-    $body = (New-Object Text.UTF8Encoding $false).GetBytes($Text)
-    try {
-        $fs = New-Object IO.FileStream($temp, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
-        try { $fs.Write($pre, 0, $pre.Length); $fs.Write($body, 0, $body.Length); $fs.Flush($true) } finally { $fs.Dispose() }
-        Move-AVDTuneFileReplace $temp $full
-    }
-    finally { if ([IO.File]::Exists($temp)) { [IO.File]::Delete($temp) } }
-    $full
-}
 
 function Get-AVDTuneBenchStartBlock {
     # Why a benchmark may not start now ('' when it may): the integrity check of the tool still runs, or the tool is read only (write block, e.g. files that do not match the release) (Finn, #90)
@@ -2047,4 +2024,4 @@ Export-ModuleMember -Function Get-AVDTuneBenchShare, Get-AVDTuneBenchShareHost, 
     Get-AVDTuneBenchmarkResult, Set-AVDTuneBenchmarkBaseline, Get-AVDTuneBenchmarkBaseline, Compare-AVDTuneBenchmark, Invoke-AVDTuneBenchmark, Get-AVDTuneBenchmarkSummaryText, New-AVDTuneBenchmarkRunId,
     ConvertTo-AVDTuneBenchNumber, ConvertTo-AVDTuneBenchText, ConvertTo-AVDTuneBenchmarkRow, Get-AVDTuneBenchmarkSystemFolder, Get-AVDTuneBenchmarkSystems, Get-AVDTuneBenchmarkVersionComparison,
     ConvertTo-AVDTuneCsvCell, ConvertTo-AVDTuneBenchmarkComparisonText, Export-AVDTuneBenchmarkComparison, Test-AVDTuneBenchmarkLabel, Import-AVDTuneBenchmarkSystem, Export-AVDTuneBenchmarkResultFile,
-    Test-AVDTuneBenchSystemFolder, Test-AVDTuneBenchRunId, Write-AVDTuneExportFile, Get-AVDTuneBenchStartBlock
+    Test-AVDTuneBenchSystemFolder, Test-AVDTuneBenchRunId, Get-AVDTuneBenchStartBlock

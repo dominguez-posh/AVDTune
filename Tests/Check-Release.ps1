@@ -57,6 +57,10 @@ try {
     $badUrl = @($urls.GetEnumerator() | Where-Object { (Test-AVDTuneReleaseUrl $_.Key) -ne $_.Value } | ForEach-Object Key)
     Test-Check 'URL rule: https, default port, no credentials, only github.com and its download hosts (exact host)' ($badUrl.Count -eq 0) ($badUrl -join ' ')
     $real = New-AVDTuneReleaseHttp
+    $dl = & (Get-Module AVDTune.Release) { (Get-Command Invoke-AVDTuneHttpDownload).ScriptBlock.ToString() }
+    Test-Check 'real HTTP adapter: system proxy without Windows credentials, a 407 ends with a note (#106)' ($dl -notmatch 'CredentialCache]::DefaultCredentials|UseDefaultCredentials\s*=\s*\$true' -and $dl -match 'Proxy\.Credentials\s*=\s*\$null' -and $dl -match '-eq 407') $null
+    Test-Check 'real HTTP adapter (#108 N1): TLS 1.2 is added to the protocols of the process, never set alone' ($dl -match 'SecurityProtocol = \[Net\.ServicePointManager\]::SecurityProtocol -bor \[Net\.SecurityProtocolType\]::Tls12' -and $dl -notmatch 'SecurityProtocol = \[Net\.SecurityProtocolType\]::Tls12') $null
+    Test-Check 'safe paths (#108 N6): a trailing line feed does not pass' (-not (Test-AVDTuneSafeRelativePath "Modules/AVDTune.psm1`n") -and (Test-AVDTuneSafeRelativePath 'Modules/AVDTune.psm1')) $null
     Test-Check 'real HTTP adapter refuses an http address and a foreign host before any connection' ((Get-ThrownText { & $real.GetText 'http://github.com/o/r' 1000 }) -like 'Refused*' -and (Get-ThrownText { & $real.GetFile 'https://evil.example/x.zip' (Join-Path $tmp 'x.zip') 1000 }) -like 'Refused*' -and -not (Test-Path (Join-Path $tmp 'x.zip'))) $null
     Test-Check 'safe paths: plain relative names only' ((Test-AVDTuneSafeRelativePath 'Modules/AVDTune.psm1') -and -not (Test-AVDTuneSafeRelativePath '../x') -and -not (Test-AVDTuneSafeRelativePath 'a/../b') -and -not (Test-AVDTuneSafeRelativePath 'C:/x') -and -not (Test-AVDTuneSafeRelativePath '/x') -and -not (Test-AVDTuneSafeRelativePath 'a\b') -and -not (Test-AVDTuneSafeRelativePath 'a/nul.txt') -and -not (Test-AVDTuneSafeRelativePath 'a.') -and -not (Test-AVDTuneSafeRelativePath 'a:stream')) $null
 
@@ -272,9 +276,11 @@ try {
     $st = Get-AVDTuneIntegrityStatus -AppRoot $app -InstallRoot $inst -StateRoot $state -Http $http
     Set-AVDTuneIntegrityBlock $st
     Test-Check 'unverified: AVDTune stays read only (the gate cannot be opened)' ((Get-ThrownText { Open-AVDTuneWriteGate -SnapshotId 's1' -ConfirmedBy 'admin1' }) -like '*read only*') $null
-    Test-Check 'continue without the check: a wrong or empty name is refused and the block stays' ((Get-ThrownText { Confirm-AVDTuneUnverified -StateRoot $state -Name 'wrong' -Expected 'GM-TEST01' }) -like '*Type the name*' -and (Get-ThrownText { Confirm-AVDTuneUnverified -StateRoot $state -Name '' -Expected 'GM-TEST01' }) -like '*Type the name*' -and (Get-AVDTuneWriteBlock)) $null
+    Test-Check 'continue without the check: a wrong or empty name is refused and the block stays' ((Get-ThrownText { Confirm-AVDTuneUnverified -StateRoot $state -Name 'wrong' -Expected 'GM-TEST01' -Status $st }) -like '*Type the name*' -and (Get-ThrownText { Confirm-AVDTuneUnverified -StateRoot $state -Name '' -Expected 'GM-TEST01' -Status $st }) -like '*Type the name*' -and (Get-AVDTuneWriteBlock)) $null
     $logBefore = @(Get-AVDTuneChangeLog -Root $state).Count
-    $c = Confirm-AVDTuneUnverified -StateRoot $state -Name 'GM-TEST01' -Expected 'GM-TEST01' -User 'admin1'
+    $badText = Get-ThrownText { Confirm-AVDTuneUnverified -StateRoot $state -Name 'GM-TEST01' -Expected 'GM-TEST01' -User 'admin1' -Status ([pscustomobject]@{ Status = 'bad'; Blocked = $true; Message = 'files differ' }) }
+    Test-Check 'continue without the check (#104 N3): a copy whose files differ (bad) is never lifted, even with the right name; the block stays' ($badText -like '*Only an unverified copy*' -and (Get-AVDTuneWriteBlock)) $badText
+    $c = Confirm-AVDTuneUnverified -StateRoot $state -Name 'GM-TEST01' -Expected 'GM-TEST01' -User 'admin1' -Status $st
     Test-Check 'continue without the check: the typed name lifts the block and writes a change log entry' ($c.ChangeLog -and -not (Get-AVDTuneWriteBlock) -and @(Get-AVDTuneChangeLog -Root $state).Count -eq $logBefore + 1 -and $c.Text -like '*without the integrity check*') $null
     [IO.File]::WriteAllText($cachePath, $cacheText); $http.Store.Offline = $false
 

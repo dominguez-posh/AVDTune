@@ -230,7 +230,7 @@ function Get-AVDTuneEnvResource {
 function Get-AVDTuneEnvPollPath([string]$Url) {
     # A polling URL is absolute: only the ARM host and a subscription path are followed, nothing else
     $p = ConvertTo-AVDTuneArmPath $Url
-    if ($p -notmatch "^/subscriptions/$($script:Guid)/[A-Za-z0-9/._()-]+(\?[A-Za-z0-9=&_.%+/~:-]{1,2000})?$" -or $p -match '\.\.') { throw 'Azure returned a polling link that is not followed.' }
+    if ($p -notmatch "\A/subscriptions/$($script:Guid)/[A-Za-z0-9/._()-]+(\?[A-Za-z0-9=&_.%+/~:-]{1,2000})?\z" -or $p -match '\.\.') { throw 'Azure returned a polling link that is not followed.' }
     $p
 }
 
@@ -1046,6 +1046,8 @@ function Set-AVDTuneEnvMaster {
     try {
     $runs = @(Set-AVDTuneFSLogixSettings -Machine $Machine -Root $Root -Values $v.Values -User $User -SnapshotId $SnapshotId -WhatIf:$WhatIf)
     foreach ($r in $v.Registry) {
+        # audit #100: the value found before is recorded (first value found stays) so that the FSLogix undo puts it back
+        if (-not $WhatIf -and (Test-AVDTuneWriteAllowed)) { Save-AVDTuneFSLogixUndo -Root $Root -Machine $Machine -Items @([pscustomobject]@{ Id = 'fslogix.kerberos.cloudticket'; Path = $r.Path; Name = $r.Name; Type = $r.Type; Previous = (& $Machine.RegGet $r.Path $r.Name); Value = $r.Value; Title = 'Allow the cloud Kerberos ticket (Entra Kerberos)' }) }
         $step = New-AVDTuneFSLogixRegStep -Id 'fslogix.kerberos.cloudticket' -Path $r.Path -Name $r.Name -Value $r.Value -Type $r.Type -Title 'Allow the cloud Kerberos ticket (Entra Kerberos)' -SourceUrl $r.Source -Why 'The client asks Microsoft Entra ID for the Kerberos ticket of the share.'
         $runs += Invoke-AVDTune -Plan ([pscustomobject]@{ Name = 'Entra Kerberos client'; Steps = @($step.Id) }) -Catalog @($step) -Machine $Machine -Root $Root -User $User -SnapshotId $SnapshotId -WhatIf:$WhatIf
     }

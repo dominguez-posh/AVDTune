@@ -587,7 +587,7 @@ function Invoke-AVDTuneHttps {
     [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
     try {
         $request = [System.Net.HttpWebRequest]::Create($uri)
-        $request.Method = $Method; $request.Timeout = 30000; $request.AllowAutoRedirect = $false
+        $request.Method = $Method; $request.Timeout = 30000; $request.ReadWriteTimeout = 30000; $request.AllowAutoRedirect = $false
         if ($Token) { $request.Headers.Add('Authorization', "Bearer $Token") }
         $request.Accept = 'application/json'
         if ($null -ne $Body) {
@@ -603,7 +603,7 @@ function Invoke-AVDTuneHttps {
         if (-not $response) { return [pscustomobject]@{ Status = 0; Body = $null; Error = $_.Exception.Message } }
     }
     try {
-        $text = (New-Object IO.StreamReader($response.GetResponseStream())).ReadToEnd()
+        $text = Read-AVDTuneResponseText -Response $response -MaxBytes 4MB   # bounded read (#108 N7)
         $parsed = $null; if ($text.Trim()) { try { $parsed = $text | ConvertFrom-Json } catch { } }
         [pscustomobject]@{ Status = [int]$response.StatusCode; Body = $parsed; Error = '' }
     }

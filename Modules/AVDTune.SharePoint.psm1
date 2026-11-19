@@ -138,43 +138,12 @@ function Get-AVDTuneSpPending {
 
 #region texts: nothing secret leaves the master
 
-# One table of secret patterns (Finn's review of #89, B2/B3) for both uses: Protect-AVDTuneSpText replaces what it finds in a list text, Test-AVDTuneSpSecretFree refuses a
-# file in which one of them finds something. It covers the rules of Remove-AVDTuneRecordingSecrets (#87) and of the protocol cleaner of PackTune and more. Every replacement
-# is idempotent (a placeholder it wrote is not found again), so a text the recording or the protocol already cleaned is "secret free". Values are delimited by spaces,
-# quotes, commas and semicolons, so the closing quote of a JSON string stays where it is.
-$script:SpValue = '("[^"]*"|''[^'']*''|[^\s"'',;<>]+)'
-$script:SpSecretRules = @(
-    # a JWT (access or id token)
-    @('eyJ[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}(\.[A-Za-z0-9_\-]*)?', '(token removed)'),
-    # Authorization values
-    @('(?i)\b(bearer|basic)\s+[A-Za-z0-9._~+/=\-]{8,}', '$1 (removed)'),
-    # name = value and name: value (also "name": "value" of JSON); key only with "=" (a "Registry key: HKLM\..." stays)
-    @("(?i)\b(password|passwort|kennwort|pwd|pass|secret|client_?secret|token|access_?token|refresh_?token|apikey|api[_-]?key|accountkey|account_key|sharedaccesskey|sas|pin|serial|seriennummer|pidkey|product\s*key|licen[cs]e\s*key|lizenzschl(\u00fc|ue)ssel|schl(\u00fc|ue)ssel)""?\s*[=:]\s*(?!\((removed|key removed|token removed|not shown)\))$($script:SpValue)", '$1=(removed)'),
-    @("(?i)\bkey\s*=\s*(?!\((removed|key removed)\))$($script:SpValue)", 'key=(removed)'),
-    # parameters with the value after a space: -Password X, -ClientSecret X, /p X, /p:X, /pass X
-    @("(?i)(?<![\w-])(-(password|passwort|kennwort|pwd|secret|clientsecret|accesstoken|token|apikey|accountkey|pidkey|productkey|key))(\s+|:)(?!\(removed\))$($script:SpValue)", '$1 (removed)'),
-    @("(?i)(?<![\w/])(/(p|pw|pwd|pass|password))(\s+|:)(?!\(removed\))(?!/)$($script:SpValue)", '$1 (removed)'),
-    # net use \\server\share <password> /user:x and net use ... /user:x <password>
-    @("(?i)(\bnet(\.exe)?\s+use\s+[^\s/]+)\s+(?![/*]|\(removed\))$($script:SpValue)", '$1 (removed)'),
-    @("(?i)(\bnet(\.exe)?\s+use\b[^\r\n]*?/user:\S+)\s+(?![/*]|\(removed\))$($script:SpValue)", '$1 (removed)'),
-    # SAS and other secret query values (also a SAS without sig)
-    @('(?i)([?&](sig|token|code|key|access_token|sv|se|st|sp|spr|sr|srt|ss|si|skoid|sktid|skt|ske|sks|skv|sdd)=)(?!\(removed\))[^&\s"''<>]+', '$1(removed)'),
-    # an Entra client secret (contains ~)
-    @('(?<![\w~.-])[A-Za-z0-9_.\-]{3,8}~[A-Za-z0-9_.~\-]{20,}', '(removed)'),
-    # a product key (upper case and digits in groups, at least one digit); a GUID and hyphenated words stay
-    @('(?-i)\b(?=[A-Z0-9-]*\d)(?![0-9A-F]{8}-[0-9A-F]{4}-)[A-Z0-9]{4,8}(-[A-Z0-9]{4,8}){3,}\b', '(key removed)'),
-    # base64 with padding (a storage key: 88 characters ending ==)
-    @('[A-Za-z0-9+/]{30,}={1,2}', '(removed)'),
-    # a long run of mixed upper case, lower case and digits (keys, tokens); hex hashes and names with hyphens stay
-    @('\b(?=[A-Za-z0-9+/_]*[0-9])(?=[A-Za-z0-9+/_]*[A-Z])(?=[A-Za-z0-9+/_]*[a-z])[A-Za-z0-9+/_]{40,}', '(removed)')
-)
-
+# The table of secret patterns lives in Modules\AVDTune.psm1 since #107 (Invoke-AVDTuneSecretRules): change log, run records, protocol, task bar, recording and
+# SharePoint use the same one. Invoke-AVDTuneSpSecretRules stays as the name the SharePoint code and the export use.
 function Invoke-AVDTuneSpSecretRules {
-    # Pure. The text with every rule of the table applied; $null when a rule ran into its timeout (the caller fails closed)
+    # Pure. The text with every rule of the shared table applied; $null when a rule ran into its timeout (the caller fails closed)
     param([AllowEmptyString()][string]$Text)
-    $t = $Text
-    foreach ($r in $script:SpSecretRules) { try { $t = [regex]::Replace($t, $r[0], $r[1], [Text.RegularExpressions.RegexOptions]::None, [TimeSpan]::FromSeconds(2)) } catch { return $null } }
-    $t
+    Invoke-AVDTuneSecretRules $Text
 }
 
 function Protect-AVDTuneSpText {

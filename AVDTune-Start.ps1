@@ -392,6 +392,9 @@ function Invoke-SignInCore([switch]$Setup) {
     $typedClient = if ($script:Form.ClientId) { ([string]$script:Form.ClientId.Text).Trim() } else { '' }
     if ($typedClient -and -not (Test-AVDTuneTenantGuid $typedClient)) { Set-StageMessage 'The client ID must be a GUID (or leave it empty).' 'error'; return }
     if ($typedClient -ieq '14d82eec-204b-4c2f-b7e8-296a70dab67e') { Set-StageMessage "That is Microsoft's setup app; AVDTune needs the client ID of its own app registration (leave the field empty and AVDTune creates it at the sign-in)." 'error'; return }
+    # #99: after the finish a sign-in puts tokens and a WebView2 profile on the master again: only after a warning (the upload to SharePoint needs it)
+    $sealedNow = Test-AVDTuneSealed -Root $script:StateRoot
+    if ($sealedNow -and -not (Confirm-Action (T 'stage.signin.sealed' ([string](Get-AVDTuneState $script:StateRoot).ImageVersion)) (T 'stage.signin.title'))) { return }
     $setup = $Setup -or (-not $savedClient -and -not $typedClient)
     if ($setup -and -not (Confirm-Action (T 'stage.signin.confirm' $(if ($savedClient) { T 'stage.signin.confirm.check' $savedClient } else { T 'stage.signin.confirm.create' }) (Get-AVDTuneSetupConsentNote)) (T 'stage.signin.confirm.title'))) { return }
     $session = New-AVDTuneSession -Auth (Get-StartAuth) -TempRoot (Get-StartTempRoot)

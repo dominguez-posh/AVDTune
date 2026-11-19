@@ -359,6 +359,183 @@ function Confirm-AVDTuneSnapshotGate {
 
 #endregion
 
+#region snapshot housekeeping and the image versions of the gallery (plan 7a, issue #91)
+
+$script:GalleryApi = '2023-07-03'
+$script:CleanupRegexTimeout = [TimeSpan]::FromSeconds(1)
+$script:GalleryDefinitionIdPattern = '^/subscriptions/[0-9a-fA-F-]{36}/resourceGroups/[A-Za-z0-9._()-]+/providers/Microsoft\.Compute/galleries/[A-Za-z0-9._()-]+/images/[A-Za-z0-9._()-]+$'
+$script:SnapshotIdPattern = '^/subscriptions/[0-9a-fA-F-]{36}/resourceGroups/[A-Za-z0-9._()-]+/providers/Microsoft\.Compute/snapshots/[A-Za-z0-9._-]{1,80}$'
+
+function Get-AVDTuneGalleryVersions {
+    <#
+        Read only: the image versions of the gallery image definition the image is captured into (environment.json Gallery.ImageDefinitionId), newest first:
+        Name (major.minor.patch), Published (publishingProfile.publishedDate, local time), Regions (target regions), State. The imaging tool (Hydra for AVD or
+        another) writes them; AVDTune only reads. Paging through nextLink on the ARM host only, at most 10 pages, 500 versions.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)]$Arm, [Parameter(Mandatory)][string]$Token, [Parameter(Mandatory)][string]$DefinitionId)
+    if ($DefinitionId.Length -gt 400 -or $DefinitionId -notmatch $script:GalleryDefinitionIdPattern) { throw 'That is not the Resource ID of a gallery image definition.' }
+    $ro = New-AVDTuneReadOnlyArm -Arm $Arm
+    $path = "$DefinitionId/versions?api-version=$($script:GalleryApi)"
+    $found = New-Object System.Collections.ArrayList
+    for ($page = 0; $path -and $page -lt 10 -and $found.Count -lt 500; $page++) {
+        $body = Invoke-AVDTuneArm -Arm $ro -Method GET -Path $path -Token $Token -Action 'Microsoft.Compute/galleries/images/versions/read' -Scope 'the image definition'
+        foreach ($v in @(Get-AVDTuneProp $body 'value')) {
+            if (-not $v) { continue }
+            $name = [string](Get-AVDTuneProp $v 'name')
+            if ($name -notmatch '^\d{1,9}\.\d{1,9}\.\d{1,9}$') { continue }
+            $p = Get-AVDTuneProp $v 'properties'; $pub = Get-AVDTuneProp $p 'publishingProfile'
+            $published = $null
+            $raw = [string](Get-AVDTuneProp $pub 'publishedDate')
+            if ($raw) { try { $published = ([datetime]::Parse($raw, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind)).ToLocalTime() } catch { } }
+            $regions = @(@(Get-AVDTuneProp $pub 'targetRegions') | Where-Object { $_ } | ForEach-Object { ([string](Get-AVDTuneProp $_ 'name')).Trim() } | Where-Object { $_ -match '^[A-Za-z0-9 ]{2,40}$' } | Select-Object -First 30)
+            $state = [string](Get-AVDTuneProp $p 'provisioningState'); if ($state -notmatch '^[A-Za-z]{1,30}$') { $state = '' }
+            [void]$found.Add([pscustomobject]@{ Name = $name; Published = $published; Regions = $regions; State = $state })
+        }
+        $next = [string](Get-AVDTuneProp $body 'nextLink')
+        $path = if ($next) { ConvertTo-AVDTuneArmPath $next } else { $null }
+    }
+    @($found | Sort-Object { if ($_.Published) { $_.Published } else { [datetime]::MinValue } } -Descending)
+}
+
+function Add-AVDTuneGalleryVersionEntries {
+    <#
+        Plan 7a, after the imaging: every gallery version that was published after the finish of an image version and is not in the change log yet gets one
+        entry (category Imaging, component "gallery <name>") in the change log of the newest version finished before it was published: gallery version, date,
+        replicated regions. A gallery version without a finished version before it is not recorded. Returns the new entries.
+    #>
+    param([string]$Root = (Get-AVDTuneRoot), $GalleryVersions, [string]$User)
+    $state = Get-AVDTuneState $Root
+    $finished = @(foreach ($v in @(@(Get-AVDTuneProp $state 'Versions') | Where-Object { $_ })) {
+            $f = ConvertTo-AVDTuneUtc (Get-AVDTuneProp $v 'Finished')
+            if ($f -and (Test-AVDTuneImageVersion ([string]$v.Version))) { [pscustomobject]@{ Version = [string]$v.Version; Finished = $f.ToLocalTime() } }
+        }) | Sort-Object Finished
+    $known = @(Get-AVDTuneChangeLog -Root $Root | Where-Object { $_.Category -eq 'Imaging' } | ForEach-Object { [string]$_.Component })
+    $added = New-Object System.Collections.ArrayList
+    foreach ($g in @($GalleryVersions | Where-Object { $_ -and $_.Published } | Sort-Object Published)) {
+        $component = "gallery $($g.Name)"
+        if ($known -contains $component) { continue }
+        $owner = @($finished | Where-Object { $_.Finished -le $g.Published } | Select-Object -Last 1)
+        if ($owner.Count -eq 0) { continue }
+        $text = "Image version $($g.Name) in the Azure Compute Gallery, published $($g.Published.ToString('yyyy-MM-dd HH:mm'))$(if (@($g.Regions).Count) { ", replicated to $(@($g.Regions) -join ', ')" }), made by the imaging tool after the finish of $($owner[0].Version) ($($owner[0].Finished.ToString('yyyy-MM-dd HH:mm')))."
+        [void]$added.Add((Add-AVDTuneChangeLogEntry -Root $Root -Version $owner[0].Version -Category 'Imaging' -Component $component -ChangeType 'Note' -Text $text -User $User -Source Step))
+        $known += $component
+    }
+    @($added)
+}
+
+function ConvertTo-AVDTuneSnapshotNameRegex {
+    # Pure. The regex of the names the pattern of the environment makes (tokens filled with the disk and VM names, the date parts and {N} as digits); '' for a pattern that is not valid
+    param([string]$Pattern, [string]$OsDiskName, [string]$VmName)
+    if (-not $Pattern -or (Test-AVDTuneSnapshotNamePattern $Pattern)) { return '' }
+    $clean = { param($v) [regex]::Escape([regex]::Replace([string]$v, '[^A-Za-z0-9_.-]', '-')) }
+    $map = @{ OsDisk = (& $clean $OsDiskName); VM = (& $clean $VmName); ImageVersion = '\d{4}\.\d{2}\.\d{3}'; YYYY = '\d{4}'; MM = '\d{2}'; DD = '\d{2}'; N = '\d{1,6}' }
+    $parts = [regex]::Split($Pattern, '(\{(?:' + ($script:SnapshotNameTokens -join '|') + ')\})')
+    '\A' + (@(foreach ($p in $parts) { if ($p -match '^\{(\w+)\}$' -and $map.ContainsKey($Matches[1])) { $map[$Matches[1]] } else { [regex]::Escape($p) } }) -join '') + '\z'
+}
+
+function Get-AVDTuneSnapshotCleanupSettings {
+    # The settings of the housekeeping (config\snapshot-cleanup.json): Keep (newest N kept, 1-50, default 2), MinAgeDays (0-3650, default 7); a value of the wrong type or range is the default
+    param([string]$Root = (Get-AVDTuneRoot))
+    $o = $null; try { $o = Read-AVDTuneJson (Join-Path $Root 'config\snapshot-cleanup.json') } catch { }
+    $num = { param($v, $min, $max, $def) if (($v -is [int] -or $v -is [long]) -and $v -ge $min -and $v -le $max) { [int]$v } else { $def } }
+    [pscustomobject]@{ Keep = (& $num (Get-AVDTuneProp $o 'Keep') 1 50 2); MinAgeDays = (& $num (Get-AVDTuneProp $o 'MinAgeDays') 0 3650 7) }
+}
+
+function Set-AVDTuneSnapshotCleanupSettings {
+    param([string]$Root = (Get-AVDTuneRoot), [Parameter(Mandatory)][ValidateRange(1, 50)][int]$Keep, [Parameter(Mandatory)][ValidateRange(0, 3650)][int]$MinAgeDays)
+    Write-AVDTuneFile (Join-Path $Root 'config\snapshot-cleanup.json') ([ordered]@{ Keep = $Keep; MinAgeDays = $MinAgeDays } | ConvertTo-Json)
+    Get-AVDTuneSnapshotCleanupSettings -Root $Root
+}
+
+function Get-AVDTuneSnapshotCleanupPlan {
+    <#
+        Pure. Which snapshots of the OS disk may go (plan 7a, snapshot housekeeping), each with Delete and Reason. A snapshot is KEPT when it is
+        not finished; the confirmed snapshot of the gate (state.json SnapshotGate, the open write gate); the snapshot of the running image version (its tag
+        ImageVersion, FirstChangeSnapshotId); not made by AVDTune (tag CreatedWith) and not named by the pattern of the environment (AVDTune never deletes
+        those); one of the newest -Keep finished snapshots; younger than -MinAgeDays; or no image version in the gallery was published after it. Only what
+        passes all of these is offered for deletion.
+    #>
+    param($Snapshots, $State, $GalleryVersions, [string]$GalleryProblem, [ValidateRange(1, 50)][int]$Keep = 2, [ValidateRange(0, 3650)][int]$MinAgeDays = 7,
+        [string]$NamePattern = $script:DefaultSnapshotNamePattern, [string]$OsDiskName, [string]$VmName, $GateSnapshotId, [datetime]$Now = (Get-Date))
+    $confirmed = @([string](Get-AVDTuneProp (Get-AVDTuneProp $State 'SnapshotGate') 'SnapshotId'), [string]$GateSnapshotId) | Where-Object { $_ }
+    $running = [string](Get-AVDTuneProp $State 'ImageVersion')
+    $firstId = [string](Get-AVDTuneProp $State 'FirstChangeSnapshotId')
+    $regex = ConvertTo-AVDTuneSnapshotNameRegex -Pattern $NamePattern -OsDiskName $OsDiskName -VmName $VmName
+    $finished = @(@($Snapshots) | Where-Object { $_ -and $_.Finished -and $_.Created } | Sort-Object Created -Descending)
+    $newest = @($finished | Select-Object -First $Keep | ForEach-Object { [string]$_.Id })
+    $gallery = @(@($GalleryVersions) | Where-Object { $_ -and $_.Published } | Sort-Object Published -Descending)
+    $rows = foreach ($s in @(@($Snapshots) | Where-Object { $_ })) {
+        $named = $false
+        if ($regex) { try { $named = [regex]::IsMatch([string]$s.Name, $regex, [Text.RegularExpressions.RegexOptions]::IgnoreCase, $script:CleanupRegexTimeout) } catch { $named = $false } }
+        $age = if ($s.Created) { ($Now - [datetime]$s.Created).TotalDays } else { $null }
+        $newer = @(if ($s.Created) { $gallery | Where-Object { $_.Published -gt [datetime]$s.Created } | Select-Object -First 1 })
+        $reason = if (-not $s.Finished -or -not $s.Created) { 'Not finished: kept.' }
+        elseif ($confirmed | Where-Object { $_ -ieq [string]$s.Id }) { 'The confirmed snapshot of the snapshot gate: kept.' }
+        elseif (($firstId -and $firstId -ieq [string]$s.Id) -or ($running -and [string]$s.ImageVersion -eq $running)) { "The snapshot of the running image version $($running): kept." }
+        elseif (-not $s.ByAVDTune -and -not $named) { 'Not made by AVDTune and not named by the snapshot name pattern of the environment: AVDTune does not delete it.' }
+        elseif ($newest -contains [string]$s.Id) { "One of the newest $Keep finished snapshots: kept." }
+        elseif ($null -ne $age -and $age -lt $MinAgeDays) { "Younger than $MinAgeDays days: kept." }
+        elseif ($gallery.Count -eq 0) { "No image version of the gallery is known$(if ($GalleryProblem) { " ($GalleryProblem)" }): kept until one newer than the snapshot is found." }
+        elseif ($newer.Count -eq 0) { 'No image version in the gallery is newer than this snapshot: kept.' }
+        else { '' }
+        [pscustomobject]@{ Snapshot = $s; Name = [string]$s.Name; Id = [string]$s.Id; Created = $s.Created; ImageVersion = [string]$s.ImageVersion; ByAVDTune = [bool]$s.ByAVDTune; Named = $named
+            Delete = (-not $reason); Reason = $(if ($reason) { $reason } else { "Image version $($newer[0].Name) in the gallery (published $($newer[0].Published.ToString('yyyy-MM-dd HH:mm'))) is newer: can be deleted." }) }
+    }
+    @($rows)
+}
+
+function Remove-AVDTuneOldSnapshots {
+    <#
+        Deletes the snapshots the administrator confirmed by name (plan 7a; an Azure change, not a change of the master: it needs the open snapshot gate and an open
+        image version, sets no LastChange, writes one change log entry per deleted snapshot). Everything is read again from Azure first (snapshots of this disk, gallery
+        versions) and planned again: when a confirmed name is no longer offered for deletion nothing is deleted. Each snapshot is read again by ID (it must be one of
+        THIS OS disk) right before its DELETE. A refusal (403: no right Microsoft.Compute/snapshots/delete) stops the rest. Returns Deleted, Failed, Message.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)]$Arm, [Parameter(Mandatory)][string]$Token, [Parameter(Mandatory)]$Vm, [string]$Root = (Get-AVDTuneRoot), [Parameter(Mandatory)][string[]]$ConfirmedNames,
+        [string]$GalleryDefinitionId, [ValidateRange(1, 50)][int]$Keep = 2, [ValidateRange(0, 3650)][int]$MinAgeDays = 7, [string]$NamePattern = $script:DefaultSnapshotNamePattern,
+        [string]$User, [datetime]$Now = (Get-Date))
+    if (-not (Test-AVDTuneWriteAllowed)) { throw 'Read only: confirm the snapshot on the Overview first; old snapshots are deleted only with an open snapshot gate.' }
+    Assert-AVDTuneNotSealed -Root $Root
+    if (-not $Vm.Available) { throw [string]$Vm.Problem }
+    $names = @($ConfirmedNames | Where-Object { $_ } | Select-Object -Unique)
+    if ($names.Count -eq 0) { throw 'No snapshot was confirmed for deletion.' }
+    $state = Get-AVDTuneState $Root
+    $version = [string](Get-AVDTuneProp $state 'ImageVersion')
+    if (-not (Test-AVDTuneImageVersion $version)) { throw 'Start an image version first (Overview, Start new version): the change log entries need it.' }
+    $snaps = @(Get-AVDTuneOsDiskSnapshots -Arm $Arm -Token $Token -Vm $Vm)
+    $gv = @(); $gp = ''
+    if ($GalleryDefinitionId) { try { $gv = @(Get-AVDTuneGalleryVersions -Arm $Arm -Token $Token -DefinitionId $GalleryDefinitionId) } catch { $gp = $_.Exception.Message } } else { $gp = 'no gallery image definition chosen' }
+    $gate = Get-AVDTuneWriteGate
+    $plan = @(Get-AVDTuneSnapshotCleanupPlan -Snapshots $snaps -State $state -GalleryVersions $gv -GalleryProblem $gp -Keep $Keep -MinAgeDays $MinAgeDays -NamePattern $NamePattern -OsDiskName $Vm.OsDiskName -VmName $Vm.VmName -GateSnapshotId $(if ($gate) { [string]$gate.SnapshotId }) -Now $Now)
+    $todo = New-Object System.Collections.ArrayList
+    foreach ($n in $names) {
+        $row = @($plan | Where-Object { $_.Name -ceq $n })
+        if ($row.Count -ne 1 -or -not $row[0].Delete) { throw "The snapshot $n is no longer offered for deletion ($(if ($row.Count) { $row[0].Reason } else { 'not found' })). Nothing was deleted; read the list again." }
+        if ($row[0].Id -notmatch $script:SnapshotIdPattern) { throw "The snapshot $n has an unexpected resource ID: nothing was deleted." }
+        [void]$todo.Add($row[0])
+    }
+    $deleted = New-Object System.Collections.ArrayList; $failed = New-Object System.Collections.ArrayList; $failedNames = New-Object System.Collections.ArrayList; $message = ''
+    foreach ($r in $todo) {
+        try {
+            $info = Get-AVDTuneVerifiedSnapshot -Arm $Arm -Token $Token -Vm $Vm -Id $r.Id
+            if ($info.Name -cne $r.Name) { throw 'Azure answered with another snapshot.' }
+            [void](Invoke-AVDTuneArm -Arm $Arm -Method DELETE -Path "$($r.Id)?api-version=$($script:ComputeApi)" -Token $Token -Action 'Microsoft.Compute/snapshots/delete' -Scope "the snapshot $($r.Name)")
+            [void]$deleted.Add($r.Name)
+            $text = "Snapshot $($r.Name) of the OS disk deleted (created $(([datetime]$r.Created).ToString('yyyy-MM-dd HH:mm'))$(if ($r.ImageVersion) { ", image version $($r.ImageVersion)" })): $($r.Reason)"
+            [void](Add-AVDTuneChangeLogEntry -Root $Root -Version $version -Category 'Snapshot' -Component 'OS disk' -ChangeType 'Removed' -Text $text -User $User -SnapshotId $r.Id -Source Step)
+        }
+        catch {
+            [void]$failed.Add("$($r.Name): $($_.Exception.Message)"); [void]$failedNames.Add($r.Name)
+            if ($_.Exception.Message -like '*(403)*' -or $_.Exception.Message -like '*(401)*') { $message = $_.Exception.Message; break }
+        }
+    }
+    [pscustomobject]@{ Deleted = @($deleted); Failed = @($failed); Message = $message; Skipped = @($todo | Where-Object { $deleted -notcontains $_.Name -and $failedNames -notcontains $_.Name } | ForEach-Object { $_.Name }) }
+}
+
+#endregion
+
 #region what Azure says about this VM (issue #64: read only, before the snapshot is confirmed)
 
 $script:FactsRegexTimeout = [TimeSpan]::FromSeconds(2)
@@ -472,7 +649,7 @@ function New-AVDTuneArmAdapter {
         [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
         try {
             $request = [System.Net.HttpWebRequest]::Create("https://management.azure.com$Path")
-            $request.Method = $Method; $request.Timeout = 60000; $request.AllowAutoRedirect = $false
+            $request.Method = $Method; $request.Timeout = 60000; $request.ReadWriteTimeout = 60000; $request.AllowAutoRedirect = $false
             $request.Headers.Add('Authorization', "Bearer $Token")
             $request.Accept = 'application/json'
             if ($null -ne $Body) {
@@ -488,7 +665,7 @@ function New-AVDTuneArmAdapter {
             if (-not $response) { return [pscustomobject]@{ Status = 0; Body = $null; Error = $_.Exception.Message } }
         }
         try {
-            $text = (New-Object IO.StreamReader($response.GetResponseStream())).ReadToEnd()
+            $text = Read-AVDTuneResponseText -Response $response -MaxBytes 32MB   # bounded read (#108 N12)
             $parsed = $null; if ($text.Trim()) { try { $parsed = $text | ConvertFrom-Json } catch { } }
             $hs = @{}; foreach ($k in $response.Headers.AllKeys) { $hs[[string]$k] = [string]$response.Headers[$k] }   # Azure-AsyncOperation, Location, Retry-After of asynchronous operations (environment wizard)
             [pscustomobject]@{ Status = [int]$response.StatusCode; Body = $parsed; Error = ''; Headers = $hs }
@@ -501,4 +678,5 @@ function New-AVDTuneArmAdapter {
 #endregion
 
 Export-ModuleMember -Function Get-AVDTuneVerifiedSnapshot, Get-AVDTuneSnapshotClockBuffer, Get-AVDTuneGateText, Invoke-AVDTuneArm, ConvertTo-AVDTuneArmPath, Get-AVDTuneVmIdentity, Get-AVDTuneDefaultSnapshotNamePattern, Test-AVDTuneSnapshotNamePattern, Get-AVDTuneSnapshotName, Get-AVDTuneOsDiskSnapshots, Get-AVDTuneIncrementalSnapshotSku, Start-AVDTuneSnapshot,
-    Get-AVDTuneSnapshotState, Wait-AVDTuneSnapshot, Test-AVDTuneConfirmationName, Get-AVDTuneGateStatus, Confirm-AVDTuneSnapshotGate, New-AVDTuneArmAdapter, New-AVDTuneReadOnlyArm, Get-AVDTuneAzureFacts
+    Get-AVDTuneSnapshotState, Wait-AVDTuneSnapshot, Test-AVDTuneConfirmationName, Get-AVDTuneGateStatus, Confirm-AVDTuneSnapshotGate, New-AVDTuneArmAdapter, New-AVDTuneReadOnlyArm, Get-AVDTuneAzureFacts,
+    Get-AVDTuneGalleryVersions, Add-AVDTuneGalleryVersionEntries, ConvertTo-AVDTuneSnapshotNameRegex, Get-AVDTuneSnapshotCleanupPlan, Remove-AVDTuneOldSnapshots, Get-AVDTuneSnapshotCleanupSettings, Set-AVDTuneSnapshotCleanupSettings

@@ -56,7 +56,7 @@ function Start-UpdJob([string]$Kind, $Argument) {
                 $u = if ($Seed) { New-AVDTuneFakeUpdates -Seed $Seed } else { New-AVDTuneFakeUpdates -Seed @{ Wua = $Wua; Native = $Native } }
             }
             else { $m = New-AVDTuneMachine; $u = New-AVDTuneUpdateAdapter }
-            if ($Gate) { Open-AVDTuneWriteGate -SnapshotId $Gate.SnapshotId -ConfirmedBy $Gate.ConfirmedBy }
+            if ($Gate) { Open-AVDTuneWriteGate -SnapshotId $Gate.SnapshotId -ConfirmedBy $Gate.ConfirmedBy -SnapshotCreated ([string](Get-AVDTuneProp $Gate 'SnapshotCreated')) }
             $progress = { param($t) $Sync.Text = $t }
             try {
                 switch ($Kind) {

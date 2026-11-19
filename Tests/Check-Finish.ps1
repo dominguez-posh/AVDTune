@@ -112,6 +112,19 @@ try {
     $buText = Get-ThrownText { Invoke-AVDTuneFinish -Machine $bum -Fin (New-AVDTuneFakeFinish -Seed (Get-Fake $root)) -Root $root -User 'admin1' }
     $sealSrc = [IO.File]::ReadAllText((Join-Path $repo 'AVDTune-Seal.ps1'))
     Test-Check 'gate (#92 M1): a temporary benchmark user left behind blocks the finish (gate and Invoke, named); a clean machine passes; the Seal page asks with its machine' (-not $bug.Allowed -and ($bug.Reasons -join ' ') -like '*avdtb-0123456789ab*readiness fix*' -and $buText -like '*avdtb-0123456789ab*' -and (Test-AVDTuneFinishGate -Root $root -Machine (New-Master)).Allowed -and ([regex]::Matches($sealSrc, 'Test-AVDTuneFinishGate -Root \$script:StateRoot -Machine \$script:Machine')).Count -eq 3 -and ([regex]::Matches($sealSrc, 'Test-AVDTuneFinishGate')).Count -eq 4) ($bug.Reasons -join '|')
+    # audit #98: an interrupted benchmark (restore task, journal, work folder) blocks the finish even after a green healthcheck
+    $blm = New-AVDTuneFakeMachine -Seed @{ BenchLeftovers = @('restore journal', 'scheduled task AVDTune-BenchmarkRestore') }
+    $blg = Test-AVDTuneFinishGate -Root $root -Machine $blm
+    $blText = Get-ThrownText { Invoke-AVDTuneFinish -Machine $blm -Fin (New-AVDTuneFakeFinish -Seed (Get-Fake $root)) -Root $root -User 'admin1' }
+    Test-Check 'gate (#98): leftovers of an interrupted benchmark block the finish (gate and Invoke, named), nothing is written' (-not $blg.Allowed -and ($blg.Reasons -join ' ') -like '*interrupted benchmark*restore journal*AVDTune-BenchmarkRestore*Benchmark page*' -and $blText -like '*AVDTune-BenchmarkRestore*' -and (Test-AVDTuneFinishGate -Root $root -Machine (New-Master)).Allowed -and -not (Get-AVDTuneFinishRecord $root)) ($blg.Reasons -join '|')
+    # audit #103: a TrustedHosts journal of the first Printers page and an interrupted environment setup block the finish
+    Write-AVDTuneFile (Join-Path $root 'config\printers-trustedhosts.json') '{"Schema":1,"Old":"","Server":"print1.example.test"}'
+    $g103a = Test-AVDTuneFinishGate -Root $root
+    Remove-Item -LiteralPath (Join-Path $root 'config\printers-trustedhosts.json') -Force
+    Write-AVDTuneFile (Join-Path $root 'config\azure-setup.json') '{"Schema":1,"Runs":[{"RunId":"run-103","Started":"2026-11-19T10:00:00Z","Steps":[{"Id":"s1","Type":"StorageAccount","Action":"Create","Path":"x","Status":"Started"}]}]}'
+    $g103b = Test-AVDTuneFinishGate -Root $root
+    Remove-Item -LiteralPath (Join-Path $root 'config\azure-setup.json') -Force
+    Test-Check 'gate (#103): a TrustedHosts journal and an interrupted environment setup block the finish, named' (-not $g103a.Allowed -and ($g103a.Reasons -join ' ') -like '*TrustedHosts*Printers page*' -and -not $g103b.Allowed -and ($g103b.Reasons -join ' ') -like '*environment setup did not end properly*run-103*' -and (Test-AVDTuneFinishGate -Root $root).Allowed) (($g103a.Reasons + $g103b.Reasons) -join '|')
     $old = New-Root
     [void](Save-Healthcheck -Root $old)
     $s = Get-AVDTuneState $old
@@ -127,15 +140,30 @@ try {
     Test-Check 'the Finish button asks with exactly this text (page script)' (([IO.File]::ReadAllText((Join-Path $repo 'AVDTune-Seal.ps1'))) -match 'Confirm-Action \(Get-AVDTuneFinishConfirmText') $null
     # ---------------------------------------------------------------- dry run
     $dry = Invoke-AVDTuneFinish -Machine $m -Fin $f -Root $root -WhatIf
-    Test-Check 'dry run lists the steps and writes nothing' ($dry.WhatIf -and @($dry.Results).Count -eq 7 -and @($dry.Results | Where-Object { $_.Status -notin 'WhatIf', 'Unchanged' }).Count -eq 0 -and $m.Log.Count -eq 0 -and -not ($f.Log -like 'ClearFolder*') -and -not ($f.Log -like 'RemoveFolder*') -and $null -eq (Get-AVDTuneFinishRecord $root)) ((@($dry.Results | ForEach-Object Status)) -join ',')
+    Test-Check 'dry run lists the steps and writes nothing' ($dry.WhatIf -and @($dry.Results).Count -eq 9 -and @($dry.Results | Where-Object { $_.Status -notin 'WhatIf', 'Unchanged' }).Count -eq 0 -and $m.Log.Count -eq 0 -and -not ($f.Log -like 'ClearFolder*') -and -not ($f.Log -like 'RemoveFolder*') -and $null -eq (Get-AVDTuneFinishRecord $root)) ((@($dry.Results | ForEach-Object Status)) -join ',')
 
     # ---------------------------------------------------------------- the finish
     $signTemp = Join-Path $base 'signtemp'; New-Item -ItemType Directory -Path $signTemp | Out-Null
     $session = New-TokenSession $signTemp
     Test-Check 'precondition: the session holds a token and a sign-in profile' (-not (Test-AVDTuneSessionClear -Session $session)) $null
+    # audit #97: <state>\temp with tool folders, a set-aside folder, a download leftover of a crash, a large file (a hit of the token scan), a junction and the folder of the running window
+    $st97 = Join-Path $root 'temp'
+    foreach ($d in 'host', 'winget', 'apps', 'choco.untrusted-20260101-000000', ('office-' + [guid]::NewGuid().ToString('N'))) { [void](New-Item -ItemType Directory -Path (Join-Path $st97 $d) -Force); Set-Content -LiteralPath (Join-Path (Join-Path $st97 $d) 'left.log') -Value 'x' }
+    $bigFs = [IO.File]::Create((Join-Path $st97 'apps\setup.bin')); try { $bigFs.SetLength(5MB) } finally { $bigFs.Dispose() }
+    $out97 = Join-Path $base 'outside97'; [void](New-Item -ItemType Directory -Path $out97); Set-Content -LiteralPath (Join-Path $out97 'keep.txt') -Value 'keep'
+    cmd.exe /c mklink /J "$(Join-Path $st97 'lnk')" "$out97" | Out-Null
+    # #103 (option A): what AVDTune builds again goes (tools, logs but security.log, exports, documents, custom\files), the history stays (runs, config, change log, state.json)
+    foreach ($d in 'tools\other', 'exports', 'documents', 'custom\files', 'logs') { [void](New-Item -ItemType Directory -Path (Join-Path $root $d) -Force) }
+    Set-Content -LiteralPath (Join-Path $root 'tools\other\x.exe') -Value 'x'; Set-Content -LiteralPath (Join-Path $root 'exports\state.zip') -Value 'x'; Set-Content -LiteralPath (Join-Path $root 'documents\env.html') -Value 'x'
+    Set-Content -LiteralPath (Join-Path $root 'custom\files\setup.ps1') -Value 'x'; Set-Content -LiteralPath (Join-Path $root 'logs\software-x.log') -Value 'x'; Set-Content -LiteralPath (Join-Path $root 'logs\security.log') -Value 'kept'
+    Set-Content -LiteralPath (Join-Path $root 'config\fslogix-undo.json') -Value '{}'
+    $runsBefore103 = @(Get-ChildItem -LiteralPath (Join-Path $root 'runs') -File).Count
     $progress = New-Object System.Collections.ArrayList
     $r = Invoke-AVDTuneFinish -Machine $m -Fin $f -Root $root -User 'admin1' -SnapshotId 'snap-check' -Session $session -Progress { param($t, $p) [void]$progress.Add("$p $t") }
-    Test-Check 'finish: Finished, seven steps in order, none failed' ($r.Status -eq 'Finished' -and (@($r.Results | ForEach-Object Id) -join ',') -eq 'finish.temp,finish.wer,finish.wu-cache,finish.diskspd,finish.block,finish.tokens,finish.version' -and @($r.Results | Where-Object Status -eq 'Failed').Count -eq 0) ((@($r.Results | ForEach-Object { "$($_.Id)=$($_.Status):$($_.Message)" })) -join '; ')
+    Test-Check 'finish (#97): <state>\temp is emptied before the token scan (tool, set-aside and download folders, the large file, the junction as a link); the host folder and the junction target stay' ((@(Get-ChildItem -LiteralPath $st97 -Force | ForEach-Object Name) -join ',') -eq 'host' -and (Test-Path -LiteralPath (Join-Path $out97 'keep.txt')) -and @(Find-AVDTuneTokenFiles -Root $root).Count -eq 0) (@(Get-ChildItem -LiteralPath $st97 -Force | ForEach-Object Name) -join ',')
+    $left103 = @(foreach ($d in 'tools', 'exports', 'documents', 'custom\files', 'logs') { Get-ChildItem -LiteralPath (Join-Path $root $d) -Force -Recurse -File | ForEach-Object { $_.Name } })
+    Test-Check 'finish (#103, option A): tools, logs (security.log stays), exports, documents and the library cache are emptied; run records, undo records, change log and state.json stay' (($left103 -join ',') -eq 'security.log' -and (Test-Path -LiteralPath (Join-Path $root 'config\fslogix-undo.json')) -and @(Get-ChildItem -LiteralPath (Join-Path $root 'runs') -File).Count -ge $runsBefore103 -and $runsBefore103 -gt 0 -and (Test-Path -LiteralPath (Join-Path $root 'changelog.json')) -and (Get-AVDTuneState $root).Sealed) ($left103 -join ',')
+    Test-Check 'finish: Finished, nine steps in order, none failed' ($r.Status -eq 'Finished' -and (@($r.Results | ForEach-Object Id) -join ',') -eq 'finish.temp,finish.wer,finish.wu-cache,finish.diskspd,finish.block,finish.state-temp,finish.rebuildable,finish.tokens,finish.version' -and @($r.Results | Where-Object Status -eq 'Failed').Count -eq 0) ((@($r.Results | ForEach-Object { "$($_.Id)=$($_.Status):$($_.Message)" })) -join '; ')
     Test-Check 'finish: every step ran through the step engine (Section Seal, Mode Apply)' (@($r.Results | Where-Object { $_.Section -ne 'Seal' -or $_.Mode -ne 'Apply' }).Count -eq 0) $null
     $temp = $f.Store.Items['C:\Windows\Temp']
     Test-Check 'cleanup: temp is cleared in depth through handles (#48): files, the sub folder, the link and the read-only files go; only the file in use stays' ((@($temp | ForEach-Object Name | Sort-Object) -join ',') -eq 'inuse.dat') (@($temp | ForEach-Object Name) -join ',')
@@ -155,15 +183,33 @@ try {
     $state = Get-AVDTuneState $root
     Test-Check 'version closed: Sealed, Finished and FinishedBy in state.json' ($state.Sealed -eq $true -and $state.Versions[0].Finished -and $state.Versions[0].FinishedBy -eq 'admin1') ($state | ConvertTo-Json -Compress)
     $journal = Get-AVDTuneFinishRecord $root
-    Test-Check 'journal: closed (done), seven steps recorded, nothing lifted is open' (-not $journal.Active -and $journal.Phase -eq 'done' -and @($journal.Steps).Count -eq 7 -and @(@($journal.Lifted) | Where-Object { -not $_.Restored }).Count -eq 0) ($journal | ConvertTo-Json -Compress)
+    Test-Check 'journal: closed (done), nine steps recorded, nothing lifted is open' (-not $journal.Active -and $journal.Phase -eq 'done' -and @($journal.Steps).Count -eq 9 -and @(@($journal.Lifted) | Where-Object { -not $_.Restored }).Count -eq 0) ($journal | ConvertTo-Json -Compress)
     $cl = @(Get-AVDTuneChangeLog -Root $root | Where-Object Category -eq 'Finish')
     Test-Check 'change log: one entry per changed step and the summary; run record "Finish"; LastChange set' ($cl.Count -ge 7 -and (@($cl | Where-Object Component -eq 'Finish')[0].Text -like '*is finished*imaging tool*') -and @(Get-AVDTuneRun -Root $root | Where-Object Plan -eq 'Finish').Count -eq 1 -and (Get-AVDTuneState $root).LastChange) ($cl.Count)
     Test-Check 'progress: reported per step' ($progress.Count -ge 7 -and $progress[0] -like '0 *') ($progress -join '|')
     $g = Test-AVDTuneFinishGate -Root $root
     Test-Check 'gate after the finish: the version is finished, a second finish is refused' (-not $g.Allowed -and ($g.Reasons -join ' ') -like '*already finished*' -and (Test-Throws { Invoke-AVDTuneFinish -Machine $m -Fin $f -Root $root })) ($g.Reasons -join '|')
-    $again = Invoke-AVDTuneStep -Step (Get-AVDTuneFinishSteps -Machine $m -Fin $f -Root $root -Session $session -User 'admin1' -SnapshotId 'x')[5].Step -Machine $m -Mode Test
+    $again = Invoke-AVDTuneStep -Step (Get-AVDTuneFinishSteps -Machine $m -Fin $f -Root $root -Session $session -User 'admin1' -SnapshotId 'x')[7].Step -Machine $m -Mode Test
     Test-Check 'the token step tests compliant afterwards' ($again.Status -eq 'Compliant') $again.Status
 
+    # #99/#97 (second pass): a sign-in profile in <state>\temp is found without a session, also where the state-temp step does not clear (host); a junction is not followed
+    $rootP = New-Root; [void](Save-Healthcheck -Root $rootP)
+    $profDir = Join-Path $rootP ('temp\host\PackTuneSignIn-' + [guid]::NewGuid().ToString('N')); [void](New-Item -ItemType Directory -Path $profDir -Force)
+    $outP = Join-Path $base 'outsideP'; [void](New-Item -ItemType Directory -Path (Join-Path $outP ('PackTuneSignIn-' + [guid]::NewGuid().ToString('N'))) -Force)
+    cmd.exe /c mklink /J "$(Join-Path $rootP 'temp\host\lnk')" "$outP" | Out-Null
+    $foundP = @(Find-AVDTuneSignInProfiles -Folder (Join-Path $rootP 'temp'))
+    $rP = Invoke-AVDTuneFinish -Machine (New-Master) -Fin (New-AVDTuneFakeFinish -Seed @{ Present = @() }) -Root $rootP -User 'admin1'
+    $tokP = @($rP.Results | Where-Object Id -eq 'finish.tokens')[0]
+    Test-Check 'tokens (#99): a sign-in profile left in <state>\temp\host without a session fails the token step, named; the junction target is not looked at; the version stays open' ($foundP.Count -eq 1 -and $foundP[0] -like 'host\PackTuneSignIn-*' -and $rP.Status -eq 'Failed' -and $tokP.Status -eq 'Failed' -and $tokP.Message -like '*sign-in window*host\PackTuneSignIn-*' -and -not (Get-AVDTuneState $rootP).Sealed) "$($foundP -join ',') / $($rP.Message)"
+    $usedP = Join-Path $rootP ('temp\host.used-20260101-000000\PackTuneSignIn-' + [guid]::NewGuid().ToString('N')); [void](New-Item -ItemType Directory -Path $usedP -Force)
+    Test-Check 'tokens (#99): a profile in host.used-* (a crash at an earlier start) is found as well' (@(@(Find-AVDTuneSignInProfiles -Folder (Join-Path $rootP 'temp')) -like 'host.used-20260101-000000\PackTuneSignIn-*').Count -eq 1) (@(Find-AVDTuneSignInProfiles -Folder (Join-Path $rootP 'temp')) -join ',')
+    # #99 (source): after the finish a sign-in only after a warning, sign-out after each SharePoint job, the Seal page says "no longer clean" while a sign-in exists
+    $startSrc = [IO.File]::ReadAllText((Join-Path $repo 'AVDTune-Start.ps1'))
+    $core99 = [regex]::Match($startSrc, '(?s)function Invoke-SignInCore.*?New-AVDTuneSession').Value
+    $spSrc = [IO.File]::ReadAllText((Join-Path $repo 'AVDTune-SharePoint.ps1'))
+    $spDone = [regex]::Match($spSrc, '(?s)function Complete-SpJob \{.*?\$script:SpLast = \$summary').Value
+    $sealView = [regex]::Match([IO.File]::ReadAllText((Join-Path $repo 'AVDTune-Seal.ps1')), '(?s)function Update-SealView \{.*?\r?\n\}').Value
+    Test-Check 'sign-in after the finish (#99, source): asked with a warning before the session is made; a SharePoint job signs out when the version is finished; the Seal page shows "not clean" from the session and from profiles in <state>\temp' ($core99 -match "if \(\`$sealedNow -and -not \(Confirm-Action \(T 'stage.signin.sealed'" -and $core99 -match 'Test-AVDTuneSealed -Root \$script:StateRoot' -and $spDone -match 'Test-AVDTuneSealed -Root \$script:StateRoot\)\) \{\s+try \{ Disconnect-AVDTuneSession \$script:StartContext.Session' -and $sealView -match 'Test-AVDTuneSessionClear -Session \$s' -and $sealView -match 'Find-AVDTuneSignInProfiles' -and $sealView -match "elseif \(\`$notClean\) \{ @\('ErrorBg', 'Danger', \(T 'seal.pill.notclean'\)\) \}" -and $sealView -match "T 'seal.notclean'") $null
     # ---------------------------------------------------------------- tokens: the finish stops while a token pattern is in AVDTune files and keeps the sign-in
     $root2 = New-Root; [void](Save-Healthcheck -Root $root2)
     $m2 = New-Master; $f2 = New-AVDTuneFakeFinish -Seed (@{ TokenFiles = @('config\leftover.json'); Present = @() })

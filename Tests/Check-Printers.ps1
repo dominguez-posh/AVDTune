@@ -63,6 +63,9 @@ try {
         $ix = Read-Inventory $px $tmp
         Test-Check "export (N1): $($case[0]) makes the driver a problem, nothing is left on either side" ((Get-Printer1 $ix 'Floor 1 Color').Problem -like $case[1] -and $px.Store.LocalFolders.Count -eq 0 -and $px.Store.RemoteFolders.Count -eq 0) (Get-Printer1 $ix 'Floor 1 Color').Problem
     }
+    $pg = New-AVDTuneFakePrinters; $pg.Store.GrowFile = 'amd64\driver.dll'
+    $ig = Read-Inventory $pg $tmp
+    Test-Check 'export (#108 N2): a file with more bytes than the list said is refused before it is written, nothing is left' ((Get-Printer1 $ig 'Floor 1 Color').Problem -like '*the list of the export said*' -and $pg.Store.LocalFolders.Count -eq 0 -and $pg.Store.RemoteFolders.Count -eq 0) (Get-Printer1 $ig 'Floor 1 Color').Problem
     $pb = New-AVDTuneFakePrinters; $pb.Store.Servers[$srv].Printers += @{ Name = 'Wild'; ShareName = 'Wild'; Shared = $true; DriverName = 'Bad*Driver' }
     $ib = Read-Inventory $pb $tmp
     Test-Check 'inventory (N3): a driver name with a wildcard is a problem, never exported' ((Get-Printer1 $ib 'Wild').Problem -like '*driver name is not valid*' -and @($pb.Store.Log | Where-Object { $_ -like '*Bad*' }).Count -eq 0) (Get-Printer1 $ib 'Wild').Problem
@@ -141,6 +144,76 @@ try {
     Write-AVDTuneFile (Get-AVDTunePrinterJournalPath $rootJ) '{"Schema":1,"Old":"admin1.example.test","Server":"print1.example.test"}'
     $pj = New-AVDTuneFakePrinters; $pj.Store.TrustedHosts = 'admin1.example.test,print1.example.test'
     Test-Check 'TrustedHosts journal of the first version: the start sets TrustedHosts back exactly and removes the journal; without a journal nothing happens' ((Repair-AVDTunePrinterTrustedHosts -P $pj -Root $rootJ) -and $pj.Store.TrustedHosts -ceq 'admin1.example.test' -and -not (Test-Path (Get-AVDTunePrinterJournalPath $rootJ)) -and -not (Repair-AVDTunePrinterTrustedHosts -P $pj -Root $rootJ)) $pj.Store.TrustedHosts
+    # audit #102: the undo record is written before the first write; the server list step fails after it removed the foreign entry: the origin is still known and the
+    # undo brings the foreign entry back
+    $rootF = Join-Path $tmp 'fail102'; [void](Initialize-AVDTuneState -Root $rootF)
+    Save-AVDTunePrinterState -Root $rootF -State ([pscustomobject]@{ Servers = @($srv); Drivers = @() })
+    $pf = New-AVDTuneFakePrinters
+    $pf.Store.Registry['hklm:\software\policies\microsoft\windows nt\printers\packagepointandprint\listofservers|foreign.example.test'] = @{ Value = 'foreign.example.test'; Kind = 'String' }
+    $pf.Store.Registry['hklm:\software\policies\microsoft\windows nt\printers\pointandprint|restrictdriverinstallationtoadministrators'] = @{ Value = 1; Kind = 'DWord' }   # already set: only the list step writes (no Changed step to record after the run)
+    $origSet = $pf.RegSet
+    $pf.RegSet = { param($Path, $Name, $Value, $Type) if ($Path -like '*ListOfServers') { throw 'fake: write refused' }; & $origSet $Path $Name $Value $Type }.GetNewClosure()
+    $rf = Invoke-AVDTunePrinterRun -Machine $m -P $pf -Root $rootF -Drivers @() -Policy -User 'admin1' -SnapshotId 'snap-1'
+    $uf = Read-AVDTunePrinterUndo $rootF
+    Test-Check 'undo record (#102): the server list step failed after removing the foreign entry; the record written before the run keeps it' (@($rf.Run.Results | Where-Object { $_.Id -eq 'printers.policy-serverlist' -and $_.Status -eq 'Failed' }).Count -eq 1 -and -not $pf.Store.Registry.ContainsKey('hklm:\software\policies\microsoft\windows nt\printers\packagepointandprint\listofservers|foreign.example.test') -and [string]$uf.Policy.List.'foreign.example.test' -eq 'foreign.example.test') $(try { Get-Content (Get-AVDTunePrinterUndoPath $rootF) -Raw -ErrorAction Stop } catch { "no undo record" })
+    $pf.RegSet = $origSet
+    [void](Invoke-AVDTunePrinterRun -Machine $m -P $pf -Root $rootF -Mode Undo -User 'admin1' -SnapshotId 'snap-1')
+    Test-Check 'undo (#102): after the failed run the foreign entry is back' ($pf.Store.Registry.ContainsKey('hklm:\software\policies\microsoft\windows nt\printers\packagepointandprint\listofservers|foreign.example.test')) $null
+    # a value someone else changed after AVDTune is not overwritten by the undo; the record stays
+    $rootO = Join-Path $tmp 'other102'; [void](Initialize-AVDTuneState -Root $rootO)
+    Save-AVDTunePrinterState -Root $rootO -State ([pscustomobject]@{ Servers = @($srv); Drivers = @() })
+    $po = New-AVDTuneFakePrinters
+    [void](Invoke-AVDTunePrinterRun -Machine $m -P $po -Root $rootO -Drivers @() -Policy -User 'admin1' -SnapshotId 'snap-1')
+    $po.Store.Registry['hklm:\software\policies\microsoft\windows nt\printers\pointandprint|restrictdriverinstallationtoadministrators'] = @{ Value = 0; Kind = 'DWord' }
+    $po.Store.Registry['hklm:\software\policies\microsoft\windows nt\printers\packagepointandprint\listofservers|gpo.example.test'] = @{ Value = 'gpo.example.test'; Kind = 'String' }
+    $ro = Invoke-AVDTunePrinterRun -Machine $m -P $po -Root $rootO -Mode Undo -User 'admin1' -SnapshotId 'snap-1'
+    Test-Check 'undo (#102): a restriction and a list someone else changed since are not overwritten (failed with the reason), the record stays' (@($ro.Run.Results | Where-Object { $_.Status -eq 'Failed' -and $_.Message -like '*someone else*' }).Count -eq 1 -and $po.Store.Registry['hklm:\software\policies\microsoft\windows nt\printers\pointandprint|restrictdriverinstallationtoadministrators'].Value -eq 0 -and $po.Store.Registry.ContainsKey('hklm:\software\policies\microsoft\windows nt\printers\packagepointandprint\listofservers|gpo.example.test') -and $null -ne (Read-AVDTunePrinterUndo $rootO).Policy) (($ro.Run.Results | ForEach-Object { "$($_.Id)=$($_.Status):$($_.Message)" }) -join ' | ')
+    # typed read: "false" is not false, a list entry with a control character, a driver without a valid name
+    $typedBad = 0
+    foreach ($bad in '{"Schema":1,"Policy":{"Restrict":{"Exists":"false"},"ListFlag":{"Exists":false},"List":{}},"Drivers":{}}', '{"Schema":1,"Policy":{"Restrict":{"Exists":false},"ListFlag":{"Exists":false},"List":{"a\u0001b":"x"}},"Drivers":{}}', '{"Schema":1,"Policy":null,"Drivers":{"x*":{"Name":"x*","Version":"1","Server":"print1.example.test","Existed":false}}}') {
+        Write-AVDTuneFile (Get-AVDTunePrinterUndoPath $rootO) $bad
+        $logN = $po.Store.Log.Count
+        if ((Get-ThrownText { Invoke-AVDTunePrinterRun -Machine $m -P $po -Root $rootO -Mode Undo -User 'admin1' -SnapshotId 'snap-1' }) -like '*not usable*' -and $po.Store.Log.Count -eq $logN) { $typedBad++ }
+    }
+    Test-Check 'undo record (#102): read typed: "false" for Exists, a list entry with a control character and a driver name with a wildcard are refused, nothing is written' ($typedBad -eq 3) "$typedBad of 3"
+    # audit #103: the repair is a change of the master: not with a closed write gate (journal and TrustedHosts stay), else under the marker with LastChange and a change log entry
+    $rootJ2 = Join-Path $tmp 'j103'; [void](Initialize-AVDTuneState -Root $rootJ2); [void](Start-AVDTuneImageVersion -Root $rootJ2 -Date (Get-Date) -User 'admin1')
+    Write-AVDTuneFile (Get-AVDTunePrinterJournalPath $rootJ2) '{"Schema":1,"Old":"admin1.example.test","Server":"print1.example.test"}'
+    $pj2 = New-AVDTuneFakePrinters; $pj2.Store.TrustedHosts = 'admin1.example.test,print1.example.test'
+    Close-AVDTuneWriteGate
+    $closed103 = Repair-AVDTunePrinterTrustedHosts -P $pj2 -Root $rootJ2
+    Open-AVDTuneWriteGate -SnapshotId 'snap-1' -ConfirmedBy 'admin1'
+    $closedOk = (-not $closed103 -and $pj2.Store.TrustedHosts -ceq 'admin1.example.test,print1.example.test' -and (Test-Path (Get-AVDTunePrinterJournalPath $rootJ2)))
+    $open103 = Repair-AVDTunePrinterTrustedHosts -P $pj2 -Root $rootJ2 -User 'admin1'
+    Test-Check 'TrustedHosts repair (#103): nothing with a closed write gate; with the gate: put back, LastChange set, a change log entry' ($closedOk -and $open103 -and $pj2.Store.TrustedHosts -ceq 'admin1.example.test' -and $null -ne (Get-AVDTuneLastChange -Root $rootJ2) -and @(Get-AVDTuneChangeLog -Root $rootJ2 | Where-Object { $_.Component -eq 'printers.trustedhosts' }).Count -eq 1) "closed ok $closedOk, open $open103"
+    $twice = @($plan[0], $plan[0])
+    $rootT = Join-Path $tmp 'twice104'; [void](Initialize-AVDTuneState -Root $rootT)
+    $twiceText = Get-ThrownText { Invoke-AVDTunePrinterRun -Machine $m -P $p -Root $rootT -Drivers $twice -Credential $cred -User 'admin1' -SnapshotId 'snap-1' }
+    Test-Check 'run (#104 N7): a driver twice in the plan is refused before anything runs' ($twiceText -like '*in the plan twice*') $twiceText
+    # #111 N-2: foreign short names in the server list (\\server style and print_srv) are recorded and come back with the undo
+    $rootN = Join-Path $tmp 'short111'; [void](Initialize-AVDTuneState -Root $rootN)
+    Save-AVDTunePrinterState -Root $rootN -State ([pscustomobject]@{ Servers = @($srv); Drivers = @() })
+    $pn = New-AVDTuneFakePrinters
+    $lkN = 'hklm:\software\policies\microsoft\windows nt\printers\packagepointandprint\listofservers'
+    $pn.Store.Registry["$lkN|print_srv"] = @{ Value = 'print_srv'; Kind = 'String' }; $pn.Store.Registry["$lkN|\\oldsrv"] = @{ Value = '\\oldsrv'; Kind = 'String' }
+    $rn = Invoke-AVDTunePrinterRun -Machine $m -P $pn -Root $rootN -Drivers @() -Policy -User 'admin1' -SnapshotId 'snap-1'
+    $un = Invoke-AVDTunePrinterRun -Machine $m -P $pn -Root $rootN -Mode Undo -User 'admin1' -SnapshotId 'snap-1'
+    Test-Check 'undo record (#111 N-2): foreign short names in the list (print_srv, \\oldsrv) are recorded and put back by the undo' (@($rn.Run.Results | Where-Object Status -eq 'Failed').Count -eq 0 -and @($un.Run.Results | Where-Object Status -eq 'Failed').Count -eq 0 -and $pn.Store.Registry.ContainsKey("$lkN|print_srv") -and $pn.Store.Registry.ContainsKey("$lkN|\\oldsrv")) (($un.Run.Results | ForEach-Object { "$($_.Id)=$($_.Status):$($_.Message)" }) -join ' | ')
+    # a state before that the reader would refuse (a Binary restriction) is refused before the record and before the first write
+    $rootB = Join-Path $tmp 'binary111'; [void](Initialize-AVDTuneState -Root $rootB)
+    Save-AVDTunePrinterState -Root $rootB -State ([pscustomobject]@{ Servers = @($srv); Drivers = @() })
+    $pb = New-AVDTuneFakePrinters
+    $pb.Store.Registry['hklm:\software\policies\microsoft\windows nt\printers\pointandprint|restrictdriverinstallationtoadministrators'] = @{ Value = [byte[]](1, 0); Kind = 'Binary' }
+    $pb.Store.Registry["$lkN|foreign.example.test"] = @{ Value = 'foreign.example.test'; Kind = 'String' }
+    $logB = $pb.Store.Log.Count
+    $bt = Get-ThrownText { Invoke-AVDTunePrinterRun -Machine $m -P $pb -Root $rootB -Drivers @() -Policy -User 'admin1' -SnapshotId 'snap-1' }
+    Test-Check 'undo record (#111 N-2): a state before the reader would refuse (Binary restriction) stops the run before the record and before the first write' ($bt -like '*cannot be recorded for undo*' -and -not (Test-Path (Get-AVDTunePrinterUndoPath $rootB)) -and @($pb.Store.Log | Select-Object -Skip $logB | Where-Object { $_ -like 'Reg*' }).Count -eq 0 -and $pb.Store.Registry.ContainsKey("$lkN|foreign.example.test")) $bt
+    # #103/#111: the TrustedHosts repair also on a finished version (-AllowSealed: it puts back what an older AVDTune left)
+    $rootS = Join-Path $tmp 'sealed111'; [void](Initialize-AVDTuneState -Root $rootS); [void](Start-AVDTuneImageVersion -Root $rootS -Date (Get-Date) -User 'admin1')
+    [void](Set-AVDTuneState -Root $rootS -Values @{ Sealed = $true }); Open-AVDTuneWriteGate -SnapshotId 'snap-1' -ConfirmedBy 'admin1'   # a new version closes the gate
+    Write-AVDTuneFile (Get-AVDTunePrinterJournalPath $rootS) '{"Schema":1,"Old":"admin1.example.test","Server":"print1.example.test"}'
+    $ps111 = New-AVDTuneFakePrinters; $ps111.Store.TrustedHosts = 'admin1.example.test,print1.example.test'
+    Test-Check 'TrustedHosts repair (#111): also on a finished version (crash repair, -AllowSealed)' ((Repair-AVDTunePrinterTrustedHosts -P $ps111 -Root $rootS -User 'admin1') -and $ps111.Store.TrustedHosts -ceq 'admin1.example.test' -and -not (Test-Path (Get-AVDTunePrinterJournalPath $rootS))) $null
     $u = Invoke-AVDTunePrinterRun -Machine $m -P $p -Root $tmp -Mode Undo -User 'admin1' -SnapshotId 'snap-1'
     Test-Check 'undo: the policies as before (restriction absent, the old list entry back) and the drivers AVDTune added removed; the record is empty' (-not $st.Registry.ContainsKey("$pol\pointandprint|restrictdriverinstallationtoadministrators") -and $st.Registry["$pol\packagepointandprint\listofservers|old.example.test"].Value -eq 'old.example.test' -and -not $st.Registry.ContainsKey("$pol\packagepointandprint\listofservers|$srv") -and $st.Local.Count -eq 0 -and $null -eq (Read-AVDTunePrinterUndo $tmp).Policy -and (Read-AVDTunePrinterUndo $tmp).Drivers.Count -eq 0) (($u.Run.Results | ForEach-Object { "$($_.Id)=$($_.Status) $($_.Message)" }) -join ' | ')
 

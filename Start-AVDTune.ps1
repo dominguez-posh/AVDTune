@@ -93,6 +93,7 @@ Import-Module (Join-Path $PSScriptRoot 'Modules\AVDTune.Recording.psm1') -Force 
 Import-Module (Join-Path $PSScriptRoot 'Modules\AVDTune.Printers.psm1') -Force   # printer drivers from a print server (#86): after Custom, whose registry adapter it uses
 Import-Module (Join-Path $PSScriptRoot 'Modules\AVDTune.Release.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'Modules\AVDTune.SharePoint.psm1') -Force   # change log, software list and environment document to SharePoint (#89)
+Import-Module (Join-Path $PSScriptRoot 'Modules\AVDTune.Export.psm1') -Force   # the export ZIP (#91), uses the secret table of AVDTune.SharePoint
 # Test runs of several checkouts can run at the same time: one test mutex per test state folder
 $mutexName = if ($script:TestMode) {
     $sha = [System.Security.Cryptography.SHA256]::Create()
@@ -469,6 +470,7 @@ function Update-ProtocolView {
     $ui.CmbVersion.Visibility = ConvertTo-Vis $change
     $ui.PanelNote.Visibility = ConvertTo-Vis $change
     if (Get-Variable -Scope Script -Name SpReady -ValueOnly -ErrorAction SilentlyContinue) { Show-SpCard $change }   # the SharePoint card (#89)
+    if (Get-Variable -Scope Script -Name ExpReady -ValueOnly -ErrorAction SilentlyContinue) { Show-ExportCard $change }   # export and old snapshots (#91)
     if ($change) {
         $keep = Get-ChangeLogVersion
         $versions = @(Get-AVDTuneChangeLogVersions -Root $script:StateRoot)
@@ -514,7 +516,7 @@ function Save-ProtocolFile([string]$Path) {
     }
     else {
         $format = if ($Path -match '\.md$') { 'Markdown' } else { 'Text' }
-        [IO.File]::WriteAllText($Path, (ConvertTo-PackTuneProtocolText -Protocol $script:Protocol -Language $script:Settings.ProtocolLanguage -Format $format -End (Get-Date)), (New-Object Text.UTF8Encoding $true))
+        [void](Write-AVDTuneExportFile -Path $Path -Text (ConvertTo-PackTuneProtocolText -Protocol $script:Protocol -Language $script:Settings.ProtocolLanguage -Format $format -End (Get-Date)) -Bom)   # no link, temp file and one move (#108 N9)
     }
 }
 Add-Click $ui.BtnProtocolSave {
@@ -547,6 +549,7 @@ $script:ReadyFakeArm = $(if ($script:TestMode) { $script:Services.Arm } else { $
 . (Join-Path $PSScriptRoot 'AVDTune-Printers.ps1')   # the Printers page (#86): printer drivers from a print server; uses the App Masking and Software helpers
 . (Join-Path $PSScriptRoot 'AVDTune-Seal.ps1')
 . (Join-Path $PSScriptRoot 'AVDTune-SharePoint.ps1')   # the SharePoint card of the change log (#89); the finish uses its upload
+. (Join-Path $PSScriptRoot 'AVDTune-Export.ps1')   # export and old snapshots of the change log view (#91)
 . (Join-Path $PSScriptRoot 'AVDTune-Environment.ps1')
 . (Join-Path $PSScriptRoot 'AVDTune-Optimization.ps1')
 . (Join-Path $PSScriptRoot 'AVDTune-Language.ps1')   # the Language and region page (issue 56)
@@ -668,7 +671,7 @@ function Get-ShutdownBlockReason {
     if ($h -ne [IntPtr]::Zero -and [AVDTune.ShutdownBlock]::ShutdownBlockReasonQuery($h, $sb, [ref]$size)) { $sb.ToString() } else { '' }
 }
 function Invoke-SessionEnding($EventArgs) {
-    if (-not $script:UpdJob -and -not $script:BenchJob -and -not $script:SealJob) { return }
+    if (-not (Get-CloseHoldReason)) { return }   # #104 N1: the same reasons as closing the window (every writer job, not only updates, benchmark and finish)
     $EventArgs.Cancel = $true
     Show-Toast (T 'shell.sessionend')
 }

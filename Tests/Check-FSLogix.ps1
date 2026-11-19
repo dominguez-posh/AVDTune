@@ -94,6 +94,61 @@ try {
     $failRun = Set-AVDTuneFSLogixSettings -Machine $mf -Root $tmp -Values @{ LockedRetryCount = 5 } -User 'admin1' -SnapshotId 'snap-check'
     Test-Check 'a refused registry write is a Failed step, not a crash' ($failRun.Results[0].Status -eq 'Failed' -and $failRun.Results[0].Message -like '*refused*') $null
 
+    # ---------------------------------------------------------------- undo record (audit #100): first value found, only changed values, typed, foreign changes
+    $u0 = Join-Path $tmp 'undo100'; [void](Initialize-AVDTuneState -Root $u0)
+    $um = New-Master -Reg @{ "$pk|LockedRetryCount" = 12; "$pk|IsDynamic" = 1 }
+    [void](Set-AVDTuneFSLogixSettings -Machine $um -Root $u0 -Values @{ LockedRetryCount = 3; IsDynamic = 1 } -User 'admin1' -SnapshotId 'snap-check')
+    $rec1 = @(Read-AVDTuneFSLogixUndo -Root $u0)
+    Test-Check 'undo record (#100): only the value that changes is recorded (IsDynamic was already 1)' ((@($rec1 | ForEach-Object Name) -join ',') -eq 'LockedRetryCount' -and $rec1[0].Previous -eq 12 -and $rec1[0].Value -eq 3) (@($rec1 | ForEach-Object { "$($_.Name)=$($_.Previous)>$($_.Value)" }) -join ',')
+    [void](Set-AVDTuneFSLogixSettings -Machine $um -Root $u0 -Values @{ LockedRetryCount = 5 } -User 'admin1' -SnapshotId 'snap-check')
+    $rec2 = @(Read-AVDTuneFSLogixUndo -Root $u0)
+    $arch = @(Get-ChildItem -LiteralPath (Join-Path $u0 'config') -Filter 'fslogix-undo.*.json')
+    Test-Check 'undo record (#100): a second apply keeps the first value found (12, not 3) and archives the older record' ($rec2.Count -eq 1 -and $rec2[0].Previous -eq 12 -and $rec2[0].Value -eq 5 -and $arch.Count -ge 1) "$($rec2[0].Previous)>$($rec2[0].Value) archives $($arch.Count)"
+    [void](Undo-AVDTuneFSLogixSettings -Machine $um -Root $u0 -User 'admin1' -SnapshotId 'snap-check')
+    Test-Check 'undo (#100): puts back the origin of the first apply' ((& $um.RegGet $pk 'LockedRetryCount') -eq 12) (& $um.RegGet $pk 'LockedRetryCount')
+    # a value changed by someone else since is not touched
+    $rarc0 = & $um.RegGet $pk 'ReAttachRetryCount'
+    [void](Set-AVDTuneFSLogixSettings -Machine $um -Root $u0 -Values @{ LockedRetryCount = 3; ReAttachRetryCount = 4 } -User 'admin1' -SnapshotId 'snap-check')
+    & $um.RegSet $pk 'LockedRetryCount' 7 'DWord'
+    $uf = Undo-AVDTuneFSLogixSettings -Machine $um -Root $u0 -User 'admin1' -SnapshotId 'snap-check'
+    Test-Check 'undo (#100): a value someone else changed since stays and is named in Skipped; the others are put back' ((& $um.RegGet $pk 'LockedRetryCount') -eq 7 -and (& $um.RegGet $pk 'ReAttachRetryCount') -eq $rarc0 -and $rarc0 -ne 4 -and (@($uf.Skipped) -join ' ') -like '*LockedRetryCount*now 7*') (@($uf.Skipped) -join ' ')
+    # typed read: a string "false" for a DWord, a foreign path, an unknown id are refused, nothing is written
+    $up = Get-AVDTuneFSLogixUndoPath $u0
+    $bad = @(
+        @{ Id = 'fslogix.profile.lockedretrycount'; Path = $pk; Name = 'LockedRetryCount'; Type = 'DWord'; Previous = 'false'; Value = 3; Title = 'x' },
+        @{ Id = 'fslogix.profile.lockedretrycount'; Path = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run'; Name = 'LockedRetryCount'; Type = 'DWord'; Previous = 1; Value = 3; Title = 'x' },
+        @{ Id = 'fslogix.other.anything'; Path = $pk; Name = 'Anything'; Type = 'String'; Previous = 'a'; Value = 'b'; Title = 'x' }
+    )
+    $refused = 0
+    foreach ($b in $bad) {
+        Write-AVDTuneFile $up (@{ At = 'x'; Items = @($b) } | ConvertTo-Json -Depth 4)
+        $before = $um.Log.Count
+        if ((Test-Throws { Undo-AVDTuneFSLogixSettings -Machine $um -Root $u0 -User 'admin1' -SnapshotId 'snap-check' }) -and $um.Log.Count -eq $before) { $refused++ }
+    }
+    Test-Check 'undo (#100): read typed against the catalog: "false" as a DWord, a foreign key, an unknown id are refused, nothing written' ($refused -eq 3) "$refused of 3"
+    Remove-Item -LiteralPath $up -Force
+    # #111 N-2: a DWord with the high bit (registry: negative Int32) is recorded and put back bit-equal; a JSON value of 2^31..2^32-1 reads as the same bits
+    $u1 = Join-Path $tmp 'undo111'; [void](Initialize-AVDTuneState -Root $u1)
+    $hm = New-Master -Reg @{ "$pk|LockedRetryCount" = -1 }
+    [void](Set-AVDTuneFSLogixSettings -Machine $hm -Root $u1 -Values @{ LockedRetryCount = 3 } -User 'admin1' -SnapshotId 'snap-check')
+    $hu = Undo-AVDTuneFSLogixSettings -Machine $hm -Root $u1 -User 'admin1' -SnapshotId 'snap-check'
+    Write-AVDTuneFile (Get-AVDTuneFSLogixUndoPath $u1) ('{"Items":[{"Id":"fslogix.profile.lockedretrycount","Path":"' + $pk.Replace('\', '\\') + '","Name":"LockedRetryCount","Type":"DWord","Previous":4294967295,"Value":3,"Title":"x"}]}')
+    $hr = @(Read-AVDTuneFSLogixUndo -Root $u1); Remove-Item -LiteralPath (Get-AVDTuneFSLogixUndoPath $u1) -Force
+    Test-Check 'undo record (#111 N-2): a DWord with the high bit is recorded and put back (-1), 4294967295 in the record reads as -1' (@($hu.Results | Where-Object Status -eq 'Failed').Count -eq 0 -and (& $hm.RegGet $pk 'LockedRetryCount') -eq -1 -and $hr[0].Previous -eq -1) "$((& $hm.RegGet $pk 'LockedRetryCount')) / $($hr[0].Previous)"
+    # a value before that the undo could not read back (a text where the setting is a DWord) is refused before anything is written
+    $wm = New-Master -Reg @{ "$pk|IsDynamic" = 'abc' }
+    $wt = Get-ThrownText { Set-AVDTuneFSLogixSettings -Machine $wm -Root $u1 -Values @{ IsDynamic = 1 } -User 'admin1' -SnapshotId 'snap-check' }
+    Test-Check 'undo record (#111 N-2): a value before of the wrong type is refused before the record and the registry are written' ($wt -like '*cannot be recorded for undo*' -and -not (Test-Path (Get-AVDTuneFSLogixUndoPath $u1)) -and @($wm.Log | Where-Object { $_ -like 'RegSet*' }).Count -eq 0) $wt
+    # sealed (#104 N6 behaviour): no undo record, nothing written
+    [void](Set-AVDTuneState -Root $u1 -Values @{ Sealed = $true })
+    $sm = New-Master
+    $st = Get-ThrownText { Set-AVDTuneFSLogixSettings -Machine $sm -Root $u1 -Values @{ LockedRetryCount = 3 } -User 'admin1' -SnapshotId 'snap-check' }
+    Test-Check 'finished version (#104 N6, behaviour): FSLogix settings are refused, no undo record, nothing written' ($st -like '*finished*' -and -not (Test-Path (Get-AVDTuneFSLogixUndoPath $u1)) -and $sm.Log.Count -eq 0) $st
+    [void](Set-AVDTuneState -Root $u1 -Values @{ Sealed = $false })
+    # #104 N5/N6 (source): a finished version takes no undo record and no optimization run: the Sealed check comes before the write of the record / the step loop
+    $fsSrc = [IO.File]::ReadAllText((Join-Path $repo 'Modules\AVDTune.FSLogix.psm1')); $offSrc = [IO.File]::ReadAllText((Join-Path $repo 'Modules\AVDTune.Office.psm1')); $optSrc = [IO.File]::ReadAllText((Join-Path $repo 'Modules\AVDTune.Optimization.psm1'))
+    $optFn = [regex]::Match($optSrc, '(?s)function Invoke-AVDTuneOptimization \{.*?foreach \(\$it in \$items\)').Value
+    Test-Check 'Sealed before undo records (#104 N5/N6, source): redirections, Defender exclusions, FSLogix settings, Office fix and policies; optimization up front' (([regex]::Matches($fsSrc, 'Assert-AVDTuneNotSealed -Root \$Root; (Write-AVDTuneUndoFile|Save-AVDTuneFSLogixUndo)')).Count -eq 3 -and $offSrc -match 'Assert-AVDTuneNotSealed -Root \$Root; Write-AVDTuneFile \$undoPath' -and $offSrc -match '(?s)Assert-AVDTuneNotSealed -Root \$Root\s+# #101' -and $optFn -match 'if \(-not \$WhatIf\) \{ Assert-AVDTuneNotSealed -Root \$Root \}') $null
     # ---------------------------------------------------------------- groups
     $f = New-AVDTuneFakeFSLogix
     $g = Get-AVDTuneFSLogixGroups -F $f

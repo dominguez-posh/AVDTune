@@ -16,7 +16,7 @@ function New-AVDTuneFakeMachine {
         Paths = @(@($Seed.Paths) | Where-Object { $_ }); Dirs = $(if ($Seed.Dirs) { $Seed.Dirs } else { @{} }); Hotfixes = @(@($Seed.Hotfixes) | Where-Object { $_ }); NetAdapters = @(@($Seed.NetAdapters) | Where-Object { $_ })
         Files = @{}; Folders = @{}; Acl = $(if ($Seed.Acl) { $Seed.Acl } else { @{} }); Pnp = @(@($Seed.Pnp) | Where-Object { $_ }); Arch = $(if ($Seed.Arch) { $Seed.Arch } else { 'AMD64' }); Tpm = $(if ($Seed.ContainsKey('Tpm')) { $Seed.Tpm } else { $null })
         Firmware = $(if ($Seed.ContainsKey('Firmware')) { $Seed.Firmware } else { $null })
-        BenchUsers = @(@($Seed.BenchUsers) | Where-Object { $_ }); BenchUserRemoveFails = [bool]$Seed.BenchUserRemoveFails   # #92: temporary benchmark users left behind (Name, Sid, Profile, Account); removal that fails (profile in use)
+        BenchUsers = @(@($Seed.BenchUsers) | Where-Object { $_ }); BenchUserRemoveFails = [bool]$Seed.BenchUserRemoveFails; BenchLeftovers = @(@($Seed.BenchLeftovers) | Where-Object { $_ })   # audit #98: BenchLeftovers = texts of an interrupted benchmark (journal, task, work folder)   # #92: temporary benchmark users left behind (Name, Sid, Profile, Account); removal that fails (profile in use)
     }
     $win = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion'
     $office = 'HKLM:\SOFTWARE\Microsoft\Office\ClickToRun\Configuration'
@@ -188,6 +188,8 @@ function New-AVDTuneFakeMachine {
         $store.Hive.Loaded = $false; $store.Hive.Unloads++; 0
     }.GetNewClosure()
     $m.BenchUsers = { @($store.BenchUsers) }.GetNewClosure()
+    $m.BenchLeftovers = { param($Root) @($store.BenchLeftovers) }.GetNewClosure()
+    $m.StateAsideRemove = { param($Path) [void]$store.Log.Add("StateAsideRemove $Path"); $parent = Split-Path $Path -Parent; $leaf = Split-Path $Path -Leaf; if ($store.Dirs.ContainsKey($parent)) { $store.Dirs[$parent] = @(@($store.Dirs[$parent]) | Where-Object { $_ -ne $leaf }) } }.GetNewClosure()   # #111 N-1
     $m.BenchUserRemove = {
         param($Sid)
         [void]$store.Log.Add("BenchUserRemove $Sid")

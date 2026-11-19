@@ -49,13 +49,13 @@ $manifestPath = Join-Path $ReleaseDir 'manifest.json'
 if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) { throw "No manifest.json in $ReleaseDir." }
 $m = [IO.File]::ReadAllText($manifestPath).TrimStart([char]0xFEFF) | ConvertFrom-Json
 if ($m.Product -isnot [string] -or $m.Product -ne 'AVDTune') { throw 'The manifest is not one of an AVDTune release.' }
-if ($m.Version -isnot [string] -or $m.Version -notmatch '^\d+\.\d+\.\d+(-ea\.\d+)?$') { throw 'The version of the manifest is not x.y.z or x.y.z-ea.N.' }
+if ($m.Version -isnot [string] -or $m.Version -notmatch '\A\d+\.\d+\.\d+(-ea\.\d+)?\z') { throw 'The version of the manifest is not x.y.z or x.y.z-ea.N.' }
 if ($m.Zip.Name -isnot [string] -or $m.Zip.Name -ne "AVDTune-$($m.Version).zip") { throw 'The ZIP name of the manifest does not match its version.' }
-if ($m.Zip.Sha256 -isnot [string] -or $m.Zip.Sha256 -notmatch '^[0-9a-f]{64}$') { throw 'The ZIP hash of the manifest is not a SHA256.' }
+if ($m.Zip.Sha256 -isnot [string] -or $m.Zip.Sha256 -notmatch '\A[0-9a-f]{64}\z') { throw 'The ZIP hash of the manifest is not a SHA256.' }
 $listed = @{}
 foreach ($f in @($m.Files)) {
     if ($f.Path -isnot [string] -or -not (Test-SafeRelative $f.Path)) { throw "Unsafe path in the manifest: $($f.Path)" }
-    if ($f.Sha256 -isnot [string] -or $f.Sha256 -notmatch '^[0-9a-f]{64}$') { throw "No SHA256 for $($f.Path) in the manifest." }
+    if ($f.Sha256 -isnot [string] -or $f.Sha256 -notmatch '\A[0-9a-f]{64}\z') { throw "No SHA256 for $($f.Path) in the manifest." }
     $listed[$f.Path] = $f.Sha256
 }
 $zipPath = Join-Path $ReleaseDir $m.Zip.Name

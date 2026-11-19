@@ -206,7 +206,7 @@ function Start-LangJob([string]$Kind, $Config) {
                 Import-Module (Join-Path $AppRoot 'Modules\AVDTune.psm1') -Force
                 foreach ($part in 'Updates', 'Language') { Import-Module (Join-Path $AppRoot "Modules\AVDTune.$part.psm1") -Force }
                 $c = $Common.Clone(); $c.Machine = New-AVDTuneMachine; $c.L = New-AVDTuneLanguageAdapter
-                if ($Gate) { Open-AVDTuneWriteGate -SnapshotId $Gate.SnapshotId -ConfirmedBy $Gate.ConfirmedBy }
+                if ($Gate) { Open-AVDTuneWriteGate -SnapshotId $Gate.SnapshotId -ConfirmedBy $Gate.ConfirmedBy -SnapshotCreated ([string](Get-AVDTuneProp $Gate 'SnapshotCreated')) }
                 & ([scriptblock]::Create($WorkerText)) $Kind $c
             }).AddArgument($script:AppRoot).AddArgument($Kind).AddArgument($common).AddArgument($gate).AddArgument($script:LangWorkerText)
         $script:LangJob = @{ PS = $ps; Handle = $ps.BeginInvoke(); Kind = $Kind; Task = $task }

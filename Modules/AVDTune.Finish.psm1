@@ -8,7 +8,9 @@
       finish.wu-cache      Windows Update download cache (SoftwareDistribution\Download); Windows Update and BITS are stopped for it
       finish.diskspd       the downloaded diskspd of the benchmark (tools\diskspd)
       finish.block         update block on and no maintenance mode left (the end state)
-      finish.tokens        tokens, refresh token and the temporary profiles of the sign-in window removed and proved; no token pattern in AVDTune's own files
+      finish.state-temp    contents of <state>\temp (tool folders, set-aside folders, download leftovers), except the folder of the running window (host)
+      finish.rebuildable   contents of tools, logs (not security.log), exports, documents and custom\files: what AVDTune builds again (#103, option A)
+      finish.tokens       tokens, refresh token and the temporary profiles of the sign-in window removed and proved; no token pattern in AVDTune's own files
       finish.version       the image version is closed in state.json (Sealed, Finished)
     Cleanup removes contents only, never follows a link (a junction in a folder that users can write to is removed itself, not its target), and a file in
     use stays and is counted ("n left, in use"), it does not fail the finish.
@@ -126,6 +128,68 @@ function Clear-AVDTuneFolderContents {
     if (-not (Test-AVDTuneNoLinkChain -Folder $dir.FullName)) { throw "The path $Folder contains a link: nothing is deleted." }
     $r = Remove-AVDTuneTreeSafe -Path $dir.FullName -ContentsOnly   # checks the path again on the open handle (a link swapped in after the check above)
     [pscustomobject]@{ Removed = $r.Removed; Left = $r.Left; Skipped = $r.Skipped }
+}
+function Get-AVDTuneFinishStateTempEntries {
+    <#
+        The entries of <state>\temp that the finish removes (audit #97): every tool folder (winget, choco, msiexec, apps, office, bench), every set-aside folder
+        (<tool>.untrusted-*, <tool>.used-*), download and staging leftovers (<prefix>-<guid>, <guid>) and loose files. Only the folder of the running window
+        (host: TEMP of this process, Set-AVDTuneProcessTemp) stays. Returns DirectoryInfo/FileInfo objects; none when the folder is missing.
+    #>
+    param([Parameter(Mandatory)][string]$Folder, [string[]]$Keep = @('host'))
+    $dir = New-Object IO.DirectoryInfo $Folder
+    if (-not $dir.Exists) { return @() }
+    @($dir.GetFileSystemInfos() | Where-Object { $_.Name -notin $Keep })
+}
+function Get-AVDTuneFinishRebuildTargets {
+    # The folders of the state that finish.rebuildable empties (#103, option A): Path and Keep (names that stay directly in it). Everything else of the state stays.
+    param([Parameter(Mandatory)][string]$Root)
+    @(
+        [pscustomobject]@{ Path = (Join-Path $Root 'tools'); Keep = @() }
+        [pscustomobject]@{ Path = (Join-Path $Root 'logs'); Keep = @('security.log') }
+        [pscustomobject]@{ Path = (Join-Path $Root 'exports'); Keep = @() }
+        [pscustomobject]@{ Path = (Join-Path $Root 'documents'); Keep = @() }
+        [pscustomobject]@{ Path = (Join-Path $Root 'custom\files'); Keep = @() }
+    )
+}
+function Clear-AVDTuneFinishStateTemp {
+    <#
+        Removes the entries of Get-AVDTuneFinishStateTempEntries, each through Remove-AVDTuneTreeSafe (handles, a link removed as a link, never followed). The
+        folder itself and the parent chain must be no links (throws, nothing deleted). An entry in use stays and counts as Left. Returns Removed, Left, Skipped.
+    #>
+    param([Parameter(Mandatory)][string]$Folder, [string[]]$Keep = @('host'))
+    $removed = 0; $left = 0; $skipped = 0
+    if (-not (Test-Path -LiteralPath $Folder)) { return [pscustomobject]@{ Removed = 0; Left = 0; Skipped = 0 } }
+    if (-not (Test-AVDTuneNoLinkChain -Folder $Folder)) { throw "The path $Folder contains a link: nothing is deleted." }
+    foreach ($e in @(Get-AVDTuneFinishStateTempEntries -Folder $Folder -Keep $Keep)) {
+        $r = $null
+        try { $r = Remove-AVDTuneTreeSafe -Path $e.FullName } catch { $left++; continue }
+        $skipped += [int]$r.Skipped
+        if ($r.Gone) { $removed++ } else { $left++ }
+    }
+    [pscustomobject]@{ Removed = $removed; Left = $left; Skipped = $skipped }
+}
+function Find-AVDTuneSignInProfiles {
+    <#
+        Profiles of the sign-in window (PackTuneSignIn-*: WebView2 with Microsoft cookies) anywhere below $Folder (<state>\temp), with or without a session (#99,
+        second pass of the audit): after a crash such a profile stays in host.used-* or host.untrusted-*, where the session does not look. Links are not followed.
+        Returns the paths relative to $Folder.
+    #>
+    param([Parameter(Mandatory)][string]$Folder)
+    $root = New-Object IO.DirectoryInfo $Folder
+    if (-not $root.Exists) { return @() }
+    $prefixLen = $root.FullName.TrimEnd([char]92).Length + 1
+    $found = New-Object System.Collections.ArrayList
+    $stack = New-Object System.Collections.Stack
+    $stack.Push($root)
+    while ($stack.Count -gt 0) {
+        $dir = $stack.Pop()
+        foreach ($d in $dir.GetDirectories()) {
+            if ($d.Name -like 'PackTuneSignIn-*') { [void]$found.Add($d.FullName.Substring($prefixLen)); continue }
+            if (($d.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { continue }
+            $stack.Push($d)
+        }
+    }
+    @($found)
 }
 function Find-AVDTuneTokenFiles {
     <#
@@ -355,6 +419,11 @@ function Test-AVDTuneFinishGate {
         $left = @(); try { $left = @(& $Machine.BenchUsers) } catch { [void]$reasons.Add("The temporary benchmark users could not be checked ($($_.Exception.Message)).") }
         if ($left.Count -gt 0) { [void]$reasons.Add("Temporary benchmark user(s) left behind: $(@($left | ForEach-Object { $_.Name }) -join ', '). Remove them with the readiness fix and run the analysis again.") }
     }
+    # audit #98: no finish while an interrupted benchmark left its restore task, journal, work folders or a test container (diskspd is removed by the finish itself)
+    if ($Machine -and $Machine.PSObject.Properties['BenchLeftovers']) {
+        $bl = @(); try { $bl = @(& $Machine.BenchLeftovers $Root) } catch { [void]$reasons.Add("The leftovers of the benchmark could not be checked ($($_.Exception.Message)).") }
+        if ($bl.Count -gt 0) { [void]$reasons.Add("An interrupted benchmark left something behind: $($bl -join '; '). Repair it on the Benchmark page and run the analysis again.") }
+    }
     if (-not (Test-AVDTuneWriteAllowed)) { [void]$reasons.Add('The snapshot gate is not confirmed: AVDTune is read only until a snapshot of today is confirmed on the Overview.') }
     $state = Get-AVDTuneState $Root
     $version = [string](Get-AVDTuneProp $state 'ImageVersion')
@@ -362,6 +431,10 @@ function Test-AVDTuneFinishGate {
     elseif ([bool](Get-AVDTuneProp $state 'Sealed')) { [void]$reasons.Add("Image version $version is already finished. Start a new version for further changes.") }
     if (Get-AVDTuneFinishCrash -Root $Root) { [void]$reasons.Add('An earlier finish did not end properly: repair it first.') }
     if (Get-AVDTuneMaintenanceCrash -Root $Root) { [void]$reasons.Add('An earlier maintenance mode did not end properly: repair the update block first.') }
+    # audit #103: a TrustedHosts journal of the first Printers page (TrustedHosts not put back yet) and an interrupted environment setup are no image to finish
+    if (Test-Path -LiteralPath (Join-Path $Root 'config\printers-trustedhosts.json') -PathType Leaf) { [void]$reasons.Add('TrustedHosts still holds a print server added by an earlier AVDTune (config\printers-trustedhosts.json): open the Printers page to put it back first.') }
+    $envOpen = @(); try { $envOpen = @(Get-AVDTuneEnvInterrupted -Root $Root) } catch { [void]$reasons.Add("The environment setup journal could not be checked ($($_.Exception.Message)).") }
+    if ($envOpen.Count -gt 0) { [void]$reasons.Add("An environment setup did not end properly (run $(@($envOpen | ForEach-Object { $_.RunId }) -join ', ')): look at it on the Environment page first.") }
     $ready = Get-AVDTuneFinishReadiness -Root $Root
     foreach ($r in @($ready.Reasons)) { [void]$reasons.Add([string]$r) }
     $rec = Get-AVDTuneReadinessRecord -Root $Root
@@ -510,13 +583,26 @@ function Get-AVDTuneFinishSteps {
         [void](Set-AVDTuneUpdateBlock -Machine $m -Root $Root -Mode On -User $User -SnapshotId $SnapshotId)
     }.GetNewClosure()
     [void]$steps.Add([pscustomobject]@{ Step = (New-AVDTuneStep -Id 'finish.block' -Section Seal -Title 'Update block on, maintenance mode ended (end state)' -Why 'Users of the image must not see or run updates; the maintenance mode is only for the own run of AVDTune.' -Test $bTest -Apply $bApply); Lifts = $false })
+    # <state>\temp (audit #97): tool folders, set-aside folders and download leftovers must not reach the image; before the token scan (a large leftover is a hit there)
+    $stateTemp = Join-Path $Root 'temp'
+    $stTest = { param($m) $n = @(Get-AVDTuneFinishStateTempEntries -Folder $stateTemp).Count; @{ Compliant = ($n -eq 0 -or [bool]$attempted['state-temp']); State = "$n item(s)" } }.GetNewClosure()
+    $stApply = { param($m) $r = Clear-AVDTuneFinishStateTemp -Folder $stateTemp; $Report.Skipped += [int]$r.Skipped; $Report.Left += [int]$r.Left; $attempted['state-temp'] = $true }.GetNewClosure()
+    [void]$steps.Add([pscustomobject]@{ Step = (New-AVDTuneStep -Id 'finish.state-temp' -Section Seal -Title 'AVDTune work folders emptied' -Why 'Temporary folders of winget, Chocolatey, msiexec, the benchmark and downloads (also folders set aside as untrusted and leftovers of a crash) are not part of the image. Only the folder of the running window stays; a link is removed itself, never followed; a file in use stays.' -Test $stTest -Apply $stApply); Lifts = $false })
+    # #103 (owner decision, option A): what AVDTune can build again is not part of the image: tool caches, logs (the security log of a set-aside state folder stays),
+    # exports and documents made here (made again from the state), the library cache of the customizations. History, undo records, configuration, run records
+    # (benchmark baseline, LastChange, healthcheck proof) and state.json stay.
+    $rebuild = @(Get-AVDTuneFinishRebuildTargets -Root $Root)
+    $rbTest = { param($m) $n = 0; foreach ($t in $rebuild) { $n += @(Get-AVDTuneFinishStateTempEntries -Folder $t.Path -Keep $t.Keep).Count }; @{ Compliant = ($n -eq 0 -or [bool]$attempted['rebuild']); State = "$n item(s)" } }.GetNewClosure()
+    $rbApply = { param($m) foreach ($t in $rebuild) { $r = Clear-AVDTuneFinishStateTemp -Folder $t.Path -Keep $t.Keep; $Report.Skipped += [int]$r.Skipped; $Report.Left += [int]$r.Left }; $attempted['rebuild'] = $true }.GetNewClosure()
+    [void]$steps.Add([pscustomobject]@{ Step = (New-AVDTuneStep -Id 'finish.rebuildable' -Section Seal -Title 'Caches, logs, exports and documents of AVDTune removed' -Why 'A session host does not need what AVDTune can build again: tools, logs, exports, documents and the library cache. The history (change log, run records, undo records, configuration, state.json) stays for the next version of this master. A link is removed itself, never followed.' -Test $rbTest -Apply $rbApply); Lifts = $false })
     # tokens
     $tTest = {
         param($m)
         $cur = & $getSession
         $clear = $true; if ($cur) { $clear = [bool](Test-AVDTuneSessionClear -Session $cur) }
         $files = @(& $Fin.FindTokenFiles $Root $Progress)
-        @{ Compliant = ($clear -and $files.Count -eq 0); State = "session $(if ($clear) { 'clear' } else { 'holds tokens or sign-in profiles' }); token pattern in $($files.Count) file(s)" }
+        $prof = @(Find-AVDTuneSignInProfiles -Folder (Join-Path $Root 'temp'))   # also without a session and in folders of an earlier start (#99)
+        @{ Compliant = ($clear -and $files.Count -eq 0 -and $prof.Count -eq 0); State = "session $(if ($clear) { 'clear' } else { 'holds tokens or sign-in profiles' }); token pattern in $($files.Count) file(s); $($prof.Count) sign-in profile(s) in temp" }
     }.GetNewClosure()
     $tApply = {
         param($m)
@@ -528,6 +614,8 @@ function Get-AVDTuneFinishSteps {
         if ($cur) { Disconnect-AVDTuneSession -Session $cur }
         $cur = & $getSession
         if ($cur -and -not (Test-AVDTuneSessionClear -Session $cur)) { throw 'The sign-in could not be removed completely (tokens or temporary sign-in profiles are still there).' }
+        $prof = @(Find-AVDTuneSignInProfiles -Folder (Join-Path $Root 'temp'))
+        if ($prof.Count -gt 0) { throw "Profiles of the sign-in window (Microsoft cookies) are still in the state folder: $($prof -join '; '). Close every AVDTune window, restart AVDTune and run the finish again." }
     }.GetNewClosure()
     [void]$steps.Add([pscustomobject]@{ Step = (New-AVDTuneStep -Id 'finish.tokens' -Section Seal -Title 'Tokens and sign-in caches removed and checked' -Why 'No access or refresh token, no temporary sign-in profile (Microsoft cookies) and no token in AVDTune files may reach the image.' -Test $tTest -Apply $tApply); Lifts = $false })
     # close the version
@@ -671,5 +759,5 @@ function Invoke-AVDTuneFinishEndAction {
 
 #endregion
 
-Export-ModuleMember -Function Invoke-AVDTuneFinishEndAction, New-AVDTuneFinishAdapter, Clear-AVDTuneFolderContents, Get-AVDTuneFinishRebootWait, Get-AVDTuneFileLinkCount, Clear-AVDTuneReadOnlyMark, Find-AVDTuneTokenFiles, Test-AVDTuneNoLinkChain, Get-AVDTuneFinishRecord, Get-AVDTuneFinishCrash,
+Export-ModuleMember -Function Invoke-AVDTuneFinishEndAction, New-AVDTuneFinishAdapter, Clear-AVDTuneFolderContents, Get-AVDTuneFinishStateTempEntries, Clear-AVDTuneFinishStateTemp, Get-AVDTuneFinishRebuildTargets, Get-AVDTuneFinishRebootWait, Get-AVDTuneFileLinkCount, Clear-AVDTuneReadOnlyMark, Find-AVDTuneTokenFiles, Find-AVDTuneSignInProfiles, Test-AVDTuneNoLinkChain, Get-AVDTuneFinishRecord, Get-AVDTuneFinishCrash,
     Start-AVDTuneFinishLift, Restore-AVDTuneFinishLift, Test-AVDTuneFinishBinding, Get-AVDTuneFinishConfirmText, Repair-AVDTuneFinishCrash, Test-AVDTuneFinishGate, Get-AVDTuneFinishSteps, Invoke-AVDTuneFinish

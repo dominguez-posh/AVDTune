@@ -746,6 +746,9 @@ try {
 
     # 11: polling links of real Azure URLs
     $real = "https://management.azure.com/subscriptions/$sub/providers/Microsoft.Network/locations/westeurope/operations/33333333-3333-3333-3333-333333333333?api-version=2023-11-01&t=638700000000000000&c=MIIHhzCCBm-gAwIBAgITOgAB%2BQw%2Bx_y%2F%3D&s=abc-DEF_123~x&h=QmFzZTY0LS1oYXNo"
+    Test-Check 'polling URL (#108 N13): a trailing line feed is refused' (Test-Throws { Get-AVDTuneEnvPollPath ("https://management.azure.com/subscriptions/$sub/providers/Microsoft.Network/x?api-version=2023-11-01" + "`n") }) $null
+    $pkgSrc = [IO.File]::ReadAllText((Join-Path $repo 'Tools\New-AVDBenchmarkPackage.ps1'))
+    Test-Check 'benchmark package tool (#108 N13): version and SHA256 of the manifest end with \z, not $' ($pkgSrc -notmatch "-notmatch '\^[^']*\$'" -and ([regex]::Matches($pkgSrc, "\\z'")).Count -ge 3) $null
     Test-Check 'a real looking polling URL (signed values with base64 and percent characters) is accepted' ((Get-AVDTuneEnvPollPath $real) -like "/subscriptions/$sub/providers/Microsoft.Network/locations/westeurope/operations/*&h=QmFzZTY0LS1oYXNo") $null
     foreach ($bad in @("https://management.azure.com.evil.example/subscriptions/$sub/x?api-version=2023-11-01", "https://evil.example/subscriptions/$sub/x?api-version=2023-11-01", "https://management.azure.com/subscriptions/$sub/%2e%2e/x?api-version=2023-11-01",
             "https://management.azure.com/subscriptions/$sub/x?api-version=2023-11-01&c=a b", "https://management.azure.com/subscriptions/$sub/x?api-version=2023-11-01&c=<x>", "https://management.azure.com/subscriptions/$sub/x?api-version=2023-11-01#frag", "https://management.azure.com:8443/subscriptions/$sub/x?api-version=1")) {
@@ -765,6 +768,8 @@ try {
     Test-Check 'FSLogix on the master: WhatIf changes nothing' (@($m.Log | Where-Object { $_ -like 'RegSet*' }).Count -eq 0) $null
     [void](Set-AVDTuneEnvMaster -Machine $m -Spec $good -Identity EntraKerberos -Root $root -User 'u' -SnapshotId 'snap3')
     Test-Check 'FSLogix on the master: Enabled, VHDLocations with the new share and the cloud Kerberos ticket value' (($m.Log -join "`n") -like '*FSLogix\Profiles|VHDLocations*contosoprofiles.file.core.windows.net\profiles*' -and ($m.Log -join "`n") -like '*Enabled=1*' -and ($m.Log -join "`n") -like '*CloudKerberosTicketRetrievalEnabled=1*') ($m.Log -join '|')
+    $kr = @(Read-AVDTuneFSLogixUndo -Root $root | Where-Object Id -eq 'fslogix.kerberos.cloudticket')
+    Test-Check 'FSLogix on the master (#100): the cloud Kerberos ticket value has an undo record (absent before), the FSLogix undo removes it again' ($kr.Count -eq 1 -and $null -eq $kr[0].Previous -and $kr[0].Value -eq 1 -and (Undo-AVDTuneFSLogixSettings -Machine $m -Root $root -User 'u' -SnapshotId 'snap3') -and $null -eq (& $m.RegGet 'HKLM:\SYSTEM\CurrentControlSet\Control\Lsa\Kerberos\Parameters' 'CloudKerberosTicketRetrievalEnabled')) ($kr | ConvertTo-Json -Compress)
     $lcRoot = New-Root; $roots += $lcRoot
     Open-AVDTuneWriteGate -SnapshotId 'snap4' -ConfirmedBy 'Test User'
     $before = Get-AVDTuneLastChange -Root $lcRoot

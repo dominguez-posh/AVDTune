@@ -10,6 +10,8 @@ $repo = Split-Path $PSScriptRoot -Parent
 $script:WorkRoot = Join-Path ([IO.Path]::GetTempPath()) ('avdtune-tasks-' + [guid]::NewGuid().ToString('N'))   # the protocol code wants a work root; nothing is written there
 . (Join-Path $repo 'AVDTune-Protocol.ps1')
 . (Join-Path $repo 'AVDTune-Tasks.ps1')
+$script:FakeWriteBlock = $null
+function Get-AVDTuneWriteBlock { $script:FakeWriteBlock }   # the integrity block of AVDTune.psm1 (#104 N4)
 
 $script:failed = 0
 function Test-Check([string]$Name, [bool]$Ok, $Detail) { if ($Ok) { "PASS $Name" } else { $script:failed++; "FAIL $Name" + $(if ($null -ne $Detail) { "  -> $Detail" }) } }
@@ -295,5 +297,20 @@ Invoke-CloseWhenDone; $keptOnFail = ($script:Closed -eq 1 -and -not $script:Clos
 $mainText = Get-Content -Raw (Join-Path $repo 'Start-AVDTune.ps1')
 Test-Check 'closing (#49 review): every writer job of WriterJobVariables (writing kind) and a held lock keep the window open; it closes on the timer when none is left, not after a task that failed meanwhile' ($holdFree -and $notHeld.Count -eq 0 -and $heldByLock -and $waited -and $closedAfter -and $keptOnFail -and $mainText -match '\$what = Get-CloseHoldReason' -and $mainText -match 'Add_Tick\(\{ try \{ Invoke-CloseWhenDone \}') "free=$holdFree notHeld=$($notHeld -join ',') lock=$heldByLock waited=$waited closed=$closedAfter fail=$keptOnFail"
 
+# ---------------------------------------------------------------- audit #104 (N1, N2, N4, N9)
+$script:FakeSealed = $false
+$script:FakeWriteBlock = 'the integrity check of the tool is still running.'
+$wbErr = $null; try { Assert-NoOtherWriter } catch { $wbErr = $_.Exception.Message }
+$wbRepair = $true; try { Assert-NoOtherWriter -AllowWriteBlock } catch { $wbRepair = $false }
+$wbEnter = $(try { [void](Enter-AVDTuneWriter -Kind 'x' -Title 'y' -AllowSealed); $false } catch { $true })
+$script:FakeWriteBlock = $null
+$relText = Get-Content -Raw (Join-Path $repo 'AVDTune-Release.ps1')
+Test-Check 'write block (#104 N4): every writer is refused while AVDTune is read only (also a crash repair with -AllowSealed); only the release repair passes' ($wbErr -like '*read only*integrity check*' -and $wbRepair -and $wbEnter -and $relText -match "Assert-NoOtherWriter -AllowWriteBlock:\(\`$Kind -eq 'Repair'\)") $wbErr
+$endBody = [regex]::Match($mainText, '(?s)function Invoke-SessionEnding\(\$EventArgs\) \{.*?\r?\n\}').Value
+Test-Check 'sign-out (#104 N1): the session end is held for the same reasons as closing the window (Get-CloseHoldReason: every writer job)' ($endBody -match 'if \(-not \(Get-CloseHoldReason\)\) \{ return \}' -and $endBody -notmatch 'UpdJob') $endBody
+$maskBody = [regex]::Match((Get-Content -Raw (Join-Path $repo 'AVDTune-AppMasking.ps1')), '(?s)function Invoke-MaskChange \{.*?\r?\n\}').Value
+Test-Check 'App Masking (#104 N2): the inline change holds the central lock (Enter-AVDTuneWriter, Exit in finally)' ($maskBody -match 'Enter-AVDTuneWriter -Kind ''appmasking''' -and $maskBody -match 'finally \{ Exit-AVDTuneWriter \$maskHold \}') $null
+$gateOpen = @(Get-ChildItem -LiteralPath $repo -Filter 'AVDTune-*.ps1' | Select-String -Pattern 'Open-AVDTuneWriteGate -SnapshotId \$Gate\.SnapshotId' | Where-Object { $_.Line -notmatch '-SnapshotCreated \(\[string\]\(Get-AVDTuneProp \$Gate ''SnapshotCreated''\)\)' })
+Test-Check 'background jobs (#104 N9): the gate of a job carries the creation time of the snapshot (FirstChangeSnapshotCreated)' ($gateOpen.Count -eq 0) (@($gateOpen | ForEach-Object { "$($_.Filename):$($_.LineNumber)" }) -join ', ')
 if ($script:failed -gt 0) { throw "$script:failed check(s) failed." }
 'Check-Tasks: all checks passed.'

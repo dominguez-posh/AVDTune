@@ -670,6 +670,22 @@ function Invoke-AVDTuneReadiness {
         else { Add-Row 'hy.bench-users' $hy 'green' 'No temporary benchmark user left behind.' }
     }
 
+    Invoke-Check 'hy.state-aside' $hy {
+        # state folders AVDTune set aside as untrusted (<state>.untrusted-<stamp>, Move-AVDTuneStateAside): never read again, foreign rules possible, old records and
+        # possibly sign-in data; AVDTune does not delete them (#99, second pass of the audit)
+        $sr = $(if ($Root) { $Root } else { Get-AVDTuneRoot })
+        $parent = Split-Path $sr -Parent
+        $aside = @(& $Machine.DirList $parent "$(Split-Path $sr -Leaf).untrusted-*")
+        if ($aside.Count -gt 0) { Add-Row 'hy.state-aside' $hy 'red' ('State folders set aside as untrusted: ' + (@($aside | ForEach-Object { Join-Path $parent $_ }) -join '; ') + '. They hold old records of AVDTune and possibly rules of someone else and must not go into the image.') 'Remove them with the button (through handles: a link inside is removed as a link, never followed; AVDTune does not read what is in them), then run the analysis again. Do not use takeown /r, icacls /T or a recursive delete of PowerShell on them: those follow links someone may have put there.' 'readiness.state-aside-remove' -Found ($aside -join '; ') }
+        else { Add-Row 'hy.state-aside' $hy 'green' 'No state folder set aside as untrusted.' }
+    }
+    Invoke-Check 'hy.bench-leftovers' $hy {
+        # an interrupted benchmark (audit #98): the SYSTEM restore task, restore script and journal, work folders or an attached test container would go into the image
+        $left = @(& $Machine.BenchLeftovers $(if ($Root) { $Root } else { Get-AVDTuneRoot }))
+        if ($left.Count -gt 0) { Add-Row 'hy.bench-leftovers' $hy 'red' ('Leftovers of an interrupted benchmark: ' + ($left -join '; ') + '. They must not go into the image (the restore task would run on every session host).') 'Open the Benchmark page and repair the interrupted benchmark (or restart AVDTune and repair it there); remove what is still listed afterwards, then run the analysis again.' -Found ($left -join '; ') }
+        else { Add-Row 'hy.bench-leftovers' $hy 'green' 'No leftovers of an interrupted benchmark.' }
+    }
+
     # ---- families (needs the flags of the checks above)
     Invoke-Check 'hw.families' $hw {
         $fams = @(Get-AVDTuneReadinessFamilies -Data $Data -OsArch $osArch -StornvmeProblem $flags.Stornvme -Gen1 $flags.Gen1 -ManaMissing $flags.ManaMissing -DriveDUse $flags.DriveD)
@@ -808,7 +824,17 @@ function Get-AVDTuneFinishReadiness {
 #region fixes
 
 function Get-AVDTuneReadinessFixes {
-    # The fixes behind the write gate. Only what is safe and documented.
+    # The fixes behind the write gate. Only what is safe and documented. -Root: the state folder (the fix of hy.state-aside works next to it).
+    param([string]$Root = (Get-AVDTuneRoot))
+    # #111 N-1: state folders set aside as untrusted (<state>.untrusted-*) are removed through Remove-AVDTuneTreeSafe (machine member StateAsideRemove): a link inside is removed as a link
+    $asideParent = Split-Path $Root -Parent; $asidePattern = "$(Split-Path $Root -Leaf).untrusted-*"
+    $asideTest = { param($m) $l = @(& $m.DirList $asideParent $asidePattern); @{ Compliant = ($l.Count -eq 0); State = $(if ($l.Count) { $l -join ', ' } else { 'none' }) } }.GetNewClosure()
+    $asideApply = {
+        param($m)
+        foreach ($n in @(& $m.DirList $asideParent $asidePattern)) { if ([string]$n -like '*.untrusted-*' -and ([string]$n).IndexOfAny([char[]]'\/') -lt 0) { & $m.StateAsideRemove (Join-Path $asideParent $n) } }
+        $still = @(& $m.DirList $asideParent $asidePattern)
+        if ($still.Count -gt 0) { throw "Still there (an entry in use stays): $($still -join ', '). Restart the master and remove them again." }
+    }.GetNewClosure()
     $stornvme = 'HKLM:\SYSTEM\CurrentControlSet\Services\stornvme'
     $test = {
         param($m)
@@ -834,6 +860,7 @@ function Get-AVDTuneReadinessFixes {
     $hiveApply = { param($m) $r = Invoke-AVDTuneDefaultHiveUnload -Machine $m; if (-not $r.Unloaded) { throw "HKU\AVDTune_DefaultUser could not be unloaded (reg unload, exit code $($r.ExitCode)); restart the master." } }
     @{
         'readiness.bench-users-remove' = (New-AVDTuneStep -Id 'readiness.bench-users-remove' -Section Setup -Title 'Remove the temporary benchmark users left behind' -Why 'The benchmark starts the application tests as a throw-away standard user (#92); a crash can leave the account (random password nobody knows) and its profile. They are removed before the image is finished.' -Risk Low -Reboot $false -SourceUrl 'https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.localaccounts/remove-localuser' -Test $benchTest -Apply $benchApply)
+        'readiness.state-aside-remove' = (New-AVDTuneStep -Id 'readiness.state-aside-remove' -Section Setup -Title 'Remove the state folders set aside as untrusted' -Why 'A state folder with a foreign owner or rules was set aside and is never read again; it may hold old records and sign-in data and must not go into the image. Removed through handles: a link inside is removed itself, never followed.' -Test $asideTest -Apply $asideApply)
         'readiness.default-hive-unload' = (New-AVDTuneStep -Id 'readiness.default-hive-unload' -Section Setup -Title 'Unload the default user profile (HKU\AVDTune_DefaultUser)' -Why 'An interrupted optimization run left the default user profile loaded; it is unloaded so that new users and Sysprep get the complete profile (#40).' -Risk Low -Reboot $false -SourceUrl 'https://learn.microsoft.com/en-us/windows-hardware/manufacture/desktop/sysprep--generalize--a-windows-installation' -Test $hiveTest -Apply $hiveApply)
         'readiness.stornvme-boot' =(New-AVDTuneStep -Id 'readiness.stornvme-boot' -Section Setup -Title 'NVMe driver (stornvme): start at boot' -Why "Microsoft's SCSI to NVMe conversion sets it for Windows (sc.exe config stornvme start=boot) so that the OS finds its disk on an NVMe controller. Takes effect after the next restart; the master keeps working on SCSI sizes." -Risk Medium -Reboot $true -SourceUrl 'https://learn.microsoft.com/en-us/azure/virtual-machines/nvme-linux' -Test $test -Apply $apply)
     }
@@ -851,7 +878,7 @@ function Invoke-AVDTuneReadinessFix {
         $bad = $s.Failed -gt 0
         return [pscustomobject]@{ FixId = $FixId; Status = $(if ($WhatIf) { 'WhatIf' } elseif ($bad) { 'Failed' } else { 'Changed' }); Message = "Update block on: $($s.Changed) setting(s) changed, state $($s.State)."; Reboot = $false; Results = @($s.Results) }
     }
-    $fixes = Get-AVDTuneReadinessFixes
+    $fixes = Get-AVDTuneReadinessFixes -Root $Root
     if (-not $fixes.ContainsKey($FixId)) { throw "Unknown fix '$FixId'." }
     $step = $fixes[$FixId]
     $changeOwner = $false; if (-not $WhatIf) { $changeOwner = Start-AVDTuneChange -Root $Root }   # marker: the first change of the version starts here, no new version or snapshot counts while it runs (#27)

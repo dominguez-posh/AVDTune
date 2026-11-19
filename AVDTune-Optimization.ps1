@@ -336,7 +336,7 @@ function Start-OptRun([string]$Mode, [string[]]$Ids, [bool]$ConfirmIrr, [string]
                 $ErrorActionPreference = 'Stop'
                 Import-Module (Join-Path $AppRoot 'Modules\AVDTune.psm1') -Force
                 Import-Module (Join-Path $AppRoot 'Modules\AVDTune.Optimization.psm1') -Force
-                if ($Gate) { Open-AVDTuneWriteGate -SnapshotId $Gate.SnapshotId -ConfirmedBy $Gate.ConfirmedBy }
+                if ($Gate) { Open-AVDTuneWriteGate -SnapshotId $Gate.SnapshotId -ConfirmedBy $Gate.ConfirmedBy -SnapshotCreated ([string](Get-AVDTuneProp $Gate 'SnapshotCreated')) }
                 Invoke-AVDTuneOptimization -Machine (New-AVDTuneMachine) -Root $Root -Ids $Ids -Mode $Mode -ConfirmIrreversible:$ConfirmIrr -User $User -SnapshotId $Gate.SnapshotId -Inputs $Inputs -ConfirmedHosts $Hosts
             }).AddArgument($script:AppRoot).AddArgument($script:StateRoot).AddArgument($Ids).AddArgument($Mode).AddArgument($ConfirmIrr).AddArgument($User).AddArgument($Gate).AddArgument($Inputs).AddArgument($Hosts)
         $script:OptRun = @{ PS = $ps; Handle = $ps.BeginInvoke(); Task = $task; Mode = $Mode }
