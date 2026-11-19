@@ -18,10 +18,13 @@ function Update-SealView {
     $gate = Test-AVDTuneFinishGate -Root $script:StateRoot -Machine $script:Machine
     $crash = Get-AVDTuneFinishCrash -Root $script:StateRoot
     $state = Get-AVDTuneState $script:StateRoot
-    $pair = if ($script:SealJob) { @('AccentSubtle', 'Primary', 'Running') } elseif ($crash) { @('ErrorBg', 'Danger', 'Interrupted') } elseif ([bool]$state.Sealed) { @('SuccessBg', 'Success', 'Finished') } elseif ($gate.Allowed) { @('SuccessBg', 'Success', 'Allowed') } else { @('WarningBg', 'Warning', 'Locked') }
+    # #99: a finished version with a sign-in again (tokens, or a sign-in profile anywhere in <state>\temp) is no longer clean
+    $notClean = $false
+    if ([bool]$state.Sealed) { $s = $script:StartContext.Session; $notClean = ([bool]$s -and -not (Test-AVDTuneSessionClear -Session $s)) -or @(Find-AVDTuneSignInProfiles -Folder (Join-Path $script:StateRoot 'temp')).Count -gt 0 }
+    $pair = if ($script:SealJob) { @('AccentSubtle', 'Primary', 'Running') } elseif ($crash) { @('ErrorBg', 'Danger', 'Interrupted') } elseif ($notClean) { @('ErrorBg', 'Danger', (T 'seal.pill.notclean')) } elseif ([bool]$state.Sealed) { @('SuccessBg', 'Success', 'Finished') } elseif ($gate.Allowed) { @('SuccessBg', 'Success', 'Allowed') } else { @('WarningBg', 'Warning', 'Locked') }
     Set-Brush $ui.PillSeal ([System.Windows.Controls.Border]::BackgroundProperty) $pair[0]
     $ui.TxtSealPill.Text = $pair[2]; Set-Brush $ui.TxtSealPill ([System.Windows.Controls.TextBlock]::ForegroundProperty) $pair[1]
-    $ui.TxtSealGate.Text = $(if ($gate.Allowed) { (T 'seal.gate.ok' $($gate.Version)) } else { (T 'seal.gate.locked') + (@($gate.Reasons) -join ' ') })
+    $ui.TxtSealGate.Text = $(if ($notClean) { (T 'seal.notclean' $([string]$state.ImageVersion)) } elseif ($gate.Allowed) { (T 'seal.gate.ok' $($gate.Version)) } else { (T 'seal.gate.locked') + (@($gate.Reasons) -join ' ') })
     $ui.TxtSealNotes.Text = (@($gate.Notes) -join ' ')
     $ui.BtnSealRun.IsEnabled = ($gate.Allowed -and -not $script:SealJob)
     $ui.BoxSealCrash.Visibility = ConvertTo-Vis ([bool]$crash -and -not $script:SealJob)   # a running finish has an active journal by design
