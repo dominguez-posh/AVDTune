@@ -1434,5 +1434,6 @@
   "exp.snap.protocol": "Old snapshots deleted: {0}",
   "exp.snap.err.gate": "Read only: snapshots are deleted only after the snapshot of this run is confirmed on the Overview.",
   "exp.snap.err.keep": "Keep the newest: a number from 1 to 50.",
-  "exp.snap.err.days": "Minimum age: a number of days from 0 to 3650."
+  "exp.snap.err.days": "Minimum age: a number of days from 0 to 3650.",
+  "exp.warn.acl": "Warning: users without administrator rights can change the folder {0}. The ZIP itself is readable for administrators only; move it to a folder only administrators can open."
 }

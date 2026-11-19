@@ -35,7 +35,13 @@ try {
     # ---------------------------------------------------------------- export: contents and the secret filter
     [IO.File]::WriteAllText((Join-Path $tmp 'environment.json'), (@{ Schema = 1; Answers = @{ IdentityModel = 'Hybrid'; Domain = 'example.local'; StorageKey = $storageKey; Note = "sig=$jwt" }; SignIn = @{ ClientId = '11111111-2222-3333-4444-555555555555'; RefreshToken = 'abc' } } | ConvertTo-Json -Depth 5))
     New-Item -ItemType Directory -Path (Join-Path $tmp 'config') -Force | Out-Null
-    [IO.File]::WriteAllText((Join-Path $tmp 'config\customizations.json'), '{"Items":[{"Kind":"Shortcut","Name":"Example","Arguments":"-Password Secr3t!"}]}')
+    $custJson = @{ Items = @(
+            @{ Kind = 'Shortcut'; Name = 'Example'; Arguments = '-Password Secr3t!' },
+            @{ Kind = 'Registry'; Name = 'Autologon'; Path = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon'; ValueName = 'DefaultPassword'; ValueType = 'String'; Value = 'Winl0gonValue' },
+            @{ Kind = 'Registry'; Name = 'By path'; Path = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon\DefaultPassword'; ValueName = ''; ValueType = 'String'; Value = 'PathValue77' },
+            @{ Kind = 'Ini'; Name = 'App ini'; Path = 'C:\ProgramData\Example\app.ini'; Section = 'Server'; Key = 'ApiPassword'; Value = 'IniValue42' },
+            @{ Kind = 'Registry'; Name = 'Harmless'; Path = 'HKLM:\SOFTWARE\Example'; ValueName = 'DisableTips'; ValueType = 'DWord'; Value = 'KeepMe1' }) }
+    [IO.File]::WriteAllText((Join-Path $tmp 'config\customizations.json'), ($custJson | ConvertTo-Json -Depth 5))
     [IO.File]::WriteAllText((Join-Path $tmp 'config\printers.json'), '{"Servers":["print01.example.local"],"Drivers":[{"Name":"Example PCL6"}]}')
     [IO.File]::WriteAllText((Join-Path $tmp 'config\masking.json'), '{"Rules":[{"App":"Example App","Groups":["AVD-Example"]}]}')
     [void](Add-AVDTuneChangeLogEntry -Root $tmp -Version $ver -Category 'Software' -ChangeType 'Added' -Text "Example App 1.0 installed, key $storageKey" -User 'admin1')
@@ -51,6 +57,10 @@ try {
     $flagged = Get-AVDTuneExportEntries -Root $tmp -ComparisonCsv "a`r`npassword=Secr3t!" -ComparisonJson '{"Text":"password=Secr3t!"}'
     $csv = ($flagged.Entries | Where-Object Name -eq 'benchmark/comparison.csv').Text; $js = ($flagged.Entries | Where-Object Name -eq 'benchmark/comparison.json')
     Test-Check 'export (counter-test): a text file is filtered, a JSON file in which the table still finds a secret is left out and named' ($csv -like '*password=(removed)*' -and -not $js -and @($flagged.Skipped | Where-Object { $_ -like 'benchmark/comparison.json:*password, key or token*' }).Count -eq 1 -and ($flagged.Entries | Where-Object Name -eq 'README.txt').Text -like '*Left out:*comparison.json*') ($flagged.Skipped -join ' | ')
+    $custOut = ($ex.Entries | Where-Object Name -eq 'settings/customizations.json').Text
+    Test-Check 'export (M1): the value of a registry value or ini key whose name ends like a secret is left out (DefaultPassword as value name and as end of the path, ApiPassword), a harmless value stays' ($custOut -notlike '*Winl0gonValue*' -and $custOut -notlike '*PathValue77*' -and $custOut -notlike '*IniValue42*' -and $custOut -like '*KeepMe1*' -and $custOut -like '*DefaultPassword*') $custOut
+    $readme = ($ex.Entries | Where-Object Name -eq 'README.txt').Text
+    Test-Check 'export (M1): the README says what is filtered and does not promise that no secret is left' ($readme -like '*What is filtered*' -and $readme -like '*cannot find every secret*' -and $readme -notmatch '(?i)no secrets|are not in this export') $null
     $deep = @{ a = @{ b = @{ c = @{ d = @{ e = @{ f = @{ g = @{ h = @{ i = 'x' } } } } } } } } }
     Test-Check 'export: nesting deeper than 8 levels is not followed' ((ConvertTo-AVDTuneExportJson $deep) -like '*too deep*') $null
     Test-Check 'export: the README names the files and says what is left out' (($ex.Entries | Where-Object Name -eq 'README.txt').Text -like '*settings/environment.json*' -and ($ex.Entries | Where-Object Name -eq 'README.txt').Text -like '*administrators*') $null
@@ -67,6 +77,17 @@ try {
     Test-Check 'export: no temp file is left next to the ZIP' (@(Get-ChildItem -LiteralPath $folder -Force -Filter '*.tmp').Count -eq 0) $null
     $r2 = Export-AVDTuneBundle -Export $ex -Path $zipPath
     Test-Check 'export: a second export to the same file replaces it in one step' ((Read-Zip $zipPath).Count -eq $content.Count -and $r2.Path -eq $zipPath) $null
+    $zacl = [IO.File]::GetAccessControl($zipPath)
+    $others = @($zacl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]) | Where-Object { $_.IdentityReference.Value -in 'S-1-5-32-545', 'S-1-1-0', 'S-1-5-11', 'S-1-5-4' })
+    Test-Check 'export (N1): the ZIP is admin-only (protected ACL from the temp file, no rule for Users, Everyone, Authenticated Users, Interactive)' ($zacl.AreAccessRulesProtected -and $others.Count -eq 0) ($zacl.Sddl)
+    $open = Join-Path $tmp 'open-folder'; New-Item -ItemType Directory -Path $open | Out-Null
+    $acl = Get-Acl -LiteralPath $open; $acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule((New-Object Security.Principal.SecurityIdentifier 'S-1-5-32-545'), 'Modify', 'ContainerInherit, ObjectInherit', 'None', 'Allow'))); Set-Acl -LiteralPath $open -AclObject $acl
+    $rOpen = Export-AVDTuneBundle -Export $ex -Path (Join-Path $open 'x.zip')
+    Test-Check 'export (N1): a target folder users can change is allowed but named (FolderAdminOnly false, the page shows exp.warn.acl)' (-not $rOpen.FolderAdminOnly -and (Test-Path -LiteralPath (Join-Path $open 'x.zip'))) $rOpen.FolderAdminOnly
+    $free = @([char[]](68..90) | ForEach-Object { "$([char]$_):" } | Where-Object { -not (Test-Path -LiteralPath "$_\") } | Select-Object -Last 1)
+    $netErr = if ($free.Count) { Get-ThrownText { Assert-AVDTuneExportPath "$($free[0])\x.zip" } } else { 'network drive' }
+    $modText = [IO.File]::ReadAllText((Join-Path $repo 'Modules\AVDTune.Export.psm1'))
+    Test-Check 'export (N1): only a fixed or removable drive (DriveInfo.DriveType): a drive that is not local is refused' ($netErr -like '*network drive*' -and $modText -match 'DriveType -ne \[IO\.DriveType\]::Fixed') $netErr
     $badNames = @('../evil.txt', 'a/../../b', 'C:/x', '\\server\x', '', 'a b.txt')
     $okRefused = @($badNames | Where-Object { Get-ThrownText { Export-AVDTuneBundle -Export ([pscustomobject]@{ Entries = @([pscustomobject]@{ Name = $_; Text = 'x' }); Skipped = @() }) -Path (Join-Path $folder 'n.zip') } })
     Test-Check 'export (counter-test): names that climb, are absolute or have spaces are refused' ($okRefused.Count -eq $badNames.Count -and -not (Test-Path -LiteralPath (Join-Path $folder 'n.zip'))) ($okRefused -join ' | ')
@@ -157,6 +178,22 @@ try {
     $sealedErr = Get-ThrownText { Remove-AVDTuneOldSnapshots @args0 -ConfirmedNames $offer }
     [void](Set-AVDTuneState -Root $tmp -Values @{ Sealed = $false })
     Test-Check 'delete (counter-test): not while the image version is finished' ($sealedErr -like '*is finished*' -and $arm.Store.Deleted.Count -eq 0) $sealedErr
+    # N2 (a): the snapshot named in FirstChangeSnapshotId (the gate of the first change of this version) stays, in the plan and when it is named for deletion
+    $first = 'gm-test01_osdisk-20.10.2026-1'
+    [void](Set-AVDTuneState -Root $tmp -Values @{ FirstChangeSnapshotId = (@($live | Where-Object Name -eq $first)[0].Id) })
+    $planFirst = @(Get-AVDTuneSnapshotCleanupPlan -Snapshots $live -State (Get-AVDTuneState $tmp) -GalleryVersions $gv -Keep 2 -MinAgeDays 7 -OsDiskName $vm.OsDiskName -VmName $vm.VmName -Now (Get-Date))
+    $firstErr = Get-ThrownText { Remove-AVDTuneOldSnapshots @args0 -ConfirmedNames @($first) }
+    [void](Set-AVDTuneState -Root $tmp -Values @{ FirstChangeSnapshotId = $null })
+    Test-Check 'delete (N2a): the snapshot of FirstChangeSnapshotId is kept and refused by name, nothing deleted' (-not @($planFirst | Where-Object Name -eq $first)[0].Delete -and $firstErr -like '*running image version*' -and $arm.Store.Deleted.Count -eq 0) $firstErr
+    # N2 (b): the GET by ID right before the DELETE names another source disk, another name or another sourceUniqueId: nothing is deleted
+    $arm.Store.DiskUniqueId = '11111111-0000-0000-0000-000000000001'
+    foreach ($t in 'Source', 'Name', 'UniqueId') {
+        $arm.Store.TamperGet = $t
+        $rt = Remove-AVDTuneOldSnapshots @args0 -ConfirmedNames @($offer[0])
+        $arm.Store.TamperGet = ''
+        Test-Check "delete (N2b): the read before the DELETE answers with another $t`: Deleted.Count = 0, no DELETE sent, the reason is reported" ($rt.Deleted.Count -eq 0 -and $rt.Failed.Count -eq 1 -and @($arm.Log | Where-Object { $_ -like 'DELETE *' }).Count -eq 0 -and $arm.Store.Deleted.Count -eq 0) ($rt.Failed -join ' | ')
+    }
+    $arm.Store.DiskUniqueId = ''
     $arm.Store.DeleteForbidden = $true
     $forb = Remove-AVDTuneOldSnapshots @args0 -ConfirmedNames $offer
     $arm.Store.DeleteForbidden = $false

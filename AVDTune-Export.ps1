@@ -39,7 +39,8 @@ function Invoke-ExpExport {
     $script:ExpLast = T 'exp.done' $r.Path $r.Files $(if (@($r.Skipped).Count) { (@($r.Skipped) | ForEach-Object { Remove-PackTuneProtocolSecrets $_ 200 }) -join '; ' } else { '-' })
     [void](Add-AVDTuneProtocolNote -Protocol $script:Protocol -Group 'other' -Subject (T 'exp.protocol' $r.Path $r.Sha256))
     Save-Protocol
-    Show-Toast (T 'exp.toast' $r.Path)
+    if (-not $r.FolderAdminOnly) { $script:ExpLast += ' ' + (T 'exp.warn.acl' ([IO.Path]::GetDirectoryName($r.Path))) }
+    Show-Toast $(if ($r.FolderAdminOnly) { T 'exp.toast' $r.Path } else { T 'exp.warn.acl' ([IO.Path]::GetDirectoryName($r.Path)) })
     Update-ExpView
 }
 

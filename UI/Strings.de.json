@@ -1434,5 +1434,6 @@
   "exp.snap.protocol": "Alte Snapshots gelöscht: {0}",
   "exp.snap.err.gate": "Nur lesen: Snapshots werden erst gelöscht, wenn der Snapshot dieses Laufs auf der Übersicht bestätigt ist.",
   "exp.snap.err.keep": "Neueste behalten: eine Zahl von 1 bis 50.",
-  "exp.snap.err.days": "Mindestalter: eine Zahl von 0 bis 3650 Tagen."
+  "exp.snap.err.days": "Mindestalter: eine Zahl von 0 bis 3650 Tagen.",
+  "exp.warn.acl": "Warnung: Benutzer ohne Administratorrechte können den Ordner {0} ändern. Das ZIP selbst ist nur für Administratoren lesbar; verschieben Sie es in einen Ordner, den nur Administratoren öffnen können."
 }
