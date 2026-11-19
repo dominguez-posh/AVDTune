@@ -130,6 +130,10 @@
                                                 <Button x:Name="BtnRelShortcut" Uid="rel.shortcut" Margin="0,0,12,0"/>
                                                 <TextBlock x:Name="TxtRelShortcut" VerticalAlignment="Center" TextWrapping="Wrap" MaxWidth="640"/>
                                             </StackPanel>
+                                            <StackPanel x:Name="PanelRelBenchShortcut" Orientation="Horizontal" Margin="0,8,0,0">
+                                                <Button x:Name="BtnRelBenchShortcut" Uid="rel.benchshortcut" Margin="0,0,12,0"/>
+                                                <TextBlock x:Name="TxtRelBenchShortcut" VerticalAlignment="Center" TextWrapping="Wrap" MaxWidth="640"/>
+                                            </StackPanel>
                                         </StackPanel>
                                     </Border>
                                     <Border x:Name="BoxStart" Style="{DynamicResource CardBox}" Margin="0,16,0,0" Background="{DynamicResource Card}" Padding="20,16">

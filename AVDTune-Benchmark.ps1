@@ -191,31 +191,8 @@ function Update-BenchIntegrity {
 Add-Click $ui.BtnBenchRelRepair { $ui.BtnRelRepair.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent))) }
 $script:Timer.Add_Tick({ try { if ($script:CurrentPage -eq 'Benchmark') { Update-BenchIntegrity } } catch { } })
 
-# ---------------------------------------------------------------- desktop shortcut "AVDTune Benchmark" (#90): the launcher with -Benchmark, like AVDTune.lnk (#15)
-function Update-BenchShortcutRow {
-    $installed = (Get-ShortcutMode) -eq 'Installed'
-    $link = $null; try { $link = Get-AVDTuneDesktopShortcut -Folder (Get-ShortcutDesktop) -InstallRoot $script:RelInstallRoot -Benchmark } catch { }
-    $ui.BtnBenchShortcut.Content = $(if ($link) { T 'bench.sc.remove' } else { T 'bench.sc.create' })
-    $ui.BtnBenchShortcut.IsEnabled = ($installed -or [bool]$link)
-    $ui.TxtBenchShortcut.Text = if (-not $installed -and -not $link) { T 'sc.state.notinstalled' }
-    elseif ($link -and -not $link.Matches) { T 'sc.state.wrong' $script:RelInstallRoot }
-    elseif ($link) { T 'bench.sc.ok' }
-    else { T 'sc.state.none' }
-}
-function Switch-BenchShortcut {
-    $folder = Get-ShortcutDesktop
-    if (Get-AVDTuneDesktopShortcut -Folder $folder -Benchmark) {
-        [void](Remove-AVDTuneDesktopShortcut -Folder $folder -Benchmark)
-        Add-RelProtocol 'Desktop shortcut AVDTune Benchmark removed' $folder
-        Show-Toast (T 'sc.toast.removed')
-    }
-    else {
-        $link = New-AVDTuneDesktopShortcut -InstallRoot $script:RelInstallRoot -Folder $folder -Benchmark
-        Add-RelProtocol 'Desktop shortcut AVDTune Benchmark created' "$($link.Path) -> $($link.Target) $($link.Arguments) (run as administrator)"
-        Show-Toast (T 'sc.toast.created')
-    }
-    Update-BenchShortcutRow
-}
+# The desktop shortcut "AVDTune Benchmark" (#90) is in AVDTune-Release.ps1 (Update-BenchShortcutRow, Switch-BenchShortcut): the benchmark-only card and the
+# Integrity and updates card of the Overview both offer it.
 Add-Click $ui.BtnBenchShortcut { Switch-BenchShortcut }
 
 # ---------------------------------------------------------------- comparison per image version (#90), comparison systems (plan 6b)

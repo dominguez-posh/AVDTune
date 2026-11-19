@@ -424,7 +424,15 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         Test-Smoke 'the Integrity and updates card offers Remove' ([string]$ui.BtnRelShortcut.Content -eq 'Remove desktop shortcut' -and $ui.TxtRelShortcut.Text -like 'Desktop shortcut on your desktop*') $ui.TxtRelShortcut.Text
         $ui.BtnRelShortcut.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
         Test-Smoke 'Remove deletes it; the card offers Create again' (-not (Test-Path (Join-Path $desk 'AVDTune.lnk')) -and [string]$ui.BtnRelShortcut.Content -eq 'Create desktop shortcut') $null
+        # #90 follow-up: the same card offers the second shortcut "AVDTune Benchmark" (the launcher with -Benchmark)
+        Test-Smoke 'Integrity and updates: the AVDTune Benchmark shortcut is offered for the installed copy' ($ui.BtnRelBenchShortcut.IsEnabled -and [string]$ui.BtnRelBenchShortcut.Content -eq (T 'bench.sc.create')) $ui.TxtRelBenchShortcut.Text
+        $ui.BtnRelBenchShortcut.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
+        $bsl = Get-AVDTuneDesktopShortcut -Folder $desk -InstallRoot $script:RelInstallRoot -Benchmark
+        Test-Smoke 'Integrity and updates: Create writes AVDTune Benchmark.lnk (-Benchmark, run as administrator) into the test desktop; both cards offer Remove; AVDTune.lnk is not made' ($bsl -and $bsl.Matches -and $bsl.RunAs -and $bsl.Arguments.EndsWith(' -Benchmark') -and [string]$ui.BtnRelBenchShortcut.Content -eq (T 'bench.sc.remove') -and [string]$ui.BtnBenchShortcut.Content -eq (T 'bench.sc.remove') -and $ui.TxtRelBenchShortcut.Text -eq (T 'bench.sc.ok') -and -not (Test-Path (Join-Path $desk 'AVDTune.lnk'))) ($bsl | Out-String)
+        $ui.BtnRelBenchShortcut.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
+        Test-Smoke 'Integrity and updates: Remove deletes the benchmark shortcut again' (-not (Get-AVDTuneDesktopShortcut -Folder $desk -Benchmark) -and [string]$ui.BtnRelBenchShortcut.Content -eq (T 'bench.sc.create')) $null
         $script:ShortcutTestMode = 'Development'; Update-ShortcutRow
+        Test-Smoke 'not installed: the benchmark shortcut is off too, and a click creates nothing' (-not $ui.BtnRelBenchShortcut.IsEnabled -and $ui.TxtRelBenchShortcut.Text -like '*install AVDTune first*' -and $(Switch-BenchShortcut; -not (Get-AVDTuneDesktopShortcut -Folder $desk -Benchmark))) $ui.TxtRelBenchShortcut.Text
         Test-Smoke 'not installed: Create is off and the card says to install first' (-not $ui.BtnRelShortcut.IsEnabled -and $ui.TxtRelShortcut.Text -like '*install AVDTune first*') $ui.TxtRelShortcut.Text
         $script:ShortcutTestMode = ''; Update-ShortcutRow
         Test-Smoke 'the protocol has the shortcut created and removed' (@($script:Protocol.Actions | Where-Object { $_.Subject -eq 'Desktop shortcut created' }).Count -eq 1 -and @($script:Protocol.Actions | Where-Object { $_.Subject -eq 'Desktop shortcut removed' }).Count -eq 1) $null

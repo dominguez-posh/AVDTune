@@ -246,7 +246,39 @@ function Update-ShortcutRow {
     elseif ($link -and -not $link.Matches) { T 'sc.state.wrong' $script:RelInstallRoot }
     elseif ($link) { T 'sc.state.ok' }
     else { T 'sc.state.none' }
+    Update-BenchShortcutRow
 }
+# The second shortcut "AVDTune Benchmark" (#90): the launcher with -Benchmark, like AVDTune.lnk (#15). Offered in the benchmark-only card of the Benchmark page and in
+# the Integrity and updates card of the Overview; both rows show the same state and use the same switch.
+function Update-BenchShortcutRow {
+    $installed = (Get-ShortcutMode) -eq 'Installed'
+    $link = $null; try { $link = Get-AVDTuneDesktopShortcut -Folder (Get-ShortcutDesktop) -InstallRoot $script:RelInstallRoot -Benchmark } catch { }
+    $text = if (-not $installed -and -not $link) { T 'sc.state.notinstalled' }
+    elseif ($link -and -not $link.Matches) { T 'sc.state.wrong' $script:RelInstallRoot }
+    elseif ($link) { T 'bench.sc.ok' }
+    else { T 'sc.state.none' }
+    foreach ($row in @(@($ui.BtnBenchShortcut, $ui.TxtBenchShortcut), @($ui.BtnRelBenchShortcut, $ui.TxtRelBenchShortcut))) {
+        $row[0].Content = $(if ($link) { T 'bench.sc.remove' } else { T 'bench.sc.create' })
+        $row[0].IsEnabled = ($installed -or [bool]$link)
+        $row[1].Text = $text
+    }
+}
+function Switch-BenchShortcut {
+    $folder = Get-ShortcutDesktop
+    if (Get-AVDTuneDesktopShortcut -Folder $folder -Benchmark) {
+        [void](Remove-AVDTuneDesktopShortcut -Folder $folder -Benchmark)
+        Add-RelProtocol 'Desktop shortcut AVDTune Benchmark removed' $folder
+        Show-Toast (T 'sc.toast.removed')
+    }
+    elseif ((Get-ShortcutMode) -eq 'Installed') {
+        # only the installed copy gets a shortcut (it points to the install folder); a button that is off cannot be clicked, this is the same rule for every caller
+        $link = New-AVDTuneDesktopShortcut -InstallRoot $script:RelInstallRoot -Folder $folder -Benchmark
+        Add-RelProtocol 'Desktop shortcut AVDTune Benchmark created' "$($link.Path) -> $($link.Target) $($link.Arguments) (run as administrator)"
+        Show-Toast (T 'sc.toast.created')
+    }
+    Update-BenchShortcutRow
+}
+Add-Click $ui.BtnRelBenchShortcut { Switch-BenchShortcut }
 function New-ShortcutNow {
     $link = New-AVDTuneDesktopShortcut -InstallRoot $script:RelInstallRoot -Folder (Get-ShortcutDesktop)
     Add-RelProtocol 'Desktop shortcut created' "$($link.Path) -> $($link.Target) $($link.Arguments) (run as administrator)"

@@ -79,6 +79,16 @@ try {
     Test-Check 'an account key with odd characters is refused' ($null -ne (Get-ThrownText { Set-AVDTuneShortcutAnswer -Root $root -UserKey 'a.b"c' -Answer Yes })) $null
     Test-Check 'the key of the current account is its SID' ((Get-AVDTuneUserKey) -match '^S-1-5-') (Get-AVDTuneUserKey)
 
+    # ---------------------------------------------------------------- the benchmark shortcut on the Overview (#90 follow-up)
+    [xml]$win = Get-Content (Join-Path $repo 'UI\AVDTune.xaml') -Raw -Encoding UTF8
+    $named = { param($n) $win.SelectSingleNode("//*[@*[local-name()='Name' and .='$n']]") }
+    $card = { param($node) $p = $node; while ($p -and -not ($p.LocalName -eq 'Border' -and ($p.Attributes | Where-Object { $_.LocalName -eq 'Name' }))) { $p = $p.ParentNode }; if ($p) { [string]($p.Attributes | Where-Object { $_.LocalName -eq 'Name' }).Value } }
+    $relBtn = & $named 'BtnRelBenchShortcut'; $relTxt = & $named 'TxtRelBenchShortcut'
+    Test-Check 'the Integrity and updates card of the Overview has the AVDTune Benchmark shortcut button next to the AVDTune one, with a key for its name' ($relBtn -and $relTxt -and (& $card $relBtn) -and (& $card $relBtn) -eq (& $card (& $named 'BtnRelShortcut')) -and $relBtn.GetAttribute('Uid') -eq 'rel.benchshortcut') $null
+    $relCode = [IO.File]::ReadAllText((Join-Path $repo 'AVDTune-Release.ps1')); $benchCode = [IO.File]::ReadAllText((Join-Path $repo 'AVDTune-Benchmark.ps1'))
+    $sw = [regex]::Match($relCode, '(?s)function Switch-BenchShortcut \{.*?\r?\n\}').Value
+    Test-Check 'both buttons use the one switch, which creates only with -Benchmark and only for the installed copy, on the desktop of the account' ($relCode -match 'Add-Click \$ui\.BtnRelBenchShortcut \{ Switch-BenchShortcut \}' -and $benchCode -match 'Add-Click \$ui\.BtnBenchShortcut \{ Switch-BenchShortcut \}' -and $benchCode -notmatch 'function Switch-BenchShortcut' -and $sw -match "elseif \(\(Get-ShortcutMode\) -eq 'Installed'\)" -and $sw -match 'New-AVDTuneDesktopShortcut -InstallRoot \$script:RelInstallRoot -Folder \$folder -Benchmark' -and $sw -match '\$folder = Get-ShortcutDesktop' -and $sw -notmatch 'CommonDesktop|Public') $sw
+
     $realAfter = Test-Path -LiteralPath (Join-Path $realDesk 'AVDTune.lnk')
     Test-Check 'the desktop of this computer was not touched' ($realBefore -eq $realAfter) $null
     $nonAscii = @('Modules\AVDTune.Shortcut.psm1', 'Tests\Check-Shortcut.ps1') | Where-Object { [IO.File]::ReadAllText((Join-Path $repo $_)) -match '[^\x00-\x7F]' }

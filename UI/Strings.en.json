@@ -879,6 +879,7 @@
   "rel.back.name": "Switch back to the previous version",
   "rel.back.version": "Back to version {0}",
   "rel.banner.block": "Read only: {0} (see the card Integrity and updates on the Overview)",
+  "rel.benchshortcut.name": "Create or remove the AVDTune Benchmark shortcut on your desktop",
   "rel.check": "Check for updates",
   "rel.check.name": "Check GitHub for a newer version",
   "rel.checkerr": "Update check: {0}",

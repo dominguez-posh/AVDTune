@@ -879,6 +879,7 @@
   "rel.back.name": "Zur vorherigen Version zurückwechseln",
   "rel.back.version": "Zurück zu Version {0}",
   "rel.banner.block": "Nur lesen: {0} (siehe Karte „Integrität und Updates“ auf der Übersicht)",
+  "rel.benchshortcut.name": "Die Verknüpfung AVDTune Benchmark auf deinem Desktop anlegen oder entfernen",
   "rel.check": "Nach Updates suchen",
   "rel.check.name": "Auf GitHub nach einer neueren Version suchen",
   "rel.checkerr": "Update-Suche: {0}",
