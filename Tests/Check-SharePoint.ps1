@@ -65,6 +65,10 @@ try {
     $hidden = @("Kennwort$([char]1): Geheim1", "Set-Thing -Password$([char]8)Geheim1", "pass$([char]0x200B)word=Geheim1", "-Pass$([char]0xFEFF)word Geheim1")
     $hiddenLeaks = @($hidden | Where-Object { (Protect-AVDTuneSecretText $_) -match 'Geheim1' -or (Protect-AVDTuneSpText $_ 500) -match 'Geheim1' -or (Test-AVDTuneSpSecretFree $_) })
     Test-Check 'secret table (#107 N-1): control and zero-width characters do not hide a name; a text without secrets keeps them (still secret free)' ($hiddenLeaks.Count -eq 0 -and (Test-AVDTuneSpSecretFree "line one$([char]0xFEFF)`r`nline two") -and (Protect-AVDTuneSecretText "a$([char]1)b") -ceq "a$([char]1)b") (($hidden | ForEach-Object { Protect-AVDTuneSecretText $_ }) -join ' | ')
+    $utf16 = -join ([Text.Encoding]::Unicode.GetBytes('Password=Geheim1') | ForEach-Object { [char]$_ })
+    $f1 = @($utf16, "pass$([char]0xAD)word=Geheim1", "Kenn$([char]0x061C)wort: Geheim1", "Pass$([char]0x2066)word=Geheim1", "Pass$([char]0x0085)word=Geheim1", "-Pass$([char]0x00AD)word Geheim1")
+    $f1Leaks = @($f1 | Where-Object { (Protect-AVDTuneSecretText $_) -match 'G.?e.?h.?e.?i.?m.?1' -or (Test-AVDTuneSpSecretFree $_) })
+    Test-Check 'secret table (#107 F1): NUL between the letters (UTF-16 read as bytes), soft hyphen, U+061C, U+2066, C1 control in the name do not hide it' ($f1Leaks.Count -eq 0) (($f1 | ForEach-Object { (Protect-AVDTuneSecretText $_) -replace '[\x00]', '' }) -join ' | ')
     $n2 = @('Install-ADDSForest -SafeModeAdministratorPassword Geheim1 -Force', 'New-Thing -AdminPassword Geheim1', 'tool --db-password Geheim1', "@{ 'Password' = 'Geheim1' }", '@{ "ApiPassword" = "Geheim1" }',
         'net user svc1 Geheim1 /add', 'net.exe user "Service One" Geheim1 /add', "ConvertTo-SecureString 'Geheim1' -AsPlainText -Force", 'ConvertTo-SecureString -AsPlainText -Force -String Geheim1')
     $n2Leaks = @($n2 | Where-Object { (Protect-AVDTuneSpText $_ 500) -match 'Geheim1' -or (Test-AVDTuneSpSecretFree $_) })

@@ -2519,23 +2519,38 @@ $script:SecretRules = @(
     @('(?-i)\b(?=[A-Z0-9-]{0,80}\d)(?![0-9A-F]{8}-[0-9A-F]{4}-)[A-Z0-9]{4,8}(-[A-Z0-9]{4,8}){3,8}\b', '(key removed)'),
     # base64 with padding (a storage key: 88 characters ending ==); starts only where a run starts, so a long run is linear (#107 N-2)
     @('(?<![A-Za-z0-9+/])[A-Za-z0-9+/]{30,}={1,2}', '(removed)'),
-    # a long run of mixed upper case, lower case and digits (keys, tokens); hex hashes and names with hyphens stay
+    # a long run of mixed upper case, lower case and digits (keys, tokens); hex hashes and names with hyphens stay.
     @('\b(?=[A-Za-z0-9+/_]*[0-9])(?=[A-Za-z0-9+/_]*[A-Z])(?=[A-Za-z0-9+/_]*[a-z])[A-Za-z0-9+/_]{40,}', '(removed)')
 )
 
-# Control characters (not tab and line breaks) and zero-width characters hide a name from the rules ("Kennwort<0x01>: x", "pass<ZWSP>word"): the rules see control characters as spaces and no zero-width characters (#107 N-1)
-$script:SecretControl = '[\x00-\x08\x0E-\x1F\x7F\u2028\u2029]'   # as a space
-$script:SecretInvisible = '[\u200B-\u200F\u202A-\u202E\u2060-\u2064\uFEFF]'   # zero width and direction marks: taken out (pass<ZWSP>word is password)
+# Control and format characters (#107 N-1, F1: \p{Cc} incl. C1 and NUL of UTF-16 text read as bytes, \p{Cf} such as soft hyphen, zero width, direction marks; not tab and
+# line breaks) hide a name from the rules: 'Kennwort<0x01>: x', '-Password<0x08>x', 'pass<0xAD>word=x', 'P<0>a<0>s<0>s<0>...'. The rules run on two variants of the
+# text, with these characters as spaces and without them; the variant in which they find something is taken.
+$script:SecretHidden = '[\p{Cc}\p{Cf}\u00ad\u061c\u2028\u2029-[\t\n\r]]'   # soft hyphen and U+061C named as well: .NET Framework does not count them as Cf
+
+function Invoke-AVDTuneSecretRulesOnce([string]$Text) {
+    $t = $Text
+    foreach ($r in $script:SecretRules) { $t = [regex]::Replace($t, $r[0], $r[1], [Text.RegularExpressions.RegexOptions]::None, [TimeSpan]::FromSeconds(2)) }
+    $t
+}
 
 function Invoke-AVDTuneSecretRules {
-    # Pure. The text with every rule of the table applied; $null when a rule ran into its timeout (the caller fails closed). The rules run on the text without control and
-    # zero-width characters (see above); when they find nothing the text comes back unchanged (so a file without secrets stays 'secret free').
+    # Pure. The text with every rule of the table applied; $null when a rule ran into its timeout (the caller fails closed). The rules run on the text without the hidden
+    # characters (removed) and with them as spaces (see above); when they find nothing in either, the text comes back unchanged (a file without secrets stays 'secret free').
     param([AllowEmptyString()][string]$Text)
-    try { $n = [regex]::Replace([regex]::Replace($Text, $script:SecretControl, ' ', [Text.RegularExpressions.RegexOptions]::None, [TimeSpan]::FromSeconds(2)), $script:SecretInvisible, '', [Text.RegularExpressions.RegexOptions]::None, [TimeSpan]::FromSeconds(2)) } catch { return $null }
-    $t = $n
-    foreach ($r in $script:SecretRules) { try { $t = [regex]::Replace($t, $r[0], $r[1], [Text.RegularExpressions.RegexOptions]::None, [TimeSpan]::FromSeconds(2)) } catch { return $null } }
-    if ($t -ceq $n) { return $Text }
-    $t
+    try {
+        $gone = [regex]::Replace($Text, $script:SecretHidden, '', [Text.RegularExpressions.RegexOptions]::None, [TimeSpan]::FromSeconds(2))
+        $tGone = Invoke-AVDTuneSecretRulesOnce $gone
+        if ($gone -ceq $Text) { if ($tGone -ceq $gone) { return $Text }; return $tGone }   # nothing hidden: one variant is enough
+        $space = [regex]::Replace($Text, $script:SecretHidden, ' ', [Text.RegularExpressions.RegexOptions]::None, [TimeSpan]::FromSeconds(2))
+        $tSpace = Invoke-AVDTuneSecretRulesOnce $space
+    }
+    catch { return $null }
+    $foundGone = ($tGone -cne $gone); $foundSpace = ($tSpace -cne $space)
+    if ($foundGone -and $foundSpace) { if (($tGone -replace '\s', '') -ceq ($tSpace -replace '\s', '')) { return $tGone }; return '(removed)' }   # both found something different: fail closed
+    if ($foundGone) { return $tGone }
+    if ($foundSpace) { return $tSpace }
+    $Text
 }
 
 function Protect-AVDTuneSecretText {
