@@ -514,6 +514,16 @@ try {
     $sam = New-Master @{ Dirs = @{ $tmp = @('AVDTune', 'AVDTune.untrusted-20260101-000000', 'Other') } }
     $sarow = Get-Row (Invoke-AVDTuneReadiness -Machine $sam -Arm (New-Arm) -Token 'tok' -UpdateBlock $goodBlock -Root $saRoot) 'hy.state-aside'
     Test-Check 'state set aside (#99): an AVDTune.untrusted-* folder is red and named; none is green' ($sarow.Status -eq 'red' -and $sarow.Reason -like '*AVDTune.untrusted-20260101-000000*' -and $sarow.Reason -notlike '*Other*' -and (Get-Row (Invoke-AVDTuneReadiness -Machine (New-Master) -Arm (New-Arm) -Token 'tok' -UpdateBlock $goodBlock -Root $saRoot) 'hy.state-aside').Status -eq 'green') ($sarow | ConvertTo-Json -Compress)
+    # #111 N-1: the row offers the fix, which removes through the machine member (Remove-AVDTuneTreeSafe), and is idempotent
+    [void](Initialize-AVDTuneState -Root $saRoot)
+    $saf = Invoke-AVDTuneReadinessFix -Machine $sam -Root $saRoot -FixId 'readiness.state-aside-remove' -User 'admin1' -SnapshotId 'snap1'
+    Test-Check 'state set aside (#111 N-1): the row has the remove fix; the fix removes the folder through the machine member (not by hand) and is idempotent' ($sarow.FixId -eq 'readiness.state-aside-remove' -and $sarow.Fix -like '*takeown /r*' -and $saf.Status -eq 'Changed' -and @($sam.Store.Log | Where-Object { $_ -like 'StateAsideRemove *AVDTune.untrusted-20260101-000000' }).Count -eq 1 -and @($sam.Store.Dirs[$tmp]) -contains 'Other' -and (Invoke-AVDTuneReadinessFix -Machine $sam -Root $saRoot -FixId 'readiness.state-aside-remove' -User 'admin1' -SnapshotId 'snap1').Status -eq 'Unchanged') "$($saf.Status) $($saf.Message)"
+    $realAside = Join-Path $tmp 'aside111'; $asideOut = Join-Path $tmp 'aside111-outside'
+    [void](New-Item -ItemType Directory -Path (Join-Path $realAside 'AVDTune.untrusted-20260101-000000\config') -Force); [void](New-Item -ItemType Directory -Path $asideOut -Force)
+    Set-Content -LiteralPath (Join-Path $asideOut 'keep.txt') -Value 'keep'
+    cmd.exe /c mklink /J "$(Join-Path $realAside 'AVDTune.untrusted-20260101-000000\lnk')" "$asideOut" | Out-Null
+    & (New-AVDTuneMachine).StateAsideRemove (Join-Path $realAside 'AVDTune.untrusted-20260101-000000')
+    Test-Check 'state set aside (#111 N-1): the real member removes the folder, a junction inside only as a link (its target keeps its file)' (-not (Test-Path -LiteralPath (Join-Path $realAside 'AVDTune.untrusted-20260101-000000')) -and (Test-Path -LiteralPath (Join-Path $asideOut 'keep.txt'))) $null
     $bf = Invoke-AVDTuneReadinessFix -Machine $bm -Root $tmp -FixId 'readiness.bench-users-remove' -User 'admin1' -SnapshotId 'snap1'
     Test-Check 'benchmark users (#92 M1): the fix removes every one of them (account and profile) and is idempotent' ($bf.Status -eq 'Changed' -and @($bm.Store.BenchUsers).Count -eq 0 -and @($bm.Store.Log | Where-Object { $_ -like 'BenchUserRemove *' }).Count -eq 2 -and (Invoke-AVDTuneReadinessFix -Machine $bm -Root $tmp -FixId 'readiness.bench-users-remove' -User 'admin1' -SnapshotId 'snap1').Status -eq 'Unchanged') "$($bf.Status) $($bf.Message)"
     $bs = New-Master @{ BenchUsers = $bu; BenchUserRemoveFails = $true }

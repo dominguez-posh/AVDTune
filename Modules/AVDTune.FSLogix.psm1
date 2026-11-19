@@ -204,8 +204,15 @@ function ConvertTo-AVDTuneFSLogixUndoValue {
     if ($null -eq $Value) { return $null }
     switch ($Type) {
         'DWord' {
-            if ($Value -is [int] -or $Value -is [long]) { if ([long]$Value -lt 0 -or [long]$Value -gt [uint32]::MaxValue) { throw "$What is out of range." }; return [int][long]$Value }
-            if ($Value -is [string] -and $Value -match '^\d{1,10}$' -and [long]$Value -le [uint32]::MaxValue) { return [int][long]$Value }
+            # #111 N-2: a DWord is 32 bits: the registry gives one with the high bit as a negative Int32, JSON may hold it as 2^31..2^32-1; both become the Int32 with the same bits
+            $l = $null
+            if ($Value -is [int] -or $Value -is [long]) { $l = [long]$Value }
+            elseif ($Value -is [string] -and $Value -match '^-?\d{1,10}$') { $l = [long]$Value }
+            if ($null -ne $l) {
+                if ($l -lt [int]::MinValue -or $l -gt [uint32]::MaxValue) { throw "$What is out of range." }
+                if ($l -gt [int]::MaxValue) { $l -= 4294967296 }
+                return [int]$l
+            }
             throw "$What is not a number."
         }
         'MultiString' {
@@ -236,6 +243,9 @@ function Save-AVDTuneFSLogixUndo {
     $added = 0
     foreach ($i in $Items) {
         if (Test-AVDTuneFSLogixUndoSame $i.Previous $i.Value) { continue }   # unchanged: nothing to put back
+        # #111 N-2: checked with the converter of the reader before it is written; a value the undo could not read back is refused (nothing written, the run does not start)
+        try { [void](ConvertTo-AVDTuneFSLogixUndoValue -Value $i.Previous -Type ([string]$i.Type) -What "The value before of $($i.Name)"); [void](ConvertTo-AVDTuneFSLogixUndoValue -Value $i.Value -Type ([string]$i.Type) -What "The value of $($i.Name)") }
+        catch { throw "The state before cannot be recorded for undo: $($_.Exception.Message) Nothing was changed." }
         if ($byId.Contains([string]$i.Id)) { $byId[[string]$i.Id].Value = $i.Value; $added++; continue }   # the origin stays, the value AVDTune sets now is the one undo checks for
         $byId[[string]$i.Id] = [pscustomobject][ordered]@{ Id = [string]$i.Id; Path = [string]$i.Path; Name = [string]$i.Name; Type = [string]$i.Type; Previous = $i.Previous; Value = $i.Value; Title = [string]$i.Title }
         $added++

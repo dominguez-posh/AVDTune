@@ -417,11 +417,18 @@ function Read-AVDTunePrinterUndo([string]$Root) {
         not a DWord); the list entries host names (Test-AVDTuneCustomHostName: an entry of someone else may be a short name); drivers with a valid driver name, the FQDN of
         their server, a version text and Existed true/false. Anything else throws: nothing is changed on a record that is not what AVDTune wrote.
     #>
-    $u = @{ Policy = $null; Drivers = @{} }
     $path = Get-AVDTunePrinterUndoPath $Root
-    if (-not (Test-Path -LiteralPath $path)) { return $u }
-    $bad = { param($why) throw "The printer undo record (config\printers-undo.json) is not usable: $why. Nothing was changed; look at the file." }
-    $j = $null; try { $j = Read-AVDTuneJson $path } catch { & $bad 'it cannot be read' }
+    if (-not (Test-Path -LiteralPath $path)) { return @{ Policy = $null; Drivers = @{} } }
+    $j = $null; try { $j = Read-AVDTuneJson $path } catch { throw 'The printer undo record (config\printers-undo.json) is not usable: it cannot be read. Nothing was changed; look at the file.' }
+    ConvertFrom-AVDTunePrinterUndoJson -Json $j
+}
+
+function ConvertFrom-AVDTunePrinterUndoJson {
+    # The typed check of a printer undo record (parsed JSON): used to read it and, before it is written, on the text that will be written (#111 N-2). Throws with the reason.
+    param($Json, [string]$Prefix = 'The printer undo record (config\printers-undo.json) is not usable')
+    $u = @{ Policy = $null; Drivers = @{} }
+    $bad = { param($why) throw "${Prefix}: $why. Nothing was changed." }.GetNewClosure()
+    $j = $Json
     if (-not $j) { return $u }
     $pol = Get-AVDTuneProp $j 'Policy'
     if ($null -ne $pol) {
@@ -440,7 +447,7 @@ function Read-AVDTunePrinterUndo([string]$Root) {
         $list = Get-AVDTuneProp $pol 'List'
         if ($null -ne $list) {
             if ($list -isnot [System.Management.Automation.PSCustomObject]) { & $bad 'List is not an object' }
-            foreach ($p in $list.PSObject.Properties) { if ($p.Value -isnot [string] -or -not (Test-AVDTuneCustomHostName $p.Name) -or -not (Test-AVDTuneCustomHostName $p.Value)) { & $bad "the list entry '$($p.Name)' is not a host name" } }
+            foreach ($p in $list.PSObject.Properties) { if ($p.Value -isnot [string] -or -not (Test-AVDTunePrinterListText $p.Name) -or -not (Test-AVDTunePrinterListText $p.Value)) { & $bad "the list entry '$($p.Name)' is not a text of 1 to 253 characters without control characters" } }
         }
         $u.Policy = $pol
     }
@@ -459,7 +466,14 @@ function Read-AVDTunePrinterUndo([string]$Root) {
     $u
 }
 
-function Write-AVDTunePrinterUndo([string]$Root, [hashtable]$Undo) { Write-AVDTuneFile (Get-AVDTunePrinterUndoPath $Root) ([ordered]@{ Schema = 1; Policy = $Undo.Policy; Drivers = $Undo.Drivers } | ConvertTo-Json -Depth 8) }
+function Test-AVDTunePrinterListText([string]$Text) { [bool]($Text -and $Text.Length -le 253 -and -not [regex]::IsMatch($Text, '[\x00-\x1F\x7F]', 'None', $script:Rx)) }   # an entry of the Point and Print list: someone else's entry may be \\server or print_srv (#111 N-2)
+
+function Write-AVDTunePrinterUndo([string]$Root, [hashtable]$Undo) {
+    # #111 N-2: what is written is checked first with the converter of the reader: a record the reader would refuse is never written (the run stops before its first write)
+    $text = [ordered]@{ Schema = 1; Policy = $Undo.Policy; Drivers = $Undo.Drivers } | ConvertTo-Json -Depth 8
+    [void](ConvertFrom-AVDTunePrinterUndoJson -Json ($text | ConvertFrom-Json) -Prefix 'The state before cannot be recorded for undo')
+    Write-AVDTuneFile (Get-AVDTunePrinterUndoPath $Root) $text
+}
 
 function Compare-AVDTunePrinterDrivers {
     <#
