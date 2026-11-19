@@ -174,7 +174,11 @@ function Get-AVDTuneRunningWriter {
 function Assert-NoOtherWriter {
     # #50: a finished version (Sealed) takes no further change until "Start new version"; only the repairs of a crash (they put back what was lifted) pass -AllowSealed.
     # The engine refuses as well (Start-AVDTuneChange); this gives the clear message before anything starts.
-    param([switch]$AllowSealed)
+    # #104 N4: the write block of the integrity check (files of AVDTune not verified or changed) stops every writer here too, also those without the snapshot gate
+    # (new version, benchmark repair, TrustedHosts repair, SharePoint upload/remove); only the release repair passes -AllowWriteBlock (it is the way out of it).
+    param([switch]$AllowSealed, [switch]$AllowWriteBlock)
+    $wb = Get-AVDTuneWriteBlock
+    if ($wb -and -not $AllowWriteBlock) { throw "AVDTune is read only: $wb" }
     $w = Get-AVDTuneRunningWriter
     if ($w) { throw "Another operation that changes the master is still running ($w). Wait until it is done." }
     if (-not $AllowSealed -and $script:StateRoot -and (Test-AVDTuneSealed -Root $script:StateRoot)) { throw (T 'shell.sealed') }   # the window always has a state root; the engine refuses on its own as well

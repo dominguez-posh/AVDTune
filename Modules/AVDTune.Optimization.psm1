@@ -1198,6 +1198,7 @@ function Invoke-AVDTuneOptimization {
     $data = Read-AVDTuneOptimizationData -Path $DataPath
     if (-not $data.Valid) { throw ('The optimization data is not valid, nothing is applied: ' + (@($data.Errors | Select-Object -First 3) -join ' ')) }
     if (-not $WhatIf -and -not (Test-AVDTuneWriteAllowed)) { throw 'The snapshot gate is not confirmed: AVDTune is read only until a snapshot newer than its last change is confirmed on the Overview.' }
+    if (-not $WhatIf) { Assert-AVDTuneNotSealed -Root $Root }   # #104 N5: up front (the release of a backup in Undo writes before the first step changes anything)
     $byId = @{}; foreach ($e in $data.Entries) { $byId[$e.Id] = $e }
     $selected = @($Ids | Where-Object { $_ } | Select-Object -Unique)
     if ($selected.Count -eq 0) { throw 'No entry is selected.' }

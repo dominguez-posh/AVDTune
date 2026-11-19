@@ -13,8 +13,9 @@ $script:PrnWarnings = @()
 $script:PrnFake = $null
 $script:PrnReadKinds = @('Servers', 'Read')   # the kinds of PrnJob that do not change the master (also in WriterReadOnlyKinds)
 if ($script:TestMode) { . (Get-TestScript 'FakePrinters.ps1'); $script:PrnFake = New-AVDTuneFakePrinters }
-# a TrustedHosts value left by the first version of this page (d63e941) is put back at the start (journal); the page checks again
-if (Test-Path -LiteralPath (Get-AVDTunePrinterJournalPath $script:StateRoot) -PathType Leaf) { try { [void](Repair-AVDTunePrinterTrustedHosts -P $(if ($script:TestMode) { $script:PrnFake } else { New-AVDTunePrinterAdapter }) -Root $script:StateRoot) } catch { } }
+# a TrustedHosts value left by the first version of this page (d63e941) is put back at the start (journal) when the write gate is open (#103: a change of the master,
+# under the change marker with a change log entry); the page checks again, and the finish gate names the journal while it is there
+if (Test-Path -LiteralPath (Get-AVDTunePrinterJournalPath $script:StateRoot) -PathType Leaf) { try { [void](Repair-AVDTunePrinterTrustedHosts -P $(if ($script:TestMode) { $script:PrnFake } else { New-AVDTunePrinterAdapter }) -Root $script:StateRoot -User ([string]$env:USERNAME)) } catch { } }
 
 function Get-PrnAdapter { if ($script:TestMode) { $script:PrnFake } else { if (-not $script:RealPrn) { $script:RealPrn = New-AVDTunePrinterAdapter }; $script:RealPrn } }
 function Get-PrnAvailability { $e = $null; try { $e = Get-AVDTuneEnvironment $script:StateRoot } catch { }; Get-AVDTunePrinterAvailability $(if ($e) { Get-AVDTuneEnvironmentAnswers $e } else { $null }) }
@@ -28,7 +29,7 @@ $ErrorActionPreference = 'Stop'
 foreach ($n in 'AVDTune', 'AVDTune.Updates', 'AVDTune.Directory', 'AVDTune.Start', 'AVDTune.Custom', 'AVDTune.Printers') { Import-Module (Join-Path $AppRoot "Modules\$n.psm1") -Force }
 try {
     if ($FakeDir) { . (Join-Path $FakeDir 'FakeMachine.ps1'); $m = New-AVDTuneFakeMachine; $p = $SharedP } else { $m = New-AVDTuneMachine; $p = New-AVDTunePrinterAdapter }
-    if ($Gate) { Open-AVDTuneWriteGate -SnapshotId $Gate.SnapshotId -ConfirmedBy $Gate.ConfirmedBy }
+    if ($Gate) { Open-AVDTuneWriteGate -SnapshotId $Gate.SnapshotId -ConfirmedBy $Gate.ConfirmedBy -SnapshotCreated ([string](Get-AVDTuneProp $Gate 'SnapshotCreated')) }
     if ($Kind -ne 'Undo') {
         # the print servers published in AD, over the pinned LDAPS connection of the start sequence (H1: only these are used)
         $Sync.Text = 'ad'
@@ -272,7 +273,7 @@ function Update-PrnView {
 
 function Update-PrnPage {
     Build-PrnPage
-    try { if (Repair-AVDTunePrinterTrustedHosts -P (Get-PrnAdapter) -Root $script:StateRoot) { Show-Toast (T 'prn.repaired') } } catch { Show-Error $_.Exception.Message }
+    try { if (-not (Get-AVDTuneRunningWriter) -and (Repair-AVDTunePrinterTrustedHosts -P (Get-PrnAdapter) -Root $script:StateRoot -User ([string]$env:USERNAME))) { Show-Toast (T 'prn.repaired') } } catch { Show-Error $_.Exception.Message }   # #103: not while another writer runs; behind the gate (inside)
     Update-PrnView
 }
 

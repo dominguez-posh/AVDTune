@@ -338,6 +338,8 @@ function Get-MaskLdap {
 function Invoke-MaskChange {
     # A change of the master on the window thread, shown as a task; ends failed when the call throws or a step failed. No Retry: every one of these changes the master or AD.
     param([Parameter(Mandatory)][string]$Title, [Parameter(Mandatory)][string]$Step, [Parameter(Mandatory)][scriptblock]$Block)
+    $maskHold = Enter-AVDTuneWriter -Kind 'appmasking' -Title $Title   # #104 N2: the central lock (#49) while it writes, like the other inline writers
+    try {
     $task = Start-AVDTuneUiTask -Kind 'appmasking' -Title $Title -Step $Step
     try { Update-TaskBar; $window.Dispatcher.Invoke([Action] {}, [System.Windows.Threading.DispatcherPriority]::Render) } catch { }
     $out = $null
@@ -347,6 +349,8 @@ function Invoke-MaskChange {
     if ($failed.Count -gt 0) { Complete-AVDTuneUiTask $task -Failed -Summary "$($failed.Count) step(s) failed: $($failed[0].Message)" }
     else { Complete-AVDTuneUiTask $task -Summary "$(@($out.Results | Where-Object { $_.Status -in 'Changed', 'Reverted' }).Count) changed" }
     $out
+    }
+    finally { Exit-AVDTuneWriter $maskHold }
 }
 
 function Get-MaskRequest {

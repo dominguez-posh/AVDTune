@@ -785,6 +785,13 @@ public static class StandIn { public static int Main(string[] a) {
         $lc = (@(Test-AVDTuneBenchmarkClean -Bench $lb -Root $r2) -join ' | ')
         Test-Check 'cleanliness: a share test folder, an attached container (label AVDTuneBench), a mount point and Edge or Office leftovers are reported' ($lc -like '*share test folder*AVDTune-Bench-*' -and $lc -like '*attached container*AVDTuneBench*' -and $lc -like '*work leftover*mnt1*' -and $lc -like '*work leftover*edge-1234*' -and $lc -like '*apps-0f*') $lc
         Test-Check 'cleanliness (source): the real scan looks for AVDTune-Bench-<guid> on VHDLocations, volumes labelled AVDTuneBench, mnt/edge/apps folders' ($adapterSrc -match 'LeftoverScan' -and $adapterSrc -match "FileSystemLabel -eq 'AVDTuneBench'" -and $adapterSrc -match 'AVDTune-Bench-\[0-9a-f\]\{32\}\$' -and $adapterSrc -match 'mnt\\d\+\|edge-') $null
+        # audit #98: the real machine member that the readiness item and the finish gate read (Test-AVDTuneBenchmarkClean with the real adapter, without the diskspd line)
+        $r98 = Join-Path ([IO.Path]::GetTempPath()) ('avdtune-bench-98-' + [guid]::NewGuid().ToString('N'))
+        [void](New-Item -ItemType Directory -Path (Join-Path $r98 'benchmark\work\run-1') -Force); [void](New-Item -ItemType Directory -Path (Join-Path $r98 'tools\diskspd') -Force)
+        Set-Content -LiteralPath (Get-AVDTuneBenchmarkJournalPath $r98) -Value '{}'
+        $real98 = @(& (New-AVDTuneMachine).BenchLeftovers $r98)
+        Remove-Item -LiteralPath $r98 -Recurse -Force
+        Test-Check 'leftovers (#98): the real machine member names the work folder and the restore journal of an interrupted run, not the diskspd cache' (($real98 -join '|') -like '*work folder run-1*' -and ($real98 -join '|') -like '*restore journal*' -and -not (($real98 -join '|') -like '*diskspd*')) ($real98 -join '|')
         # plausibility band against the reference (N4)
         $refO = [pscustomobject]@{ Measures = [pscustomobject]@{ 'host.app.speedometer' = [pscustomobject]@{ value = 20.0 }; 'host.app.edge.warm' = [pscustomobject]@{ value = 300.0 } } }
         $mk = { param($id, $v) [pscustomobject]@{ id = $id; unit = 'x'; better = 'higher'; value = $v; status = 'ok'; reason = $null } }

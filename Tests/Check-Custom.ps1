@@ -108,6 +108,8 @@ try {
     foreach ($f in $forms) { $r = Add-AVDTuneCustomItem -Root $tmp -Raw $f -Library $libRows; if (-not $r.Valid) { throw "fixture $($f.Name): $($r.Errors -join ' ')" } }
     $dupe = Add-AVDTuneCustomItem -Root $tmp -Raw @{ Kind = 'Hosts'; Name = 'crm'; Address = '10.0.0.8'; HostName = 'x.example.test' } -Library $libRows
     Test-Check 'a second item of the same kind and name is refused' (-not $dupe.Valid -and ($dupe.Errors -join ' ') -like '*already*') $null
+    $dupT = Add-AVDTuneCustomItem -Root $tmp -Raw @{ Kind = 'Registry'; Name = 'Proxy again'; Path = 'HKLM:\SOFTWARE\Contoso'; ValueName = 'proxy'; ValueType = 'DWord'; Value = '0' } -Library $libRows
+    Test-Check 'a second item that changes the same value is refused (#104 N7: the undo record would take the value of the first one as the origin)' (-not $dupT.Valid -and ($dupT.Errors -join ' ') -like "*'Proxy' already changes the same value*") ($dupT.Errors -join ' ')
     $saved = Get-AVDTuneCustomizations -Root $tmp -Forbidden $forbidden
     Test-Check 'ten items saved, read back typed and valid' ($saved.Items.Count -eq 10 -and $saved.Invalid.Count -eq 0 -and -not $saved.Problem) ($saved.Invalid | ConvertTo-Json -Compress)
     $ids = @{}; foreach ($i in $saved.Items) { $ids[$i.Name] = $i.Id }
@@ -125,6 +127,12 @@ try {
     Open-AVDTuneWriteGate -SnapshotId 'snap-1' -ConfirmedBy 'Alex Example'
     $noLib = Invoke-AVDTuneCustomRun -Machine $m -C $c -Root $tmp -Mode Apply -Ids @($ids['Readme'])
     Test-Check 'a library file that is not cached needs the library: the step fails with the reason, nothing is copied' ($noLib.Run.Results[0].Status -eq 'Failed' -and $noLib.Run.Results[0].Message -like '*not in the cache*' -and -not $c.Store.Files.ContainsKey('c:\apps\readme.txt')) $noLib.Run.Results[0].Message
+    # #102: the record of the state before is on disk when the first write happens (a crash there keeps the origin); a failed step that wrote nothing leaves no record
+    $undoFile = Get-AVDTuneCustomUndoPath $tmp; $seenAtWrite = @{ Seen = $false }; $origRegSet = $c.RegSet
+    $c.RegSet = { param($Path, $Name, $Value, $Type) $seenAtWrite.Seen = ((Test-Path -LiteralPath $undoFile) -and ([IO.File]::ReadAllText($undoFile)).Contains($ids['Proxy'])); throw 'fake: crash at the write' }.GetNewClosure()
+    $crashRun = Invoke-AVDTuneCustomRun -Machine $m -C $c -Root $tmp -Mode Apply -Ids @($ids['Proxy'])
+    $c.RegSet = $origRegSet
+    Test-Check 'undo record (#102): written before the first write (on disk at the write); a failed step that changed nothing leaves no record' ($seenAtWrite.Seen -and $crashRun.Run.Results[0].Status -eq 'Failed' -and -not (Read-AVDTuneCustomUndo $tmp).ContainsKey($ids['Proxy'])) "seen $($seenAtWrite.Seen)"
     $c.Store.Tamper['readme.txt'] = [Text.Encoding]::UTF8.GetBytes('evil')
     $tam = Invoke-AVDTuneCustomRun -Machine $m -C $c -Root $tmp -Mode Apply -Ids @($ids['Readme']) -Context @{ Fake = $true }
     Test-Check 'a download that does not match the pinned SHA256 is refused and not used' ($tam.Run.Results[0].Status -eq 'Failed' -and $tam.Run.Results[0].Message -like '*SHA256*' -and -not $c.Store.Files.ContainsKey('c:\apps\readme.txt')) $tam.Run.Results[0].Message

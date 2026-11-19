@@ -105,7 +105,7 @@ function Start-ReadyJob([string]$Kind, [string]$FixId) {
             foreach ($part in 'Snapshot', 'UpdateBlock', 'Readiness', 'FSLogix') { Import-Module (Join-Path $AppRoot "Modules\AVDTune.$part.psm1") -Force }
             $m = New-AVDTuneMachine
             if ($Kind -eq 'Fix') {
-                if ($Gate) { Open-AVDTuneWriteGate -SnapshotId $Gate.SnapshotId -ConfirmedBy $Gate.ConfirmedBy }
+                if ($Gate) { Open-AVDTuneWriteGate -SnapshotId $Gate.SnapshotId -ConfirmedBy $Gate.ConfirmedBy -SnapshotCreated ([string](Get-AVDTuneProp $Gate 'SnapshotCreated')) }
                 Invoke-AVDTuneReadinessFix -Machine $m -Root $Root -FixId $FixId -User $User -SnapshotId $Gate.SnapshotId
             }
             else { Invoke-AVDTuneReadiness -Machine $m -Arm (New-AVDTuneArmAdapter) -Token $Token -NoTokenReason $Reason -GalleryImageId $Gallery -FSLogixApplies $FslApplies -FSLogixTest $FslTest -Root $Root }

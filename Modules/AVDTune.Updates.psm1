@@ -722,13 +722,14 @@ function Remove-AVDTuneStageDir {
 }
 
 function Clear-AVDTuneStageFolder {
-    # At the start: staging folders left behind in <root>\temp (a crash during a Teams update) are removed. Returns the number removed.
+    # At the start: staging and download folders left behind in <root>\temp (a crash during a Teams update or a download) are removed: <guid> and <prefix>-<guid>
+    # (New-AVDTuneDownloadFolder: fslogix-, office-, vdi-, printers-, rec-; audit #97). Runs under the AVDTune mutex: no other AVDTune uses them. Returns the number removed.
     param([Parameter(Mandatory)][string]$Root)
     $temp = New-Object IO.DirectoryInfo (Join-Path $Root 'temp')
     if (-not $temp.Exists) { return 0 }
     if (($temp.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { $temp.Delete(); return 0 }
     $n = 0
-    foreach ($c in $temp.GetDirectories()) { if ($c.Name -match '^[0-9a-f]{32}$' -and (Remove-AVDTuneStageDir -Dir $c.FullName -Tries 3)) { $n++ } }
+    foreach ($c in $temp.GetDirectories()) { if ($c.Name -match '^([a-z]{1,20}-)?[0-9a-f]{32}$' -and (Remove-AVDTuneStageDir -Dir $c.FullName -Tries 3)) { $n++ } }
     $n
 }
 

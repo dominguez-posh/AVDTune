@@ -13,6 +13,10 @@
     Active at the next start means AVDTune was closed or crashed in the middle: Get-AVDTuneMaintenanceCrash finds it, Repair-AVDTuneMaintenanceCrash
     puts the block back and writes a change log entry.
 
+    "Off" is a switch, not an undo (#104 N8, decided to document it rather than keep a second record): it removes every value of the block (RegRemove) and enables
+    the update tasks again, whatever was there before AVDTune turned the block on. A value set by a GPO or by hand before is gone after "Off"; the policy owner
+    sets it again. The update block owns these values alone (also officeupdate\hideenabledisableupdates, #101): no other page sets or undoes them.
+
     Sources: each step names its documentation. Verified against Microsoft Learn on 2026-11-15: Windows policies (waas-wu-settings, policy-csp-update),
     Edge update policies, Teams disableAutoUpdate (teams-client-vdi-requirements-deploy), Store AutoDownload value name. NOT verifiable on Learn
     (reported): the Office policy registry path (policy names are on Learn), Chrome/Google Update and Adobe policy values (vendor documentation).

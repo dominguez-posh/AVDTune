@@ -419,11 +419,49 @@ function Save-AVDTunePrinterState {
 }
 
 function Read-AVDTunePrinterUndo([string]$Root) {
+    <#
+        config\printers-undo.json, typed (audit #102): Restrict and ListFlag with Exists true/false and, when it existed, a registry kind and a value of that kind ("false" is
+        not a DWord); the list entries host names (Test-AVDTuneCustomHostName: an entry of someone else may be a short name); drivers with a valid driver name, the FQDN of
+        their server, a version text and Existed true/false. Anything else throws: nothing is changed on a record that is not what AVDTune wrote.
+    #>
     $u = @{ Policy = $null; Drivers = @{} }
-    $j = $null; try { $j = Read-AVDTuneJson (Get-AVDTunePrinterUndoPath $Root) } catch { }
-    if ($j) {
-        $u.Policy = Get-AVDTuneProp $j 'Policy'
-        $d = Get-AVDTuneProp $j 'Drivers'; if ($d) { foreach ($p in $d.PSObject.Properties) { $u.Drivers[$p.Name] = $p.Value } }
+    $path = Get-AVDTunePrinterUndoPath $Root
+    if (-not (Test-Path -LiteralPath $path)) { return $u }
+    $bad = { param($why) throw "The printer undo record (config\printers-undo.json) is not usable: $why. Nothing was changed; look at the file." }
+    $j = $null; try { $j = Read-AVDTuneJson $path } catch { & $bad 'it cannot be read' }
+    if (-not $j) { return $u }
+    $pol = Get-AVDTuneProp $j 'Policy'
+    if ($null -ne $pol) {
+        if ($pol -isnot [System.Management.Automation.PSCustomObject]) { & $bad 'Policy is not an object' }
+        foreach ($n in 'Restrict', 'ListFlag') {
+            $r = Get-AVDTuneProp $pol $n
+            if ($r -isnot [System.Management.Automation.PSCustomObject]) { & $bad "$n is missing" }
+            $ex = Get-AVDTuneProp $r 'Exists'
+            if ($ex -isnot [bool]) { & $bad "$n.Exists is not true or false" }
+            if ($ex) {
+                $k = Get-AVDTuneProp $r 'Kind'; $v = Get-AVDTuneProp $r 'Value'
+                $ok = ($k -is [string]) -and ((($k -ceq 'DWord' -or $k -ceq 'QWord') -and ($v -is [int] -or $v -is [long])) -or (($k -ceq 'String' -or $k -ceq 'ExpandString') -and $v -is [string]))
+                if (-not $ok) { & $bad "$n has no typed value" }
+            }
+        }
+        $list = Get-AVDTuneProp $pol 'List'
+        if ($null -ne $list) {
+            if ($list -isnot [System.Management.Automation.PSCustomObject]) { & $bad 'List is not an object' }
+            foreach ($p in $list.PSObject.Properties) { if ($p.Value -isnot [string] -or -not (Test-AVDTuneCustomHostName $p.Name) -or -not (Test-AVDTuneCustomHostName $p.Value)) { & $bad "the list entry '$($p.Name)' is not a host name" } }
+        }
+        $u.Policy = $pol
+    }
+    $d = Get-AVDTuneProp $j 'Drivers'
+    if ($null -ne $d) {
+        if ($d -isnot [System.Management.Automation.PSCustomObject]) { & $bad 'Drivers is not an object' }
+        foreach ($p in $d.PSObject.Properties) {
+            $e = $p.Value
+            $okD = ($e -is [System.Management.Automation.PSCustomObject]) -and ((Get-AVDTuneProp $e 'Name') -is [string]) -and (Test-AVDTunePrinterDriverName ([string](Get-AVDTuneProp $e 'Name'))) -and
+                ([string](Get-AVDTuneProp $e 'Name')).ToLowerInvariant() -ceq $p.Name -and ((Get-AVDTuneProp $e 'Server') -is [string]) -and (Test-AVDTunePrinterServerName ([string](Get-AVDTuneProp $e 'Server'))) -and
+                ((Get-AVDTuneProp $e 'Version') -is [string]) -and ((Get-AVDTuneProp $e 'Existed') -is [bool])
+            if (-not $okD) { & $bad "the driver entry '$($p.Name)' is not typed" }
+            $u.Drivers[$p.Name] = $e
+        }
     }
     $u
 }
@@ -451,15 +489,27 @@ function Compare-AVDTunePrinterDrivers {
 }
 
 function Repair-AVDTunePrinterTrustedHosts {
-    <# A journal of the first version (it appended the server to TrustedHosts): TrustedHosts is set back to the value before, then the journal goes. Returns $true when it repaired. #>
-    param([Parameter(Mandatory)]$P, [string]$Root = (Get-AVDTuneRoot))
+    <#
+        A journal of the first version (it appended the server to TrustedHosts): TrustedHosts is set back to the value before, then the journal goes. Returns $true when it
+        repaired. A change of the master (audit #103): only behind the write gate (closed: $false, nothing written; the finish gate names the journal), under the change marker
+        (LastChange), with a change log entry; -AllowSealed because it puts back what an older AVDTune left (a crash repair).
+    #>
+    param([Parameter(Mandatory)]$P, [string]$Root = (Get-AVDTuneRoot), [string]$User)
     $path = Get-AVDTunePrinterJournalPath $Root
     if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return $false }
+    if (-not (Test-AVDTuneWriteAllowed)) { return $false }
+    Assert-AVDTuneNoForeignChange -Root $Root
     $j = Read-AVDTuneJson $path
     $old = Get-AVDTuneProp $j 'Old'
     if ($old -isnot [string]) { throw "The TrustedHosts journal $path has no previous value: check TrustedHosts by hand and delete the journal." }
-    & $P.TrustedHostsSet $old
-    [void](Remove-AVDTuneTreeSafe -Path $path)
+    $owner = Start-AVDTuneChange -Root $Root -AllowSealed
+    try {
+        & $P.TrustedHostsSet $old
+        [void](Remove-AVDTuneTreeSafe -Path $path)
+        $v = [string](Get-AVDTuneState $Root).ImageVersion
+        if ($v) { [void](Add-AVDTuneChangeLogEntry -Root $Root -Version $v -Category 'Printers' -Component 'printers.trustedhosts' -ChangeType Changed -Text "TrustedHosts set back to the value before the first Printers page ($(if ($old) { $old } else { 'empty' }))" -User $User -Source Step) }
+    }
+    finally { Stop-AVDTuneChange -Root $Root -Owner $owner }
     $true
 }
 
@@ -548,14 +598,24 @@ function Test-AVDTunePrinterRegMatch($Current, $Record) {
 }
 
 function New-AVDTunePrinterPolicyUndoSteps {
-    <# Undo of the policies: in place when the values equal the record taken before AVDTune changed them; Apply writes the record back (removes what was absent). #>
-    param([Parameter(Mandatory)]$P, [Parameter(Mandatory)]$Before)
+    <#
+        Undo of the policies: in place when the values equal the record taken before AVDTune changed them; Apply writes the record back (removes what was absent), but only
+        over the state AVDTune set (restriction DWord 1; flag 1 and a list of servers AVDTune keeps, -Servers, and no other): a value someone else changed since is not
+        overwritten, the step fails and the record stays (audit #102).
+    #>
+    param([Parameter(Mandatory)]$P, [Parameter(Mandatory)]$Before, [string[]]$Servers = @())
     $pp = $P; $pk = $script:PolicyKey; $kk = $script:PackageKey; $lk = $script:ListKey; $b = $Before
+    $ours = @($Servers | Where-Object { $_ } | ForEach-Object { $_.ToLowerInvariant() } | Select-Object -Unique | Sort-Object)
     $rRec = Get-AVDTuneProp $b 'Restrict'; $fRec = Get-AVDTuneProp $b 'ListFlag'
     $want = @(); $old = Get-AVDTuneProp $b 'List'; if ($old) { $want = @($old.PSObject.Properties | ForEach-Object { "$($_.Name)=$($_.Value)".ToLowerInvariant() } | Sort-Object) }
     $restoreOne = { param($k, $n, $rec) if ($rec -and [bool](Get-AVDTuneProp $rec 'Exists')) { & $pp.RegSet $k $n $rec.Value $rec.Kind } else { & $pp.RegRemove $k $n } }.GetNewClosure()
     $t1 = { param($m) $v = & $pp.RegGet $pk 'RestrictDriverInstallationToAdministrators'; @{ Compliant = (Test-AVDTunePrinterRegMatch $v $rRec); State = $(if ($v) { "$($v.Kind) $($v.Value)" } else { 'absent' }) } }.GetNewClosure()
-    $a1 = { param($m) & $restoreOne $pk 'RestrictDriverInstallationToAdministrators' $rRec }.GetNewClosure()
+    $a1 = {
+        param($m)
+        $v = & $pp.RegGet $pk 'RestrictDriverInstallationToAdministrators'
+        if (-not ($v -and $v.Kind -eq 'DWord' -and [int]$v.Value -eq 1)) { throw "RestrictDriverInstallationToAdministrators is $(if ($v) { "$($v.Kind) $($v.Value)" } else { 'absent' }) now, not the value AVDTune set: someone else changed it, it is not overwritten." }
+        & $restoreOne $pk 'RestrictDriverInstallationToAdministrators' $rRec
+    }.GetNewClosure()
     $t2 = {
         param($m)
         $have = @(@(& $pp.RegValues $lk) | ForEach-Object { $v = & $pp.RegGet $lk $_; "$_=$(if ($v) { $v.Value })".ToLowerInvariant() } | Sort-Object)
@@ -563,6 +623,9 @@ function New-AVDTunePrinterPolicyUndoSteps {
     }.GetNewClosure()
     $a2 = {
         param($m)
+        $f = & $pp.RegGet $kk 'PackagePointAndPrintServerList'
+        $now = @(@(& $pp.RegValues $lk) | ForEach-Object { $v = & $pp.RegGet $lk $_; if ($v) { ([string]$v.Value).ToLowerInvariant() } } | Sort-Object -Unique)
+        if (-not ($f -and [int]$f.Value -eq 1) -or @($now | Where-Object { $_ -notin $ours }).Count -gt 0) { throw "The Point and Print server list is not the one AVDTune set (now: $(if ($now.Count) { $now -join ', ' } else { 'none' })): someone else changed it, it is not overwritten." }
         & $restoreOne $kk 'PackagePointAndPrintServerList' $fRec
         foreach ($n in @(& $pp.RegValues $lk)) { & $pp.RegRemove $lk $n }
         if ($old) { foreach ($p in $old.PSObject.Properties) { & $pp.RegSet $lk $p.Name ([string]$p.Value) 'String' } }
@@ -601,6 +664,7 @@ function Invoke-AVDTunePrinterRun {
         foreach ($d in @($Drivers)) {
             if (-not (Test-AVDTunePrinterServerName $d.Server)) { throw "Not the FQDN of a print server: $($d.Server)." }
             if (-not (Test-AVDTunePrinterDriverName $d.Name)) { throw "Not a valid driver name: $($d.Name)." }
+            if (@(@($Drivers) | Where-Object { $_ -and ([string]$_.Name) -ieq [string]$d.Name }).Count -gt 1) { throw "The driver $($d.Name) is in the plan twice (#104 N7: its undo record would take the state after the first one). Choose one server for it." }
             if (-not [regex]::IsMatch([string]$d.Thumbprint, '\A[0-9A-F]{40}\z', 'None', $script:Rx)) { throw "$($d.Name) has no confirmed signer." }
             $s = New-AVDTunePrinterDriverStep -Driver $d -P $P -Credential $Credential -Root $Root -Signers $signers
             [void]$steps.Add($s); $byStep[$s.Id] = @{ Driver = $d; Existed = [bool](Get-AVDTunePrinterLocal -P $P -Name $d.Name) }
@@ -610,7 +674,7 @@ function Invoke-AVDTunePrinterRun {
         if ($Policy) { $policyBefore = Get-AVDTunePrinterPolicyBefore -P $P; foreach ($s in (New-AVDTunePrinterPolicySteps -P $P -Servers $servers)) { [void]$steps.Add($s) } }
     }
     else {
-        if ($undo.Policy) { foreach ($s in (New-AVDTunePrinterPolicyUndoSteps -P $P -Before $undo.Policy)) { [void]$steps.Add($s) } }
+        if ($undo.Policy) { foreach ($s in (New-AVDTunePrinterPolicyUndoSteps -P $P -Before $undo.Policy -Servers @($state.Servers))) { [void]$steps.Add($s) } }
         foreach ($k in @($undo.Drivers.Keys)) {
             $rec = $undo.Drivers[$k]
             $d = [pscustomobject]@{ Name = [string]$rec.Name; Version = [string]$rec.Version; Server = [string]$rec.Server; InfPath = ''; PackageAware = $false; Signer = ''; Thumbprint = ''; Printers = @() }
@@ -619,6 +683,15 @@ function Invoke-AVDTunePrinterRun {
         }
     }
     if ($steps.Count -eq 0) { return [pscustomobject]@{ Run = $null; Check = @() } }
+    # audit #102: the state before goes into the undo record BEFORE the first write (the server list step deletes foreign entries first; a crash or a failed step
+    # keeps the origin). After the run a provisional entry whose steps changed nothing is taken out again.
+    $provPolicy = $false; $provDrivers = @()
+    if ($Mode -eq 'Apply') {
+        Assert-AVDTuneNotSealed -Root $Root
+        if ($Policy -and -not $undo.Policy) { $undo.Policy = $policyBefore; $provPolicy = $true }
+        foreach ($k in @($byStep.Keys)) { $d = $byStep[$k].Driver; $dk = $d.Name.ToLowerInvariant(); if (-not $byStep[$k].Existed -and -not $undo.Drivers.ContainsKey($dk)) { $undo.Drivers[$dk] = [ordered]@{ Name = $d.Name; Version = $d.Version; Server = $d.Server; Existed = $false }; $provDrivers += $dk } }
+        if ($provPolicy -or $provDrivers.Count -gt 0) { Write-AVDTunePrinterUndo $Root $undo }
+    }
     $run = Invoke-AVDTune -Plan ([pscustomobject]@{ Name = "Printers $($Mode.ToLower())"; Steps = @($steps | ForEach-Object { $_.Id }) }) -Catalog @($steps) -Machine $Machine -Root $Root -User $User -SnapshotId $SnapshotId
     $changed = $false; $check = @()
     if ($Mode -eq 'Apply') {
@@ -626,12 +699,14 @@ function Invoke-AVDTunePrinterRun {
         $list = @{}; foreach ($i in @($state.Drivers)) { $list["$($i.Server)|$($i.Name)".ToLowerInvariant()] = $i }
         foreach ($r in @($run.Results)) {
             $info = $byStep[$r.Id]
-            if ($r.Id -like 'printers.policy-*' -and $r.Status -eq 'Changed' -and -not $undo.Policy) { $undo.Policy = $policyBefore; $changed = $true }
+            if ($r.Id -like 'printers.policy-*' -and ($r.Status -eq 'Changed' -or ($r.Status -eq 'Failed' -and (ConvertTo-Json (Get-AVDTunePrinterPolicyBefore -P $P) -Depth 6 -Compress) -cne (ConvertTo-Json $policyBefore -Depth 6 -Compress)))) { $provPolicy = $false }   # changed (a failed step only when the state differs now): the record stays
             if (-not $info) { continue }
             $d = $info.Driver
-            if ($r.Status -eq 'Changed' -and -not $info.Existed -and -not $undo.Drivers.ContainsKey($d.Name.ToLowerInvariant())) { $undo.Drivers[$d.Name.ToLowerInvariant()] = [ordered]@{ Name = $d.Name; Version = $d.Version; Server = $d.Server; Existed = $false }; $changed = $true }
+            if ($r.Status -eq 'Changed' -or ($r.Status -eq 'Failed' -and (Get-AVDTunePrinterLocal -P $P -Name $d.Name))) { $provDrivers = @($provDrivers | Where-Object { $_ -ne $d.Name.ToLowerInvariant() }) }   # installed (a failed step only when the driver is there now): the record stays
             if ($r.Status -in 'Changed', 'Unchanged') { $list["$($d.Server)|$($d.Name)".ToLowerInvariant()] = [pscustomobject]@{ Name = $d.Name; Version = $d.Version; Server = $d.Server; Signer = [string]$d.Signer; Printers = @($d.Printers); At = $now } }
         }
+        if ($provPolicy) { $undo.Policy = $null; $changed = $true }
+        foreach ($dk in $provDrivers) { $undo.Drivers.Remove($dk); $changed = $true }
         Save-AVDTunePrinterState -Root $Root -State ([pscustomobject]@{ Servers = $servers; Drivers = @($list.Values | Sort-Object Server, Name) })
         $check = @(Get-AVDTunePrinterDriverStatus -P $P -Drivers $Drivers)
     }

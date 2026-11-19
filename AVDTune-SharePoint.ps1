@@ -132,6 +132,11 @@ function Complete-SpJob {
             }
         }
     }
+    # #99: after the finish no sign-in stays after a SharePoint job (it was only signed in again for the upload)
+    if ($script:StartContext.Session -and (Test-AVDTuneSealed -Root $script:StateRoot)) {
+        try { Disconnect-AVDTuneSession $script:StartContext.Session; $summary += ' ' + (T 'sp.signedout.sealed') } catch { $failed = $true; $summary += ' ' + $_.Exception.Message }
+        try { Update-StartView } catch { }
+    }
     $script:SpLast = $summary
     [void](Add-AVDTuneProtocolNote -Protocol $script:Protocol -Group 'other' -Subject $summary)
     Save-Protocol

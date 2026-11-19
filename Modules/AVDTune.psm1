@@ -545,6 +545,10 @@ function New-AVDTuneMachine {
     # Temporary standard users of the benchmark that a crash left behind (#92, Finn M1): found and removed before the finish
     $m.BenchUsers = { Get-AVDTuneBenchUserLeftovers }
     $m.BenchUserRemove = { param($Sid) Remove-AVDTuneBenchUserLeftover -Sid $Sid }
+    # Leftovers of an interrupted benchmark (audit #98): restore journal, restore script and task, work folders, test containers (Test-AVDTuneBenchmarkClean without the diskspd cache,
+    # which the finish removes itself). The benchmark module is loaded on first use (it imports this module, so it cannot be imported at the top).
+    $benchModule = Join-Path $PSScriptRoot 'AVDTune.Benchmark.psm1'
+    $m.BenchLeftovers = { param($Root) Import-Module $benchModule; @(Test-AVDTuneBenchmarkClean -Bench (New-AVDTuneBenchAdapter) -Root $Root | Where-Object { $_ -notlike 'diskspd cache*' }) }.GetNewClosure()
     [pscustomobject]$m
 }
 
@@ -2436,6 +2440,8 @@ function Invoke-AVDTune {
     $selected = @(@($Plan.Steps) | ForEach-Object { [string]$_ })
     foreach ($id in $selected) { if (-not $byId.ContainsKey($id)) { throw "The plan names the unknown step '$id'." } }
     $started = & $Machine.Now
+    # #104 N10: with a closed write gate nothing is written at all (no marker, no LastChange, no run record); every step would be refused anyway
+    if (-not $WhatIf -and -not (Test-AVDTuneWriteAllowed)) { throw 'The snapshot gate is not confirmed: AVDTune is read only until a snapshot newer than its last change is confirmed on the Overview.' }
     $changeOwner = $false; if (-not $WhatIf) { $changeOwner = Start-AVDTuneChange -Root $Root }   # marker: the first change of the version starts here, no new version or snapshot counts while it runs (#27)
     try {
     $results = New-Object System.Collections.ArrayList
