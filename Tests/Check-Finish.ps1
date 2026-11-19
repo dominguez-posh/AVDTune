@@ -117,6 +117,14 @@ try {
     $blg = Test-AVDTuneFinishGate -Root $root -Machine $blm
     $blText = Get-ThrownText { Invoke-AVDTuneFinish -Machine $blm -Fin (New-AVDTuneFakeFinish -Seed (Get-Fake $root)) -Root $root -User 'admin1' }
     Test-Check 'gate (#98): leftovers of an interrupted benchmark block the finish (gate and Invoke, named), nothing is written' (-not $blg.Allowed -and ($blg.Reasons -join ' ') -like '*interrupted benchmark*restore journal*AVDTune-BenchmarkRestore*Benchmark page*' -and $blText -like '*AVDTune-BenchmarkRestore*' -and (Test-AVDTuneFinishGate -Root $root -Machine (New-Master)).Allowed -and -not (Get-AVDTuneFinishRecord $root)) ($blg.Reasons -join '|')
+    # audit #103: a TrustedHosts journal of the first Printers page and an interrupted environment setup block the finish
+    Write-AVDTuneFile (Join-Path $root 'config\printers-trustedhosts.json') '{"Schema":1,"Old":"","Server":"print1.example.test"}'
+    $g103a = Test-AVDTuneFinishGate -Root $root
+    Remove-Item -LiteralPath (Join-Path $root 'config\printers-trustedhosts.json') -Force
+    Write-AVDTuneFile (Join-Path $root 'config\azure-setup.json') '{"Schema":1,"Runs":[{"RunId":"run-103","Started":"2026-11-19T10:00:00Z","Steps":[{"Id":"s1","Type":"StorageAccount","Action":"Create","Path":"x","Status":"Started"}]}]}'
+    $g103b = Test-AVDTuneFinishGate -Root $root
+    Remove-Item -LiteralPath (Join-Path $root 'config\azure-setup.json') -Force
+    Test-Check 'gate (#103): a TrustedHosts journal and an interrupted environment setup block the finish, named' (-not $g103a.Allowed -and ($g103a.Reasons -join ' ') -like '*TrustedHosts*Printers page*' -and -not $g103b.Allowed -and ($g103b.Reasons -join ' ') -like '*environment setup did not end properly*run-103*' -and (Test-AVDTuneFinishGate -Root $root).Allowed) (($g103a.Reasons + $g103b.Reasons) -join '|')
     $old = New-Root
     [void](Save-Healthcheck -Root $old)
     $s = Get-AVDTuneState $old

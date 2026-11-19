@@ -173,6 +173,16 @@ try {
         if ((Get-ThrownText { Invoke-AVDTunePrinterRun -Machine $m -P $po -Root $rootO -Mode Undo -User 'admin1' -SnapshotId 'snap-1' }) -like '*not usable*' -and $po.Store.Log.Count -eq $logN) { $typedBad++ }
     }
     Test-Check 'undo record (#102): read typed: "false" for Exists, a list entry that is not a host name and a driver name with a wildcard are refused, nothing is written' ($typedBad -eq 3) "$typedBad of 3"
+    # audit #103: the repair is a change of the master: not with a closed write gate (journal and TrustedHosts stay), else under the marker with LastChange and a change log entry
+    $rootJ2 = Join-Path $tmp 'j103'; [void](Initialize-AVDTuneState -Root $rootJ2); [void](Start-AVDTuneImageVersion -Root $rootJ2 -Date (Get-Date) -User 'admin1')
+    Write-AVDTuneFile (Get-AVDTunePrinterJournalPath $rootJ2) '{"Schema":1,"Old":"admin1.example.test","Server":"print1.example.test"}'
+    $pj2 = New-AVDTuneFakePrinters; $pj2.Store.TrustedHosts = 'admin1.example.test,print1.example.test'
+    Close-AVDTuneWriteGate
+    $closed103 = Repair-AVDTunePrinterTrustedHosts -P $pj2 -Root $rootJ2
+    Open-AVDTuneWriteGate -SnapshotId 'snap-1' -ConfirmedBy 'admin1'
+    $closedOk = (-not $closed103 -and $pj2.Store.TrustedHosts -ceq 'admin1.example.test,print1.example.test' -and (Test-Path (Get-AVDTunePrinterJournalPath $rootJ2)))
+    $open103 = Repair-AVDTunePrinterTrustedHosts -P $pj2 -Root $rootJ2 -User 'admin1'
+    Test-Check 'TrustedHosts repair (#103): nothing with a closed write gate; with the gate: put back, LastChange set, a change log entry' ($closedOk -and $open103 -and $pj2.Store.TrustedHosts -ceq 'admin1.example.test' -and $null -ne (Get-AVDTuneLastChange -Root $rootJ2) -and @(Get-AVDTuneChangeLog -Root $rootJ2 | Where-Object { $_.Component -eq 'printers.trustedhosts' }).Count -eq 1) "closed ok $closedOk, open $open103"
     $u = Invoke-AVDTunePrinterRun -Machine $m -P $p -Root $tmp -Mode Undo -User 'admin1' -SnapshotId 'snap-1'
     Test-Check 'undo: the policies as before (restriction absent, the old list entry back) and the drivers AVDTune added removed; the record is empty' (-not $st.Registry.ContainsKey("$pol\pointandprint|restrictdriverinstallationtoadministrators") -and $st.Registry["$pol\packagepointandprint\listofservers|old.example.test"].Value -eq 'old.example.test' -and -not $st.Registry.ContainsKey("$pol\packagepointandprint\listofservers|$srv") -and $st.Local.Count -eq 0 -and $null -eq (Read-AVDTunePrinterUndo $tmp).Policy -and (Read-AVDTunePrinterUndo $tmp).Drivers.Count -eq 0) (($u.Run.Results | ForEach-Object { "$($_.Id)=$($_.Status) $($_.Message)" }) -join ' | ')
 

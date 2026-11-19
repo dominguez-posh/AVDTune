@@ -482,15 +482,27 @@ function Compare-AVDTunePrinterDrivers {
 }
 
 function Repair-AVDTunePrinterTrustedHosts {
-    <# A journal of the first version (it appended the server to TrustedHosts): TrustedHosts is set back to the value before, then the journal goes. Returns $true when it repaired. #>
-    param([Parameter(Mandatory)]$P, [string]$Root = (Get-AVDTuneRoot))
+    <#
+        A journal of the first version (it appended the server to TrustedHosts): TrustedHosts is set back to the value before, then the journal goes. Returns $true when it
+        repaired. A change of the master (audit #103): only behind the write gate (closed: $false, nothing written; the finish gate names the journal), under the change marker
+        (LastChange), with a change log entry; -AllowSealed because it puts back what an older AVDTune left (a crash repair).
+    #>
+    param([Parameter(Mandatory)]$P, [string]$Root = (Get-AVDTuneRoot), [string]$User)
     $path = Get-AVDTunePrinterJournalPath $Root
     if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return $false }
+    if (-not (Test-AVDTuneWriteAllowed)) { return $false }
+    Assert-AVDTuneNoForeignChange -Root $Root
     $j = Read-AVDTuneJson $path
     $old = Get-AVDTuneProp $j 'Old'
     if ($old -isnot [string]) { throw "The TrustedHosts journal $path has no previous value: check TrustedHosts by hand and delete the journal." }
-    & $P.TrustedHostsSet $old
-    [void](Remove-AVDTuneTreeSafe -Path $path)
+    $owner = Start-AVDTuneChange -Root $Root -AllowSealed
+    try {
+        & $P.TrustedHostsSet $old
+        [void](Remove-AVDTuneTreeSafe -Path $path)
+        $v = [string](Get-AVDTuneState $Root).ImageVersion
+        if ($v) { [void](Add-AVDTuneChangeLogEntry -Root $Root -Version $v -Category 'Printers' -Component 'printers.trustedhosts' -ChangeType Changed -Text "TrustedHosts set back to the value before the first Printers page ($(if ($old) { $old } else { 'empty' }))" -User $User -Source Step) }
+    }
+    finally { Stop-AVDTuneChange -Root $Root -Owner $owner }
     $true
 }
 

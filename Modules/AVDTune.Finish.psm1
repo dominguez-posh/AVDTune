@@ -419,6 +419,10 @@ function Test-AVDTuneFinishGate {
     elseif ([bool](Get-AVDTuneProp $state 'Sealed')) { [void]$reasons.Add("Image version $version is already finished. Start a new version for further changes.") }
     if (Get-AVDTuneFinishCrash -Root $Root) { [void]$reasons.Add('An earlier finish did not end properly: repair it first.') }
     if (Get-AVDTuneMaintenanceCrash -Root $Root) { [void]$reasons.Add('An earlier maintenance mode did not end properly: repair the update block first.') }
+    # audit #103: a TrustedHosts journal of the first Printers page (TrustedHosts not put back yet) and an interrupted environment setup are no image to finish
+    if (Test-Path -LiteralPath (Join-Path $Root 'config\printers-trustedhosts.json') -PathType Leaf) { [void]$reasons.Add('TrustedHosts still holds a print server added by an earlier AVDTune (config\printers-trustedhosts.json): open the Printers page to put it back first.') }
+    $envOpen = @(); try { $envOpen = @(Get-AVDTuneEnvInterrupted -Root $Root) } catch { [void]$reasons.Add("The environment setup journal could not be checked ($($_.Exception.Message)).") }
+    if ($envOpen.Count -gt 0) { [void]$reasons.Add("An environment setup did not end properly (run $(@($envOpen | ForEach-Object { $_.RunId }) -join ', ')): look at it on the Environment page first.") }
     $ready = Get-AVDTuneFinishReadiness -Root $Root
     foreach ($r in @($ready.Reasons)) { [void]$reasons.Add([string]$r) }
     $rec = Get-AVDTuneReadinessRecord -Root $Root
