@@ -2514,11 +2514,18 @@ $script:SecretRules = @(
     @('\b(?=[A-Za-z0-9+/_]*[0-9])(?=[A-Za-z0-9+/_]*[A-Z])(?=[A-Za-z0-9+/_]*[a-z])[A-Za-z0-9+/_]{40,}', '(removed)')
 )
 
+# Control characters (not tab and line breaks) and zero-width characters hide a name from the rules ("Kennwort<0x01>: x", "pass<ZWSP>word"): the rules see control characters as spaces and no zero-width characters (#107 N-1)
+$script:SecretControl = '[\x00-\x08\x0E-\x1F\x7F\u2028\u2029]'   # as a space
+$script:SecretInvisible = '[\u200B-\u200F\u202A-\u202E\u2060-\u2064\uFEFF]'   # zero width and direction marks: taken out (pass<ZWSP>word is password)
+
 function Invoke-AVDTuneSecretRules {
-    # Pure. The text with every rule of the table applied; $null when a rule ran into its timeout (the caller fails closed)
+    # Pure. The text with every rule of the table applied; $null when a rule ran into its timeout (the caller fails closed). The rules run on the text without control and
+    # zero-width characters (see above); when they find nothing the text comes back unchanged (so a file without secrets stays 'secret free').
     param([AllowEmptyString()][string]$Text)
-    $t = $Text
+    try { $n = [regex]::Replace([regex]::Replace($Text, $script:SecretControl, ' ', [Text.RegularExpressions.RegexOptions]::None, [TimeSpan]::FromSeconds(2)), $script:SecretInvisible, '', [Text.RegularExpressions.RegexOptions]::None, [TimeSpan]::FromSeconds(2)) } catch { return $null }
+    $t = $n
     foreach ($r in $script:SecretRules) { try { $t = [regex]::Replace($t, $r[0], $r[1], [Text.RegularExpressions.RegexOptions]::None, [TimeSpan]::FromSeconds(2)) } catch { return $null } }
+    if ($t -ceq $n) { return $Text }
     $t
 }
 
