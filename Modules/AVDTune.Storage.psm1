@@ -610,7 +610,7 @@ function New-AVDTuneFilesAdapter {
         [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
         try {
             $req = [System.Net.HttpWebRequest]::Create($Url)
-            $req.Method = $Method; $req.Timeout = 60000; $req.AllowAutoRedirect = $false
+            $req.Method = $Method; $req.Timeout = 60000; $req.ReadWriteTimeout = 60000; $req.AllowAutoRedirect = $false
             $req.Headers.Add('Authorization', "Bearer $Token")
             foreach ($k in $Headers.Keys) { $req.Headers.Add([string]$k, [string]$Headers[$k]) }
             if ($Method -eq 'PUT') { $req.ContentLength = 0 }
@@ -622,7 +622,7 @@ function New-AVDTuneFilesAdapter {
             if (-not $resp) { return [pscustomobject]@{ Status = 0; Headers = @{}; Body = ''; Error = $_.Exception.Message } }
         }
         try {
-            $text = (New-Object IO.StreamReader($resp.GetResponseStream())).ReadToEnd()
+            $text = Read-AVDTuneResponseText -Response $resp -MaxBytes 16MB   # bounded read (#108 N-4)
             $hs = @{}; foreach ($k in $resp.Headers.AllKeys) { $hs[[string]$k] = [string]$resp.Headers[$k] }
             [pscustomobject]@{ Status = [int]$resp.StatusCode; Headers = $hs; Body = $text; Error = '' }
         }
