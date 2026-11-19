@@ -22,7 +22,8 @@ function Update-SealView {
     Set-Brush $ui.PillSeal ([System.Windows.Controls.Border]::BackgroundProperty) $pair[0]
     $ui.TxtSealPill.Text = $pair[2]; Set-Brush $ui.TxtSealPill ([System.Windows.Controls.TextBlock]::ForegroundProperty) $pair[1]
     $ui.TxtSealGate.Text = $(if ($gate.Allowed) { (T 'seal.gate.ok' $($gate.Version)) } else { (T 'seal.gate.locked') + (@($gate.Reasons) -join ' ') })
-    $ui.TxtSealNotes.Text = (@($gate.Notes) -join ' ')
+    $prnNote = ''; try { $prnNote = [string](Get-PrnFinishNote) } catch { }   # installed printer drivers older than those of the print server at its last read (#86); a note, the readiness row is what counts
+    $ui.TxtSealNotes.Text = (@(@($gate.Notes) + @($prnNote) | Where-Object { $_ }) -join ' ')
     $ui.BtnSealRun.IsEnabled = ($gate.Allowed -and -not $script:SealJob)
     $ui.BoxSealCrash.Visibility = ConvertTo-Vis ([bool]$crash -and -not $script:SealJob)   # a running finish has an active journal by design
     if ($crash) { $ui.TxtSealCrash.Text = (T 'seal.crash' $(([datetime]$crash.Started).ToString('yyyy-MM-dd HH:mm')) $($crash.User)) }

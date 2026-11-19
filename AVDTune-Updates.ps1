@@ -191,6 +191,7 @@ function Update-UpdatesView {
     }
     $prnNotes = @(); try { $prnNotes = @(Get-PrnUpdateNotes) } catch { }   # printer drivers of the print server against the installed ones (#86, skeleton)
     $ui.TxtUpdNotes.Text = (@(@($script:UpdNotes) + $prnNotes) -join "`r`n")
+    if (Get-Command Update-PrnUpdCard -ErrorAction SilentlyContinue) { Update-PrnUpdCard }   # the card "Printer drivers" (AVDTune-Printers.ps1, #86): read the server again, update, remove unused
     $failedRepair = $script:UpdLastRun -and @($script:UpdLastRun.Results | Where-Object { $_.Status -eq 'Failed' -and $_.Repair }).Count -gt 0
     $ui.BoxUpdRepair.Visibility = ConvertTo-Vis ([bool]$failedRepair)
     # history

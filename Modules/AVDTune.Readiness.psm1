@@ -336,7 +336,7 @@ function Invoke-AVDTuneReadiness {
     #>
     [CmdletBinding()]
     param(
-        [Parameter(Mandatory)]$Machine, $Arm, [string]$Token, [string]$NoTokenReason, [string]$GalleryImageId, $Data, $UpdateBlock, [bool]$FSLogixApplies = $false, $FSLogixTest, [string]$Root
+        [Parameter(Mandatory)]$Machine, $Arm, [string]$Token, [string]$NoTokenReason, [string]$GalleryImageId, $Data, $UpdateBlock, [bool]$FSLogixApplies = $false, $FSLogixTest, [string]$Root, $PrinterLag
     )
     if (-not $Data) { $Data = Get-AVDTuneReadinessData }
     $now = & $Machine.Now
@@ -617,6 +617,17 @@ function Invoke-AVDTuneReadiness {
             elseif ([string]$t.Overall -eq 'green') { Add-Row 'hy.fslogix-test' $hy 'green' "The FSLogix function test passed (green) on $(([datetime]::Parse([string]$t.At, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind)).ToString('yyyy-MM-dd HH:mm'))." }
             elseif ([string]$t.Overall -eq 'red') { Add-Row 'hy.fslogix-test' $hy 'red' "The last FSLogix function test is red ($($t.Red) red item(s): $(@($t.OpenIds) -join ', ')). Profiles will not work." 'Fix the red items on the FSLogix page and run the test again.' }
             else { Add-Row 'hy.fslogix-test' $hy 'yellow' "The last FSLogix function test is yellow ($($t.Yellow) item(s): $(@($t.OpenIds) -join ', '))." 'Look at the yellow items on the FSLogix page, fix them or run the test again.' }
+        }
+    }
+    if ($null -ne $PrinterLag) {
+        # -PrinterLag (Get-AVDTunePrinterDriverLag): only when AVDTune installed printer drivers and their print server was read; the server is not asked here (#86)
+        Invoke-Check 'hy.printer-drivers' $hy {
+            $old = @($PrinterLag.Older); $where = "$(@($PrinterLag.Servers) -join ', '), read on $(([datetime]$PrinterLag.At).ToString('yyyy-MM-dd HH:mm'))"
+            if ($old.Count -gt 0) {
+                $list = (@($old | Select-Object -First 10 | ForEach-Object { "$($_.Name) $($_.Installed) -> $($_.ServerVersion)" }) -join '; ') + $(if ($old.Count -gt 10) { '; ...' } else { '' })
+                Add-Row 'hy.printer-drivers' $hy 'yellow' "$($old.Count) printer driver(s) in the image are older than those of the print server ($where): $list." 'Update them on the Updates page (card Printer drivers), or read the print server again.' -Found (@($old | ForEach-Object { $_.Name }) -join '; ')
+            }
+            else { Add-Row 'hy.printer-drivers' $hy 'green' "The printer drivers AVDTune installed are not older than those of the print server ($where)." }
         }
     }
     Invoke-Check 'hy.defender-onboarding' $hy {

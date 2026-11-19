@@ -9,7 +9,7 @@
 #>
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path $PSScriptRoot -Parent
-foreach ($m in 'AVDTune', 'AVDTune.Updates', 'AVDTune.Directory', 'AVDTune.Custom', 'AVDTune.Printers') { Import-Module (Join-Path $repo "Modules\$m.psm1") -Force }
+foreach ($m in 'AVDTune', 'AVDTune.UpdateBlock', 'AVDTune.Updates', 'AVDTune.Directory', 'AVDTune.Custom', 'AVDTune.Printers') { Import-Module (Join-Path $repo "Modules\$m.psm1") -Force }
 . (Join-Path $PSScriptRoot 'Fakes\FakeMachine.ps1')
 . (Join-Path $PSScriptRoot 'Fakes\FakeServices.ps1')
 . (Join-Path $PSScriptRoot 'Fakes\FakePrinters.ps1')
@@ -137,6 +137,78 @@ try {
     $cmp = @(Compare-AVDTunePrinterDrivers -Installed $saved.Drivers -Server @(Get-AVDTunePrinterDriverPlan -Inventory (Read-Inventory $p $tmp $signers)))
     Test-Check 'maintenance: a new version on the server is Changed, the unchanged one Same' ((($cmp | Sort-Object Name | ForEach-Object { "$($_.Name)=$($_.Status)" }) -join ',') -eq 'Example Label Driver=Same,Example Universal PCL6=Changed') (($cmp | ForEach-Object { "$($_.Name)=$($_.Status)" }) -join ',')
     $st.Servers[$srv].Drivers[0].Version = '7.1.0.2500'
+
+    # ---------------------------------------------------------------- maintenance of the Updates page (#86): last read, rows, update in maintenance mode, removal
+    $pcl6 = 'Example Universal PCL6'; $label = 'Example Label Driver'
+    Test-Check 'maintenance: versions are compared by their numbers (10 is newer than 9), anything that is not a.b.c.d gives no answer' ((Compare-AVDTunePrinterVersion '7.1.0.2500' '7.2.0.1000') -eq -1 -and (Compare-AVDTunePrinterVersion '10.0.0.300' '9.0.0.300') -eq 1 -and (Compare-AVDTunePrinterVersion '2.4.0.300' '2.4.0.300') -eq 0 -and $null -eq (Compare-AVDTunePrinterVersion 'x' '2.4.0.300') -and $null -eq (Compare-AVDTunePrinterVersion ('1' * 40) '2.4.0.300')) $null
+    $lagNone = Get-AVDTunePrinterDriverLag -Root $tmp
+    Save-AVDTunePrinterLastRead -Root $tmp -Inventory (Read-Inventory $p $tmp $signers)
+    $lagSame = Get-AVDTunePrinterDriverLag -Root $tmp
+    $st.Servers[$srv].Drivers[0].Version = '7.2.0.1000'
+    $invNew = Read-Inventory $p $tmp $signers
+    Save-AVDTunePrinterLastRead -Root $tmp -Inventory $invNew
+    $lagOld = Get-AVDTunePrinterDriverLag -Root $tmp
+    $lastRead = @(Get-AVDTunePrinterLastRead -Root $tmp)
+    Test-Check 'last read (readiness): nothing to say before the server was read or without installed drivers; after a read the installed drivers that are older are named, one entry per server (the newest read)' ($null -eq $lagNone -and $null -eq (Get-AVDTunePrinterDriverLag -Root (Join-Path $tmp 'nothing')) -and $lagSame -and @($lagSame.Older).Count -eq 0 -and @($lagOld.Older).Count -eq 1 -and $lagOld.Older[0].Name -eq $pcl6 -and $lagOld.Older[0].Installed -eq '7.1.0.2500' -and $lagOld.Older[0].ServerVersion -eq '7.2.0.1000' -and ($lagOld.Servers -join ',') -eq $srv -and $lastRead.Count -eq 1 -and 'Example Unsigned Driver' -in $lastRead[0].InUse -and 'Example Unsigned Driver' -notin @($lastRead[0].Drivers | ForEach-Object { $_.Name })) ($lagOld | ConvertTo-Json -Depth 4 -Compress)
+    $rowsNewer = @(Get-AVDTunePrinterMaintenance -Installed @([pscustomobject]@{ Name = $pcl6; Version = '7.3.0.1000'; Server = $srv }) -Server @(Get-AVDTunePrinterDriverPlan -Inventory $invNew) -ReadServer $srv)
+    Test-Check 'maintenance rows: an installed driver that is newer than the one of the server is Changed but not older; a driver of the server AVDTune did not install is New' ((@($rowsNewer | Where-Object { $_.Name -eq $pcl6 })[0].Status -eq 'Changed') -and -not @($rowsNewer | Where-Object { $_.Name -eq $pcl6 })[0].Older -and @($rowsNewer | Where-Object { $_.Name -eq $label })[0].Status -eq 'New') (($rowsNewer | ForEach-Object { "$($_.Name)=$($_.Status)/$($_.Older)" }) -join ',')
+    $rootT = Join-Path $tmp 'tamper'; [void](Initialize-AVDTuneState -Root $rootT)
+    Write-AVDTuneFile (Get-AVDTunePrinterLastReadPath $rootT) '{"Schema":1,"Reads":[{"Server":"print1","At":"2026-11-18T10:00:00","Drivers":[]},{"Server":"print1.example.test","At":"not a date","Drivers":[]},{"Server":"print1.example.test","At":"2026-11-18T10:00:00","Drivers":[{"Name":"Bad*Driver","Version":"1.0.0.300"},{"Name":"Good Driver","Version":"latest"},{"Name":"Fine Driver","Version":"1.0.0.300"},{"Name":7,"Version":"1.0.0.300"}],"InUse":["Bad[1]","Fine Driver",5]}]}'
+    $tampered = @(Get-AVDTunePrinterLastRead -Root $rootT)
+    Test-Check 'last read (untrusted file): a server that is not an FQDN, a time that is none, driver names with wildcards, versions that are none and wrong types are dropped' ($tampered.Count -eq 1 -and (@($tampered[0].Drivers | ForEach-Object { "$($_.Name)=$($_.Version)" }) -join ',') -eq 'Fine Driver=1.0.0.300' -and ($tampered[0].InUse -join ',') -eq 'Fine Driver') ($tampered | ConvertTo-Json -Depth 4 -Compress)
+
+    [void](Set-AVDTuneUpdateBlock -Machine $m -Root $tmp -Mode On -User 'admin1' -SnapshotId 'snap-1')
+    $planM = @(Get-AVDTunePrinterDriverPlan -Inventory $invNew | Where-Object { $_.Name -eq $pcl6 })
+    Close-AVDTuneWriteGate
+    $gateM = Get-ThrownText { Invoke-AVDTunePrinterMaintenance -Machine $m -P $p -Root $tmp -Drivers $planM -Remove @($label) -Inventory $invNew -Credential $cred }
+    Open-AVDTuneWriteGate -SnapshotId 'snap-1' -ConfirmedBy 'admin1'
+    Test-Check 'maintenance: without the confirmed snapshot gate nothing is installed or removed' ($gateM -like '*gate*' -and $st.Local[$pcl6] -eq '7.1.0.2500' -and $st.Local.ContainsKey($label)) $gateM
+    $otherM = Get-ThrownText { Invoke-AVDTunePrinterMaintenance -Machine $m -P $p -Root $tmp -Drivers @([pscustomobject]@{ Name = $pcl6; Version = '7.2.0.1000'; Server = 'print2.example.test'; Thumbprint = ('A1' * 20); InfPath = $planM[0].InfPath }) -Inventory $invNew -Credential $cred }
+    Test-Check 'maintenance: a driver of another server than the one that was read is refused' ($otherM -like '*not to the server that was read*' -and $st.Local[$pcl6] -eq '7.1.0.2500') $otherM
+    $st.SwapSigner[$pcl6] = $st.Vendor
+    $rSwap = Invoke-AVDTunePrinterMaintenance -Machine $m -P $p -Root $tmp -Drivers $planM -Inventory $invNew -Credential $cred -User 'admin1' -SnapshotId 'snap-1'
+    Test-Check 'maintenance (same checks as the first install): an update whose catalog is now signed by another signer than the confirmed one is not installed; the update block is back' (@($rSwap.Results | Where-Object { $_.Status -eq 'Failed' -and $_.Message -like '*not by the confirmed signer*' }).Count -eq 1 -and $st.Local[$pcl6] -eq '7.1.0.2500' -and (Get-AVDTuneUpdateBlockStatus $m).State -eq 'On' -and -not (Get-AVDTuneMaintenanceCrash -Root $tmp)) (($rSwap.Results | ForEach-Object { "$($_.Status) $($_.Message)" }) -join ' | ')
+    $st.SwapSigner.Remove($pcl6)
+    $noSigner = Get-ThrownText { Invoke-AVDTunePrinterMaintenance -Machine $m -P $p -Root $tmp -Drivers @([pscustomobject]@{ Name = $pcl6; Version = '7.2.0.1000'; Server = $srv; Thumbprint = ''; InfPath = $planM[0].InfPath }) -Inventory $invNew -Credential $cred }
+    Test-Check 'maintenance (same checks): a driver without a confirmed signer stops the run, the maintenance mode ends properly' ($noSigner -like '*no confirmed signer*' -and (Get-AVDTuneUpdateBlockStatus $m).State -eq 'On' -and -not (Get-AVDTuneMaintenanceCrash -Root $tmp)) $noSigner
+    $before = (Get-AVDTuneState $tmp).Maintenance.Id
+    $rM = Invoke-AVDTunePrinterMaintenance -Machine $m -P $p -Root $tmp -Drivers $planM -Inventory $invNew -Credential $cred -User 'admin1' -SnapshotId 'snap-1'
+    $maint = (Get-AVDTuneState $tmp).Maintenance
+    $savedM = Get-AVDTunePrinterState -Root $tmp
+    Test-Check 'maintenance: the changed driver is updated by the checked export to the version of the server and checked; printers.json has the new version; the readiness lag is gone' ($st.Local[$pcl6] -eq '7.2.0.1000' -and @($rM.Check).Count -eq 1 -and $rM.Check[0].Ok -and @($rM.Results | Where-Object { $_.Status -eq 'Changed' }).Count -eq 1 -and @($savedM.Drivers | Where-Object { $_.Name -eq $pcl6 })[0].Version -eq '7.2.0.1000' -and @((Get-AVDTunePrinterDriverLag -Root $tmp).Older).Count -eq 0 -and $st.LocalFolders.Count -eq 0 -and $st.RemoteFolders.Count -eq 0 -and $st.Sessions.Count -eq 0) (($rM.Results | ForEach-Object { "$($_.Status) $($_.Message)" }) -join ' | ')
+    $undoM = Read-AVDTunePrinterUndo $tmp
+    Test-Check 'maintenance: the undo record of a driver AVDTune added follows the update (the new version), so Undo still removes it' ([string]$undoM.Drivers[$pcl6.ToLowerInvariant()].Version -eq '7.2.0.1000' -and -not [bool]$undoM.Drivers[$pcl6.ToLowerInvariant()].Existed -and [string]$undoM.Drivers[$label.ToLowerInvariant()].Version -eq '2.4.0.300') ($undoM.Drivers | ConvertTo-Json -Depth 4 -Compress)
+    Test-Check 'maintenance mode: the run has its own maintenance record (the update block was lifted for it) and the block is back on afterwards' ($maint.Id -ne $before -and $maint.Phase -eq 'restored' -and -not $maint.Active -and @($maint.BlockBefore).Count -gt 0 -and (Get-AVDTuneUpdateBlockStatus $m).State -eq 'On' -and -not (Get-AVDTuneMaintenanceCrash -Root $tmp)) ($maint | ConvertTo-Json -Compress)
+    Test-Check 'maintenance: the change log has the update with version, server and signer (category Printers)' (@(Get-AVDTuneChangeLog -Root $tmp | Where-Object { $_.Category -eq 'Printers' -and $_.Text -eq "Printer driver $pcl6 7.2.0.1000 from $srv, signed by Microsoft Windows Hardware Compatibility Publisher (printers: Floor 1 Color, Floor 2 Color)" }).Count -eq 1) $null
+
+    # gone drivers: only what AVDTune installed from this server and added itself, and what no shared printer uses (also not one with a problem)
+    $st.Servers[$srv].Printers = @($st.Servers[$srv].Printers | Where-Object { $_.Name -ne 'Label Printer' })
+    $st.Local['Example Old Driver'] = '1.0.0.300'
+    $stateG = Get-AVDTunePrinterState -Root $tmp
+    Save-AVDTunePrinterState -Root $tmp -State ([pscustomobject]@{ Servers = @($stateG.Servers); Drivers = @($stateG.Drivers) + @([pscustomobject]@{ Name = 'Example Old Driver'; Version = '1.0.0.300'; Server = $srv; Signer = ''; Printers = @(); At = '' }, [pscustomobject]@{ Name = 'Example Unsigned Driver'; Version = '1.0.0.300'; Server = $srv; Signer = ''; Printers = @(); At = '' }) })
+    $invGone = Read-Inventory $p $tmp $signers
+    $rowsG = @(Get-AVDTunePrinterMaintenance -Installed (Get-AVDTunePrinterState -Root $tmp).Drivers -Server @(Get-AVDTunePrinterDriverPlan -Inventory $invGone) -ReadServer $srv -InUse @(Get-AVDTunePrinterInUse -Inventory $invGone) -Added @(Get-AVDTunePrinterAdded -Root $tmp))
+    Test-Check 'gone: a driver no shared printer uses any more is Gone and removable when AVDTune added it; one that was there before AVDTune is Gone but stays; one a printer with a problem still uses is not gone' ((@($rowsG | Sort-Object Name | ForEach-Object { "$($_.Name)=$($_.Status)/$($_.Removable)" }) -join ',') -eq "$label=Gone/True,Example Old Driver=Gone/False,$pcl6=Same/False") ((@($rowsG | Sort-Object Name | ForEach-Object { "$($_.Name)=$($_.Status)/$($_.Removable)" }) -join ','))
+    $removeLog = { @($st.Log | Where-Object { $_ -like 'RemoveDriver *' }).Count }
+    $r0count = & $removeLog
+    $refused = @(
+        (Get-ThrownText { Invoke-AVDTunePrinterMaintenance -Machine $m -P $p -Root $tmp -Remove @($pcl6) -Inventory $invGone -Credential $cred })
+        (Get-ThrownText { Invoke-AVDTunePrinterMaintenance -Machine $m -P $p -Root $tmp -Remove @('Example Unsigned Driver') -Inventory $invGone -Credential $cred })
+        (Get-ThrownText { Invoke-AVDTunePrinterMaintenance -Machine $m -P $p -Root $tmp -Remove @('Some Other Driver') -Inventory $invGone -Credential $cred })
+        (Get-ThrownText { Invoke-AVDTunePrinterMaintenance -Machine $m -P $p -Root $tmp -Remove @($label, 'Example Old Driver') -Inventory $invGone -Credential $cred })
+        (Get-ThrownText { Invoke-AVDTunePrinterMaintenance -Machine $m -P $p -Root $tmp -Remove @('Example*') -Inventory $invGone -Credential $cred })
+        (Get-ThrownText { Invoke-AVDTunePrinterMaintenance -Machine $m -P $p -Root $tmp -Remove @($label) -Inventory $invNew -Credential $cred }))
+    Test-Check 'remove: a driver still in use, one a problem printer uses, one AVDTune never installed, one that was there before AVDTune (also next to a removable one), a wildcard, and a driver the given read still shows in use are refused before anything changes' ($refused[0] -like '*not a driver AVDTune installed*' -and $refused[1] -like '*not a driver AVDTune installed*' -and $refused[2] -like '*not a driver AVDTune installed*' -and $refused[3] -like '*before AVDTune*' -and $refused[4] -like '*not valid*' -and $refused[5] -like '*not a driver AVDTune installed*' -and (& $removeLog) -eq $r0count -and $st.Local.Count -eq 3 -and (Get-AVDTunePrinterState -Root $tmp).Drivers.Count -eq 4) ($refused -join ' | ')
+    $rR = Invoke-AVDTunePrinterMaintenance -Machine $m -P $p -Root $tmp -Remove @($label) -Inventory $invGone -Credential $cred -User 'admin1' -SnapshotId 'snap-1'
+    $undoR = Read-AVDTunePrinterUndo $tmp
+    Test-Check 'remove: the gone driver AVDTune added is removed (one Remove-PrinterDriver, by its exact name) in maintenance mode; it leaves printers.json and the undo record; the others stay' ((& $removeLog) -eq ($r0count + 1) -and 'RemoveDriver Example Label Driver' -in $st.Log -and -not $st.Local.ContainsKey($label) -and $st.Local.ContainsKey($pcl6) -and $st.Local.ContainsKey('Example Old Driver') -and ($rR.Removed -join ',') -eq $label.ToLowerInvariant() -and @((Get-AVDTunePrinterState -Root $tmp).Drivers | Where-Object { $_.Name -eq $label }).Count -eq 0 -and -not $undoR.Drivers.ContainsKey($label.ToLowerInvariant()) -and $undoR.Drivers.ContainsKey($pcl6.ToLowerInvariant()) -and (Get-AVDTuneState $tmp).Maintenance.Phase -eq 'restored' -and (Get-AVDTuneState $tmp).Maintenance.Id -ne $maint.Id) (($rR.Results | ForEach-Object { "$($_.Status) $($_.Message)" }) -join ' | ')
+    Test-Check 'remove: the change log says which driver was removed, why, and that there is no undo' (@(Get-AVDTuneChangeLog -Root $tmp | Where-Object { $_.Category -eq 'Printers' -and $_.Text -eq "Printer driver $label 2.4.0.300 removed: no printer of $srv uses it any more (no undo, only a new install)" }).Count -eq 1) ((Get-AVDTuneChangeLog -Root $tmp | Select-Object -Last 1).Text)
+    # back to what the checks below expect: the driver that was "there before" is not AVDTune's
+    $st.Local.Remove('Example Old Driver')
+    $stateG = Get-AVDTunePrinterState -Root $tmp
+    Save-AVDTunePrinterState -Root $tmp -State ([pscustomobject]@{ Servers = @($stateG.Servers); Drivers = @($stateG.Drivers | Where-Object { $_.Name -eq $pcl6 }) })
+    [void](Set-AVDTuneUpdateBlock -Machine $m -Root $tmp -Mode Off -User 'admin1' -SnapshotId 'snap-1')
+
     $rootJ = Join-Path $tmp 'j'; [void](Initialize-AVDTuneState -Root $rootJ)
     Write-AVDTuneFile (Get-AVDTunePrinterJournalPath $rootJ) '{"Schema":1,"Old":"admin1.example.test","Server":"print1.example.test"}'
     $pj = New-AVDTuneFakePrinters; $pj.Store.TrustedHosts = 'admin1.example.test,print1.example.test'
@@ -166,6 +238,14 @@ try {
     Test-Check 'sources (H2/N2): no printer connection (Add-Printer -ConnectionName), pnputil through Invoke-AVDTuneProgram, the server folder admin-only and deleted only below Windows\Temp by name' ($src -notmatch 'Add-Printer\s' -and $src -notmatch 'ConnectionName' -and $src -notmatch 'Copy-Item' -and $src -match 'IO\.FileMode\]::CreateNew' -and $src -match "Invoke-AVDTuneProgram -File \(Join-Path \(Get-AVDTuneSystemFolder System\) 'pnputil\.exe'\)" -and $src -match "SetAccessRuleProtection\(\`$true, \`$false\)" -and $src -match "AVDTune-\[0-9a-f\]\{12\}" -and $src -match 'New-AVDTuneDownloadFolder -Root \$Root -Prefix ''printers''') $null
     Test-Check 'secrets: the password never becomes a managed string (no ConvertFrom-SecureString, no -AsPlainText, no GetNetworkCredential, no PtrToString)' ($src -notmatch 'ConvertFrom-SecureString' -and $src -notmatch 'AsPlainText' -and $src -notmatch 'GetNetworkCredential' -and $src -notmatch 'PtrToString') $null
     $page = [IO.File]::ReadAllText((Join-Path $repo 'AVDTune-Printers.ps1'))
+    $pageAst = [Management.Automation.Language.Parser]::ParseInput($page, [ref]$null, [ref]$null)
+    $fnText = { param([string]$n) $f = $pageAst.Find({ param($x) $x -is [Management.Automation.Language.FunctionDefinitionAst] -and $x.Name -eq $n }, $true); if ($f) { $f.Extent.Text } else { '' } }
+    $acct = & $fnText 'New-PrnUpdAccount'; $upd = & $fnText 'Invoke-PrnUpdUpdate'; $rem = & $fnText 'Invoke-PrnUpdRemove'; $done = & $fnText 'Complete-PrnJob'
+    $worker = $page.Substring($page.IndexOf("`$script:PrnWorkerText = @'")); $worker = $worker.Substring(0, $worker.IndexOf("`n'@"))
+    $maintain = $worker.Substring($worker.IndexOf("'Maintain' {")); $maintain = $maintain.Substring(0, $maintain.IndexOf("'Undo' {"))
+    Test-Check 'Updates page (account, #75): the typed password box is cleared; an empty one takes the kept account of the start sequence only with the pins of the environment; the copy is disposed with the job; a kept account that did not get to a read of the server is forgotten' ($acct.Contains('$ui.PwdUpdPrn.Clear()') -and $acct.Contains('Get-AVDTuneSessionDcAccount -Pins (Get-AVDTuneDcPins (Get-AVDTuneEnvironment $script:StateRoot))') -and $acct.Contains("throw (T 'prn.upd.err.password')") -and $acct -notmatch 'ConvertFrom-SecureString|AsPlainText|GetNetworkCredential|PtrToString' -and $done.Contains('$job.Account.Password.Dispose()') -and $done.Contains("if (`$err -and `$job.FromSession -and [string]`$job.Sync.Auth -ne 'ok') { Clear-AVDTuneSessionDcAccount }")) $null
+    Test-Check 'Updates page (writer): update and remove ask the write gate and Assert-NoOtherWriter, confirm first, and run as the writer kind Maintain of PrnJob (not a read kind); the job asks AD for the server, compares the confirmed plan with a fresh read and goes through Invoke-AVDTunePrinterMaintenance' ($upd.Contains('Test-AVDTuneWriteAllowed') -and $upd.Contains('Assert-NoOtherWriter') -and $upd.Contains('Confirm-PrnSigners') -and $upd.IndexOf('Confirm-Action') -lt $upd.IndexOf("Start-PrnJob 'Maintain'") -and $rem.Contains('Test-AVDTuneWriteAllowed') -and $rem.Contains('Assert-NoOtherWriter') -and $rem.IndexOf("Confirm-Action (T 'prn.upd.ask.remove'") -gt 0 -and $rem.IndexOf('Confirm-Action') -lt $rem.IndexOf("Start-PrnJob 'Maintain'") -and 'Maintain' -notin @('Servers', 'Read') -and $page.Contains("`$script:PrnReadKinds = @('Servers', 'Read')") -and $maintain.Contains('Assert-AVDTunePrinterServerAllowed -Server $Server -Allowed $allowed') -and $maintain.IndexOf('Compare-AVDTunePrinterPlan') -gt 0 -and $maintain.IndexOf('Compare-AVDTunePrinterPlan') -lt $maintain.IndexOf('$r = Invoke-AVDTunePrinterMaintenance') -and $maintain -notmatch 'RemoveDriver|Remove-PrinterDriver') $null
+    Test-Check 'sources (remove): Remove-PrinterDriver only in the adapter; the module calls RemoveDriver only in the undo of a driver AVDTune added and in the remove step, each after the name check' (([regex]::Matches($src, 'Remove-PrinterDriver -Name \$Name')).Count -eq 1 -and ([regex]::Matches($src, '& \$pp\.RemoveDriver \$d\.Name')).Count -eq 2 -and ([regex]::Matches($src, "if \(-not \(Test-AVDTunePrinterDriverName \`$d\.Name\)\) \{ throw 'The driver name is not valid\.' \}; & \`$pp\.RemoveDriver \`$d\.Name")).Count -eq 2 -and ([regex]::Matches($src, 'RemoveDriver')).Count -eq 3) "$(([regex]::Matches($src, 'RemoveDriver')).Count)"
     Test-Check 'page: texts from T, the job through New-AVDTunePowerShell, writes check the gate and Assert-NoOtherWriter, the password is cleared and disposed, the confirmed plan goes to the job and is compared (M1), servers only from AD' ($page -match "T 'prn\." -and $page -match 'New-AVDTunePowerShell' -and $page -match 'Assert-NoOtherWriter' -and $page -match 'Test-AVDTuneWriteAllowed' -and $page -notmatch '\[powershell\]::Create' -and $page -match '\.Password\.Dispose\(\)' -and $page -match 'PwdPrn\.Clear\(\)' -and $page -match 'Compare-AVDTunePrinterPlan' -and $page -match 'Assert-AVDTunePrinterServerAllowed' -and $page -match 'Repair-AVDTunePrinterTrustedHosts') $null
 }
 finally {

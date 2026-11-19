@@ -3,7 +3,9 @@
 # that list); the server is read and its drivers are exported over WinRM with Kerberos (the domain account as UPN). The password is typed here, used for one job and cleared.
 # Read checks every driver (export, limits, catalog signature); the administrator confirms the plan with the signers (another publisher than WHQL is allowed in a second
 # confirmation) and Apply gets exactly that plan: a server that answers differently stops it (M1). Every read and change is a background job (New-AVDTunePowerShell) and a
-# task; Apply and Undo are writer jobs (PrnJob, #66) behind the write gate. Texts from the language files (T 'prn.*'). Test mode: the fake printer adapter and the fake LDAP.
+# task; Apply, Undo and Maintain are writer jobs (PrnJob, #66) behind the write gate. Maintenance (bottom of this file) is a card on the Updates page: read the server again
+# with the domain account of the start sequence (or a typed password), update new and changed drivers in maintenance mode with the checks of the first install, remove
+# drivers no printer of the server uses any more. Texts from the language files (T 'prn.*'). Test mode: the fake printer adapter and the fake LDAP.
 
 $script:PrnJob = $null
 $script:PrnUiBuilt = $false
@@ -23,7 +25,7 @@ function Get-PrnDnsDomain { $d = $null; try { $d = Read-AVDTuneJson (Join-Path $
 
 # ---------------------------------------------------------------- the job
 $script:PrnWorkerText = @'
-param($AppRoot, $FakeDir, $Root, $Kind, $Server, $Plan, $Selected, $Policy, $Gate, $Sync, $User, $Account, $Dc, $SharedP, $SharedLdap)
+param($AppRoot, $FakeDir, $Root, $Kind, $Server, $Plan, $Selected, $Policy, $Gate, $Sync, $User, $Account, $Dc, $SharedP, $SharedLdap, $Remove, $SharedMachine)
 $ErrorActionPreference = 'Stop'
 foreach ($n in 'AVDTune', 'AVDTune.Updates', 'AVDTune.Directory', 'AVDTune.Start', 'AVDTune.Custom', 'AVDTune.Printers') { Import-Module (Join-Path $AppRoot "Modules\$n.psm1") -Force }
 try {
@@ -50,6 +52,8 @@ try {
             $Sync.Text = 'read'
             $signers = @(Get-AVDTunePrinterSigners -Root $Root)
             $inv = Invoke-AVDTunePrinterSession -P $p -Server $Server -Credential $Account -Block { param($s) $i = Get-AVDTunePrinterInventory -P $p -Session $s -Server $Server; $Sync.Text = 'check'; Add-AVDTunePrinterSignatures -P $p -Session $s -Inventory $i -Root $Root -Signers $signers }
+            $Sync.Auth = 'ok'   # the account worked (a kept account of the start sequence is forgotten only when it did not)
+            Save-AVDTunePrinterLastRead -Root $Root -Inventory $inv   # for the Updates page and the readiness row; never a source of an install
             $Sync.Text = 'local'
             [pscustomobject]@{ Inventory = $inv; Check = @(Get-AVDTunePrinterDriverStatus -P $p -Drivers @(Get-AVDTunePrinterDriverPlan -Inventory $inv)); Warnings = @(Get-AVDTunePrinterPolicyWarnings -P $p) }
         }
@@ -63,43 +67,76 @@ try {
             $r = Invoke-AVDTunePrinterRun -Machine $m -P $p -Root $Root -Mode Apply -Drivers @($Plan) -Credential $Account -Policy:$Policy -User $User -SnapshotId $Gate.SnapshotId
             [pscustomobject]@{ Run = $r.Run; Check = $r.Check }
         }
+        'Maintain' {
+            # Updates page: the same checks as Apply (fresh read against the confirmed plan, then the checked export with the confirmed signer per driver), in maintenance mode;
+            # the drivers to remove are checked against this fresh read inside Invoke-AVDTunePrinterMaintenance
+            Assert-AVDTunePrinterServerAllowed -Server $Server -Allowed $allowed
+            $Sync.Text = 'read'
+            $inv = Invoke-AVDTunePrinterSession -P $p -Server $Server -Credential $Account -Block { param($s) Get-AVDTunePrinterInventory -P $p -Session $s -Server $Server }
+            $Sync.Auth = 'ok'
+            $names = @(@($Plan) | ForEach-Object { [string]$_.Name })
+            $diff = @(Compare-AVDTunePrinterPlan -Confirmed @($Plan) -Fresh @(Get-AVDTunePrinterDriverPlan -Inventory $inv | Where-Object { $_.Name -in $names }))
+            if ($diff.Count) { throw "The print server answers differently than in the confirmed plan; nothing was installed. Read the print server again. $($diff -join '; ')" }
+            $Sync.Text = 'run'
+            $r = Invoke-AVDTunePrinterMaintenance -Machine $(if ($SharedMachine) { $SharedMachine } else { $m }) -P $p -Root $Root -Drivers @($Plan) -Remove @($Remove) -Inventory $inv -Credential $Account -User $User -SnapshotId $Gate.SnapshotId
+            [pscustomobject]@{ Run = [pscustomobject]@{ Results = @($r.Results) }; Check = @($r.Check); Removed = @($r.Removed) }
+        }
         'Undo' { $Sync.Text = 'run'; $r = Invoke-AVDTunePrinterRun -Machine $m -P $p -Root $Root -Mode Undo -User $User -SnapshotId $Gate.SnapshotId; [pscustomobject]@{ Run = $r.Run; Check = @() } }
     }
 }
 finally { $Account = $null }
 '@
 
-function Start-PrnJob([string]$Kind, [object[]]$Plan = @()) {
+function New-PrnUpdAccount {
+    # The account for a job started on the Updates page: the typed password, else the account of the start sequence kept for this session (#75; only for the pinned
+    # domain controller). The SecureString is a copy that the job disposes; nothing is written anywhere.
+    $user = [string](Get-AVDTuneProp (Get-PrnDc) 'User'); $fromSession = $false
+    $secure = $ui.PwdUpdPrn.SecurePassword
+    $ui.PwdUpdPrn.Clear()
+    if ($secure.Length -eq 0) {
+        $secure.Dispose()
+        $kept = $null; try { $kept = Get-AVDTuneSessionDcAccount -Pins (Get-AVDTuneDcPins (Get-AVDTuneEnvironment $script:StateRoot)) } catch { }
+        if ($kept) { $user = [string]$kept.User; $secure = $kept.Password; $fromSession = $true }
+        elseif ($script:TestMode) { $secure = New-Object System.Security.SecureString }
+        else { throw (T 'prn.upd.err.password') }
+    }
+    try { $upn = ConvertTo-AVDTunePrinterUpn -User $user -DnsDomain (Get-PrnDnsDomain) } catch { $secure.Dispose(); throw }
+    [pscustomobject]@{ User = $upn; Ldap = $user; Password = $secure; FromSession = $fromSession }
+}
+
+function Start-PrnJob([string]$Kind, [object[]]$Plan = @(), [string[]]$Remove = @(), [switch]$Updates) {
     if ($script:PrnJob) { throw (T 'prn.err.busy') }
     $writes = $Kind -notin $script:PrnReadKinds
     if ($writes) {
         if (-not (Test-AVDTuneWriteAllowed)) { throw (T 'shell.readonly') }
         Assert-NoOtherWriter
     }
-    $server = if ($Kind -eq 'Apply' -and $script:PrnInventory) { [string]$script:PrnInventory.Server } else { ([string]$ui.CmbPrnServer.Text).Trim() }   # Apply installs from the server that was read (the plan belongs to it)
-    if ($Kind -in 'Read', 'Apply' -and -not (Test-AVDTunePrinterServerName $server)) { throw (T 'prn.err.server') }
+    if ($Kind -eq 'Maintain' -and -not $script:PrnInventory) { throw (T 'prn.upd.err.unread') }
+    $server = if ($Kind -in 'Apply', 'Maintain' -and $script:PrnInventory) { [string]$script:PrnInventory.Server } elseif ($Updates) { [string]$ui.CmbUpdPrnServer.SelectedItem } else { ([string]$ui.CmbPrnServer.Text).Trim() }   # Apply and Maintain work on the server that was read (the plan belongs to it)
+    if ($Kind -in 'Read', 'Apply', 'Maintain' -and -not (Test-AVDTunePrinterServerName $server)) { throw (T 'prn.err.server') }
     $account = $null
-    if ($Kind -ne 'Undo') {
+    if ($Updates) { $account = New-PrnUpdAccount }
+    elseif ($Kind -ne 'Undo') {
         $user = ([string]$ui.TxtPrnUser.Text).Trim()
         $upn = ConvertTo-AVDTunePrinterUpn -User $user -DnsDomain (Get-PrnDnsDomain)   # throws before the password is taken
         $secure = $ui.PwdPrn.SecurePassword   # a copy: disposed when the job has ended
         $ui.PwdPrn.Clear()
         if ($secure.Length -eq 0 -and -not $script:TestMode) { $secure.Dispose(); throw (T 'prn.err.password') }
-        $account = [pscustomobject]@{ User = $upn; Ldap = $user; Password = $secure }
+        $account = [pscustomobject]@{ User = $upn; Ldap = $user; Password = $secure; FromSession = $false }
     }
-    $selected = @(Get-PrnSelected)
+    $selected = @(if (-not $Updates) { Get-PrnSelected })
     $sync = [hashtable]::Synchronized(@{ Text = '' })
     $ps = New-AVDTunePowerShell
-    [void]$ps.AddScript($script:PrnWorkerText).AddArgument($script:AppRoot).AddArgument($script:SwFakeDir).AddArgument($script:StateRoot).AddArgument($Kind).AddArgument($server).AddArgument(@($Plan)).AddArgument($selected).AddArgument([bool]$ui.ChkPrnPolicy.IsChecked).AddArgument((Get-AVDTuneWriteGate)).AddArgument($sync).AddArgument((Get-SwUser)).AddArgument($account).AddArgument([string](Get-AVDTuneProp (Get-PrnDc) 'Server')).AddArgument($(if ($script:TestMode) { $script:PrnFake } else { $null })).AddArgument($(if ($script:TestMode) { $script:Services.Ldap } else { $null }))
+    [void]$ps.AddScript($script:PrnWorkerText).AddArgument($script:AppRoot).AddArgument($script:SwFakeDir).AddArgument($script:StateRoot).AddArgument($Kind).AddArgument($server).AddArgument(@($Plan)).AddArgument($selected).AddArgument([bool](-not $Updates -and $ui.ChkPrnPolicy.IsChecked)).AddArgument((Get-AVDTuneWriteGate)).AddArgument($sync).AddArgument((Get-SwUser)).AddArgument($account).AddArgument([string](Get-AVDTuneProp (Get-PrnDc) 'Server')).AddArgument($(if ($script:TestMode) { $script:PrnFake } else { $null })).AddArgument($(if ($script:TestMode) { $script:Services.Ldap } else { $null })).AddArgument(@($Remove)).AddArgument($(if ($script:TestMode) { $script:Machine } else { $null }))
     $task = Start-AVDTuneUiTask -Kind "printers-$($Kind.ToLower())" -Title (T "prn.task.$($Kind.ToLower())") -Step (T 'prn.task.start')
-    $script:PrnJob = @{ PS = $ps; Handle = $ps.BeginInvoke(); Kind = $Kind; Sync = $sync; Task = $task; Account = $account }
+    $script:PrnJob = @{ PS = $ps; Handle = $ps.BeginInvoke(); Kind = $Kind; Sync = $sync; Task = $task; Account = $account; FromSession = [bool]($account -and $account.FromSession) }
     if ($writes) { Set-ShutdownBlock $true }
     Set-PrnBusy $true
 }
 
 function Set-PrnBusy([bool]$Busy) {
-    if (-not $script:PrnUiBuilt) { return }
-    foreach ($b in $ui.BtnPrnFind, $ui.BtnPrnRead, $ui.BtnPrnApply, $ui.BtnPrnUndo, $ui.PanelPrnPrinters) { $b.IsEnabled = -not $Busy }
+    if ($script:PrnUiBuilt) { foreach ($b in $ui.BtnPrnFind, $ui.BtnPrnRead, $ui.BtnPrnApply, $ui.BtnPrnUndo, $ui.PanelPrnPrinters) { $b.IsEnabled = -not $Busy } }
+    if ($script:PrnUpdBuilt) { foreach ($b in $ui.BtnUpdPrnRead, $ui.BtnUpdPrnUpdate, $ui.BtnUpdPrnRemove, $ui.PanelUpdPrnRows) { $b.IsEnabled = -not $Busy } }
 }
 
 function Complete-PrnJob {
@@ -116,6 +153,8 @@ function Complete-PrnJob {
     }
     catch { $err = $_.Exception.Message }
     finally { $job.PS.Dispose(); if ($job.Account) { $job.Account.Password.Dispose() } }
+    # the kept account of the start sequence did not get as far as a read of the server: it is forgotten, the next job asks for the password (#75, as on the App Masking page)
+    if ($err -and $job.FromSession -and [string]$job.Sync.Auth -ne 'ok') { Clear-AVDTuneSessionDcAccount }
     Set-PrnBusy $false
     $failed = [bool]$err; $summary = ''
     switch ($job.Kind) {
@@ -135,15 +174,21 @@ function Complete-PrnJob {
         default {
             $run = if ($result) { $result.Run } else { $null }
             if ($run) { foreach ($r in $run.Results) { Register-StepResult $r } }
-            if ($result) { $script:PrnCheck = @($result.Check) }
+            $check = @(if ($result) { $result.Check } else { $script:PrnCheck })
+            if ($result -and $job.Kind -eq 'Maintain') {
+                # only the drivers of this run were checked: the others keep their row, removed ones lose it
+                $touched = @($check | ForEach-Object { $_.Name }) + @($result.Removed)
+                $script:PrnCheck = @(@($script:PrnCheck | Where-Object { $_.Name -notin $touched }) + $check)
+            }
+            elseif ($result) { $script:PrnCheck = $check }
             $ch = if ($run) { @($run.Results | Where-Object { $_.Status -eq 'Changed' }).Count } else { 0 }
             $bad = if ($run) { @($run.Results | Where-Object { $_.Status -eq 'Failed' }) } else { @() }
-            $wrong = @($script:PrnCheck | Where-Object { -not $_.Ok })
+            $wrong = @($check | Where-Object { -not $_.Ok })
             if ($bad.Count -gt 0 -or $wrong.Count -gt 0) { $failed = $true }
             $summary = T 'prn.run.done' $ch $bad.Count
             if ($bad.Count -gt 0) { $summary += ' ' + $bad[0].Title + ': ' + $bad[0].Message }
             if ($wrong.Count -gt 0) { $summary += ' ' + (T 'prn.check.wrong' (@($wrong | ForEach-Object { "$($_.Name) ($($_.Installed) / $($_.Version))" }) -join ', ')) }
-            foreach ($w in @($script:PrnCheck | Where-Object { $_.Warning })) { $summary += " $($w.Name): $($w.Warning)" }
+            foreach ($w in @($check | Where-Object { $_.Warning })) { $summary += " $($w.Name): $($w.Warning)" }
             if ($err) { $summary += " $err" }
             Show-Toast $summary
             [void](Add-AVDTuneProtocolNote -Protocol $script:Protocol -Group 'printers' -Subject $summary)
@@ -153,6 +198,7 @@ function Complete-PrnJob {
     }
     Complete-AVDTuneUiTask $job.Task -Failed:$failed -Summary $summary
     if ($script:PrnUiBuilt) { $ui.TxtPrnState.Text = $summary; Update-PrnView }
+    if ($script:PrnUpdBuilt) { $ui.TxtUpdPrnState.Text = $summary; Update-PrnUpdCard }
 }
 $script:Timer.Add_Tick({ try { Complete-PrnJob } catch { Show-Error $_.Exception.Message } })
 
@@ -217,7 +263,17 @@ function Get-PrnSignerName([string]$Subject) { $cn = Get-AVDTunePrinterDnPart $S
 function Invoke-PrnApply {
     $plan = @(Get-PrnPlan)
     if ($plan.Count -eq 0) { Show-Toast (T 'prn.none'); return }
-    # a publisher that is not WHQL and not allowed yet: the administrator allows it (saved in config, protocol) or its drivers stay out of the plan
+    $plan = @(Confirm-PrnSigners $plan)
+    if ($plan.Count -eq 0) { Show-Toast (T 'prn.none'); return }
+    $list = (@($plan[0..([Math]::Min(12, $plan.Count) - 1)] | ForEach-Object { "- $($_.Name) $($_.Version), $(T 'prn.signed' (Get-PrnSignerName $_.Signer))" }) -join "`n") + $(if ($plan.Count -gt 12) { "`n..." } else { '' })
+    $ask = (T 'prn.ask.apply' $plan.Count $script:PrnInventory.Server $list) + $(if ($ui.ChkPrnPolicy.IsChecked) { "`n`n" + (T 'prn.ask.policy') } else { '' })
+    if (-not (Confirm-Action $ask (T 'nav.printers'))) { return }
+    Start-PrnJob 'Apply' $plan
+}
+
+function Confirm-PrnSigners([object[]]$Plan) {
+    # a publisher that is not WHQL and not allowed yet: the administrator allows it (saved in config, protocol) or its drivers stay out of the plan. Returns the allowed part.
+    $plan = @($Plan)
     foreach ($g in @($plan | Where-Object { -not $_.Allowed } | Group-Object Thumbprint)) {
         $f = $g.Group[0]
         if (Confirm-Action (T 'prn.ask.signer' (Get-PrnSignerName $f.Signer) $f.Thumbprint (@($g.Group | ForEach-Object { $_.Name }) -join ', ')) (T 'nav.printers')) {
@@ -226,12 +282,7 @@ function Invoke-PrnApply {
             foreach ($d in $g.Group) { $d.Allowed = $true }
         }
     }
-    $plan = @($plan | Where-Object { $_.Allowed })
-    if ($plan.Count -eq 0) { Show-Toast (T 'prn.none'); return }
-    $list = (@($plan[0..([Math]::Min(12, $plan.Count) - 1)] | ForEach-Object { "- $($_.Name) $($_.Version), $(T 'prn.signed' (Get-PrnSignerName $_.Signer))" }) -join "`n") + $(if ($plan.Count -gt 12) { "`n..." } else { '' })
-    $ask = (T 'prn.ask.apply' $plan.Count $script:PrnInventory.Server $list) + $(if ($ui.ChkPrnPolicy.IsChecked) { "`n`n" + (T 'prn.ask.policy') } else { '' })
-    if (-not (Confirm-Action $ask (T 'nav.printers'))) { return }
-    Start-PrnJob 'Apply' $plan
+    @($plan | Where-Object { $_.Allowed })
 }
 
 function Update-PrnDrivers {
@@ -276,12 +327,131 @@ function Update-PrnPage {
     Update-PrnView
 }
 
+# ---------------------------------------------------------------- maintenance on the Updates page (plan 3b)
+$script:PrnUpdBuilt = $false
+$script:PrnUpdChecked = @{}   # 'status|driver' -> checked, kept while the rows are built again
+
+function Get-PrnUpdRows {
+    # the drivers of the read in this session against what AVDTune installed from that server: New, Changed, Same, Gone (Removable only for drivers AVDTune added)
+    if (-not $script:PrnInventory) { return @() }
+    $inv = $script:PrnInventory
+    @(Get-AVDTunePrinterMaintenance -Installed (Get-AVDTunePrinterState -Root $script:StateRoot).Drivers -Server @(Get-AVDTunePrinterDriverPlan -Inventory $inv) -ReadServer ([string]$inv.Server) -InUse @(Get-AVDTunePrinterInUse -Inventory $inv) -Added @(Get-AVDTunePrinterAdded -Root $script:StateRoot))
+}
+
 function Get-PrnUpdateNotes {
-    # Maintenance on the Updates page (skeleton, plan 3b): the drivers of the last read of the print server against what AVDTune installed
+    # The line of the Updates page: the drivers of the last read of the print server against what AVDTune installed
     $saved = Get-AVDTunePrinterState -Root $script:StateRoot
     if (-not $script:PrnInventory) { if (@($saved.Drivers).Count) { return , (T 'prn.upd.unread' @($saved.Drivers).Count (@($saved.Servers) -join ', ')) }; return @() }
-    $cmp = @(Compare-AVDTunePrinterDrivers -Installed $saved.Drivers -Server @(Get-AVDTunePrinterDriverPlan -Inventory $script:PrnInventory))
-    $todo = @($cmp | Where-Object { $_.Status -in 'New', 'Changed' })
-    if ($todo.Count -eq 0) { return , (T 'prn.upd.same' $script:PrnInventory.Server) }
-    , (T 'prn.upd.todo' $todo.Count $script:PrnInventory.Server (@($todo | ForEach-Object { "$($_.Name) $(if ($_.Installed) { $_.Installed } else { '-' }) -> $($_.ServerVersion)" }) -join '; '))
+    $rows = @(Get-PrnUpdRows)
+    $todo = @($rows | Where-Object { $_.Status -in 'New', 'Changed' }); $gone = @($rows | Where-Object { $_.Status -eq 'Gone' })
+    if ($todo.Count -eq 0 -and $gone.Count -eq 0) { return , (T 'prn.upd.same' $script:PrnInventory.Server) }
+    $out = @()
+    if ($todo.Count) { $out += T 'prn.upd.todo' $todo.Count $script:PrnInventory.Server (@($todo | ForEach-Object { "$($_.Name) $(if ($_.Installed) { $_.Installed } else { '-' }) -> $($_.ServerVersion)" }) -join '; ') }
+    if ($gone.Count) { $out += T 'prn.upd.gone' $gone.Count $script:PrnInventory.Server (@($gone | ForEach-Object { $_.Name }) -join '; ') }
+    @($out)
+}
+
+function Build-PrnUpdCard {
+    if ($script:PrnUpdBuilt) { return }
+    $c = New-MaskCard (T 'prn.upd.card') (T 'prn.upd.card.hint')
+    $ui.CmbUpdPrnServer = New-Object System.Windows.Controls.ComboBox; $ui.CmbUpdPrnServer.Padding = '8,6'   # not editable: only servers AVDTune installed from (the job still asks AD)
+    [System.Windows.Automation.AutomationProperties]::SetName($ui.CmbUpdPrnServer, (T 'prn.field.server'))
+    [void]$c.Panel.Children.Add((New-MaskLabeled (T 'prn.field.server') $ui.CmbUpdPrnServer))
+    $ui.PwdUpdPrn = New-Object System.Windows.Controls.PasswordBox; $ui.PwdUpdPrn.Padding = '8,6'; $ui.PwdUpdPrn.MaxLength = 256
+    [System.Windows.Automation.AutomationProperties]::SetName($ui.PwdUpdPrn, (T 'prn.upd.field.password'))
+    [void]$c.Panel.Children.Add((New-MaskLabeled (T 'prn.upd.field.password') $ui.PwdUpdPrn))
+    $ui.TxtUpdPrnAccount = New-MaskText '' 'Hint' '0,2,0,0'; [void]$c.Panel.Children.Add($ui.TxtUpdPrnAccount)
+    $row = New-Object System.Windows.Controls.StackPanel; $row.Orientation = 'Horizontal'; $row.Margin = '0,10,0,0'
+    $ui.BtnUpdPrnRead = New-MaskButton (T 'prn.upd.btn.read') (T 'prn.upd.btn.read.tip')
+    [void]$row.Children.Add($ui.BtnUpdPrnRead); [void]$c.Panel.Children.Add($row)
+    $ui.PanelUpdPrnRows = New-Object System.Windows.Controls.StackPanel; $ui.PanelUpdPrnRows.Margin = '0,10,0,0'; [void]$c.Panel.Children.Add($ui.PanelUpdPrnRows)
+    $row2 = New-Object System.Windows.Controls.StackPanel; $row2.Orientation = 'Horizontal'; $row2.Margin = '0,10,0,0'
+    $ui.BtnUpdPrnUpdate = Set-AVDTuneWriterButton (New-MaskButton (T 'prn.upd.btn.update') (T 'prn.upd.btn.update.tip') $true)
+    $ui.BtnUpdPrnRemove = Set-AVDTuneWriterButton (New-MaskButton (T 'prn.upd.btn.remove') (T 'prn.upd.btn.remove.tip'))
+    foreach ($b in $ui.BtnUpdPrnUpdate, $ui.BtnUpdPrnRemove) { [void]$row2.Children.Add($b) }
+    [void]$c.Panel.Children.Add($row2)
+    $ui.TxtUpdPrnState = New-MaskText '' 'Hint' '0,8,0,0'; [void]$c.Panel.Children.Add($ui.TxtUpdPrnState)
+    $ui.CardUpdPrn = $c.Card
+    # below the card "Available" of the Updates page (its notes line names the printer drivers too)
+    $available = $ui.TxtUpdNotes.Parent.Parent; $pagePanel = $available.Parent
+    $pagePanel.Children.Insert($pagePanel.Children.IndexOf($available) + 1, $c.Card)
+    Add-Click $ui.BtnUpdPrnRead { Start-PrnJob 'Read' -Updates }
+    Add-Click $ui.BtnUpdPrnUpdate { Invoke-PrnUpdUpdate }
+    Add-Click $ui.BtnUpdPrnRemove { Invoke-PrnUpdRemove }
+    $script:PrnUpdBuilt = $true
+}
+
+function Get-PrnUpdChecked([string]$Status) {
+    if (-not $script:PrnUpdBuilt) { return @() }
+    @($ui.PanelUpdPrnRows.Children | Where-Object { $_ -is [System.Windows.Controls.CheckBox] -and $_.IsChecked -and $_.IsEnabled -and ([string]$_.Tag).StartsWith("$Status|") } | ForEach-Object { ([string]$_.Tag).Substring($Status.Length + 1) })
+}
+
+function Update-PrnUpdCard {
+    # shown when the environment has a domain and AVDTune installed printer drivers from a server; called by Update-UpdatesView and after every printer job
+    Build-PrnUpdCard
+    $saved = Get-AVDTunePrinterState -Root $script:StateRoot
+    $show = (Get-PrnAvailability).Domain -and @($saved.Servers).Count -gt 0
+    $ui.CardUpdPrn.Visibility = ConvertTo-Vis $show
+    if (-not $show) { return }
+    $names = @($saved.Servers)
+    if ((@($ui.CmbUpdPrnServer.ItemsSource) -join '|') -ne ($names -join '|')) { $ui.CmbUpdPrnServer.ItemsSource = $names }
+    if ($ui.CmbUpdPrnServer.SelectedIndex -lt 0) { $ui.CmbUpdPrnServer.SelectedIndex = $(if ($script:PrnInventory -and [string]$script:PrnInventory.Server -in $names) { [Array]::IndexOf($names, [string]$script:PrnInventory.Server) } else { 0 }) }
+    $kept = $null; try { $kept = Get-AVDTuneSessionDcAccount -Pins (Get-AVDTuneDcPins (Get-AVDTuneEnvironment $script:StateRoot)) -Info } catch { }
+    $ui.TxtUpdPrnAccount.Text = if ($kept) { T 'prn.upd.account.kept' $kept.User } else { T 'prn.upd.account.ask' ([string](Get-AVDTuneProp (Get-PrnDc) 'User')) }
+    $ui.PanelUpdPrnRows.Children.Clear()
+    $rows = @(Get-PrnUpdRows)
+    if (-not $script:PrnInventory) {
+        $last = @(Get-AVDTunePrinterLastRead -Root $script:StateRoot | Where-Object { $_.Server -in $names } | Sort-Object At | Select-Object -Last 1)
+        [void]$ui.PanelUpdPrnRows.Children.Add((New-MaskText $(if ($last.Count) { T 'prn.upd.lastread' $last[0].Server ([datetime]::Parse($last[0].At, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind)).ToString('yyyy-MM-dd HH:mm') } else { T 'prn.upd.neverread' }) 'Hint'))
+    }
+    else {
+        foreach ($r in @($rows | Where-Object { $_.Status -ne 'Same' })) {
+            $key = "$($r.Status)|$($r.Name)"
+            $cb = New-Object System.Windows.Controls.CheckBox; $cb.Tag = $key; $cb.Margin = '0,3,0,3'
+            $cb.Content = switch ($r.Status) {
+                'New' { T 'prn.upd.row.new' $r.Name $r.ServerVersion }
+                'Changed' { T 'prn.upd.row.changed' $r.Name $r.Installed $r.ServerVersion }
+                default { if ($r.Removable) { T 'prn.upd.row.gone' $r.Name $r.Installed } else { T 'prn.upd.row.gone.kept' $r.Name $r.Installed } }
+            }
+            $cb.IsEnabled = ($r.Status -ne 'Gone' -or $r.Removable) -and -not $script:PrnJob
+            # default: a changed driver is selected; a new one (maybe of a printer left out on purpose) and a removal are chosen by the administrator
+            $cb.IsChecked = [bool]($cb.IsEnabled -and $(if ($script:PrnUpdChecked.ContainsKey($key)) { $script:PrnUpdChecked[$key] } else { $r.Status -eq 'Changed' }))
+            $cb.Add_Click({ param($s) $script:PrnUpdChecked[[string]$s.Tag] = [bool]$s.IsChecked })
+            [void]$ui.PanelUpdPrnRows.Children.Add($cb)
+        }
+        $same = @($rows | Where-Object { $_.Status -eq 'Same' }).Count
+        [void]$ui.PanelUpdPrnRows.Children.Add((New-MaskText (T 'prn.upd.rows.same' $same $script:PrnInventory.Server) 'Hint' '0,4,0,0'))
+    }
+    $ui.BtnUpdPrnUpdate.Visibility = ConvertTo-Vis (@($rows | Where-Object { $_.Status -in 'New', 'Changed' }).Count -gt 0)
+    $ui.BtnUpdPrnRemove.Visibility = ConvertTo-Vis (@($rows | Where-Object { $_.Status -eq 'Gone' -and $_.Removable }).Count -gt 0)
+}
+
+function Invoke-PrnUpdUpdate {
+    # new and changed drivers like a software update: the plan of the read with its signers is confirmed, the job reads the server again and installs only what still matches
+    if (-not (Test-AVDTuneWriteAllowed)) { throw (T 'shell.readonly') }
+    Assert-NoOtherWriter
+    $names = @(Get-PrnUpdChecked 'New') + @(Get-PrnUpdChecked 'Changed')
+    $plan = @(if ($script:PrnInventory -and $names.Count) { Get-AVDTunePrinterDriverPlan -Inventory $script:PrnInventory | Where-Object { $_.Name -in $names } })
+    if ($plan.Count -eq 0) { Show-Toast (T 'prn.upd.none'); return }
+    $plan = @(Confirm-PrnSigners $plan)
+    if ($plan.Count -eq 0) { Show-Toast (T 'prn.upd.none'); return }
+    $list = (@($plan[0..([Math]::Min(12, $plan.Count) - 1)] | ForEach-Object { "- $($_.Name) $($_.Version), $(T 'prn.signed' (Get-PrnSignerName $_.Signer))" }) -join "`n") + $(if ($plan.Count -gt 12) { "`n..." } else { '' })
+    if (-not (Confirm-Action (T 'prn.upd.ask.update' $plan.Count $script:PrnInventory.Server $list) (T 'prn.upd.card'))) { return }
+    Start-PrnJob 'Maintain' $plan -Updates
+}
+
+function Invoke-PrnUpdRemove {
+    # drivers no printer of the server uses any more: only after this confirmation, and the job checks each one against a fresh read and the files of AVDTune
+    if (-not (Test-AVDTuneWriteAllowed)) { throw (T 'shell.readonly') }
+    Assert-NoOtherWriter
+    $names = @(Get-PrnUpdChecked 'Gone')
+    if ($names.Count -eq 0) { Show-Toast (T 'prn.upd.none'); return }
+    if (-not (Confirm-Action (T 'prn.upd.ask.remove' $names.Count $script:PrnInventory.Server ((@($names | ForEach-Object { "- $_" })) -join "`n")) (T 'prn.upd.card'))) { return }
+    Start-PrnJob 'Maintain' @() -Remove $names -Updates
+}
+
+function Get-PrnFinishNote {
+    # Finish page: installed printer drivers older than those of the print server at its last read (nothing is asked from the server here)
+    $lag = Get-AVDTunePrinterDriverLag -Root $script:StateRoot
+    if ($lag -and @($lag.Older).Count) { T 'prn.finish.older' @($lag.Older).Count (@($lag.Servers) -join ', ') $lag.At.ToString('yyyy-MM-dd HH:mm') } else { '' }
 }

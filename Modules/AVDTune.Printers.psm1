@@ -24,6 +24,7 @@
 Set-StrictMode -Version 2.0
 Import-Module (Join-Path $PSScriptRoot 'AVDTune.psm1')
 Import-Module (Join-Path $PSScriptRoot 'AVDTune.Updates.psm1')
+Import-Module (Join-Path $PSScriptRoot 'AVDTune.UpdateBlock.psm1')   # the maintenance mode for the driver maintenance of the Updates page
 Import-Module (Join-Path $PSScriptRoot 'AVDTune.Directory.psm1')
 Import-Module (Join-Path $PSScriptRoot 'AVDTune.Custom.psm1')   # registry adapter and the host name rule
 
@@ -637,6 +638,192 @@ function Invoke-AVDTunePrinterRun {
     }
     if ($changed) { Write-AVDTunePrinterUndo $Root $undo }
     [pscustomobject]@{ Run = $run; Check = $check }
+}
+
+#endregion
+
+#region maintenance (Updates page; plan 3b, issue #86)
+
+function Get-AVDTunePrinterLastReadPath([string]$Root) { Join-Path $Root 'config\printers-lastread.json' }
+
+function Get-AVDTunePrinterLastRead {
+    <#
+        config\printers-lastread.json: per print server the last read (time, the drivers of its shared printers with their version, the driver names any shared printer uses).
+        It is only shown and compared (Updates page, readiness); nothing is ever installed from it. Types, names and versions are checked, anything else is dropped.
+    #>
+    param([string]$Root = (Get-AVDTuneRoot))
+    $j = $null; try { $j = Read-AVDTuneJson (Get-AVDTunePrinterLastReadPath $Root) } catch { }
+    @(@(Get-AVDTuneProp $j 'Reads') | Select-Object -First 50 | Where-Object { $_ -and (Get-AVDTuneProp $_ 'Server') -is [string] -and (Test-AVDTunePrinterServerName $_.Server) -and (Get-AVDTuneProp $_ 'At') -is [string] -and $_.At.Length -le 40 } | ForEach-Object {
+            $at = [datetime]::MinValue
+            if ([datetime]::TryParse($_.At, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind, [ref]$at)) {
+                $drivers = @(@(Get-AVDTuneProp $_ 'Drivers') | Select-Object -First $script:MaxFiles | Where-Object { $_ -and (Get-AVDTuneProp $_ 'Name') -is [string] -and (Test-AVDTunePrinterDriverName $_.Name) -and (Get-AVDTuneProp $_ 'Version') -is [string] -and $null -ne (Compare-AVDTunePrinterVersion $_.Version $_.Version) } | ForEach-Object { [pscustomobject]@{ Name = $_.Name; Version = $_.Version } })
+                $inUse = @(@(Get-AVDTuneProp $_ 'InUse') | Select-Object -First $script:MaxFiles | Where-Object { $_ -is [string] -and (Test-AVDTunePrinterDriverName $_) })
+                [pscustomobject]@{ Server = $_.Server.ToLowerInvariant(); At = $_.At; Drivers = $drivers; InUse = $inUse }
+            }
+        })
+}
+
+function Get-AVDTunePrinterInUse {
+    # The driver names any shared printer of the read uses, also printers with a problem: such a driver is never "gone"
+    param([Parameter(Mandatory)]$Inventory)
+    @($Inventory.Printers | ForEach-Object { [string]$_.Driver } | Where-Object { Test-AVDTunePrinterDriverName $_ } | Select-Object -Unique)
+}
+
+function Save-AVDTunePrinterLastRead {
+    # After a read of the server: its entry is replaced (other servers stay). A driver whose printers all have a problem is in InUse (so it is not "gone") but not in Drivers.
+    param([string]$Root = (Get-AVDTuneRoot), [Parameter(Mandatory)]$Inventory)
+    $server = ([string]$Inventory.Server).ToLowerInvariant()
+    if (-not (Test-AVDTunePrinterServerName $server)) { throw 'The read has no valid print server.' }
+    $entry = [ordered]@{
+        Server = $server; At = [string]$Inventory.At
+        Drivers = @(Get-AVDTunePrinterDriverPlan -Inventory $Inventory | Where-Object { (Test-AVDTunePrinterDriverName $_.Name) -and $_.Version } | ForEach-Object { [ordered]@{ Name = $_.Name; Version = $_.Version } })
+        InUse = @(Get-AVDTunePrinterInUse -Inventory $Inventory)
+    }
+    $rest = @(Get-AVDTunePrinterLastRead -Root $Root | Where-Object { $_.Server -ne $server })
+    Write-AVDTuneFile (Get-AVDTunePrinterLastReadPath $Root) ([ordered]@{ Schema = 1; Reads = @($rest) + @($entry) } | ConvertTo-Json -Depth 6)
+}
+
+function Compare-AVDTunePrinterVersion([string]$A, [string]$B) {
+    # -1 / 0 / 1 for two a.b.c.d versions (parts up to 65535), $null when one of them is not such a version
+    $rx = '\A\d{1,5}(\.\d{1,5}){3}\z'
+    if ($A.Length -gt 30 -or $B.Length -gt 30 -or -not [regex]::IsMatch($A, $rx, 'None', $script:Rx) -or -not [regex]::IsMatch($B, $rx, 'None', $script:Rx)) { return $null }
+    $x = $A.Split('.'); $y = $B.Split('.')
+    for ($i = 0; $i -lt 4; $i++) { $c = ([int]$x[$i]).CompareTo([int]$y[$i]); if ($c -ne 0) { return $c } }
+    0
+}
+
+function Get-AVDTunePrinterMaintenance {
+    <#
+        The maintenance rows of ONE read server: its drivers (-Server: a plan of Get-AVDTunePrinterDriverPlan) against what AVDTune installed from it (-Installed: Drivers of
+        config\printers.json). New, Changed (Older: the installed version is lower), Same, and Gone: installed from this server and no shared printer of it uses the driver
+        any more (-InUse, Get-AVDTunePrinterInUse). Removable: a gone driver that AVDTune added itself (-Added: the names of the undo record with Existed = false); a driver
+        that was on the master before AVDTune is never removed.
+    #>
+    param([object[]]$Installed, [object[]]$Server, [Parameter(Mandatory)][string]$ReadServer, [string[]]$InUse = @(), [string[]]$Added = @())
+    $srv = $ReadServer.ToLowerInvariant()
+    $mine = @(@($Installed) | Where-Object { $_ -and [string]$_.Server -eq $srv })
+    $plan = @(@($Server) | Where-Object { $_ -and [string]$_.Server -eq $srv })
+    $rows = New-Object System.Collections.ArrayList
+    foreach ($c in @(Compare-AVDTunePrinterDrivers -Installed $mine -Server $plan | Where-Object { $_.Status -ne 'Gone' })) {
+        $cmp = Compare-AVDTunePrinterVersion ([string]$c.Installed) ([string]$c.ServerVersion)
+        [void]$rows.Add([pscustomobject]@{ Name = $c.Name; Server = $c.Server; Installed = $c.Installed; ServerVersion = $c.ServerVersion; Status = $c.Status; Older = [bool]($c.Status -eq 'Changed' -and ($null -eq $cmp -or $cmp -lt 0)); Removable = $false })
+    }
+    $used = @(@($InUse) + @($plan | ForEach-Object { $_.Name }) | ForEach-Object { ([string]$_).ToLowerInvariant() })
+    $mineAdded = @($Added | ForEach-Object { ([string]$_).ToLowerInvariant() })
+    foreach ($i in $mine) {
+        $k = ([string]$i.Name).ToLowerInvariant()
+        if ($k -in $used) { continue }
+        [void]$rows.Add([pscustomobject]@{ Name = $i.Name; Server = $srv; Installed = $i.Version; ServerVersion = ''; Status = 'Gone'; Older = $false; Removable = [bool]($k -in $mineAdded -and (Test-AVDTunePrinterDriverName $i.Name)) })
+    }
+    @($rows | Sort-Object Name)
+}
+
+function Get-AVDTunePrinterAdded {
+    # The names of the drivers AVDTune added itself (undo record with Existed = false), lower case
+    param([string]$Root = (Get-AVDTuneRoot))
+    $u = Read-AVDTunePrinterUndo $Root
+    @(foreach ($k in @($u.Drivers.Keys)) { $r = $u.Drivers[$k]; if ($r -and (Get-AVDTuneProp $r 'Name') -is [string] -and (Get-AVDTuneProp $r 'Existed') -is [bool] -and -not $r.Existed) { $r.Name.ToLowerInvariant() } })
+}
+
+function Get-AVDTunePrinterDriverLag {
+    <#
+        Readiness and finish (read only, nothing is asked from the server): the drivers AVDTune installed against the LAST read of their print server. $null when AVDTune
+        installed no driver or none of their servers was read (then there is nothing to say). Otherwise Older (name, installed, server version, server), Servers and At
+        (the oldest of the reads used).
+    #>
+    param([string]$Root = (Get-AVDTuneRoot))
+    $state = Get-AVDTunePrinterState -Root $Root
+    if (@($state.Drivers).Count -eq 0) { return $null }
+    $older = New-Object System.Collections.ArrayList; $servers = @(); $at = $null
+    foreach ($r in @(Get-AVDTunePrinterLastRead -Root $Root)) {
+        if (@($state.Drivers | Where-Object { $_.Server -eq $r.Server }).Count -eq 0) { continue }
+        $servers += $r.Server
+        $t = [datetime]::Parse($r.At, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind)
+        if ($null -eq $at -or $t -lt $at) { $at = $t }
+        $plan = @($r.Drivers | ForEach-Object { [pscustomobject]@{ Name = $_.Name; Version = $_.Version; Server = $r.Server } })
+        foreach ($row in @(Get-AVDTunePrinterMaintenance -Installed $state.Drivers -Server $plan -ReadServer $r.Server -InUse $r.InUse | Where-Object { $_.Older })) { [void]$older.Add($row) }
+    }
+    if ($servers.Count -eq 0) { return $null }
+    [pscustomobject]@{ Older = @($older); Servers = @($servers); At = $at }
+}
+
+function New-AVDTunePrinterRemoveStep {
+    <# Removes one driver no printer of its server uses any more: Test = not installed on the master; Apply = Remove-PrinterDriver (the name is checked again). No undo: only a new install brings it back. #>
+    param([Parameter(Mandatory)]$Driver, [Parameter(Mandatory)]$P)
+    if (-not (Test-AVDTunePrinterDriverName $Driver.Name)) { throw 'The driver name is not valid.' }
+    $d = $Driver; $pp = $P
+    $test = { param($m) $l = Get-AVDTunePrinterLocal -P $pp -Name $d.Name; @{ Compliant = (-not $l); State = $(if ($l) { [string]$l.Version } else { 'absent' }) } }.GetNewClosure()
+    $apply = { param($m) if (-not (Test-AVDTunePrinterDriverName $d.Name)) { throw 'The driver name is not valid.' }; & $pp.RemoveDriver $d.Name }.GetNewClosure()
+    New-AVDTuneStep -Id ((Get-AVDTunePrinterStepId $d.Name) -replace '^printers\.driver-', 'printers.remove-') -Section Printers -Title "Printer driver $($d.Name) $($d.Version) removed: no printer of $($d.Server) uses it any more (no undo, only a new install)" -Why 'A driver no printer of the print server uses any more does not belong in the image.' -Risk Medium -Test $test -Apply $apply
+}
+
+function Invoke-AVDTunePrinterMaintenance {
+    <#
+        Maintenance like software updates: in maintenance mode (the update block is lifted for the run and put back in finally) the drivers of -Drivers are installed with
+        exactly the checks of the first install (Invoke-AVDTunePrinterRun: the confirmed plan with its signers, the checked export, WHQL or an allowed signer, the version
+        check afterwards, change log) and the drivers named in -Remove are removed. -Inventory is the FRESH read of the server by the caller, who compared -Drivers with it
+        (Compare-AVDTunePrinterPlan). A driver is removed only when all of this holds against that fresh read and the files of AVDTune: it is in config\printers.json for
+        this server, AVDTune added it itself (undo record), and no shared printer of the server uses it. Anything else in -Remove stops the run before the first change.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)]$Machine, [Parameter(Mandatory)]$P, [string]$Root = (Get-AVDTuneRoot), [object[]]$Drivers = @(), [string[]]$Remove = @(), [Parameter(Mandatory)]$Inventory, $Credential, [string]$User, [string]$SnapshotId)
+    if (-not (Test-AVDTuneWriteAllowed)) { throw 'The snapshot gate is not confirmed: nothing is installed or removed.' }
+    $server = ([string]$Inventory.Server).ToLowerInvariant()
+    if (-not (Test-AVDTunePrinterServerName $server)) { throw 'The read has no valid print server.' }
+    $install = @($Drivers | Where-Object { $_ })
+    foreach ($d in $install) { if (([string]$d.Server).ToLowerInvariant() -ne $server) { throw "$($d.Name) belongs to $($d.Server), not to the server that was read ($server)." } }
+    $names = @($Remove | Where-Object { $_ } | Select-Object -Unique)
+    $gone = @()
+    if ($names.Count) {
+        $rows = @(Get-AVDTunePrinterMaintenance -Installed (Get-AVDTunePrinterState -Root $Root).Drivers -Server @(Get-AVDTunePrinterDriverPlan -Inventory $Inventory) -ReadServer $server -InUse @(Get-AVDTunePrinterInUse -Inventory $Inventory) -Added @(Get-AVDTunePrinterAdded -Root $Root))
+        foreach ($n in $names) {
+            if (-not (Test-AVDTunePrinterDriverName $n)) { throw 'A driver name to remove is not valid.' }
+            if (@($install | Where-Object { [string]$_.Name -ieq $n }).Count) { throw "$n is to be installed and removed in the same run." }
+            $row = @($rows | Where-Object { $_.Name -ieq $n -and $_.Status -eq 'Gone' })[0]
+            if (-not $row) { throw "$n is not a driver AVDTune installed from $server that no printer uses any more: nothing was changed. Read the print server again." }
+            if (-not $row.Removable) { throw "$n was on the master before AVDTune: it is not removed. Nothing was changed." }
+            $gone += [pscustomobject]@{ Name = $row.Name; Version = $row.Installed; Server = $server }
+        }
+    }
+    if ($install.Count -eq 0 -and $gone.Count -eq 0) { return [pscustomobject]@{ Results = @(); Check = @(); Removed = @() } }
+    $started = & $Machine.Now
+    $changeOwner = $false; if ($true) { $changeOwner = Start-AVDTuneChange -Root $Root }   # marker: the first change of the version starts here, no new version or snapshot counts while it runs (#27)
+    try {
+        [void](Set-AVDTuneState -Root $Root -Values @{ LastChange = $started.ToString('o') })   # LastChange for the snapshot gate before the first driver (the maintenance mode itself changes the master)
+        $out = @{ Results = @(); Check = @(); Removed = @() }
+        [void](Invoke-AVDTuneMaintenance -Machine $Machine -Root $Root -User $User -SnapshotId $SnapshotId -Script {
+                param($ctx)
+                if ($install.Count) {
+                    $r = Invoke-AVDTunePrinterRun -Machine $Machine -P $P -Root $Root -Mode Apply -Drivers $install -Credential $Credential -User $User -SnapshotId $SnapshotId
+                    if ($r.Run) { $out.Results += @($r.Run.Results) }
+                    $out.Check = @($r.Check)
+                    # a driver AVDTune added keeps its undo: the record follows the update, or Undo would take the newer version for a foreign driver and leave it
+                    $undo = Read-AVDTunePrinterUndo $Root; $hit = $false
+                    foreach ($c in @($r.Check | Where-Object { $_.Ok })) {
+                        $rec = $undo.Drivers[([string]$c.Name).ToLowerInvariant()]
+                        if ($rec -and -not [bool](Get-AVDTuneProp $rec 'Existed') -and [string](Get-AVDTuneProp $rec 'Version') -ne [string]$c.Version) { $undo.Drivers[([string]$c.Name).ToLowerInvariant()] = [ordered]@{ Name = [string]$rec.Name; Version = [string]$c.Version; Server = [string]$rec.Server; Existed = $false }; $hit = $true }
+                    }
+                    if ($hit) { Write-AVDTunePrinterUndo $Root $undo }
+                }
+                if ($gone.Count) {
+                    $steps = @($gone | ForEach-Object { New-AVDTunePrinterRemoveStep -Driver $_ -P $P })
+                    $run = Invoke-AVDTune -Plan ([pscustomobject]@{ Name = 'Printers remove'; Steps = @($steps | ForEach-Object { $_.Id }) }) -Catalog $steps -Machine $Machine -Root $Root -User $User -SnapshotId $SnapshotId
+                    $out.Results += @($run.Results)
+                    # what is gone from the master leaves config\printers.json and the undo record (there is nothing left to undo)
+                    $done = @(); for ($i = 0; $i -lt $steps.Count; $i++) { if (@($run.Results | Where-Object { $_.Id -eq $steps[$i].Id -and $_.Status -in 'Changed', 'Unchanged' }).Count) { $done += $gone[$i].Name.ToLowerInvariant() } }
+                    if ($done.Count) {
+                        $state = Get-AVDTunePrinterState -Root $Root
+                        Save-AVDTunePrinterState -Root $Root -State ([pscustomobject]@{ Servers = @($state.Servers); Drivers = @($state.Drivers | Where-Object { -not ($_.Server -eq $server -and $_.Name.ToLowerInvariant() -in $done) }) })
+                        $undo = Read-AVDTunePrinterUndo $Root; $hit = $false
+                        foreach ($k in @($undo.Drivers.Keys)) { if ($k.ToLowerInvariant() -in $done) { $undo.Drivers.Remove($k); $hit = $true } }
+                        if ($hit) { Write-AVDTunePrinterUndo $Root $undo }
+                        $out.Removed = $done
+                    }
+                }
+            })
+        [pscustomobject]@{ Results = @($out.Results); Check = @($out.Check); Removed = @($out.Removed) }
+    }
+    finally { Stop-AVDTuneChange -Root $Root -Owner $changeOwner }
 }
 
 #endregion
