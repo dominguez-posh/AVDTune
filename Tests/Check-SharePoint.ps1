@@ -65,6 +65,14 @@ try {
     $hidden = @("Kennwort$([char]1): Geheim1", "Set-Thing -Password$([char]8)Geheim1", "pass$([char]0x200B)word=Geheim1", "-Pass$([char]0xFEFF)word Geheim1")
     $hiddenLeaks = @($hidden | Where-Object { (Protect-AVDTuneSecretText $_) -match 'Geheim1' -or (Protect-AVDTuneSpText $_ 500) -match 'Geheim1' -or (Test-AVDTuneSpSecretFree $_) })
     Test-Check 'secret table (#107 N-1): control and zero-width characters do not hide a name; a text without secrets keeps them (still secret free)' ($hiddenLeaks.Count -eq 0 -and (Test-AVDTuneSpSecretFree "line one$([char]0xFEFF)`r`nline two") -and (Protect-AVDTuneSecretText "a$([char]1)b") -ceq "a$([char]1)b") (($hidden | ForEach-Object { Protect-AVDTuneSecretText $_ }) -join ' | ')
+    $n2 = @('Install-ADDSForest -SafeModeAdministratorPassword Geheim1 -Force', 'New-Thing -AdminPassword Geheim1', 'tool --db-password Geheim1', "@{ 'Password' = 'Geheim1' }", '@{ "ApiPassword" = "Geheim1" }',
+        'net user svc1 Geheim1 /add', 'net.exe user "Service One" Geheim1 /add', "ConvertTo-SecureString 'Geheim1' -AsPlainText -Force", 'ConvertTo-SecureString -AsPlainText -Force -String Geheim1')
+    $n2Leaks = @($n2 | Where-Object { (Protect-AVDTuneSpText $_ 500) -match 'Geheim1' -or (Test-AVDTuneSpSecretFree $_) })
+    $n2Stay = @('Set-LocalUser -Name svc1 -PasswordNeverExpires $true', 'net user svc1 /delete', 'net user svc1', '$s = Read-Host -AsSecureString | ConvertTo-SecureString -AsPlainText:$false', 'Get-Help ConvertTo-SecureString -Full')
+    $n2Changed = @($n2Stay | Where-Object { -not (Test-AVDTuneSpSecretFree $_) })
+    Test-Check 'secret table (#107 N-2): compound parameters with a space, quoted keys, net user name pass, ConvertTo-SecureString x -AsPlainText; normal commands stay' ($n2Leaks.Count -eq 0 -and $n2Changed.Count -eq 0) ((($n2 + $n2Stay) | ForEach-Object { Protect-AVDTuneSpText $_ 500 }) -join ' | ')
+    $sw = [Diagnostics.Stopwatch]::StartNew(); $longR = Invoke-AVDTuneSecretRules (('a' * 60000) + ' ' + ('-x' * 20000) + ' ' + ('net user ' * 3000) + ' ' + ('ABCD-' * 12000) + ' ' + ('net use x ' * 5000) + ' ' + ('--a' * 20000)); $sw.Stop()
+    Test-Check 'secret table (#107 N-2): long hostile input is processed without a timeout (no catastrophic backtracking)' ($null -ne $longR -and $sw.Elapsed.TotalSeconds -lt 10) "$([int]$sw.Elapsed.TotalMilliseconds) ms"
     $again = @(@('Passwort=(removed)', '-Password (removed)', 'net use \\print1\share /user:dom\svc (removed)', '?sv=(removed)&sig=(removed)') | Where-Object { -not (Test-AVDTuneSpSecretFree $_) })
     Test-Check 'secret table: what it replaced is not found again (a cleaned text passes)' ($again.Count -eq 0) ($again -join ' | ')
     # review B1: an error answer comes wrapped by PowerShell (MethodInvocationException with an inner WebException)

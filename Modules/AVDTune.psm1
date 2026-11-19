@@ -2494,22 +2494,29 @@ $script:SecretRules = @(
     @('(?i)\b(bearer|basic)\s+[A-Za-z0-9._~+/=\-]{8,}', '$1 (removed)'),
     # name = value and name: value (also "name": "value" of JSON); key only with "=" (a "Registry key: HKLM\..." stays); compound names too: DefaultPassword = X,
     # ApiPassword=X, ClientToken: X (#107)
-    @("(?i)\b([A-Za-z_]*?(?:password|passwort|kennwort|secret|token)|pwd|pass|client_?secret|access_?token|refresh_?token|apikey|api[_-]?key|accountkey|account_key|sharedaccesskey|sas|pin|serial|seriennummer|pidkey|product\s*key|licen[cs]e\s*key|lizenzschl(\u00fc|ue)ssel|schl(\u00fc|ue)ssel)""?\s*[=:]\s*(?!\((removed|key removed|token removed|not shown)\))$($script:SecretValue)", '$1=(removed)'),
+    @("(?i)\b([A-Za-z_]{0,40}?(?:password|passwort|kennwort|secret|token)|pwd|pass|client_?secret|access_?token|refresh_?token|apikey|api[_-]?key|accountkey|account_key|sharedaccesskey|sas|pin|serial|seriennummer|pidkey|product\s*key|licen[cs]e\s*key|lizenzschl(\u00fc|ue)ssel|schl(\u00fc|ue)ssel)[""']?\s*[=:]\s*(?!\((removed|key removed|token removed|not shown)\))$($script:SecretValue)", '$1=(removed)'),
     @("(?i)\bkey\s*=\s*(?!\((removed|key removed)\))$($script:SecretValue)", 'key=(removed)'),
     # parameters with the value after a space: -Password X, --password X (#107), -ClientSecret X, /p X, /p:X, /pass X
     @("(?i)(?<![\w-])(--?(password|passwort|kennwort|pwd|secret|client[-_]?secret|access[-_]?token|token|api[-_]?key|account[-_]?key|pidkey|product[-_]?key|key))(\s+|:)(?!\(removed\))$($script:SecretValue)", '$1 (removed)'),
+    # compound parameter names (#107 N-2): -AdminPassword X, -SafeModeAdministratorPassword X, --db-password X (not a next parameter, not a value in brackets)
+    @("(?i)(?<![\w-])(--?[A-Za-z][A-Za-z_-]{0,40}?(password|passwort|kennwort|secret|token|pwd))(\s+|:)(?![-(])$($script:SecretValue)", '$1 (removed)'),
+    # net user <name> <password> [/add] (#107 N-2)
+    @("(?i)(\bnet(\.exe)?\s+user\s+(""[^""\r\n]{0,100}""|[^\s/""]+))\s+(?![/*]|\(removed\))$($script:SecretValue)", '$1 (removed)'),
+    # ConvertTo-SecureString 'x' -AsPlainText and ConvertTo-SecureString -AsPlainText -Force -String 'x' (#107 N-2)
+    @("(?i)(\bConvertTo-SecureString\s+(-String\s+)?)(?!\(removed\)|-)$($script:SecretValue)", '$1(removed)'),
+    @("(?i)(\bConvertTo-SecureString\b[^\r\n|;]{0,200}?\s-String\s+)(?!\(removed\))$($script:SecretValue)", '$1(removed)'),
     @("(?i)(?<![\w/])(/(p|pw|pwd|pass|password))(\s+|:)(?!\(removed\))(?!/)$($script:SecretValue)", '$1 (removed)'),
     # net use \\server\share <password> /user:x and net use ... /user:x <password>
     @("(?i)(\bnet(\.exe)?\s+use\s+[^\s/]+)\s+(?![/*]|\(removed\))$($script:SecretValue)", '$1 (removed)'),
-    @("(?i)(\bnet(\.exe)?\s+use\b[^\r\n]*?/user:\S+)\s+(?![/*]|\(removed\))$($script:SecretValue)", '$1 (removed)'),
+    @("(?i)(\bnet(\.exe)?\s+use\b[^\r\n]{0,300}?/user:\S+)\s+(?![/*]|\(removed\))$($script:SecretValue)", '$1 (removed)'),
     # SAS and other secret query values (also a SAS without sig)
     @('(?i)([?&](sig|token|code|key|access_token|sv|se|st|sp|spr|sr|srt|ss|si|skoid|sktid|skt|ske|sks|skv|sdd)=)(?!\(removed\))[^&\s"''<>]+', '$1(removed)'),
     # an Entra client secret (contains ~)
     @('(?<![\w~.-])[A-Za-z0-9_.\-]{3,8}~[A-Za-z0-9_.~\-]{20,}', '(removed)'),
-    # a product key (upper case and digits in groups, at least one digit); a GUID and hyphenated words stay
-    @('(?-i)\b(?=[A-Z0-9-]*\d)(?![0-9A-F]{8}-[0-9A-F]{4}-)[A-Z0-9]{4,8}(-[A-Z0-9]{4,8}){3,}\b', '(key removed)'),
-    # base64 with padding (a storage key: 88 characters ending ==)
-    @('[A-Za-z0-9+/]{30,}={1,2}', '(removed)'),
+    # a product key (upper case and digits in groups, at least one digit); a GUID and hyphenated words stay. Bounded, so a long run is linear (#107 N-2)
+    @('(?-i)\b(?=[A-Z0-9-]{0,80}\d)(?![0-9A-F]{8}-[0-9A-F]{4}-)[A-Z0-9]{4,8}(-[A-Z0-9]{4,8}){3,8}\b', '(key removed)'),
+    # base64 with padding (a storage key: 88 characters ending ==); starts only where a run starts, so a long run is linear (#107 N-2)
+    @('(?<![A-Za-z0-9+/])[A-Za-z0-9+/]{30,}={1,2}', '(removed)'),
     # a long run of mixed upper case, lower case and digits (keys, tokens); hex hashes and names with hyphens stay
     @('\b(?=[A-Za-z0-9+/_]*[0-9])(?=[A-Za-z0-9+/_]*[A-Z])(?=[A-Za-z0-9+/_]*[a-z])[A-Za-z0-9+/_]{40,}', '(removed)')
 )
