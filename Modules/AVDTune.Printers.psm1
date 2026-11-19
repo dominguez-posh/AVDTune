@@ -692,10 +692,10 @@ function Invoke-AVDTunePrinterRun {
         $list = @{}; foreach ($i in @($state.Drivers)) { $list["$($i.Server)|$($i.Name)".ToLowerInvariant()] = $i }
         foreach ($r in @($run.Results)) {
             $info = $byStep[$r.Id]
-            if ($r.Id -like 'printers.policy-*' -and $r.Status -in 'Changed', 'Failed') { $provPolicy = $false }   # changed (or maybe in part): the record stays
+            if ($r.Id -like 'printers.policy-*' -and ($r.Status -eq 'Changed' -or ($r.Status -eq 'Failed' -and (ConvertTo-Json (Get-AVDTunePrinterPolicyBefore -P $P) -Depth 6 -Compress) -cne (ConvertTo-Json $policyBefore -Depth 6 -Compress)))) { $provPolicy = $false }   # changed (a failed step only when the state differs now): the record stays
             if (-not $info) { continue }
             $d = $info.Driver
-            if ($r.Status -in 'Changed', 'Failed') { $provDrivers = @($provDrivers | Where-Object { $_ -ne $d.Name.ToLowerInvariant() }) }   # installed (or maybe in part): the record stays
+            if ($r.Status -eq 'Changed' -or ($r.Status -eq 'Failed' -and (Get-AVDTunePrinterLocal -P $P -Name $d.Name))) { $provDrivers = @($provDrivers | Where-Object { $_ -ne $d.Name.ToLowerInvariant() }) }   # installed (a failed step only when the driver is there now): the record stays
             if ($r.Status -in 'Changed', 'Unchanged') { $list["$($d.Server)|$($d.Name)".ToLowerInvariant()] = [pscustomobject]@{ Name = $d.Name; Version = $d.Version; Server = $d.Server; Signer = [string]$d.Signer; Printers = @($d.Printers); At = $now } }
         }
         if ($provPolicy) { $undo.Policy = $null; $changed = $true }

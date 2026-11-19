@@ -127,8 +127,12 @@ try {
     Open-AVDTuneWriteGate -SnapshotId 'snap-1' -ConfirmedBy 'Alex Example'
     $noLib = Invoke-AVDTuneCustomRun -Machine $m -C $c -Root $tmp -Mode Apply -Ids @($ids['Readme'])
     Test-Check 'a library file that is not cached needs the library: the step fails with the reason, nothing is copied' ($noLib.Run.Results[0].Status -eq 'Failed' -and $noLib.Run.Results[0].Message -like '*not in the cache*' -and -not $c.Store.Files.ContainsKey('c:\apps\readme.txt')) $noLib.Run.Results[0].Message
-    $rmRec = (Read-AVDTuneCustomUndo $tmp)[$ids['Readme']]
-    Test-Check 'undo record (#102): written before the first write: a failed step keeps the state before (a crash would too)' ($null -ne $rmRec -and $null -ne (Get-AVDTuneProp $rmRec 'Before')) ((Read-AVDTuneCustomUndo $tmp).Keys -join ',')
+    # #102: the record of the state before is on disk when the first write happens (a crash there keeps the origin); a failed step that wrote nothing leaves no record
+    $undoFile = Get-AVDTuneCustomUndoPath $tmp; $seenAtWrite = @{ Seen = $false }; $origRegSet = $c.RegSet
+    $c.RegSet = { param($Path, $Name, $Value, $Type) $seenAtWrite.Seen = ((Test-Path -LiteralPath $undoFile) -and ([IO.File]::ReadAllText($undoFile)).Contains($ids['Proxy'])); throw 'fake: crash at the write' }.GetNewClosure()
+    $crashRun = Invoke-AVDTuneCustomRun -Machine $m -C $c -Root $tmp -Mode Apply -Ids @($ids['Proxy'])
+    $c.RegSet = $origRegSet
+    Test-Check 'undo record (#102): written before the first write (on disk at the write); a failed step that changed nothing leaves no record' ($seenAtWrite.Seen -and $crashRun.Run.Results[0].Status -eq 'Failed' -and -not (Read-AVDTuneCustomUndo $tmp).ContainsKey($ids['Proxy'])) "seen $($seenAtWrite.Seen)"
     $c.Store.Tamper['readme.txt'] = [Text.Encoding]::UTF8.GetBytes('evil')
     $tam = Invoke-AVDTuneCustomRun -Machine $m -C $c -Root $tmp -Mode Apply -Ids @($ids['Readme']) -Context @{ Fake = $true }
     Test-Check 'a download that does not match the pinned SHA256 is refused and not used' ($tam.Run.Results[0].Status -eq 'Failed' -and $tam.Run.Results[0].Message -like '*SHA256*' -and -not $c.Store.Files.ContainsKey('c:\apps\readme.txt')) $tam.Run.Results[0].Message

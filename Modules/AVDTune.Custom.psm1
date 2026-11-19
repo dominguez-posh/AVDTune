@@ -836,7 +836,13 @@ function Invoke-AVDTuneCustomRun {
         $changed = $false
         foreach ($r in @($run.Results)) {
             $i = $byStep[$r.Id]; if (-not $i) { continue }
-            if ($Mode -eq 'Apply' -and $i.Id -in $provisional -and $r.Status -notin 'Changed', 'Failed') { $undo.Remove($i.Id); $changed = $true }   # nothing changed: no undo record (a failed step may have changed part of it: the record stays)
+            if ($Mode -eq 'Apply' -and $i.Id -in $provisional -and $r.Status -ne 'Changed') {
+                # nothing changed: no undo record. A failed step keeps it only when the state differs from the one before now (it changed part of it); a failure that wrote
+                # nothing must not leave a record that a later Apply would take as the origin
+                $same = $true
+                if ($r.Status -eq 'Failed') { try { $same = ((ConvertTo-Json (Get-AVDTuneCustomBefore -Item $i -C $C) -Depth 6 -Compress) -ceq (ConvertTo-Json $before[$i.Id] -Depth 6 -Compress)) } catch { $same = $false } }
+                if ($same) { $undo.Remove($i.Id); $changed = $true }
+            }   # nothing changed: no undo record (a failed step may have changed part of it: the record stays)
             if ($Mode -eq 'Undo' -and $r.Status -in 'Changed', 'Unchanged' -and $undo.ContainsKey($i.Id)) { $undo.Remove($i.Id); $changed = $true }
         }
         if ($changed) { Write-AVDTuneCustomUndo $Root $undo }
