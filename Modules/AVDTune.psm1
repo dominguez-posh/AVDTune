@@ -2490,8 +2490,8 @@ function Invoke-AVDTune {
 # quotes, commas and semicolons, so the closing quote of a JSON string stays where it is.
 $script:SecretValue = '("[^"]*"|''[^'']*''|[^\s"'',;<>]+)'
 $script:SecretRules = @(
-    # a JWT (access or id token)
-    @('eyJ[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}(\.[A-Za-z0-9_\-]*)?', '(token removed)'),
+    # a JWT (access or id token); starts only where a run starts, so a long text without spaces is linear (#107 F2)
+    @('(?<![A-Za-z0-9_\-])eyJ[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}(\.[A-Za-z0-9_\-]*)?', '(token removed)'),
     # Authorization values
     @('(?i)\b(bearer|basic)\s+[A-Za-z0-9._~+/=\-]{8,}', '$1 (removed)'),
     # name = value and name: value (also "name": "value" of JSON); key only with "=" (a "Registry key: HKLM\..." stays); compound names too: DefaultPassword = X,
@@ -2519,8 +2519,9 @@ $script:SecretRules = @(
     @('(?-i)\b(?=[A-Z0-9-]{0,80}\d)(?![0-9A-F]{8}-[0-9A-F]{4}-)[A-Z0-9]{4,8}(-[A-Z0-9]{4,8}){3,8}\b', '(key removed)'),
     # base64 with padding (a storage key: 88 characters ending ==); starts only where a run starts, so a long run is linear (#107 N-2)
     @('(?<![A-Za-z0-9+/])[A-Za-z0-9+/]{30,}={1,2}', '(removed)'),
-    # a long run of mixed upper case, lower case and digits (keys, tokens); hex hashes and names with hyphens stay.
-    @('\b(?=[A-Za-z0-9+/_]*[0-9])(?=[A-Za-z0-9+/_]*[A-Z])(?=[A-Za-z0-9+/_]*[a-z])[A-Za-z0-9+/_]{40,}', '(removed)')
+    # a long run of mixed upper case, lower case and digits (keys, tokens); hex hashes and names with hyphens stay. Only at the first word start of a run (after
+    # leading + and /), so a long path or text without spaces is linear (#107 F2)
+    @('(?<=(?:^|[^A-Za-z0-9+/_])[+/]*)\b(?=[A-Za-z0-9+/_]*[0-9])(?=[A-Za-z0-9+/_]*[A-Z])(?=[A-Za-z0-9+/_]*[a-z])[A-Za-z0-9+/_]{40,}', '(removed)')
 )
 
 # Control and format characters (#107 N-1, F1: \p{Cc} incl. C1 and NUL of UTF-16 text read as bytes, \p{Cf} such as soft hyphen, zero width, direction marks; not tab and
