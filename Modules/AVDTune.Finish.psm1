@@ -156,6 +156,29 @@ function Clear-AVDTuneFinishStateTemp {
     }
     [pscustomobject]@{ Removed = $removed; Left = $left; Skipped = $skipped }
 }
+function Find-AVDTuneSignInProfiles {
+    <#
+        Profiles of the sign-in window (PackTuneSignIn-*: WebView2 with Microsoft cookies) anywhere below $Folder (<state>\temp), with or without a session (#99,
+        second pass of the audit): after a crash such a profile stays in host.used-* or host.untrusted-*, where the session does not look. Links are not followed.
+        Returns the paths relative to $Folder.
+    #>
+    param([Parameter(Mandatory)][string]$Folder)
+    $root = New-Object IO.DirectoryInfo $Folder
+    if (-not $root.Exists) { return @() }
+    $prefixLen = $root.FullName.TrimEnd([char]92).Length + 1
+    $found = New-Object System.Collections.ArrayList
+    $stack = New-Object System.Collections.Stack
+    $stack.Push($root)
+    while ($stack.Count -gt 0) {
+        $dir = $stack.Pop()
+        foreach ($d in $dir.GetDirectories()) {
+            if ($d.Name -like 'PackTuneSignIn-*') { [void]$found.Add($d.FullName.Substring($prefixLen)); continue }
+            if (($d.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { continue }
+            $stack.Push($d)
+        }
+    }
+    @($found)
+}
 function Find-AVDTuneTokenFiles {
     <#
         Files below $Root (no links followed) with a token pattern. EVERY file is scanned, whatever its extension (a binary file is read as bytes and
@@ -555,7 +578,8 @@ function Get-AVDTuneFinishSteps {
         $cur = & $getSession
         $clear = $true; if ($cur) { $clear = [bool](Test-AVDTuneSessionClear -Session $cur) }
         $files = @(& $Fin.FindTokenFiles $Root $Progress)
-        @{ Compliant = ($clear -and $files.Count -eq 0); State = "session $(if ($clear) { 'clear' } else { 'holds tokens or sign-in profiles' }); token pattern in $($files.Count) file(s)" }
+        $prof = @(Find-AVDTuneSignInProfiles -Folder (Join-Path $Root 'temp'))   # also without a session and in folders of an earlier start (#99)
+        @{ Compliant = ($clear -and $files.Count -eq 0 -and $prof.Count -eq 0); State = "session $(if ($clear) { 'clear' } else { 'holds tokens or sign-in profiles' }); token pattern in $($files.Count) file(s); $($prof.Count) sign-in profile(s) in temp" }
     }.GetNewClosure()
     $tApply = {
         param($m)
@@ -567,6 +591,8 @@ function Get-AVDTuneFinishSteps {
         if ($cur) { Disconnect-AVDTuneSession -Session $cur }
         $cur = & $getSession
         if ($cur -and -not (Test-AVDTuneSessionClear -Session $cur)) { throw 'The sign-in could not be removed completely (tokens or temporary sign-in profiles are still there).' }
+        $prof = @(Find-AVDTuneSignInProfiles -Folder (Join-Path $Root 'temp'))
+        if ($prof.Count -gt 0) { throw "Profiles of the sign-in window (Microsoft cookies) are still in the state folder: $($prof -join '; '). Close every AVDTune window, restart AVDTune and run the finish again." }
     }.GetNewClosure()
     [void]$steps.Add([pscustomobject]@{ Step = (New-AVDTuneStep -Id 'finish.tokens' -Section Seal -Title 'Tokens and sign-in caches removed and checked' -Why 'No access or refresh token, no temporary sign-in profile (Microsoft cookies) and no token in AVDTune files may reach the image.' -Test $tTest -Apply $tApply); Lifts = $false })
     # close the version
@@ -710,5 +736,5 @@ function Invoke-AVDTuneFinishEndAction {
 
 #endregion
 
-Export-ModuleMember -Function Invoke-AVDTuneFinishEndAction, New-AVDTuneFinishAdapter, Clear-AVDTuneFolderContents, Get-AVDTuneFinishStateTempEntries, Clear-AVDTuneFinishStateTemp, Get-AVDTuneFinishRebootWait, Get-AVDTuneFileLinkCount, Clear-AVDTuneReadOnlyMark, Find-AVDTuneTokenFiles, Test-AVDTuneNoLinkChain, Get-AVDTuneFinishRecord, Get-AVDTuneFinishCrash,
+Export-ModuleMember -Function Invoke-AVDTuneFinishEndAction, New-AVDTuneFinishAdapter, Clear-AVDTuneFolderContents, Get-AVDTuneFinishStateTempEntries, Clear-AVDTuneFinishStateTemp, Get-AVDTuneFinishRebootWait, Get-AVDTuneFileLinkCount, Clear-AVDTuneReadOnlyMark, Find-AVDTuneTokenFiles, Find-AVDTuneSignInProfiles, Test-AVDTuneNoLinkChain, Get-AVDTuneFinishRecord, Get-AVDTuneFinishCrash,
     Start-AVDTuneFinishLift, Restore-AVDTuneFinishLift, Test-AVDTuneFinishBinding, Get-AVDTuneFinishConfirmText, Repair-AVDTuneFinishCrash, Test-AVDTuneFinishGate, Get-AVDTuneFinishSteps, Invoke-AVDTuneFinish

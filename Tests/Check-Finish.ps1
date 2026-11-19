@@ -176,6 +176,17 @@ try {
     $again = Invoke-AVDTuneStep -Step (Get-AVDTuneFinishSteps -Machine $m -Fin $f -Root $root -Session $session -User 'admin1' -SnapshotId 'x')[6].Step -Machine $m -Mode Test
     Test-Check 'the token step tests compliant afterwards' ($again.Status -eq 'Compliant') $again.Status
 
+    # #99/#97 (second pass): a sign-in profile in <state>\temp is found without a session, also where the state-temp step does not clear (host); a junction is not followed
+    $rootP = New-Root; [void](Save-Healthcheck -Root $rootP)
+    $profDir = Join-Path $rootP ('temp\host\PackTuneSignIn-' + [guid]::NewGuid().ToString('N')); [void](New-Item -ItemType Directory -Path $profDir -Force)
+    $outP = Join-Path $base 'outsideP'; [void](New-Item -ItemType Directory -Path (Join-Path $outP ('PackTuneSignIn-' + [guid]::NewGuid().ToString('N'))) -Force)
+    cmd.exe /c mklink /J "$(Join-Path $rootP 'temp\host\lnk')" "$outP" | Out-Null
+    $foundP = @(Find-AVDTuneSignInProfiles -Folder (Join-Path $rootP 'temp'))
+    $rP = Invoke-AVDTuneFinish -Machine (New-Master) -Fin (New-AVDTuneFakeFinish -Seed @{ Present = @() }) -Root $rootP -User 'admin1'
+    $tokP = @($rP.Results | Where-Object Id -eq 'finish.tokens')[0]
+    Test-Check 'tokens (#99): a sign-in profile left in <state>\temp\host without a session fails the token step, named; the junction target is not looked at; the version stays open' ($foundP.Count -eq 1 -and $foundP[0] -like 'host\PackTuneSignIn-*' -and $rP.Status -eq 'Failed' -and $tokP.Status -eq 'Failed' -and $tokP.Message -like '*sign-in window*host\PackTuneSignIn-*' -and -not (Get-AVDTuneState $rootP).Sealed) "$($foundP -join ',') / $($rP.Message)"
+    $usedP = Join-Path $rootP ('temp\host.used-20260101-000000\PackTuneSignIn-' + [guid]::NewGuid().ToString('N')); [void](New-Item -ItemType Directory -Path $usedP -Force)
+    Test-Check 'tokens (#99): a profile in host.used-* (a crash at an earlier start) is found as well' (@(@(Find-AVDTuneSignInProfiles -Folder (Join-Path $rootP 'temp')) -like 'host.used-20260101-000000\PackTuneSignIn-*').Count -eq 1) (@(Find-AVDTuneSignInProfiles -Folder (Join-Path $rootP 'temp')) -join ',')
     # ---------------------------------------------------------------- tokens: the finish stops while a token pattern is in AVDTune files and keeps the sign-in
     $root2 = New-Root; [void](Save-Healthcheck -Root $root2)
     $m2 = New-Master; $f2 = New-AVDTuneFakeFinish -Seed (@{ TokenFiles = @('config\leftover.json'); Present = @() })

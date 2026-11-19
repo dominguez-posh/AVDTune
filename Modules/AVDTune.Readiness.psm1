@@ -670,6 +670,15 @@ function Invoke-AVDTuneReadiness {
         else { Add-Row 'hy.bench-users' $hy 'green' 'No temporary benchmark user left behind.' }
     }
 
+    Invoke-Check 'hy.state-aside' $hy {
+        # state folders AVDTune set aside as untrusted (<state>.untrusted-<stamp>, Move-AVDTuneStateAside): never read again, foreign rules possible, old records and
+        # possibly sign-in data; AVDTune does not delete them (#99, second pass of the audit)
+        $sr = $(if ($Root) { $Root } else { Get-AVDTuneRoot })
+        $parent = Split-Path $sr -Parent
+        $aside = @(& $Machine.DirList $parent "$(Split-Path $sr -Leaf).untrusted-*")
+        if ($aside.Count -gt 0) { Add-Row 'hy.state-aside' $hy 'red' ('State folders set aside as untrusted: ' + (@($aside | ForEach-Object { Join-Path $parent $_ }) -join '; ') + '. They hold old records of AVDTune and possibly rules of someone else and must not go into the image.') 'Look at them and delete them by hand (AVDTune never reads or deletes them), then run the analysis again.' -Found ($aside -join '; ') }
+        else { Add-Row 'hy.state-aside' $hy 'green' 'No state folder set aside as untrusted.' }
+    }
     Invoke-Check 'hy.bench-leftovers' $hy {
         # an interrupted benchmark (audit #98): the SYSTEM restore task, restore script and journal, work folders or an attached test container would go into the image
         $left = @(& $Machine.BenchLeftovers $(if ($Root) { $Root } else { Get-AVDTuneRoot }))
