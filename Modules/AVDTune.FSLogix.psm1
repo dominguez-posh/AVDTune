@@ -178,27 +178,119 @@ function Set-AVDTuneFSLogixSettings {
         $prev = & $Machine.RegGet $path $s.Name
         $id = "fslogix.$($scope.ToLowerInvariant()).$($s.Name.ToLowerInvariant())"
         [void]$steps.Add((New-AVDTuneFSLogixRegStep -Id $id -Path $path -Name $s.Name -Value $v -Type (Get-FsRegType $s.Type) -Title "FSLogix $scope setting $($s.Name)" -SourceUrl $s.Source -Why $s.Explain))
-        [void]$undo.Add([ordered]@{ Id = $id; Path = $path; Name = $s.Name; Type = (Get-FsRegType $s.Type); Previous = $prev; Title = "FSLogix $scope setting $($s.Name)" })
+        [void]$undo.Add([ordered]@{ Id = $id; Path = $path; Name = $s.Name; Type = (Get-FsRegType $s.Type); Previous = $prev; Value = $v; Title = "FSLogix $scope setting $($s.Name)" })
     }
     if ($steps.Count -eq 0) { throw 'Nothing to write.' }
-    if (-not $WhatIf -and (Test-AVDTuneWriteAllowed)) { Write-AVDTuneFile (Get-AVDTuneFSLogixUndoPath $Root) ([ordered]@{ At = (& $Machine.Now).ToString('o'); Items = @($undo) } | ConvertTo-Json -Depth 6) }
+    if (-not $WhatIf -and (Test-AVDTuneWriteAllowed)) { Assert-AVDTuneNotSealed -Root $Root; Save-AVDTuneFSLogixUndo -Root $Root -Machine $Machine -Items @($undo) }
     Invoke-AVDTune -Plan ([pscustomobject]@{ Name = 'FSLogix settings'; Steps = @($steps | ForEach-Object { $_.Id }) }) -Catalog @($steps) -Machine $Machine -Root $Root -User $User -SnapshotId $SnapshotId -WhatIf:$WhatIf
 }
 
+function Get-AVDTuneFSLogixUndoTargets {
+    <#
+        The registry values an FSLogix undo record may name (audit #100): every setting of the catalog (id fslogix.<scope>.<name>, its key, name and type from the
+        catalog) and the Entra Kerberos client value of the environment assistant. Hashtable id -> Path, Name, Type, Title. The record itself never decides where to write.
+    #>
+    $t = @{}
+    foreach ($s in @(Get-AVDTuneFSLogixSettingCatalog)) {
+        $t["fslogix.$($s.Scope.ToLowerInvariant()).$($s.Name.ToLowerInvariant())"] = [pscustomobject]@{ Path = (Get-FsSettingKey $s); Name = [string]$s.Name; Type = (Get-FsRegType $s.Type); Title = "FSLogix $($s.Scope) setting $($s.Name)" }
+    }
+    $t['fslogix.kerberos.cloudticket'] = [pscustomobject]@{ Path = 'HKLM:\SYSTEM\CurrentControlSet\Control\Lsa\Kerberos\Parameters'; Name = 'CloudKerberosTicketRetrievalEnabled'; Type = 'DWord'; Title = 'Allow the cloud Kerberos ticket (Entra Kerberos)' }
+    $t
+}
+
+function ConvertTo-AVDTuneFSLogixUndoValue {
+    # A value of an undo record, typed by the registry type of its target ($null = absent). Throws for anything else ("false" is not a DWord, an object is not a string).
+    param($Value, [Parameter(Mandatory)][string]$Type, [string]$What)
+    if ($null -eq $Value) { return $null }
+    switch ($Type) {
+        'DWord' {
+            if ($Value -is [int] -or $Value -is [long]) { if ([long]$Value -lt 0 -or [long]$Value -gt [uint32]::MaxValue) { throw "$What is out of range." }; return [int][long]$Value }
+            if ($Value -is [string] -and $Value -match '^\d{1,10}$' -and [long]$Value -le [uint32]::MaxValue) { return [int][long]$Value }
+            throw "$What is not a number."
+        }
+        'MultiString' {
+            $list = @($Value)
+            foreach ($x in $list) { if ($x -isnot [string]) { throw "$What is not a list of texts." } }
+            return , [string[]]$list
+        }
+        default { if ($Value -isnot [string]) { throw "$What is not a text." }; return [string]$Value }
+    }
+}
+
+function Test-AVDTuneFSLogixUndoSame($Current, $Wanted) {
+    if ($null -eq $Wanted) { return ($null -eq $Current) }
+    if ($null -eq $Current) { return $false }
+    (@($Current) -join "`n") -ieq (@($Wanted) -join "`n")
+}
+
+function Save-AVDTuneFSLogixUndo {
+    <#
+        Adds items to config\fslogix-undo.json BEFORE the steps run (audit #100): only values that will change (current differs from the target), and per id the
+        FIRST value found stays (a second apply or the environment assistant never replaces the origin). The older record is kept through Write-AVDTuneUndoFile.
+        Items: Id, Path, Name, Type, Previous, Value (what AVDTune sets), Title.
+    #>
+    param([Parameter(Mandatory)][string]$Root, [Parameter(Mandatory)]$Machine, [Parameter(Mandatory)][object[]]$Items)
+    $path = Get-AVDTuneFSLogixUndoPath $Root
+    $old = @(); try { $old = @(Read-AVDTuneFSLogixUndo -Root $Root) } catch { throw "The FSLogix undo record cannot be read ($($_.Exception.Message)): nothing is written. Look at $path first." }
+    $byId = [ordered]@{}; foreach ($o in $old) { $byId[[string]$o.Id] = $o }
+    $added = 0
+    foreach ($i in $Items) {
+        if (Test-AVDTuneFSLogixUndoSame $i.Previous $i.Value) { continue }   # unchanged: nothing to put back
+        if ($byId.Contains([string]$i.Id)) { $byId[[string]$i.Id].Value = $i.Value; $added++; continue }   # the origin stays, the value AVDTune sets now is the one undo checks for
+        $byId[[string]$i.Id] = [pscustomobject][ordered]@{ Id = [string]$i.Id; Path = [string]$i.Path; Name = [string]$i.Name; Type = [string]$i.Type; Previous = $i.Previous; Value = $i.Value; Title = [string]$i.Title }
+        $added++
+    }
+    if ($added -eq 0) { return }
+    $list = @($byId.Values | ForEach-Object { [ordered]@{ Id = $_.Id; Path = $_.Path; Name = $_.Name; Type = $_.Type; Previous = $_.Previous; Value = $_.Value; Title = $_.Title } })
+    Write-AVDTuneUndoFile $path ([ordered]@{ At = (& $Machine.Now).ToString('o'); Items = $list } | ConvertTo-Json -Depth 6)
+}
+
+function Read-AVDTuneFSLogixUndo {
+    <#
+        The items of config\fslogix-undo.json, typed and checked against Get-AVDTuneFSLogixUndoTargets (audit #100): an unknown id, or a path, name or type that is not
+        the one of the catalog, or a value of the wrong type throws (nothing is undone). Path, name and type come from the catalog. Value is $null for a record of an
+        older AVDTune (HasValue false).
+    #>
+    param([Parameter(Mandatory)][string]$Root)
+    $u = Read-AVDTuneJson (Get-AVDTuneFSLogixUndoPath $Root)
+    if (-not $u) { return @() }
+    $targets = Get-AVDTuneFSLogixUndoTargets
+    $out = New-Object System.Collections.ArrayList
+    foreach ($i in @(Get-AVDTuneProp $u 'Items')) {
+        if ($null -eq $i) { continue }
+        $id = Get-AVDTuneProp $i 'Id'
+        if ($id -isnot [string] -or -not $targets.ContainsKey($id)) { throw "The undo record names an unknown value '$id'." }
+        $t = $targets[$id]
+        if ([string](Get-AVDTuneProp $i 'Path') -ne $t.Path -or [string](Get-AVDTuneProp $i 'Name') -ne $t.Name -or [string](Get-AVDTuneProp $i 'Type') -ne $t.Type) { throw "The undo record of $id does not match the catalog (path, name or type)." }
+        $hasValue = [bool]$i.PSObject.Properties['Value']
+        [void]$out.Add([pscustomobject][ordered]@{
+                Id = $id; Path = $t.Path; Name = $t.Name; Type = $t.Type; Title = $t.Title
+                Previous = (ConvertTo-AVDTuneFSLogixUndoValue -Value (Get-AVDTuneProp $i 'Previous') -Type $t.Type -What "The previous value of $id")
+                Value = $(if ($hasValue) { ConvertTo-AVDTuneFSLogixUndoValue -Value (Get-AVDTuneProp $i 'Value') -Type $t.Type -What "The value AVDTune set for $id" } else { $null }); HasValue = $hasValue
+            })
+    }
+    @($out)
+}
+
 function Undo-AVDTuneFSLogixSettings {
-    <# Puts back the values found before the last Set-AVDTuneFSLogixSettings (a value that was absent is removed again). #>
+    <#
+        Puts back the values found before the first recorded change (a value that was absent is removed again). The record is read typed and checked against the
+        catalog; a value that is no longer the one AVDTune set (changed by someone else since) is not touched and named in Skipped (audit #100).
+    #>
     [CmdletBinding()]
     param([Parameter(Mandatory)]$Machine, [string]$Root = (Get-AVDTuneRoot), [string]$User, [string]$SnapshotId, [switch]$WhatIf)
-    $u = Read-AVDTuneJson (Get-AVDTuneFSLogixUndoPath $Root)
-    if (-not $u -or @($u.Items).Count -eq 0) { throw 'There is nothing to undo: no FSLogix settings change was recorded.' }
-    $steps = @(foreach ($i in @($u.Items)) {
-            $prev = Get-AVDTuneProp $i 'Previous'
-            if ($i.Type -eq 'MultiString' -and $null -ne $prev) { $prev = @(@($prev) | ForEach-Object { [string]$_ }) }
-            if ($i.Type -eq 'DWord' -and $null -ne $prev) { $prev = [int]$prev }
-            New-AVDTuneFSLogixRegStep -Id "$($i.Id).undo" -Path $i.Path -Name $i.Name -Value $prev -Type $i.Type -Title "Undo: $($i.Title)"
+    $items = @(Read-AVDTuneFSLogixUndo -Root $Root)
+    if ($items.Count -eq 0) { throw 'There is nothing to undo: no FSLogix settings change was recorded.' }
+    $skipped = New-Object System.Collections.ArrayList
+    $steps = @(foreach ($i in $items) {
+            $cur = & $Machine.RegGet $i.Path $i.Name
+            if ($i.HasValue -and -not (Test-AVDTuneFSLogixUndoSame $cur $i.Value) -and -not (Test-AVDTuneFSLogixUndoSame $cur $i.Previous)) { [void]$skipped.Add("$($i.Name) (now $(@($cur) -join ', '), AVDTune set $(@($i.Value) -join ', '))"); continue }
+            New-AVDTuneFSLogixRegStep -Id "$($i.Id).undo" -Path $i.Path -Name $i.Name -Value $i.Previous -Type $i.Type -Title "Undo: $($i.Title)"
         })
+    if ($steps.Count -eq 0) { throw "Nothing is undone: every recorded value was changed since by someone else: $($skipped -join '; ')." }
     $run = Invoke-AVDTune -Plan ([pscustomobject]@{ Name = 'FSLogix settings undo'; Steps = @($steps | ForEach-Object { $_.Id }) }) -Catalog $steps -Machine $Machine -Root $Root -User $User -SnapshotId $SnapshotId -WhatIf:$WhatIf
     if (-not $WhatIf -and @($run.Results | Where-Object { $_.Status -eq 'Failed' }).Count -eq 0) { Remove-Item -LiteralPath (Get-AVDTuneFSLogixUndoPath $Root) -Force -ErrorAction SilentlyContinue }
+    Add-Member -InputObject $run -NotePropertyName Skipped -NotePropertyValue @($skipped) -Force
     $run
 }
 
@@ -1486,7 +1578,7 @@ function Remove-AVDTuneFolderNoFollowSafe([string]$Dir) { Remove-AVDTuneFolderNo
 #endregion
 
 Export-ModuleMember -Function Get-AVDTuneFSLogixSettingCatalog, Test-AVDTuneFSLogixUncPath, Test-AVDTuneFSLogixValue, Get-AVDTuneFSLogixInfo, Get-AVDTuneFSLogixSettingsState,
-    New-AVDTuneFSLogixRegStep, Get-AVDTuneFSLogixGroupMembers, Get-AVDTuneFSLogixUndoPath, Set-AVDTuneFSLogixSettings, Undo-AVDTuneFSLogixSettings, Get-AVDTuneFSLogixLastChange, Test-AVDTuneSid, Test-AVDTuneDomainSid, New-AVDTuneFSLogixGroupStep, Get-AVDTuneFSLogixRecommendedLists, Get-AVDTuneFSLogixListPlan, Format-AVDTuneFSLogixListChanges, Set-AVDTuneFSLogixListsUndoClaim, Set-AVDTuneFSLogixRecommendedLists, Undo-AVDTuneFSLogixRecommendedLists, Get-AVDTuneFSLogixListsUndoPath, Get-AVDTuneFSLogixGroups, Get-AVDTuneFSLogixVersionState,
+    New-AVDTuneFSLogixRegStep, Get-AVDTuneFSLogixGroupMembers, Get-AVDTuneFSLogixUndoPath, Save-AVDTuneFSLogixUndo, Read-AVDTuneFSLogixUndo, Get-AVDTuneFSLogixUndoTargets, Set-AVDTuneFSLogixSettings, Undo-AVDTuneFSLogixSettings, Get-AVDTuneFSLogixLastChange, Test-AVDTuneSid, Test-AVDTuneDomainSid, New-AVDTuneFSLogixGroupStep, Get-AVDTuneFSLogixRecommendedLists, Get-AVDTuneFSLogixListPlan, Format-AVDTuneFSLogixListChanges, Set-AVDTuneFSLogixListsUndoClaim, Set-AVDTuneFSLogixRecommendedLists, Undo-AVDTuneFSLogixRecommendedLists, Get-AVDTuneFSLogixListsUndoPath, Get-AVDTuneFSLogixGroups, Get-AVDTuneFSLogixVersionState,
     Get-AVDTuneFSLogixGroupChoices, Set-AVDTuneFSLogixGroupMember, Get-AVDTuneRedirectionTemplate, Test-AVDTuneRedirectionPath, New-AVDTuneRedirectionsXml,
     Test-AVDTuneRedirectionsXml, Get-AVDTuneRedirectionsTarget, Get-AVDTuneRedirectionsDefaultFolder, Get-AVDTuneRedirectionsFolderState, Assert-AVDTuneRedirectionsPath, Write-AVDTuneUndoFile, Split-AVDTuneLogonName, Save-AVDTuneRedirections, Undo-AVDTuneRedirections, Get-AVDTuneFSLogixDefenderList,
     Get-AVDTuneFSLogixDefenderState, Get-AVDTuneFSLogixDefenderHash, Get-AVDTuneFSLogixListPlanHash, Set-AVDTuneFSLogixDefender, Undo-AVDTuneFSLogixDefender, Get-AVDTuneFSLogixLatest, Invoke-AVDTuneFSLogixInstall, Invoke-AVDTuneFSLogixInstallRecorded,

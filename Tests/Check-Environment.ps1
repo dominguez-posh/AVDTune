@@ -765,6 +765,8 @@ try {
     Test-Check 'FSLogix on the master: WhatIf changes nothing' (@($m.Log | Where-Object { $_ -like 'RegSet*' }).Count -eq 0) $null
     [void](Set-AVDTuneEnvMaster -Machine $m -Spec $good -Identity EntraKerberos -Root $root -User 'u' -SnapshotId 'snap3')
     Test-Check 'FSLogix on the master: Enabled, VHDLocations with the new share and the cloud Kerberos ticket value' (($m.Log -join "`n") -like '*FSLogix\Profiles|VHDLocations*contosoprofiles.file.core.windows.net\profiles*' -and ($m.Log -join "`n") -like '*Enabled=1*' -and ($m.Log -join "`n") -like '*CloudKerberosTicketRetrievalEnabled=1*') ($m.Log -join '|')
+    $kr = @(Read-AVDTuneFSLogixUndo -Root $root | Where-Object Id -eq 'fslogix.kerberos.cloudticket')
+    Test-Check 'FSLogix on the master (#100): the cloud Kerberos ticket value has an undo record (absent before), the FSLogix undo removes it again' ($kr.Count -eq 1 -and $null -eq $kr[0].Previous -and $kr[0].Value -eq 1 -and (Undo-AVDTuneFSLogixSettings -Machine $m -Root $root -User 'u' -SnapshotId 'snap3') -and $null -eq (& $m.RegGet 'HKLM:\SYSTEM\CurrentControlSet\Control\Lsa\Kerberos\Parameters' 'CloudKerberosTicketRetrievalEnabled')) ($kr | ConvertTo-Json -Compress)
     $lcRoot = New-Root; $roots += $lcRoot
     Open-AVDTuneWriteGate -SnapshotId 'snap4' -ConfirmedBy 'Test User'
     $before = Get-AVDTuneLastChange -Root $lcRoot
