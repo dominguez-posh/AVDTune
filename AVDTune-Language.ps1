@@ -26,8 +26,8 @@ function Initialize-LangPage {
     $page.Name = 'PageLanguage'; $page.Visibility = 'Collapsed'
     $scroll = New-Object System.Windows.Controls.ScrollViewer; Set-Brush $scroll ([System.Windows.Controls.ScrollViewer]::StyleProperty) 'PageScroll'
     $stack = New-Object System.Windows.Controls.StackPanel; $stack.Margin = '40,32,40,28'; $stack.MaxWidth = 1000; $stack.HorizontalAlignment = 'Left'
-    [void]$stack.Children.Add((New-Text 'Language and region' 'PageTitle'))
-    [void]$stack.Children.Add((New-Text 'Language packs and features for a Windows 11 multi-session master, and the defaults new users get at their first sign-in. Languages come from a content folder you name (the LanguagesAndOptionalFeatures content of the Microsoft ISO, mounted or on a share): AVDTune downloads nothing. Nothing is changed until you press a button and confirm.' 'Subtitle'))
+    [void]$stack.Children.Add((New-Text (T 'nav.language') 'PageTitle'))
+    [void]$stack.Children.Add((New-Text (T 'lang.subtitle') 'Subtitle'))
     $state = New-Text '' 'Hint' '0,10,0,0'; [void]$stack.Children.Add($state)
 
     $newCard = {
@@ -39,25 +39,25 @@ function Initialize-LangPage {
     $btn = { param($Text, $Name, [bool]$Primary) $b = New-Object System.Windows.Controls.Button; $b.Content = $Text; $b.Margin = '0,0,8,0'; if ($Primary) { Set-Brush $b ([System.Windows.Controls.Button]::StyleProperty) 'PrimaryButton' }; [System.Windows.Automation.AutomationProperties]::SetName($b, $Name); $b }
 
     # installed languages
-    $c1 = & $newCard 'Installed languages and features'
+    $c1 = & $newCard (T 'lang.installed.title')
     $installed = New-Object System.Windows.Controls.StackPanel; $installed.Margin = '0,8,0,0'; [void]$c1.Children.Add($installed)
-    $refresh = & $btn 'Refresh' 'Read the installed languages again' $false; $refresh.Margin = '0,8,0,0'; $refresh.HorizontalAlignment = 'Left'; [void]$c1.Children.Add($refresh)
+    $refresh = & $btn 'Refresh' (T 'lang.refresh.tip') $false; $refresh.Margin = '0,8,0,0'; $refresh.HorizontalAlignment = 'Left'; [void]$c1.Children.Add($refresh)
 
     # add languages
-    $c2 = & $newCard 'Add languages'
-    [void]$c2.Children.Add((New-Text 'Tick the languages to install. Each one is installed with its language pack, handwriting, OCR, speech, text-to-speech and (where needed) font features, from the content folder. Installing a language pack cannot be undone by AVDTune (restore a snapshot).' 'Hint' '0,6,0,0'))
+    $c2 = & $newCard (T 'lang.add.title')
+    [void]$c2.Children.Add((New-Text (T 'lang.add.text') 'Hint' '0,6,0,0'))
     $checks = New-Object System.Windows.Controls.WrapPanel; $checks.Margin = '0,10,0,0'; [void]$c2.Children.Add($checks)
     $row = New-Object System.Windows.Controls.StackPanel; $row.Orientation = 'Horizontal'; $row.Margin = '0,12,0,0'
-    $lab = New-Text 'Content folder' $null '0,0,10,0'; $lab.VerticalAlignment = 'Center'
-    $src = New-Object System.Windows.Controls.TextBox; $src.Width = 520; $src.Padding = '6,4'; $src.ToolTip = 'A mounted ISO (drive letter), an admin-only folder or a share (\\server\share) with the LanguagesAndOptionalFeatures content'; [System.Windows.Automation.AutomationProperties]::SetName($src, 'Content folder with the language packs')
+    $lab = New-Text (T 'lang.source') $null '0,0,10,0'; $lab.VerticalAlignment = 'Center'
+    $src = New-Object System.Windows.Controls.TextBox; $src.Width = 520; $src.Padding = '6,4'; $src.ToolTip = (T 'lang.source.tip'); [System.Windows.Automation.AutomationProperties]::SetName($src, (T 'lang.source.name'))
     [void]$row.Children.Add($lab); [void]$row.Children.Add($src); [void]$c2.Children.Add($row)
     $b2 = New-Object System.Windows.Controls.StackPanel; $b2.Orientation = 'Horizontal'; $b2.Margin = '0,12,0,0'
-    $install = & $btn 'Install selected languages' 'Install the ticked languages from the content folder' $true
+    $install = & $btn (T 'lang.install') (T 'lang.install.tip') $true
     [void]$b2.Children.Add($install); [void]$c2.Children.Add($b2)
 
     # defaults for new users
-    $c3 = & $newCard 'Defaults for new users'
-    [void]$c3.Children.Add((New-Text 'What new users and the sign-in screen get at the first sign-in. The values are set for the account that runs AVDTune and then copied to the welcome screen and new users (Copy-UserInternationalSettingsToSystem). Display language, system locale and the copy take effect after a restart; users who already have a profile keep their settings. The display language list holds the installed languages; a language that is missing is offered for installation first.' 'Hint' '0,6,0,10'))
+    $c3 = & $newCard (T 'lang.defaults.title')
+    [void]$c3.Children.Add((New-Text (T 'lang.defaults.text') 'Hint' '0,6,0,10'))
     $grid = New-Object System.Windows.Controls.Grid
     foreach ($w in 250, 330, '*') { $cd = New-Object System.Windows.Controls.ColumnDefinition; $cd.Width = $w; [void]$grid.ColumnDefinitions.Add($cd) }
     $labels = [ordered]@{ Ui = 'Display language (UI) and sign-in screen'; Culture = 'Regional format (numbers, dates)'; InputTip = 'Input (keyboard)'; GeoId = 'Location (GeoId)'; SystemLocale = 'System locale (programs without Unicode, restart needed)'; TimeZone = 'Time zone (default from the Azure region)' }
@@ -73,9 +73,9 @@ function Initialize-LangPage {
     }
     [void]$c3.Children.Add($grid)
     $b3 = New-Object System.Windows.Controls.StackPanel; $b3.Orientation = 'Horizontal'; $b3.Margin = '0,12,0,0'
-    $test = & $btn 'Test (change nothing)' 'Test what the settings would change, without changing anything' $false
-    $apply = & $btn 'Apply defaults' 'Apply the defaults for new users to this master' $true
-    $undo = & $btn 'Undo defaults' 'Put back the values found before the first change' $false
+    $test = & $btn (T 'lang.test') (T 'lang.test.tip') $false
+    $apply = & $btn (T 'lang.apply') (T 'lang.apply.tip') $true
+    $undo = & $btn (T 'lang.undo') (T 'lang.undo.tip') $false
     foreach ($b in $test, $apply, $undo) { [void]$b3.Children.Add($b) }
     [void]$c3.Children.Add($b3)
     $notes = New-Text '' 'Hint' '0,12,0,0'; [void]$c3.Children.Add($notes)
@@ -103,7 +103,7 @@ function Set-LangCombo([string]$Key, $Items, $Want) {
     # Items: objects with Label and Value. Keep-as-is first; the item with the wanted value is selected (otherwise Keep as is)
     $cb = $script:LangCombos[$Key]
     $cb.Items.Clear()
-    $keep = New-Object System.Windows.Controls.ComboBoxItem; $keep.Content = '(keep as it is)'; $keep.Tag = $null; [void]$cb.Items.Add($keep)
+    $keep = New-Object System.Windows.Controls.ComboBoxItem; $keep.Content = (T 'lang.keep'); $keep.Tag = $null; [void]$cb.Items.Add($keep)
     $pick = $keep
     foreach ($it in $Items) {
         $ci = New-Object System.Windows.Controls.ComboBoxItem; $ci.Content = [string]$it.Label; $ci.Tag = $it.Value; [void]$cb.Items.Add($ci)
@@ -128,7 +128,7 @@ function Update-LangView {
             $name = @(Get-AVDTuneLanguageCatalog | Where-Object { $_.Tag -ieq $l.Tag }); $nm = if ($name.Count) { $name[0].Name } else { '' }
             [void]$ui.PanelLangInstalled.Children.Add((New-Text "$($l.Tag)  $nm   $(@($l.Features) -join ', ')" $null '0,2,0,2'))
         }
-        if ($st.Installed.Count -eq 0) { [void]$ui.PanelLangInstalled.Children.Add((New-Text 'No language is reported as installed.' 'Hint')) }
+        if ($st.Installed.Count -eq 0) { [void]$ui.PanelLangInstalled.Children.Add((New-Text (T 'lang.none') 'Hint')) }
         # add: checkboxes once, state every time
         if (-not $script:LangLoaded) {
             foreach ($c in (Get-AVDTuneLanguageCatalog)) {
@@ -140,7 +140,7 @@ function Update-LangView {
         }
         foreach ($t in @($script:LangChecks.Keys)) {
             $cb = $script:LangChecks[$t]; $isIn = ($t -in $instTags)
-            if ($isIn) { $cb.IsChecked = $true; $cb.IsEnabled = $false; $cb.Content = "$t  $((Get-AVDTuneLanguageCatalog | Where-Object Tag -eq $t).Name)  (installed)" }
+            if ($isIn) { $cb.IsChecked = $true; $cb.IsEnabled = $false; $cb.Content = (T 'lang.installed.item' $t $((Get-AVDTuneLanguageCatalog | Where-Object Tag -eq $t).Name)) }
             else { if (-not $script:LangLoaded) { $cb.IsChecked = [bool]($t -in @($saved.Languages)) }; $cb.IsEnabled = $true; $cb.Content = "$t  $((Get-AVDTuneLanguageCatalog | Where-Object Tag -eq $t).Name)" }
         }
         # defaults: previous choice, else saved, else the actual value (the time zone: the default of the Azure region)
@@ -159,16 +159,16 @@ function Update-LangView {
         $zoneWant = if ($first) { $saved.TimeZone } elseif ($prev.TimeZone) { $prev.TimeZone } else { $null }
         Set-LangCombo 'TimeZone' @($zones | ForEach-Object { [pscustomobject]@{ Label = $(if ($st.DefaultTimeZone -and $_ -eq $st.DefaultTimeZone) { "$_  (suggested for the Azure region $($st.AzureRegion))" } else { [string]$_ }); Value = [string]$_ } }) $zoneWant
         $now = $ui.LangNow
-        $now.Ui.Text = "Now for new users: $(if ($st.NewUser.Ui) { $st.NewUser.Ui } else { 'not set' })"
-        $now.Culture.Text = "Now: $(if ($st.NewUser.Culture) { $st.NewUser.Culture } else { 'not set' })"
-        $now.InputTip.Text = "Now: $(if ($st.NewUser.InputTip) { $st.NewUser.InputTip } else { 'not set' })"
-        $now.GeoId.Text = "Now: $(if ($null -ne $st.NewUser.GeoId) { $st.NewUser.GeoId } else { 'not set' })"
-        $now.SystemLocale.Text = "Now: $(if ($st.SystemLocale) { $st.SystemLocale } else { 'not set' })"
-        $now.TimeZone.Text = "Now: $(if ($st.TimeZone) { $st.TimeZone } else { 'not set' })$(if ($st.AzureRegion) { "; Azure region $($st.AzureRegion)$(if ($st.DefaultTimeZone) { " suggests $($st.DefaultTimeZone)" })" })"
+        $now.Ui.Text = (T 'lang.now.newusers' $(if ($st.NewUser.Ui) { $st.NewUser.Ui } else { (T 'lang.notset') }))
+        $now.Culture.Text = (T 'lang.now' $(if ($st.NewUser.Culture) { $st.NewUser.Culture } else { (T 'lang.notset') }))
+        $now.InputTip.Text = (T 'lang.now' $(if ($st.NewUser.InputTip) { $st.NewUser.InputTip } else { (T 'lang.notset') }))
+        $now.GeoId.Text = (T 'lang.now' $(if ($null -ne $st.NewUser.GeoId) { $st.NewUser.GeoId } else { (T 'lang.notset') }))
+        $now.SystemLocale.Text = (T 'lang.now' $(if ($st.SystemLocale) { $st.SystemLocale } else { (T 'lang.notset') }))
+        $now.TimeZone.Text = (T 'lang.now.tz' $(if ($st.TimeZone) { $st.TimeZone } else { (T 'lang.notset') }) $(if ($st.AzureRegion) { (T 'lang.azureregion' $($st.AzureRegion) $(if ($st.DefaultTimeZone) { (T 'lang.suggests' $($st.DefaultTimeZone)) })) }))
         $script:LangLoaded = $true
     }
     finally { $script:LangBuilding = $false }
-    $ui.TxtLangNotes.Text = 'Sources: Learn "Install language packs on Windows 11 Enterprise VMs in Azure Virtual Desktop" and "Copy-UserInternationalSettingsToSystem". The state of new users is read from the .DEFAULT registry hive (the welcome screen and system accounts); the default profile itself is checked on the test VM. Undo puts back the display language, format, input, location, system locale and time zone found before the first change; installed language packs stay.'
+    $ui.TxtLangNotes.Text = (T 'lang.sources')
 }
 
 function Set-LangBusy([bool]$Busy) {
@@ -244,13 +244,13 @@ $script:Timer.Add_Tick({ try { Complete-LangJob } catch { Show-Error $_.Exceptio
 
 function Save-LangConfig($Cfg) { [void](Set-AVDTuneLanguageConfig -Root $script:StateRoot -Config $Cfg) }
 
-Add-Click $ui.BtnLangRefresh { Update-LangView; $ui.TxtLangState.Text = 'Read again: nothing was changed.' }
+Add-Click $ui.BtnLangRefresh { Update-LangView; $ui.TxtLangState.Text = (T 'lang.readagain') }
 Add-Click $ui.BtnLangTest {
     $cfg = Get-LangFormConfig
     $problems = @(Test-AVDTuneLanguageConfig $cfg -InstalledTags @($script:LangState.Installed | ForEach-Object { $_.Tag })); if ($problems.Count -gt 0) { throw ($problems -join ' ') }
     $run = Invoke-AVDTuneLanguage -Machine $script:Machine -L (Get-LangAdapter) -Root $script:StateRoot -Config $cfg -Parts All -WhatIf
     $n = @($run.Results | Where-Object { $_.Status -eq 'WhatIf' }).Count; $f = @($run.Results | Where-Object { $_.Status -eq 'Failed' })
-    $ui.TxtLangState.Text = "Tested: $n step(s) would change something$(if ($f.Count -gt 0) { "; $($f.Count) would fail: $($f[0].Message)" }). Nothing was changed."
+    $ui.TxtLangState.Text = (T 'lang.tested' $n $(if ($f.Count -gt 0) { (T 'lang.tested.fail' $($f.Count) $($f[0].Message)) }))
 }
 Add-Click $ui.BtnLangInstall {
     Assert-FslWrite
@@ -261,9 +261,9 @@ Add-Click $ui.BtnLangInstall {
     $problems = @(Test-AVDTuneLanguageConfig $cfg -InstalledTags $inst); if ($problems.Count -gt 0) { throw ($problems -join ' ') }
     $chk = & (Get-LangAdapter).CheckSource $cfg.Source $script:StateRoot
     if (-not $chk.Ok) { throw "The content folder is not usable: $($chk.Problem)" }
-    if (-not (Confirm-Action (Get-AVDTuneLanguageConfirmText -Mode Languages -Config $cfg -State $script:LangState -SourceKind $chk.Kind) 'Language and region: cannot be undone')) { return }
+    if (-not (Confirm-Action (Get-AVDTuneLanguageConfirmText -Mode Languages -Config $cfg -State $script:LangState -SourceKind $chk.Kind) (T 'lang.ask.install.title'))) { return }
     Save-LangConfig $cfg
-    Start-LangJob 'Languages' $cfg; $ui.TxtLangState.Text = 'Installing languages ...'
+    Start-LangJob 'Languages' $cfg; $ui.TxtLangState.Text = (T 'lang.installing')
 }
 Add-Click $ui.BtnLangApply {
     Assert-FslWrite
@@ -272,7 +272,7 @@ Add-Click $ui.BtnLangApply {
     $kind = 'Defaults'
     if ($cfg.UiLanguage -and $cfg.UiLanguage -inotin $inst) {
         if (-not $cfg.Source) { throw "The display language $($cfg.UiLanguage) is not installed. Enter the content folder to install it first, or choose an installed language." }
-        if (-not (Confirm-Action "The display language $($cfg.UiLanguage) is not installed yet. Install it first from $($cfg.Source), then set the defaults?" 'Language and region')) { return }
+        if (-not (Confirm-Action (T 'lang.ask.uimissing' $($cfg.UiLanguage) $($cfg.Source)) (T 'nav.language'))) { return }
         $cfg.Languages = @(@($cfg.Languages) + $cfg.UiLanguage | Select-Object -Unique); $kind = 'All'
     }
     elseif (@($cfg.Languages | Where-Object { $_ -notin $inst }).Count -gt 0) { $kind = 'All' }
@@ -280,12 +280,12 @@ Add-Click $ui.BtnLangApply {
     $mode = if ($kind -eq 'All') { 'All' } else { 'Defaults' }
     $srcKind = ''
     if ($kind -eq 'All') { $chk = & (Get-LangAdapter).CheckSource $cfg.Source $script:StateRoot; if (-not $chk.Ok) { throw "The content folder is not usable: $($chk.Problem)" }; $srcKind = $chk.Kind }
-    if (-not (Confirm-Action (Get-AVDTuneLanguageConfirmText -Mode $mode -Config $cfg -State $script:LangState -SourceKind $srcKind) $(if ($kind -eq 'All') { 'Language and region: cannot be undone' } else { 'Language and region' }))) { return }
+    if (-not (Confirm-Action (Get-AVDTuneLanguageConfirmText -Mode $mode -Config $cfg -State $script:LangState -SourceKind $srcKind) $(if ($kind -eq 'All') { (T 'lang.ask.install.title') } else { (T 'nav.language') }))) { return }
     Save-LangConfig $cfg
-    Start-LangJob $kind $cfg; $ui.TxtLangState.Text = 'Setting the defaults for new users ...'
+    Start-LangJob $kind $cfg; $ui.TxtLangState.Text = (T 'lang.applying')
 }
 Add-Click $ui.BtnLangUndo {
     Assert-FslWrite
-    if (-not (Confirm-Action (Get-AVDTuneLanguageConfirmText -Mode Undo) 'Language and region')) { return }
-    Start-LangJob 'Undo' $null; $ui.TxtLangState.Text = 'Undoing the language defaults ...'
+    if (-not (Confirm-Action (Get-AVDTuneLanguageConfirmText -Mode Undo) (T 'nav.language'))) { return }
+    Start-LangJob 'Undo' $null; $ui.TxtLangState.Text = (T 'lang.undoing')
 }

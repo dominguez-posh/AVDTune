@@ -18,12 +18,13 @@ $script:MaskReadQueued = $false
 $script:MaskChecks = @{}
 $script:MaskUiBuilt = $false
 
+$script:MaskDefaultSetName = 'Public Desktop'   # the default name of a new rule set is data (file names), the same in every language
 function Get-MaskAdapter { if ($script:TestMode) { $script:MaskFake.M } else { if (-not $script:RealMask) { $script:RealMask = New-AVDTuneMaskingAdapter }; $script:RealMask } }
 function Get-MaskAnswers { $e = $null; try { $e = Get-AVDTuneEnvironment $script:StateRoot } catch { }; if ($e) { Get-AVDTuneEnvironmentAnswers $e } else { $null } }
 function Get-MaskDirectory { $d = $null; try { $d = Read-AVDTuneJson (Join-Path $script:StateRoot 'config\directory.json') } catch { }; if ($d -and (Get-AVDTuneProp $d 'Directory')) { $d.Directory } else { $null } }
 function Get-MaskGroupSam($G) { $s = [string](Get-AVDTuneProp $G 'Sam'); if ($s) { $s } else { [string]$G.Name } }
 function Get-MaskGateSnapshot { $g = Get-AVDTuneWriteGate; if ($g) { [string]$g.SnapshotId } else { '' } }
-function Assert-MaskWrite { if (-not (Test-AVDTuneWriteAllowed)) { throw 'Read only: confirm a snapshot of today on the Overview first.' }; Assert-NoOtherWriter }
+function Assert-MaskWrite { if (-not (Test-AVDTuneWriteAllowed)) { throw (T 'ready.err.readonly') }; Assert-NoOtherWriter }
 
 function New-MaskText([string]$Text, [string]$Style = '', [string]$Margin = '0') {
     $t = New-Object System.Windows.Controls.TextBlock; $t.Text = $Text; $t.TextWrapping = 'Wrap'; $t.Margin = $Margin
@@ -60,24 +61,24 @@ function Build-MaskPage {
     $page = New-Object System.Windows.Controls.Grid; $page.Visibility = 'Collapsed'
     $sv = New-Object System.Windows.Controls.ScrollViewer; $sv.SetResourceReference([System.Windows.Controls.ScrollViewer]::StyleProperty, 'PageScroll')
     $root = New-Object System.Windows.Controls.StackPanel; $root.Margin = '40,32,40,28'; $root.MaxWidth = 1000; $root.HorizontalAlignment = 'Left'
-    [void]$root.Children.Add((New-MaskText 'App Masking' 'PageTitle'))
-    $ui.TxtMaskSubtitle = New-MaskText 'Who sees which icon on the Public Desktop (FSLogix hiding rules). Choose per icon; every change is previewed, confirmed, behind the snapshot gate and can be undone.' 'Subtitle'
+    [void]$root.Children.Add((New-MaskText (T 'nav.appmasking') 'PageTitle'))
+    $ui.TxtMaskSubtitle = New-MaskText (T 'mask.subtitle') 'Subtitle'
     [void]$root.Children.Add($ui.TxtMaskSubtitle)
 
     # ---- list: one row per entry of the Public Desktop
-    $c1 = New-MaskCard 'Public Desktop' 'One row per entry. "Visible for" decides who still sees it; each entry gets its own rule set (Desktop-<name>). Groups are Active Directory groups from the domain controller (bound by name and SID).'
+    $c1 = New-MaskCard (T 'mask.pd.title') (T 'mask.pd.text')
     $ui.TxtMaskCounter = New-MaskText '' '' '0,8,0,0'; $ui.TxtMaskCounter.FontWeight = 'SemiBold'; [void]$c1.Panel.Children.Add($ui.TxtMaskCounter)
     $ui.PanelMaskList = New-Object System.Windows.Controls.StackPanel; $ui.PanelMaskList.Margin = '0,8,0,0'; [void]$c1.Panel.Children.Add($ui.PanelMaskList)
     $ui.TxtMaskEntra = New-MaskText '' 'Hint' '0,8,0,0'; [void]$c1.Panel.Children.Add($ui.TxtMaskEntra)
     $rowAll = New-Object System.Windows.Controls.StackPanel; $rowAll.Orientation = 'Horizontal'; $rowAll.Margin = '0,10,0,0'
-    $ui.BtnMaskPreviewAll = New-MaskButton 'Preview all changes' 'Preview every row whose choice was changed'; $ui.BtnMaskPreviewAll.Margin = '0,0,6,0'
-    $ui.BtnMaskSaveAll = New-MaskButton 'Save all changes' 'Save every changed row in one change (one undo)' $true; [void](Set-AVDTuneWriterButton $ui.BtnMaskSaveAll)   # #49
+    $ui.BtnMaskPreviewAll = New-MaskButton (T 'mask.previewall') (T 'mask.previewall.tip'); $ui.BtnMaskPreviewAll.Margin = '0,0,6,0'
+    $ui.BtnMaskSaveAll = New-MaskButton (T 'mask.saveall') (T 'mask.saveall.tip') $true; [void](Set-AVDTuneWriterButton $ui.BtnMaskSaveAll)   # #49
     foreach ($b in $ui.BtnMaskPreviewAll, $ui.BtnMaskSaveAll) { [void]$rowAll.Children.Add($b) }
     [void]$c1.Panel.Children.Add($rowAll)
     $row = New-Object System.Windows.Controls.StackPanel; $row.Orientation = 'Horizontal'; $row.Margin = '0,10,0,0'
-    $ui.BtnMaskRefresh = New-MaskButton 'Refresh' 'Read the rule sets and the Public Desktop again'
-    $ui.BtnMaskLogoff = New-MaskButton 'Add the Abmelden shortcut' 'Put a sign out shortcut on the Public Desktop for all users'
-    $ui.BtnMaskUndo = New-MaskButton 'Undo the last change' 'Put back the files, shortcut or group of the last change (all rows of a "Save all changes" together)'
+    $ui.BtnMaskRefresh = New-MaskButton 'Refresh' (T 'mask.refresh.tip')
+    $ui.BtnMaskLogoff = New-MaskButton (T 'mask.signout') (T 'mask.signout.tip')
+    $ui.BtnMaskUndo = New-MaskButton (T 'mask.undo') (T 'mask.undo.tip')
     foreach ($b in $ui.BtnMaskRefresh, $ui.BtnMaskLogoff, $ui.BtnMaskUndo) { [void]$row.Children.Add($b) }
     [void]$c1.Panel.Children.Add($row)
     $ui.TxtMaskLogoffNote = New-MaskText '' 'Hint' '0,6,0,0'; [void]$c1.Panel.Children.Add($ui.TxtMaskLogoffNote)
@@ -85,43 +86,43 @@ function Build-MaskPage {
     [void]$root.Children.Add($c1.Card)
 
     # ---- Advanced: the former wizard (rule set name, OU, new group, domain controller account) and the rule sets
-    $ui.ExpMaskAdvanced = New-Object System.Windows.Controls.Expander; $ui.ExpMaskAdvanced.Header = 'Advanced'; $ui.ExpMaskAdvanced.IsExpanded = $false; $ui.ExpMaskAdvanced.Margin = '0,16,0,0'
-    [System.Windows.Automation.AutomationProperties]::SetName($ui.ExpMaskAdvanced, 'Advanced: rule set wizard, new groups, domain controller account and rule sets')
+    $ui.ExpMaskAdvanced = New-Object System.Windows.Controls.Expander; $ui.ExpMaskAdvanced.Header = (T 'mask.advanced'); $ui.ExpMaskAdvanced.IsExpanded = $false; $ui.ExpMaskAdvanced.Margin = '0,16,0,0'
+    [System.Windows.Automation.AutomationProperties]::SetName($ui.ExpMaskAdvanced, (T 'mask.advanced.name'))
     $adv = New-Object System.Windows.Controls.StackPanel
 
-    $c2 = New-MaskCard 'Set up visibility (wizard)' 'Tick the entries that get a hiding rule in one rule set, name the set, and choose who still sees them. Rule sets are written exactly like the FSLogix Rule Editor writes them; a rule set that exists keeps its other rules.'
+    $c2 = New-MaskCard (T 'mask.wiz.title') (T 'mask.wiz.text')
     $ui.PanelMaskDesk = New-Object System.Windows.Controls.StackPanel; $ui.PanelMaskDesk.Margin = '0,8,0,0'; [void]$c2.Panel.Children.Add($ui.PanelMaskDesk)
-    $ui.BtnMaskUncovered = New-MaskButton 'Tick the uncovered entries' 'Tick every entry that no rule hides'; $ui.BtnMaskUncovered.Margin = '0,6,0,6'; $ui.BtnMaskUncovered.HorizontalAlignment = 'Left'
+    $ui.BtnMaskUncovered = New-MaskButton (T 'mask.wiz.uncovered') (T 'mask.wiz.uncovered.tip'); $ui.BtnMaskUncovered.Margin = '0,6,0,6'; $ui.BtnMaskUncovered.HorizontalAlignment = 'Left'
     [void]$c2.Panel.Children.Add($ui.BtnMaskUncovered)
-    $ui.TxtMaskName = New-Object System.Windows.Controls.TextBox; $ui.TxtMaskName.Text = 'Public Desktop'; $ui.TxtMaskName.Padding = '8,6'; [System.Windows.Automation.AutomationProperties]::SetName($ui.TxtMaskName, 'Name of the rule set')
-    [void]$c2.Panel.Children.Add((New-MaskLabeled 'Rule set name' $ui.TxtMaskName))
-    $ui.CmbMaskVis = New-Object System.Windows.Controls.ComboBox; $ui.CmbMaskVis.Padding = '8,6'; [System.Windows.Automation.AutomationProperties]::SetName($ui.CmbMaskVis, 'Who still sees the ticked entries')
-    [void]$c2.Panel.Children.Add((New-MaskLabeled 'Visible for' $ui.CmbMaskVis))
-    $ui.CmbMaskKind = New-Object System.Windows.Controls.ComboBox; $ui.CmbMaskKind.Padding = '8,6'; [System.Windows.Automation.AutomationProperties]::SetName($ui.CmbMaskKind, 'Kind of group')
+    $ui.TxtMaskName = New-Object System.Windows.Controls.TextBox; $ui.TxtMaskName.Text = $script:MaskDefaultSetName; $ui.TxtMaskName.Padding = '8,6'; [System.Windows.Automation.AutomationProperties]::SetName($ui.TxtMaskName, (T 'mask.wiz.setname.name'))
+    [void]$c2.Panel.Children.Add((New-MaskLabeled (T 'mask.wiz.setname') $ui.TxtMaskName))
+    $ui.CmbMaskVis = New-Object System.Windows.Controls.ComboBox; $ui.CmbMaskVis.Padding = '8,6'; [System.Windows.Automation.AutomationProperties]::SetName($ui.CmbMaskVis, (T 'mask.wiz.visible.name'))
+    [void]$c2.Panel.Children.Add((New-MaskLabeled (T 'mask.wiz.visible') $ui.CmbMaskVis))
+    $ui.CmbMaskKind = New-Object System.Windows.Controls.ComboBox; $ui.CmbMaskKind.Padding = '8,6'; [System.Windows.Automation.AutomationProperties]::SetName($ui.CmbMaskKind, (T 'mask.wiz.kind.name'))
     [void]$c2.Panel.Children.Add((New-MaskLabeled 'Group' $ui.CmbMaskKind))
-    $ui.CmbMaskExisting = New-Object System.Windows.Controls.ComboBox; $ui.CmbMaskExisting.Padding = '8,6'; [System.Windows.Automation.AutomationProperties]::SetName($ui.CmbMaskExisting, 'Existing AD group')
-    [void]$c2.Panel.Children.Add((New-MaskLabeled 'Existing AD group' $ui.CmbMaskExisting))
-    $ui.CmbMaskOu = New-Object System.Windows.Controls.ComboBox; $ui.CmbMaskOu.Padding = '8,6'; [System.Windows.Automation.AutomationProperties]::SetName($ui.CmbMaskOu, 'OU for the new AD group')
-    [void]$c2.Panel.Children.Add((New-MaskLabeled 'OU for a new AD group' $ui.CmbMaskOu))
-    $ui.TxtMaskGroup = New-Object System.Windows.Controls.TextBox; $ui.TxtMaskGroup.Padding = '8,6'; [System.Windows.Automation.AutomationProperties]::SetName($ui.TxtMaskGroup, 'Name of the new group')
-    [void]$c2.Panel.Children.Add((New-MaskLabeled 'Name of the new group' $ui.TxtMaskGroup))
-    $ui.TxtMaskDc = New-Object System.Windows.Controls.TextBox; $ui.TxtMaskDc.Padding = '8,6'; [System.Windows.Automation.AutomationProperties]::SetName($ui.TxtMaskDc, 'Domain controller')
-    [void]$c2.Panel.Children.Add((New-MaskLabeled 'Domain controller (AD groups)' $ui.TxtMaskDc))
-    $ui.TxtMaskUser = New-Object System.Windows.Controls.TextBox; $ui.TxtMaskUser.Padding = '8,6'; [System.Windows.Automation.AutomationProperties]::SetName($ui.TxtMaskUser, 'Domain account')
-    [void]$c2.Panel.Children.Add((New-MaskLabeled 'Domain account' $ui.TxtMaskUser))
-    $ui.PwdMask = New-Object System.Windows.Controls.PasswordBox; $ui.PwdMask.Padding = '8,6'; [System.Windows.Automation.AutomationProperties]::SetName($ui.PwdMask, 'Password of the domain account')
-    [void]$c2.Panel.Children.Add((New-MaskLabeled 'Password (used once, not saved)' $ui.PwdMask))
+    $ui.CmbMaskExisting = New-Object System.Windows.Controls.ComboBox; $ui.CmbMaskExisting.Padding = '8,6'; [System.Windows.Automation.AutomationProperties]::SetName($ui.CmbMaskExisting, (T 'mask.wiz.existing'))
+    [void]$c2.Panel.Children.Add((New-MaskLabeled (T 'mask.wiz.existing') $ui.CmbMaskExisting))
+    $ui.CmbMaskOu = New-Object System.Windows.Controls.ComboBox; $ui.CmbMaskOu.Padding = '8,6'; [System.Windows.Automation.AutomationProperties]::SetName($ui.CmbMaskOu, (T 'mask.wiz.ou.name'))
+    [void]$c2.Panel.Children.Add((New-MaskLabeled (T 'mask.wiz.ou') $ui.CmbMaskOu))
+    $ui.TxtMaskGroup = New-Object System.Windows.Controls.TextBox; $ui.TxtMaskGroup.Padding = '8,6'; [System.Windows.Automation.AutomationProperties]::SetName($ui.TxtMaskGroup, (T 'mask.wiz.newgroup'))
+    [void]$c2.Panel.Children.Add((New-MaskLabeled (T 'mask.wiz.newgroup') $ui.TxtMaskGroup))
+    $ui.TxtMaskDc = New-Object System.Windows.Controls.TextBox; $ui.TxtMaskDc.Padding = '8,6'; [System.Windows.Automation.AutomationProperties]::SetName($ui.TxtMaskDc, (T 'fsl.x.fsldc.name'))
+    [void]$c2.Panel.Children.Add((New-MaskLabeled (T 'mask.wiz.dc') $ui.TxtMaskDc))
+    $ui.TxtMaskUser = New-Object System.Windows.Controls.TextBox; $ui.TxtMaskUser.Padding = '8,6'; [System.Windows.Automation.AutomationProperties]::SetName($ui.TxtMaskUser, (T 'mask.wiz.account'))
+    [void]$c2.Panel.Children.Add((New-MaskLabeled (T 'mask.wiz.account') $ui.TxtMaskUser))
+    $ui.PwdMask = New-Object System.Windows.Controls.PasswordBox; $ui.PwdMask.Padding = '8,6'; [System.Windows.Automation.AutomationProperties]::SetName($ui.PwdMask, (T 'fsl.x.password.name'))
+    [void]$c2.Panel.Children.Add((New-MaskLabeled (T 'prn.field.password') $ui.PwdMask))
     $ui.TxtMaskDcSession = New-MaskText '' 'Hint' '0,2,0,6'; [void]$c2.Panel.Children.Add($ui.TxtMaskDcSession)
     $ui.TxtMaskCaps = New-MaskText '' 'Hint' '0,6,0,0'; [void]$c2.Panel.Children.Add($ui.TxtMaskCaps)
     $row2 = New-Object System.Windows.Controls.StackPanel; $row2.Orientation = 'Horizontal'; $row2.Margin = '0,10,0,0'
-    $ui.BtnMaskPreview = New-MaskButton 'Preview' 'Show what would be written, nothing is changed'
-    $ui.BtnMaskApply = New-MaskButton 'Apply' 'Write the rule set and create the group if chosen' $true
+    $ui.BtnMaskPreview = New-MaskButton 'Preview' (T 'mask.wiz.preview.tip')
+    $ui.BtnMaskApply = New-MaskButton 'Apply' (T 'mask.wiz.write.tip') $true
     foreach ($b in $ui.BtnMaskPreview, $ui.BtnMaskApply) { [void]$row2.Children.Add($b) }
     [void]$c2.Panel.Children.Add($row2)
     $ui.TxtMaskWizState = New-MaskText '' '' '0,8,0,0'; [void]$c2.Panel.Children.Add($ui.TxtMaskWizState)
     [void]$adv.Children.Add($c2.Card)
 
-    $c3 = New-MaskCard 'Rule sets' 'Everything in C:\Program Files\FSLogix\Apps\Rules (.fxr and .fxa), including sets made with the Rule Editor. Parts AVDTune does not know are kept as they are.'
+    $c3 = New-MaskCard (T 'mask.sets.title') (T 'mask.sets.text')
     $ui.TxtMaskFslVersion = New-MaskText '' 'Hint' '0,4,0,0'; [void]$c3.Panel.Children.Add($ui.TxtMaskFslVersion)
     $ui.PanelMaskSets = New-Object System.Windows.Controls.StackPanel; $ui.PanelMaskSets.Margin = '0,8,0,0'; [void]$c3.Panel.Children.Add($ui.PanelMaskSets)
     [void]$adv.Children.Add($c3.Card)
@@ -162,7 +163,7 @@ function Start-MaskReadJob {
             [pscustomobject]@{ List = @(Get-AVDTuneMaskingList -M $m -Directory $Dir); Overview = (Get-AVDTuneMaskingOverview -M $m) }
         }).AddArgument($script:AppRoot).AddArgument($dir)
     $script:MaskReadJob = @{ PS = $ps; Handle = $ps.BeginInvoke(); Dir = $dir; Task = (New-MaskReadTask) }
-    $ui.TxtMaskCounter.Text = 'Reading the rule sets and the Public Desktop ...'
+    $ui.TxtMaskCounter.Text = (T 'mask.reading')
     foreach ($e in @($script:MaskRowUi.Values)) { Update-MaskRowState $e }
 }
 function Complete-MaskReadJob {
@@ -190,7 +191,7 @@ function Get-MaskGroupChoices($Dir) {
 }
 
 function Update-MaskRowState($Entry) {
-    $row = $Entry.Data; $mode = [string]$Entry.Mode.SelectedItem
+    $row = $Entry.Data; $mode = [string]$Entry.Mode.SelectedItem.Value
     $Entry.Group.IsEnabled = ($row.Editable -and $mode -eq 'Only members of a group')
     $busy = [bool]$script:MaskReadJob   # while the state is read the rows are those of the old read: nothing is changed from them
     $Entry.Preview.IsEnabled = ([bool]$row.Editable -and -not $busy)
@@ -203,24 +204,27 @@ function New-MaskListRow($Row, $Choices, $Entra) {
     foreach ($w in 170, 200, 190, "Auto", "Auto") { $c = New-Object System.Windows.Controls.ColumnDefinition; $c.Width = $w; [void]$g.ColumnDefinitions.Add($c) }
     $n = New-MaskText $Row.Name '' '0,0,8,0'; $n.FontWeight = 'SemiBold'; $n.VerticalAlignment = 'Center'; $n.ToolTip = "$($Row.Target)"
     $mode = New-Object System.Windows.Controls.ComboBox; $mode.Padding = '8,4'; $mode.Margin = '0,0,8,0'
-    [System.Windows.Automation.AutomationProperties]::SetName($mode, "Visible for, $($Row.Name)")
-    $items = @('Everyone', 'Only members of a group', 'Nobody except administrators'); if ($Row.Mode -eq 'Custom') { $items += 'Custom (set in the Rule Editor)' }
-    $mode.ItemsSource = $items; $mode.SelectedItem = $(if ($Row.Mode -eq 'Custom') { 'Custom (set in the Rule Editor)' } else { $Row.Mode })
+    [System.Windows.Automation.AutomationProperties]::SetName($mode, (T 'mask.vis.name' $Row.Name))
+    # the values are the modes of the module (English); the window shows them in the chosen language
+    $items = @(@{ V = 'Everyone'; K = 'cust.vis.everyone' }, @{ V = 'Only members of a group'; K = 'mask.vis.group' }, @{ V = 'Nobody except administrators'; K = 'cust.vis.admins' }) | ForEach-Object { [pscustomobject]@{ Value = $_.V; Label = (T $_.K) } }
+    if ($Row.Mode -eq 'Custom') { $items = @($items) + [pscustomobject]@{ Value = 'Custom (set in the Rule Editor)'; Label = (T 'mask.vis.custom') } }
+    $mode.DisplayMemberPath = 'Label'; $mode.SelectedValuePath = 'Value'
+    $mode.ItemsSource = @($items); $mode.SelectedValue = $(if ($Row.Mode -eq 'Custom') { 'Custom (set in the Rule Editor)' } else { $Row.Mode })
     $mode.SetValue([System.Windows.Controls.Grid]::ColumnProperty, 1)
     $grp = New-Object System.Windows.Controls.ComboBox; $grp.Padding = '8,4'; $grp.Margin = '0,0,8,0'
-    [System.Windows.Automation.AutomationProperties]::SetName($grp, "Group, $($Row.Name)")
+    [System.Windows.Automation.AutomationProperties]::SetName($grp, (T 'mask.group.name' $Row.Name))
     $sids = New-Object System.Collections.ArrayList
     foreach ($ch in $Choices) { $i = New-Object System.Windows.Controls.ComboBoxItem; $i.Content = $ch.Label; [void]$grp.Items.Add($i); [void]$sids.Add($ch.Sid) }
-    $e = New-Object System.Windows.Controls.ComboBoxItem; $e.Content = 'Microsoft Entra ID groups: not supported (source: Microsoft Learn, see below)'; $e.IsEnabled = $false; [void]$grp.Items.Add($e); [void]$sids.Add('')
+    $e = New-Object System.Windows.Controls.ComboBoxItem; $e.Content = (T 'mask.entra.no'); $e.IsEnabled = $false; [void]$grp.Items.Add($e); [void]$sids.Add('')
     $cur = @($Row.Groups)[0]
     if ($cur -and $cur.Sid) { $ix = $sids.IndexOf([string]$cur.Sid); if ($ix -ge 0) { $grp.SelectedIndex = $ix } }
     $grp.Tag = $sids
     $grp.SetValue([System.Windows.Controls.Grid]::ColumnProperty, 2)
-    $pv = New-MaskButton 'Preview' "Preview the change for $($Row.Name)"; $pv.Margin = '0,0,6,0'; $pv.SetValue([System.Windows.Controls.Grid]::ColumnProperty, 3)
-    $sv = New-MaskButton 'Save' "Save the change for $($Row.Name)" $true; $sv.Margin = '0'; $sv.SetValue([System.Windows.Controls.Grid]::ColumnProperty, 4); [void](Set-AVDTuneWriterButton $sv)   # #49
+    $pv = New-MaskButton 'Preview' (T 'mask.row.preview.tip' $($Row.Name)); $pv.Margin = '0,0,6,0'; $pv.SetValue([System.Windows.Controls.Grid]::ColumnProperty, 3)
+    $sv = New-MaskButton 'Save' (T 'mask.row.save.tip' $($Row.Name)) $true; $sv.Margin = '0'; $sv.SetValue([System.Windows.Controls.Grid]::ColumnProperty, 4); [void](Set-AVDTuneWriterButton $sv)   # #49
     foreach ($e2 in $n, $mode, $grp, $pv, $sv) { [void]$g.Children.Add($e2) }
     [void]$wrap.Children.Add($g)
-    $noteText = $(if ($Row.Note) { $Row.Note } elseif ($Row.Mode -eq 'Only members of a group') { 'Visible for: ' + (@($Row.Groups | ForEach-Object { $_.Account }) -join ', ') + "  (rule set $($Row.RuleSet))" } else { '' })
+    $noteText = $(if ($Row.Note) { $Row.Note } elseif ($Row.Mode -eq 'Only members of a group') { (T 'mask.vis.note' (@($Row.Groups | ForEach-Object { $_.Account }) -join ', ') $Row.RuleSet) } else { '' })
     $note = New-MaskText $noteText 'Hint' '0,2,0,0'; [void]$wrap.Children.Add($note)
     $entry = @{ Wrap = $wrap; Data = $Row; Mode = $mode; Group = $grp; Preview = $pv; Save = $sv; Note = $note }
     foreach ($t in $mode, $pv, $sv) { $t.DataContext = [string]$Row.Name }
@@ -234,7 +238,7 @@ function New-MaskListRow($Row, $Choices, $Entra) {
 function Update-MaskDcHint {
     # #75: says whether the account of the start sequence is there for this session (server and account only, never the password)
     $i = $null; try { $i = Get-AVDTuneSessionDcAccount -Pins (Get-AVDTuneDcPins (Get-AVDTuneEnvironment $script:StateRoot)) -Info } catch { }
-    $ui.TxtMaskDcSession.Text = $(if ($i) { "Signed in to the domain in the start sequence as $($i.User) on $($i.Server): leave the password empty to use that account (kept in memory for this session only, never saved)." } else { 'Not signed in to the domain in the start sequence in this session: enter the account and its password here.' })
+    $ui.TxtMaskDcSession.Text = $(if ($i) { (T 'mask.dc.session' $($i.User) $($i.Server)) } else { (T 'mask.dc.nosession') })
 }
 
 function Update-MaskView {
@@ -254,7 +258,7 @@ function Update-MaskView {
     $ui.CmbMaskOu.ItemsSource = @($ous); if ($ui.CmbMaskOu.SelectedIndex -lt 0 -and $ous.Count -gt 0) { $ui.CmbMaskOu.SelectedIndex = 0 }
     if (-not $ui.TxtMaskDc.Text -and $caps.AdGroups) { $e = $null; try { $e = Get-AVDTuneEnvironment $script:StateRoot } catch { }; $ui.TxtMaskDc.Text = [string](Get-AVDTuneProp (Get-AVDTuneProp $e 'Dc') 'Server') }   # the server of the start sequence (environment.json Dc.Server); the answers only say which kind of DC
     if (-not $ui.TxtMaskGroup.Text) { try { $ui.TxtMaskGroup.Text = Get-AVDTuneAppGroupName -Prefix $settings.Prefix -Name $ui.TxtMaskName.Text } catch { } }
-    $ui.TxtMaskEntra.Text = (Get-AVDTuneEntraGroupInfo).Text + ' Source: ' + (Get-AVDTuneEntraGroupInfo).Source
+    $ui.TxtMaskEntra.Text = (Get-AVDTuneEntraGroupInfo).Text + (T 'mask.source') + (Get-AVDTuneEntraGroupInfo).Source
     Update-MaskDcHint
     $short = Get-AVDTuneComfortShortcuts -M (Get-MaskAdapter)
     $ui.TxtMaskLogoffNote.Text = [string]$short[0].Note
@@ -264,17 +268,17 @@ function Update-MaskView {
 function Show-MaskList($Dir, [string]$Err) {
     $applies = Test-AVDTuneWriteAllowed
     $ui.PanelMaskList.Children.Clear(); $ui.PanelMaskDesk.Children.Clear(); $ui.PanelMaskSets.Children.Clear(); $script:MaskChecks = @{}; $script:MaskRowUi = @{}
-    $ui.TxtMaskFslVersion.Text = $(try { $i = Get-AVDTuneFSLogixInfo -Machine $script:Machine; if ($i.Installed) { "FSLogix $($i.Version) is installed." } else { 'FSLogix is not installed: the rules folder does not exist yet.' } } catch { '' })
+    $ui.TxtMaskFslVersion.Text = $(try { $i = Get-AVDTuneFSLogixInfo -Machine $script:Machine; if ($i.Installed) { (T 'mask.fsl.installed' $($i.Version)) } else { (T 'mask.fsl.missing') } } catch { '' })
     if ($Err) { $ui.TxtMaskCounter.Text = $Err; foreach ($b in $ui.BtnMaskUndo, $ui.BtnMaskLogoff) { $b.IsEnabled = [bool]$applies }; return }
     $ov = $script:MaskOv
-    $ui.TxtMaskCounter.Text = $(if ($ov.Uncovered -gt 0) { "$($ov.Uncovered) of $(@($ov.PublicDesktop).Count) entries are not hidden by any rule: every user sees them." } else { "All $(@($ov.PublicDesktop).Count) entries are covered." })
+    $ui.TxtMaskCounter.Text = $(if ($ov.Uncovered -gt 0) { (T 'mask.uncovered' $($ov.Uncovered) $(@($ov.PublicDesktop).Count)) } else { (T 'mask.covered' $(@($ov.PublicDesktop).Count)) })
     $choices = @(Get-MaskGroupChoices $Dir)
     foreach ($row in @($script:MaskList)) {
         $entry = New-MaskListRow $row $choices
         $script:MaskRowUi[[string]$row.Name] = $entry
         [void]$ui.PanelMaskList.Children.Add($entry.Wrap)
     }
-    if (@($script:MaskList).Count -eq 0) { [void]$ui.PanelMaskList.Children.Add((New-MaskText 'The Public Desktop has no entries.' 'Hint')) }
+    if (@($script:MaskList).Count -eq 0) { [void]$ui.PanelMaskList.Children.Add((New-MaskText (T 'mask.pd.empty') 'Hint')) }
     # wizard: entries to tick
     foreach ($d in @($ov.PublicDesktop)) {
         $cb = New-Object System.Windows.Controls.CheckBox; $cb.Margin = '0,2,0,2'; $cb.Content = "$($d.Name) - $($d.Text)"; [System.Windows.Automation.AutomationProperties]::SetName($cb, "Select $($d.Name)")
@@ -288,19 +292,19 @@ function Show-MaskList($Dir, [string]$Err) {
         $n = New-MaskText $rs.Name '' '0'; $n.FontWeight = 'SemiBold'
         $txt = "$(@($rs.Rules).Count) hiding rule(s)" + $(if ($rs.OtherRules -gt 0) { ", $($rs.OtherRules) other (kept)" } else { '' }) + $(if ($rs.Visibility) { '; ' + $rs.Visibility.Text } else { '' }) + $(if (@($rs.Problems).Count -gt 0) { '. Problems: ' + (@($rs.Problems) -join ' ') } else { '' })
         $d = New-MaskText $txt 'Hint' '0'; $d.SetValue([System.Windows.Controls.Grid]::ColumnProperty, 1)
-        $rm = New-MaskButton 'Remove' "Remove the rule set $($rs.Name)"; $rm.Margin = '8,0,0,0'; $rm.DataContext = [string]$rs.Name; $rm.SetValue([System.Windows.Controls.Grid]::ColumnProperty, 2); [void](Set-AVDTuneWriterButton $rm)   # #49
+        $rm = New-MaskButton 'Remove' (T 'mask.set.remove.tip' $($rs.Name)); $rm.Margin = '8,0,0,0'; $rm.DataContext = [string]$rs.Name; $rm.SetValue([System.Windows.Controls.Grid]::ColumnProperty, 2); [void](Set-AVDTuneWriterButton $rm)   # #49
         $rm.Add_Click({ param($src) try { Remove-MaskSet ([string]$src.DataContext) } catch { Show-Error $_.Exception.Message } })
         foreach ($e in $n, $d, $rm) { [void]$g.Children.Add($e) }
         if (@($rs.Rules).Count -gt 1 -and $rs.OtherRules -eq 0 -and @($rs.Problems).Count -eq 0) {
             # #74: a collective rule set (the wizard's) becomes one rule set per entry, so the rows of the list can be changed
             $c3 = New-Object System.Windows.Controls.ColumnDefinition; $c3.Width = 'Auto'; [void]$g.ColumnDefinitions.Add($c3)
-            $sp = New-MaskButton 'Split per entry' "Split the rule set $($rs.Name) into one rule set per entry"; $sp.Margin = '8,0,0,0'; $sp.DataContext = [string]$rs.Name; $sp.SetValue([System.Windows.Controls.Grid]::ColumnProperty, 3); [void](Set-AVDTuneWriterButton $sp)   # #49
+            $sp = New-MaskButton (T 'mask.set.split') (T 'mask.set.split.tip' $($rs.Name)); $sp.Margin = '8,0,0,0'; $sp.DataContext = [string]$rs.Name; $sp.SetValue([System.Windows.Controls.Grid]::ColumnProperty, 3); [void](Set-AVDTuneWriterButton $sp)   # #49
             $sp.Add_Click({ param($src) try { Split-MaskSet ([string]$src.DataContext) } catch { Show-Error $_.Exception.Message } })
             [void]$g.Children.Add($sp)
         }
         [void]$ui.PanelMaskSets.Children.Add($g)
     }
-    if (@($ov.RuleSets).Count -eq 0) { [void]$ui.PanelMaskSets.Children.Add((New-MaskText 'No rule sets yet.' 'Hint')) }
+    if (@($ov.RuleSets).Count -eq 0) { [void]$ui.PanelMaskSets.Children.Add((New-MaskText (T 'mask.sets.none') 'Hint')) }
     foreach ($b in $ui.BtnMaskApply, $ui.BtnMaskUndo, $ui.BtnMaskLogoff, $ui.BtnMaskSaveAll) { $b.IsEnabled = [bool]$applies }
 }
 
@@ -386,12 +390,12 @@ function Invoke-MaskRow([string]$Name, [bool]$WhatIf) {
     if ($script:MaskReadJob) { throw "The list is being read. Wait until it is done." }
     $r = $script:MaskRowUi[$Name]
     if (-not $r) { throw "'$Name' is not in the list." }
-    $mode = [string]$r.Mode.SelectedItem
+    $mode = [string]$r.Mode.SelectedItem.Value
     $sid = ''
     if ($mode -eq 'Only members of a group') { $i = $r.Group.SelectedIndex; if ($i -ge 0) { $sid = [string]$r.Group.Tag[$i] } }
     $ch = Get-AVDTuneShortcutChange -Row $r.Data -M (Get-MaskAdapter) -Mode $mode -GroupSid $sid -Directory (Get-MaskDirectory)
     $head = "$Name`: now '$($ch.Old)', new '$($ch.New)' (rule set $($ch.RuleSet))"
-    if ($ch.Action -eq 'None') { $ui.TxtMaskState.Text = "$Name`: no change."; return }
+    if ($ch.Action -eq 'None') { $ui.TxtMaskState.Text = (T 'mask.nochange' $Name); return }
     $m = Get-MaskAdapter; $lc = $null; $run = $null
     try {
         if ($WhatIf) {
@@ -403,18 +407,18 @@ function Invoke-MaskRow([string]$Name, [bool]$WhatIf) {
             else { $run = Remove-AVDTuneRuleSet -Machine $script:Machine -M $m -Root $script:StateRoot -Name $ch.RuleSet -ExpectedSha $ch.ExpectedSha -WhatIf }
             $steps = (@($run.Results | ForEach-Object { "$($_.Title): $($_.Status)" }) -join '; ')
             $chg = if ($run.PSObject.Properties['AssignmentChange'] -and $run.AssignmentChange) { " The assignment of the existing rule set changes from '$($run.AssignmentChange.Old)' to '$($run.AssignmentChange.New)'." } else { '' }
-            $ui.TxtMaskState.Text = "Preview (nothing written): $head. $steps.$chg"
+            $ui.TxtMaskState.Text = (T 'mask.preview.row' $head $steps $chg)
             return
         }
         Assert-MaskWrite
         $what = if ($ch.Action -eq 'Save') { "write the rule set '$($ch.RuleSet)' to C:\Program Files\FSLogix\Apps\Rules" } else { "delete the rule set '$($ch.RuleSet)' (both files)" }
-        if (-not (Confirm-Action "Change who sees '$Name' on the Public Desktop?`nNow: $($ch.Old)`nNew: $($ch.New)`nAVDTune will $what. 'Undo the last change' puts it back." 'App Masking')) { return }
+        if (-not (Confirm-Action (T 'mask.ask.change' $Name $($ch.Old) $($ch.New) $what) (T 'nav.appmasking'))) { return }
         if ($ch.Action -eq 'Save') {
             $p = $ch.SaveParams
             if ($p.Directory) { $lc = Get-MaskLdap; $p.Ldap = $lc.Ldap; $p.Conn = $lc.Conn }   # only now: after the write gate and the confirmation
             $preview = Save-AVDTuneRuleSet -Machine $script:Machine -M $m -Root $script:StateRoot @p -WhatIf
             if ($preview.AssignmentChange) {
-                if (-not (Confirm-Action "The rule set '$($p.Name)' exists already and its assignment changes:`nNow: $($preview.AssignmentChange.Old)`nNew: $($preview.AssignmentChange.New)`nThis changes who sees the hidden items. Continue?" 'App Masking')) { return }
+                if (-not (Confirm-Action (T 'mask.ask.assign' $($p.Name) $($preview.AssignmentChange.Old) $($preview.AssignmentChange.New)) (T 'nav.appmasking'))) { return }
                 $p.ExpectedChange = @{ Old = [string]$preview.AssignmentChange.Old; New = [string]$preview.AssignmentChange.New }
             }
             $run = Invoke-MaskChange -Title "Changing who sees $Name" -Step "Rule set $($p.Name)" -Block { Save-AVDTuneRuleSet -Machine $script:Machine -M $m -Root $script:StateRoot @p -User ([string]$env:USERNAME) -SnapshotId (Get-MaskGateSnapshot) }
@@ -440,7 +444,7 @@ function Invoke-MaskSave([bool]$WhatIf) {
             $run = Save-AVDTuneRuleSet -Machine $script:Machine -M $m -Root $script:StateRoot @p -WhatIf
             $lines = @($run.Results | ForEach-Object { "$($_.Title): $($_.Status)" })
             $chg = if ($run.AssignmentChange) { " The existing assignment changes from '$($run.AssignmentChange.Old)' to '$($run.AssignmentChange.New)'." } else { '' }
-            $ui.TxtMaskWizState.Text = 'Preview (nothing written): ' + ($lines -join '; ') + '.' + $chg + ' Rule lines: ' + ((@($p.Entries) | ForEach-Object { "$($_.Folder)  $($_.Name)  flags 0x00000222" }) -join ' | ')
+            $ui.TxtMaskWizState.Text = (T 'mask.preview.wiz') + ($lines -join '; ') + '.' + $chg + (T 'mask.rulelines') + ((@($p.Entries) | ForEach-Object { "$($_.Folder)  $($_.Name)  flags 0x00000222" }) -join ' | ')
             return
         }
         Assert-MaskWrite
@@ -449,13 +453,13 @@ function Invoke-MaskSave([bool]$WhatIf) {
             $where = if ($p.CreateGroup.Kind -eq 'Ad') { "in Active Directory, OU $($p.CreateGroup.OuDn), domain $($p.Directory.DnsName)" } else { 'on this master' }
             $text = "Create the group '$($p.CreateGroup.Name)' $where and write the rule set '$($p.Name)'? The group is deleted again by 'Undo the last change' as long as it has no members."
         }
-        if (-not (Confirm-Action $text 'App Masking')) { return }
+        if (-not (Confirm-Action $text (T 'nav.appmasking'))) { return }
         if ($p.CreateGroup) { $p.Confirmed = $true }
         if ($p.Directory) { $lc = Get-MaskLdap; $p.Ldap = $lc.Ldap; $p.Conn = $lc.Conn }   # only now: after the write gate and the confirmation
         # an existing rule set whose assignment would mean something else: both meanings in a second question; Old and New go to the module, which refuses when the real values differ
         $preview = Save-AVDTuneRuleSet -Machine $script:Machine -M $m -Root $script:StateRoot @p -WhatIf
         if ($preview.AssignmentChange) {
-            if (-not (Confirm-Action "The rule set '$($p.Name)' exists already and its assignment changes:`nNow: $($preview.AssignmentChange.Old)`nNew: $($preview.AssignmentChange.New)`nThis changes who sees the hidden items. Continue?" 'App Masking')) { return }
+            if (-not (Confirm-Action (T 'mask.ask.assign' $($p.Name) $($preview.AssignmentChange.Old) $($preview.AssignmentChange.New)) (T 'nav.appmasking'))) { return }
             $p.ExpectedChange = @{ Old = [string]$preview.AssignmentChange.Old; New = [string]$preview.AssignmentChange.New }
         }
         $run = Invoke-MaskChange -Title 'Writing the App Masking rule set' -Step "Rule set $($p.Name)" -Block { Save-AVDTuneRuleSet -Machine $script:Machine -M $m -Root $script:StateRoot @p -User ([string]$env:USERNAME) -SnapshotId (Get-MaskGateSnapshot) }
@@ -466,7 +470,7 @@ function Invoke-MaskSave([bool]$WhatIf) {
 
 function Remove-MaskSet([string]$Name) {
     Assert-MaskWrite
-    if (-not (Confirm-Action "Delete the rule set '$Name' (both files)? 'Undo the last change' restores them." 'App Masking')) { return }
+    if (-not (Confirm-Action (T 'mask.ask.delete' $Name) (T 'nav.appmasking'))) { return }
     $m = Get-MaskAdapter
     $run = Invoke-MaskChange -Title 'Removing an App Masking rule set' -Step $Name -Block { Remove-AVDTuneRuleSet -Machine $script:Machine -M $m -Root $script:StateRoot -Name $Name -User ([string]$env:USERNAME) -SnapshotId (Get-MaskGateSnapshot) }
     Show-MaskRun $run 'Remove rule set'; Update-MaskView
@@ -477,7 +481,7 @@ function Get-MaskRowChanges {
     $dir = Get-MaskDirectory; $m = Get-MaskAdapter
     @(foreach ($r in @($script:MaskRowUi.Values | Sort-Object { [string]$_.Data.Name })) {
             if (-not $r.Data.Editable) { continue }
-            $mode = [string]$r.Mode.SelectedItem
+            $mode = [string]$r.Mode.SelectedItem.Value
             $sid = ''
             if ($mode -eq 'Only members of a group') { $i = $r.Group.SelectedIndex; if ($i -ge 0) { $sid = [string]$r.Group.Tag[$i] } }
             if ($mode -eq [string]$r.Data.Mode) {
@@ -497,7 +501,7 @@ function Invoke-MaskRows([bool]$WhatIf) {
     $lc = $null; $run = $null
     try {
         $changes = @(Get-MaskRowChanges)
-        if ($changes.Count -eq 0) { $ui.TxtMaskState.Text = 'No row has a change.'; return }
+        if ($changes.Count -eq 0) { $ui.TxtMaskState.Text = (T 'mask.norowchange'); return }
         $m = Get-MaskAdapter
         $needDc = @($changes | Where-Object { $_.SaveParams -and $_.SaveParams.ContainsKey('Directory') -and $_.SaveParams.Directory }).Count -gt 0
         $lines = @($changes | ForEach-Object { "$($_.Name): $($_.Old) -> $($_.New)" })
@@ -505,17 +509,17 @@ function Invoke-MaskRows([bool]$WhatIf) {
             if ($needDc) { $lc = Get-MaskLdap }
             $pv = Save-AVDTuneMaskingRows -Machine $script:Machine -M $m -Root $script:StateRoot -Changes $changes -Ldap $(if ($lc) { $lc.Ldap }) -Conn $(if ($lc) { $lc.Conn }) -WhatIf
             $chg = @($pv.AssignmentChanges | ForEach-Object { " The assignment of '$($_.RuleSet)' changes from '$($_.Old)' to '$($_.New)'." }) -join ''
-            $ui.TxtMaskState.Text = "Preview (nothing written), $($changes.Count) row(s): $($lines -join '; ').$chg"
+            $ui.TxtMaskState.Text = (T 'mask.preview.rows' $($changes.Count) $($lines -join '; ') $chg)
             return
         }
         Assert-MaskWrite
-        if (-not (Confirm-Action "Save $($changes.Count) row(s) in one change?`n$($lines -join "`n")`n'Undo the last change' puts all of them back together." 'App Masking')) { return }
+        if (-not (Confirm-Action (T 'mask.ask.saverows' $($changes.Count) $($lines -join "`n")) (T 'nav.appmasking'))) { return }
         if ($needDc) { $lc = Get-MaskLdap }   # only now: after the write gate and the confirmation
         $preview = Save-AVDTuneMaskingRows -Machine $script:Machine -M $m -Root $script:StateRoot -Changes $changes -Ldap $(if ($lc) { $lc.Ldap }) -Conn $(if ($lc) { $lc.Conn }) -WhatIf
         $exp = @{}
         if (@($preview.AssignmentChanges).Count -gt 0) {
             $t = @($preview.AssignmentChanges | ForEach-Object { "$($_.RuleSet): $($_.Old) -> $($_.New)" }) -join "`n"
-            if (-not (Confirm-Action "The assignment of existing rule sets changes:`n$t`nThis changes who sees the hidden items. Continue?" 'App Masking')) { return }
+            if (-not (Confirm-Action (T 'mask.ask.assigns' $t) (T 'nav.appmasking'))) { return }
             foreach ($a in @($preview.AssignmentChanges)) { $exp[[string]$a.RuleSet] = @{ Old = [string]$a.Old; New = [string]$a.New } }
         }
         $ldap = $(if ($lc) { $lc.Ldap }); $conn = $(if ($lc) { $lc.Conn })
@@ -530,7 +534,7 @@ function Split-MaskSet([string]$Name) {
     Assert-MaskWrite
     $m = Get-MaskAdapter
     $pv = Split-AVDTuneRuleSet -Machine $script:Machine -M $m -Root $script:StateRoot -Name $Name -WhatIf
-    if (-not (Confirm-Action "Split the rule set '$Name' into one rule set per entry?`n$(@($pv.Split.To) -join "`n")`nEach keeps its hiding rule and the same assignment; '$Name' is deleted. 'Undo the last change' puts it back." 'App Masking')) { return }
+    if (-not (Confirm-Action (T 'mask.ask.split' $Name $(@($pv.Split.To) -join "`n") $Name) (T 'nav.appmasking'))) { return }
     $sha = $pv.Split.Sha
     $run = Invoke-MaskChange -Title "Splitting the rule set $Name" -Step "$(@($pv.Split.To).Count) rule sets" -Block { Split-AVDTuneRuleSet -Machine $script:Machine -M $m -Root $script:StateRoot -Name $Name -ExpectedSha $sha -User ([string]$env:USERNAME) -SnapshotId (Get-MaskGateSnapshot) }
     Show-MaskRun $run 'Split rule set'; Update-MaskView
@@ -545,13 +549,13 @@ Add-Click $ui.BtnMaskSaveAll { try { Invoke-MaskRows $false } catch { $ui.TxtMas
 Add-Click $ui.BtnMaskApply { Invoke-MaskSave $false }
 Add-Click $ui.BtnMaskLogoff {
     Assert-MaskWrite
-    if (-not (Confirm-Action 'Put the shortcut "Abmelden" (signs the user out, no confirmation dialog) on the Public Desktop for all users?' 'Public Desktop')) { return }
+    if (-not (Confirm-Action (T 'mask.ask.signout') (T 'mask.pd.title'))) { return }
     $m = Get-MaskAdapter
     # the Public Desktop folder: Windows lets Authenticated Users/Users/Interactive change it. That is a warning, confirmed explicitly; any other problem (link, foreign owner, other write access) stops with its reason.
     $prev = Add-AVDTuneComfortShortcut -Machine $script:Machine -M $m -Root $script:StateRoot -Id logoff -WhatIf
     $expected = @($prev.DesktopWarnings)
     if ($expected.Count -gt 0) {
-        if (-not (Confirm-Action "Warning: the folder of the Public Desktop can be changed by users ($($expected -join '; ')). That is the Windows default, but every user could replace or delete the shortcut, or put another one there. The file of the shortcut itself stays read only for users. Create the shortcut anyway?" 'Public Desktop')) { return }
+        if (-not (Confirm-Action (T 'mask.ask.pdwritable' $($expected -join '; ')) (T 'mask.pd.title'))) { return }
     }
     $run = Invoke-MaskChange -Title 'Adding the Abmelden shortcut' -Step 'Public Desktop' -Block { Add-AVDTuneComfortShortcut -Machine $script:Machine -M $m -Root $script:StateRoot -Id logoff -ExpectedWarnings $expected -User ([string]$env:USERNAME) -SnapshotId (Get-MaskGateSnapshot) }
     Show-MaskRun $run 'Comfort shortcut'; Update-MaskView
@@ -560,7 +564,7 @@ Add-Click $ui.BtnMaskUndo {
     $m = Get-MaskAdapter; $lc = $null
     try {
         Assert-MaskWrite
-        if (-not (Confirm-Action 'Put back what the last App Masking change found (files, shortcut, or the group it created)? A file that was changed after AVDTune wrote it, or a group with members, is not touched.' 'Undo')) { return }
+        if (-not (Confirm-Action (T 'mask.ask.undo') 'Undo')) { return }
         $u = Read-AVDTuneJson (Get-AVDTuneMaskingUndoPath $script:StateRoot)
         $p = @{}
         if ($u -and @(Get-AVDTuneProp $u 'Groups' | Where-Object { $_ -and $_.Kind -eq 'Ad' }).Count -gt 0) { $lc = Get-MaskLdap; $p.Ldap = $lc.Ldap; $p.Conn = $lc.Conn }

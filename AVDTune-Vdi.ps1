@@ -46,16 +46,16 @@ function Build-VdiCards {
         $rows = New-Object System.Windows.Controls.StackPanel; $rows.Margin = '0,8,0,0'; $card.Rows = $rows; [void]$stack.Children.Add($rows)
         $opt = @(Get-AVDTuneVdiSettingDefs -Key $c.Key | Where-Object Optional)
         foreach ($o in $opt) {
-            $cb = New-Object System.Windows.Controls.CheckBox; $cb.Content = "Also set: $($o.Title)"; $cb.Margin = '0,6,0,0'; $cb.ToolTip = $o.Why
-            [System.Windows.Automation.AutomationProperties]::SetName($cb, "Optional setting $($o.Title)"); $card.Checks[$o.Id] = $cb; [void]$stack.Children.Add($cb)
+            $cb = New-Object System.Windows.Controls.CheckBox; $cb.Content = (T 'vdi.alsoset' $($o.Title)); $cb.Margin = '0,6,0,0'; $cb.ToolTip = $o.Why
+            [System.Windows.Automation.AutomationProperties]::SetName($cb, (T 'vdi.optional.name' $($o.Title))); $card.Checks[$o.Id] = $cb; [void]$stack.Children.Add($cb)
         }
         $bar = New-Object System.Windows.Controls.WrapPanel; $bar.Margin = '0,12,0,0'
-        $card.Buttons.Install = New-VdiButton $(if ($c.Kind -eq 'Winget') { 'Install or update per machine' } else { 'Install or update' }) $c.Key 'Install' "Download from Microsoft, check and install or update $($c.Title)" $true
-        $card.Buttons.Remove = New-VdiButton 'Remove' $c.Key 'Remove' "Remove $($c.Title) from this master"
-        $card.Buttons.Undo = New-VdiButton 'Undo the change' $c.Key 'Undo' "Go back to the state found before the first change of $($c.Title)"
+        $card.Buttons.Install = New-VdiButton $(if ($c.Kind -eq 'Winget') { 'Install or update per machine' } else { 'Install or update' }) $c.Key 'Install' (T 'vdi.install.tip' $($c.Title)) $true
+        $card.Buttons.Remove = New-VdiButton 'Remove' $c.Key 'Remove' (T 'vdi.remove.tip' $($c.Title))
+        $card.Buttons.Undo = New-VdiButton (T 'vdi.undo') $c.Key 'Undo' (T 'vdi.undo.tip' $($c.Title))
         if (@(Get-AVDTuneVdiSettingDefs -Key $c.Key).Count -gt 0) {
-            $card.Buttons.Settings = New-VdiButton 'Set recommended settings' $c.Key 'Settings' "Set the recommended registry values for $($c.Title)"
-            $card.Buttons.SettingsUndo = New-VdiButton 'Undo settings' $c.Key 'SettingsUndo' "Put the registry values of $($c.Title) back"
+            $card.Buttons.Settings = New-VdiButton (T 'vdi.settings') $c.Key 'Settings' (T 'vdi.settings.tip' $($c.Title))
+            $card.Buttons.SettingsUndo = New-VdiButton (T 'vdi.settings.undo') $c.Key 'SettingsUndo' (T 'vdi.settings.undo.tip' $($c.Title))
         }
         foreach ($b in $card.Buttons.Values) { [void]$bar.Children.Add($b) }
         [void]$stack.Children.Add($bar)
@@ -83,8 +83,8 @@ function Build-VdiHostCards {
         $rows = New-Object System.Windows.Controls.StackPanel; $rows.Margin = '0,8,0,0'; $card.Rows = $rows; [void]$stack.Children.Add($rows)
         if (@(Get-AVDTuneVdiHostSettingDefs -Key $c.Key).Count -gt 0) {
             $bar = New-Object System.Windows.Controls.WrapPanel; $bar.Margin = '0,12,0,0'
-            $card.Buttons.Settings = New-VdiButton 'Set recommended settings' $c.Key 'HostSettings' "Set the recommended values for $($c.Title)" $true
-            $card.Buttons.SettingsUndo = New-VdiButton 'Undo settings' $c.Key 'HostUndo' "Put the values of $($c.Title) back"
+            $card.Buttons.Settings = New-VdiButton (T 'vdi.settings') $c.Key 'HostSettings' (T 'vdi.host.settings.tip' $($c.Title)) $true
+            $card.Buttons.SettingsUndo = New-VdiButton (T 'vdi.settings.undo') $c.Key 'HostUndo' (T 'vdi.host.undo.tip' $($c.Title))
             foreach ($b in $card.Buttons.Settings, $card.Buttons.SettingsUndo) { [void]$bar.Children.Add($b) }
             [void]$stack.Children.Add($bar)
         }
@@ -109,9 +109,9 @@ function Invoke-VdiHostAction([string]$Key, [string]$Act) {
     Assert-FslWrite
     $mode = if ($Act -eq 'HostUndo') { 'Undo' } else { 'Apply' }
     $text = Get-AVDTuneVdiHostConfirmText -Machine $script:Machine -Key $Key -Mode $mode -Root $script:StateRoot
-    if (-not $text) { $ui.TxtVdiState.Text = $(if ($mode -eq 'Undo') { "$($c.Title): there is nothing to undo." } else { "$($c.Title): the recommended settings are already set." }); return }
-    if (-not (Confirm-Action $text 'VDI components')) { return }
-    Start-VdiJob $Act $Key; $ui.TxtVdiState.Text = "$($c.Title): $(if ($mode -eq 'Undo') { 'undoing' } else { 'setting' }) ..."
+    if (-not $text) { $ui.TxtVdiState.Text = $(if ($mode -eq 'Undo') { (T 'vdi.nothingtoundo' $($c.Title)) } else { (T 'vdi.alreadyset' $($c.Title)) }); return }
+    if (-not (Confirm-Action $text (T 'nav.vdicomponents'))) { return }
+    Start-VdiJob $Act $Key; $ui.TxtVdiState.Text = "$($c.Title): $(if ($mode -eq 'Undo') { (T 'vdi.undoing') } else { (T 'vdi.setting') }) ..."
 }
 
 function Update-VdiView {
@@ -189,11 +189,11 @@ function Complete-VdiJob {
         finally { $job.PS.Dispose() }
     }
     Set-VdiBusy $false
-    if ($err -or -not $result) { Complete-AVDTuneUiTask $job.Task -Failed -Summary "VDI components failed: $err"; $ui.TxtVdiState.Text = "VDI components failed: $err"; Show-Error $ui.TxtVdiState.Text; Update-VdiView; return }
+    if ($err -or -not $result) { Complete-AVDTuneUiTask $job.Task -Failed -Summary "VDI components failed: $err"; $ui.TxtVdiState.Text = (T 'vdi.failed' $err); Show-Error $ui.TxtVdiState.Text; Update-VdiView; return }
     if ($job.Kind -eq 'Latest') {
         $script:VdiLatest = @{}; foreach ($k in 'webrtc', 'mmr') { $script:VdiLatest[$k] = $result[$k] }
         $bad = @($script:VdiLatest.Values | Where-Object { -not $_.Ok })
-        $ui.TxtVdiState.Text = $(if ($bad.Count -gt 0) { "Looked up at Microsoft. Not readable: $((@($bad | ForEach-Object Error)) -join ' ')" } else { 'Looked up at Microsoft (nothing was downloaded or changed).' })
+        $ui.TxtVdiState.Text = $(if ($bad.Count -gt 0) { (T 'vdi.lookedup.partial' $((@($bad | ForEach-Object Error)) -join ' ')) } else { (T 'vdi.lookedup') })
         Complete-AVDTuneUiTask $job.Task -Summary $ui.TxtVdiState.Text
         Update-VdiView; return
     }
@@ -201,12 +201,12 @@ function Complete-VdiJob {
         foreach ($r in @($result.Results)) { Register-StepResult $r }
         $failed = @($result.Results | Where-Object Status -eq 'Failed')
         $done = @($result.Results | Where-Object { $_.Status -in 'Changed', 'Reverted' }).Count
-        $ui.TxtVdiState.Text = "$(Get-VdiTitle $job.Key): $done $(if ($job.Kind -eq 'HostUndo') { 'undone' } else { 'changed' })$(if ($failed.Count) { ", $($failed.Count) failed: $($failed[0].Message)" }).$(if (@($result.Results | Where-Object { $_.Reboot }).Count) { ' Restart the master for it to take effect.' })"
+        $ui.TxtVdiState.Text = "$(Get-VdiTitle $job.Key): $done $(if ($job.Kind -eq 'HostUndo') { (T 'vdi.undone') } else { (T 'vdi.changed') })$(if ($failed.Count) { (T 'vdi.failedcount' $($failed.Count) $($failed[0].Message)) }).$(if (@($result.Results | Where-Object { $_.Reboot }).Count) { (T 'vdi.restart.effect') })"
         Complete-AVDTuneUiTask $job.Task -Failed:([bool]$failed.Count) -Summary $ui.TxtVdiState.Text
         Show-Toast $ui.TxtVdiState.Text; Start-OverviewRefresh; Update-VdiView; return
     }
     Register-StepResult $result.Result
-    $ui.TxtVdiState.Text = "$((Get-AVDTuneVdiComponent $job.Key).Title): $($result.Setup.Status). $($result.Setup.Message)$(if ($result.Result.Reboot) { ' Restart the master before you go on.' })"
+    $ui.TxtVdiState.Text = "$((Get-AVDTuneVdiComponent $job.Key).Title): $($result.Setup.Status). $($result.Setup.Message)$(if ($result.Result.Reboot) { (T 'vdi.restartfirst') })"
     Complete-AVDTuneUiTask $job.Task -Failed:([bool]($result.Setup.Status -eq 'Failed')) -Summary $ui.TxtVdiState.Text
     Show-Toast $ui.TxtVdiState.Text
     Start-OverviewRefresh
@@ -227,38 +227,38 @@ function Invoke-VdiAction([string]$Key, [string]$Act) {
                 'Winget' { 'Install or update OneDrive per machine with winget (machine scope) inside the package lock? This takes several minutes.' }
                 default { "Download the MSI of $($c.Title) from Microsoft, check its signature and install it (an installed older version is replaced)? $(if ($Key -eq 'mmr') { 'Edge and Chrome must be closed.' })" }
             }
-            if (-not (Confirm-Action $text 'VDI components')) { return }
-            Start-VdiJob 'Install' $Key; $ui.TxtVdiState.Text = "Looking up $($c.Title) ..."
+            if (-not (Confirm-Action $text (T 'nav.vdicomponents'))) { return }
+            Start-VdiJob 'Install' $Key; $ui.TxtVdiState.Text = (T 'vdi.lookingup' $($c.Title))
         }
         'Remove' {
             $extra = if ($Key -eq 'teams') { ' teamsbootstrapper.exe -x removes Teams for all users and deletes the user profile data and cache of Teams.' } else { '' }
-            if (-not (Confirm-Action "Remove $($c.Title) from this master?$extra" 'VDI components')) { return }
-            Start-VdiJob 'Remove' $Key; $ui.TxtVdiState.Text = "Removing $($c.Title) ..."
+            if (-not (Confirm-Action (T 'vdi.ask.remove' $($c.Title) $extra) (T 'nav.vdicomponents'))) { return }
+            Start-VdiJob 'Remove' $Key; $ui.TxtVdiState.Text = (T 'vdi.removing' $($c.Title))
         }
         'Undo' {
-            if (-not (Confirm-Action (Get-AVDTuneVdiUndoText -Root $script:StateRoot -Key $Key) 'VDI components')) { return }
-            Start-VdiJob 'Undo' $Key; $ui.TxtVdiState.Text = "Undoing the change of $($c.Title) ..."
+            if (-not (Confirm-Action (Get-AVDTuneVdiUndoText -Root $script:StateRoot -Key $Key) (T 'nav.vdicomponents'))) { return }
+            Start-VdiJob 'Undo' $Key; $ui.TxtVdiState.Text = (T 'vdi.undoingof' $($c.Title))
         }
         'Settings' {
             $v = Get-VdiAdapter; $opt = @(Get-VdiOptional $Key)
             $dry = Invoke-AVDTuneVdiSettings -Machine $script:Machine -V $v -Key $Key -Mode Apply -Optional $opt -Root $script:StateRoot -WhatIf
             $n = @($dry.Results | Where-Object { $_.Status -eq 'WhatIf' }).Count
-            if ($n -eq 0) { $ui.TxtVdiState.Text = "The recommended settings of $($c.Title) are already set."; return }
-            if (-not (Confirm-Action "Set $n registry value(s) for $($c.Title) on this master?" 'VDI components')) { return }
+            if ($n -eq 0) { $ui.TxtVdiState.Text = (T 'vdi.host.alreadyset' $($c.Title)); return }
+            if (-not (Confirm-Action (T 'vdi.ask.settings' $n $($c.Title)) (T 'nav.vdicomponents'))) { return }
             $run = Invoke-AVDTuneVdiSettings -Machine $script:Machine -V $v -Key $Key -Mode Apply -Optional $opt -Root $script:StateRoot -User (Get-FslUser) -SnapshotId (Get-FslGateSnapshot)
             foreach ($r in @($run.Results)) { Register-StepResult $r }
             $failed = @($run.Results | Where-Object Status -eq 'Failed')
-            $ui.TxtVdiState.Text = "$($c.Title) settings: $(@($run.Results | Where-Object Status -eq 'Changed').Count) changed$(if ($failed.Count) { ", $($failed.Count) failed: $($failed[0].Message)" })."; Show-Toast $ui.TxtVdiState.Text; Start-OverviewRefresh; Update-VdiView
+            $ui.TxtVdiState.Text = (T 'vdi.settings.result' $($c.Title) $(@($run.Results | Where-Object Status -eq 'Changed').Count) $(if ($failed.Count) { (T 'vdi.failedcount' $($failed.Count) $($failed[0].Message)) })); Show-Toast $ui.TxtVdiState.Text; Start-OverviewRefresh; Update-VdiView
         }
         'SettingsUndo' {
-            if (-not (Confirm-Action "Put back the registry values of $($c.Title) found before the change?" 'VDI components')) { return }
+            if (-not (Confirm-Action (T 'vdi.ask.undosettings' $($c.Title)) (T 'nav.vdicomponents'))) { return }
             $run = Invoke-AVDTuneVdiSettings -Machine $script:Machine -V (Get-VdiAdapter) -Key $Key -Mode Undo -Root $script:StateRoot -User (Get-FslUser) -SnapshotId (Get-FslGateSnapshot)
             foreach ($r in @($run.Results)) { Register-StepResult $r }
-            $ui.TxtVdiState.Text = "$($c.Title) settings: undone."; Show-Toast $ui.TxtVdiState.Text; Start-OverviewRefresh; Update-VdiView
+            $ui.TxtVdiState.Text = (T 'vdi.settings.undone' $($c.Title)); Show-Toast $ui.TxtVdiState.Text; Start-OverviewRefresh; Update-VdiView
         }
         default { throw "Unknown action $Act." }
     }
 }
 
-Add-Click $ui.BtnVdiTest { Update-VdiView; $ui.TxtVdiState.Text = 'Tested: nothing was changed.' }
-Add-Click $ui.BtnVdiCheck { Start-VdiJob 'Latest' ''; $ui.TxtVdiState.Text = 'Looking up the newest versions at Microsoft ...' }
+Add-Click $ui.BtnVdiTest { Update-VdiView; $ui.TxtVdiState.Text = (T 'vdi.tested') }
+Add-Click $ui.BtnVdiCheck { Start-VdiJob 'Latest' ''; $ui.TxtVdiState.Text = (T 'vdi.lookingup.all') }

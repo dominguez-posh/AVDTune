@@ -4,7 +4,8 @@
 #
 # In XAML an element gets its texts through its Uid (Uid="nav.overview"): the Uid is the key of Text/Content, "<uid>.tip" is the ToolTip and
 # "<uid>.name" the AutomationProperties.Name. Register-AVDTuneLocalized collects those elements once after the window is loaded;
-# Update-AVDTuneLocalized sets the texts again after a switch. In code: Get-AVDTuneText 'key' [format arguments] (alias T).
+# Update-AVDTuneLocalized sets the texts again after a switch. In code: Get-AVDTuneText 'key' [format arguments] (alias T); an element made in code
+# with a fixed text gets its key with Set-AVDTuneUid, so a switch reaches it too (the shell registers the tree again before every switch).
 
 $script:LangKeyPattern = '\A[a-z0-9.]+\z'
 $script:LangMaxFileBytes = 512KB
@@ -80,7 +81,12 @@ function Get-AVDTuneText {
     if ($null -eq $text) { $text = $script:LangTexts.en[$Key] }
     if ($null -eq $text) { $text = $script:LangHard[$Key] }   # both files missing or broken: a hard English text for the messages that matter
     if ($null -eq $text) { return $Key }
-    if ($FormatArgs -and $FormatArgs.Count -gt 0) { try { return [string]::Format($text, [object[]]$FormatArgs) } catch [System.FormatException] { return $text } }
+    if ($FormatArgs -and $FormatArgs.Count -gt 0) {
+        # a list argument is joined with spaces, as "$list" does in a string
+        $values = New-Object object[] $FormatArgs.Count
+        for ($i = 0; $i -lt $FormatArgs.Count; $i++) { $a = $FormatArgs[$i]; $values[$i] = if ($a -is [System.Collections.IEnumerable] -and $a -isnot [string]) { (@($a) -join ' ') } else { $a } }
+        try { return [string]::Format($text, $values) } catch [System.FormatException] { return $text }
+    }
     $text
 }
 Set-Alias -Name T -Value Get-AVDTuneText -Scope Script
@@ -130,15 +136,28 @@ function Register-AVDTuneLocalized {
 
 function Test-AVDTuneHasText([string]$Key) { $script:LangTexts[$script:LangCurrent].ContainsKey($Key) -or $script:LangTexts.en.ContainsKey($Key) -or $script:LangHard.ContainsKey($Key) }
 
-function Update-AVDTuneLocalized {
-    foreach ($entry in $script:LangLocalized) {
-        $el = $entry.Element; $uid = $entry.Uid
-        if (Test-AVDTuneHasText $uid) {
-            $text = Get-AVDTuneText $uid
-            if ($el -is [System.Windows.Controls.TextBlock]) { $el.Text = $text }
-            elseif ($el -is [System.Windows.Controls.ContentControl]) { $el.Content = $text }
-        }
-        if (Test-AVDTuneHasText "$uid.tip") { $el.ToolTip = Get-AVDTuneText "$uid.tip" }
-        if (Test-AVDTuneHasText "$uid.name") { [System.Windows.Automation.AutomationProperties]::SetName($el, (Get-AVDTuneText "$uid.name")) }
+function Set-AVDTuneElementText {
+    # The texts of one element from its key: Text (TextBlock) or Content (button, check box ...), "<key>.tip" the ToolTip, "<key>.name" the automation name
+    param([Parameter(Mandatory)]$Element, [Parameter(Mandatory)][string]$Key)
+    if (Test-AVDTuneHasText $Key) {
+        $text = Get-AVDTuneText $Key
+        if ($Element -is [System.Windows.Controls.TextBlock]) { $Element.Text = $text }
+        elseif ($Element -is [System.Windows.Controls.ContentControl]) { $Element.Content = $text }
     }
+    if (Test-AVDTuneHasText "$Key.tip") { $Element.ToolTip = Get-AVDTuneText "$Key.tip" }
+    if (Test-AVDTuneHasText "$Key.name") { [System.Windows.Automation.AutomationProperties]::SetName($Element, (Get-AVDTuneText "$Key.name")) }
+}
+
+function Set-AVDTuneUid {
+    <# An element made in code gets a key as its Uid: its texts are set now and again after every switch (Register-AVDTuneLocalized finds it in the tree).
+       Only for fixed texts; a text with data is set with T and arguments where it is made. Returns the element. #>
+    param([Parameter(Mandatory, Position = 0)]$Element, [Parameter(Mandatory, Position = 1)][string]$Key)
+    if (-not ((Test-AVDTuneTextKey $Key) -and $Key.Contains('.'))) { throw "'$Key' is not a text key." }
+    $Element.Uid = $Key
+    Set-AVDTuneElementText $Element $Key
+    $Element
+}
+
+function Update-AVDTuneLocalized {
+    foreach ($entry in $script:LangLocalized) { Set-AVDTuneElementText $entry.Element $entry.Uid }
 }

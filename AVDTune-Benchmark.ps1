@@ -71,14 +71,14 @@ function Complete-BenchJob {
     catch { $err = $_.Exception.Message }
     finally { $job.PS.Dispose() }
     Set-BenchBusy $false
-    if ($err -and -not $result) { $ui.TxtBenchState.Text = "The benchmark stopped: $err"; Show-Error $err; Complete-AVDTuneUiTask $job.Task -Failed -Summary "The benchmark stopped: $err" }
+    if ($err -and -not $result) { $ui.TxtBenchState.Text = (T 'bench.stopped' $err); Show-Error $err; Complete-AVDTuneUiTask $job.Task -Failed -Summary "The benchmark stopped: $err" }
     elseif ($result) {
         $script:BenchLast = $result.Result
-        $ui.TxtBenchState.Text = "Finished: $($result.Summary)"
+        $ui.TxtBenchState.Text = (T 'bench.finished' $($result.Summary))
         # #92 (Finn M1): a temporary benchmark user that was left behind or removed is said on the page and in the protocol
         $userWarn = @(@($result.Warnings) | Where-Object { [string]$_ -like '*Temporary benchmark user*' })
         if ($userWarn.Count -gt 0) {
-            $ui.TxtBenchState.Text += "`nWarning: " + ($userWarn -join "`n")
+            $ui.TxtBenchState.Text += (T 'bench.warning') + ($userWarn -join "`n")
             [void](Add-AVDTuneProtocolNote -Protocol $script:Protocol -Group 'benchmark' -Subject ('Warning: ' + ($userWarn -join ' ')))
         }
         Show-Toast "Benchmark finished: $($result.Summary)"
@@ -99,9 +99,9 @@ function New-BenchCatRow([string]$Title, $Index, $Compare) {
     $i = New-Text ([string]$Index); $i.SetValue([System.Windows.Controls.Grid]::ColumnProperty, 1)
     $d = New-Text ''; $d.SetValue([System.Windows.Controls.Grid]::ColumnProperty, 2)
     if ($Compare) {
-        if ($null -eq $Compare.DeltaPercent) { $d.Text = 'no baseline value' ; Set-Brush $d ([System.Windows.Controls.TextBlock]::ForegroundProperty) 'MutedText' }
+        if ($null -eq $Compare.DeltaPercent) { $d.Text = (T 'bench.nobase') ; Set-Brush $d ([System.Windows.Controls.TextBlock]::ForegroundProperty) 'MutedText' }
         else {
-            $d.Text = ('{0:+0.0;-0.0;0.0} % vs baseline' -f [double]$Compare.DeltaPercent)
+            $d.Text = ((T 'bench.vsbase') -f [double]$Compare.DeltaPercent)
             Set-Brush $d ([System.Windows.Controls.TextBlock]::ForegroundProperty) $(switch ($Compare.Class) { 'better' { 'Success' } 'worse' { 'Danger' } default { 'MutedText' } })
         }
     }
@@ -112,21 +112,21 @@ function New-BenchCatRow([string]$Title, $Index, $Compare) {
 function Update-BenchmarkView {
     $crash = Get-AVDTuneBenchmarkCrash -Root $script:StateRoot
     $ui.BoxBenchCrash.Visibility = ConvertTo-Vis ([bool]$crash)
-    if ($crash) { $ui.TxtBenchCrash.Text = "The benchmark of $(([datetime]$crash.Started).ToString('yyyy-MM-dd HH:mm')) did not end properly. Paused: $($crash.Services -join ', '). Restoring starts them again." }
+    if ($crash) { $ui.TxtBenchCrash.Text = (T 'bench.crash' $(([datetime]$crash.Started).ToString('yyyy-MM-dd HH:mm')) $($crash.Services -join ', ')) }
     $results = @(Get-AVDTuneBenchmarkResult -Root $script:StateRoot)
     $shown = $script:BenchLast
     if (-not $shown -and $results.Count -gt 0) { $shown = $results[-1] }
     $ui.PanelBenchCats.Children.Clear()
     $ui.BoxBenchProvisional.Visibility = 'Collapsed'
     if (-not $shown) {
-        $ui.TxtBenchTitle.Text = 'Result'; $ui.TxtBenchScore.Text = 'No benchmark yet'; $ui.TxtBenchMeta.Text = 'Start a full run (about 17 minutes) for a baseline, or a quick run (about 3 minutes) to try it. Quick results are not compared with full ones.'; $ui.TxtBenchNotes.Text = ''
+        $ui.TxtBenchTitle.Text = (T 'bench.result'); $ui.TxtBenchScore.Text = (T 'bench.none'); $ui.TxtBenchMeta.Text = (T 'bench.none.text'); $ui.TxtBenchNotes.Text = ''
     }
     else {
         $h = $shown.scores.host
-        $ui.TxtBenchTitle.Text = "Host score ($($shown.mode) run, $(([datetime]$shown.started).ToLocalTime().ToString('yyyy-MM-dd HH:mm')))"
-        $ui.TxtBenchScore.Text = $(if ($null -ne $h.value) { [string]$h.value } else { 'no score' })
-        $ui.TxtBenchMeta.Text = "$($shown.benchmarkVersion), $($shown.system.vmSize), $($shown.system.cpuModel), $($shown.system.vCpu) vCPU, $($shown.system.ramGiB) GiB. 1000 = the reference host."
-        if ($h.provisional) { $ui.BoxBenchProvisional.Visibility = 'Visible'; $ui.TxtBenchProvisional.Text = 'Provisional: the reference values are placeholders (not measured yet). The numbers show changes between runs of this version, they are not yet comparable with other systems.' }
+        $ui.TxtBenchTitle.Text = (T 'bench.hostscore' $($shown.mode) $(([datetime]$shown.started).ToLocalTime().ToString('yyyy-MM-dd HH:mm')))
+        $ui.TxtBenchScore.Text = $(if ($null -ne $h.value) { [string]$h.value } else { (T 'bench.noscore') })
+        $ui.TxtBenchMeta.Text = (T 'bench.meta' $($shown.benchmarkVersion) $($shown.system.vmSize) $($shown.system.cpuModel) $($shown.system.vCpu) $($shown.system.ramGiB))
+        if ($h.provisional) { $ui.BoxBenchProvisional.Visibility = 'Visible'; $ui.TxtBenchProvisional.Text = (T 'bench.provisional') }
         $base = Get-AVDTuneBenchmarkBaseline -Root $script:StateRoot
         $cmp = $null
         $cfg = Get-AVDTuneBenchmarkConfig
@@ -134,7 +134,7 @@ function Update-BenchmarkView {
         if ($base -and $base.runId -ne $shown.runId) {
             $cmp = Compare-AVDTuneBenchmark -Current $shown -Baseline $base -Config $cfg
             if (-not $cmp.Comparable) { $notes += $cmp.Reason; $cmp = $null }
-            else { $notes += @($cmp.Notes); if ($cmp.Host) { $ui.TxtBenchMeta.Text += ('  Against the baseline: {0:+0.0;-0.0;0.0} %.' -f [double]$cmp.Host.DeltaPercent) } }
+            else { $notes += @($cmp.Notes); if ($cmp.Host) { $ui.TxtBenchMeta.Text += ((T 'bench.againstbase') -f [double]$cmp.Host.DeltaPercent) } }
         }
         elseif (-not $base -and -not $script:BenchmarkOnly) { $notes += 'No baseline yet: the first full run of the initial analysis becomes the baseline.' }
         foreach ($c in $h.categories.PSObject.Properties) {
@@ -157,11 +157,11 @@ function Update-BenchmarkView {
         $ui.TxtBenchNotes.Text = ($notes -join "`r`n")
     }
     $ui.PanelBenchHistory.Children.Clear()
-    if ($results.Count -eq 0) { [void]$ui.PanelBenchHistory.Children.Add((New-Text 'No benchmark run yet.' 'Hint')) }
+    if ($results.Count -eq 0) { [void]$ui.PanelBenchHistory.Children.Add((New-Text (T 'bench.norun') 'Hint')) }
     $recent = @($results | Select-Object -Last 8); [array]::Reverse($recent)
     foreach ($r in $recent) {
         $t = New-Object System.Windows.Controls.TextBlock; $t.TextWrapping = 'Wrap'; $t.FontFamily = 'Cascadia Mono, Consolas'; $t.FontSize = 12; $t.Margin = '0,2,0,2'
-        $t.Text = '{0}   {1,-5} {2,-8} Host {3}' -f ([datetime]$r.started).ToLocalTime().ToString('yyyy-MM-dd HH:mm'), $r.mode, $r.kind, $(if ($null -ne $r.scores.host.value) { $r.scores.host.value } else { '-' })
+        $t.Text = (T 'bench.historyrow') -f ([datetime]$r.started).ToLocalTime().ToString('yyyy-MM-dd HH:mm'), $r.mode, $r.kind, $(if ($null -ne $r.scores.host.value) { $r.scores.host.value } else { '-' })
         [void]$ui.PanelBenchHistory.Children.Add($t)
     }
     $ui.BoxBenchOnly.Visibility = ConvertTo-Vis ([bool]$script:BenchmarkOnly)
@@ -334,7 +334,7 @@ function Start-BenchRun([string]$Mode) {
     if (-not (Confirm-Action $ask 'Benchmark')) { return }
     $state = Get-AVDTuneState $script:StateRoot
     $kind = if ($script:BenchmarkOnly) { 'benchmark-only' } elseif (-not (Get-AVDTuneProp $state 'BaselineBenchmark') -and $Mode -eq 'Full') { 'baseline' } else { 'manual' }
-    $ui.TxtBenchState.Text = 'Starting ...'; $ui.BarBench.Value = 0
+    $ui.TxtBenchState.Text = (T 'task.bar.starting'); $ui.BarBench.Value = 0
     Start-BenchJob $Mode $kind $name $notes
 }
 Add-Click $ui.BtnBenchFull { Start-BenchRun 'Full' }

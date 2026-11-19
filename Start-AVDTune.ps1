@@ -553,12 +553,15 @@ $script:ReadyFakeArm = $(if ($script:TestMode) { $script:Services.Arm } else { $
 . (Join-Path $PSScriptRoot 'AVDTune-Environment.ps1')
 . (Join-Path $PSScriptRoot 'AVDTune-Optimization.ps1')
 . (Join-Path $PSScriptRoot 'AVDTune-Language.ps1')   # the Language and region page (issue 56)
+[void](Register-AVDTuneLocalized $window); Update-AVDTuneLocalized   # the pages with their own XAML (Software, VDI, Environment) are in the tree now: their Uid texts too
 
 # ---------------------------------------------------------------- theme switch
 function Update-ThemeButton { $ui.BtnTheme.Content = [string][char]$(if ($script:Settings.Theme -eq 'Dark') { 0xE706 } else { 0xE708 }) }
 function Update-LangButton { $ui.BtnLang.Content = (Get-AVDTuneLanguage).ToUpperInvariant() }
 function Update-Localized {
-    # Everything of the shell that is made in code is made again in the chosen language; pages that are not translated yet keep their texts
+    # Everything of the shell that is made in code is made again in the chosen language; elements with a Uid (XAML or Set-AVDTuneUid) are found again first,
+    # because the pages with their own XAML and the pages made in code join the tree after the start. Texts with data follow at the next refresh of their page.
+    [void](Register-AVDTuneLocalized $window)
     Update-AVDTuneLocalized
     Update-LangButton
     foreach ($page in $script:PageTable) {
@@ -573,7 +576,7 @@ function Update-Localized {
     Update-Chip
     if ($script:CurrentPage -eq 'Overview') { Update-OverviewView }
     elseif ($script:CurrentPage -eq 'Protocol') { Update-ProtocolView }
-    elseif ($ui.PagePlaceholder.Visibility -eq 'Visible') { Show-Page $script:CurrentPage }
+    elseif ($script:CurrentPage) { Show-Page $script:CurrentPage }   # the texts with data of the page shown (as when its entry in the navigation is clicked)
 }
 function Switch-Language {
     $script:Settings.Language = if ((Get-AVDTuneLanguage) -eq 'de') { 'en' } else { 'de' }

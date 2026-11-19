@@ -385,7 +385,7 @@ function Get-AVDTuneManagedSoftware {
 #region the library (PackTune package store, read only)
 
 function Test-AVDTuneLibraryUrl {
-    <# Pure. Is this request URL allowed? https, graph.microsoft.com only, default port, no credentials, no fragment, at most one "?", path and query of known characters. Returns @{ Ok; Reason }. #>
+    <# Pure. Is this request URL allowed? https, graph.microsoft.com only, default port, no credentials, no fragment, at most one "?", path and query of known characters (the path also ! and ~: real drive IDs are 'b!' + base64url, #95). Returns @{ Ok; Reason }. #>
     param([string]$Url)
     $no = { param($t) @{ Ok = $false; Reason = $t } }
     if (-not $Url -or $Url.Length -gt 2000 -or $Url.Contains('#')) { return (& $no 'the address is empty, too long or has a fragment') }
@@ -395,7 +395,7 @@ function Test-AVDTuneLibraryUrl {
     if ($u.Host -ne 'graph.microsoft.com') { return (& $no "the host $($u.Host) is not allowed") }
     if (([regex]::Matches($Url, '\?')).Count -gt 1) { return (& $no 'more than one question mark') }
     $raw = $Url.Substring(0, [Math]::Min($Url.Length, 2000))
-    $m = [regex]::Match($raw, "\Ahttps://graph\.microsoft\.com(/[A-Za-z0-9._:/%,()'-]+)(\?[A-Za-z0-9`$=,&._%()+/'-]*)?\z", 'None', [TimeSpan]::FromSeconds(1))
+    $m = [regex]::Match($raw, "\Ahttps://graph\.microsoft\.com(/[A-Za-z0-9._:/%,()'!~-]+)(\?[A-Za-z0-9`$=,&._%()+/'-]*)?\z", 'None', [TimeSpan]::FromSeconds(1))
     if (-not $m.Success) { return (& $no 'the path or query has characters that are not allowed') }
     if ($m.Groups[1].Value -match '(^|/)\.\.?(/|$)' -or $raw -match '(?i)%2e|%2f|%5c|%00') { return (& $no 'the path climbs or hides a separator') }
     @{ Ok = $true; Reason = '' }

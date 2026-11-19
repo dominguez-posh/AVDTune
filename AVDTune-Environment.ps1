@@ -105,26 +105,26 @@ function New-EnvRow($Step) {
 function Show-EnvPlan($Plan, [string]$Title) {
     $ui.PanelEnvPlan.Children.Clear()
     $ui.TxtEnvPlanTitle.Text = $Title
-    foreach ($b in @($Plan.PSObject.Properties['Blocked'] | ForEach-Object { $_.Value })) { $t = New-Object System.Windows.Controls.TextBlock; $t.Text = "Blocked: $b"; $t.TextWrapping = 'Wrap'; $t.Margin = '0,4,0,4'; Set-Brush $t ([System.Windows.Controls.TextBlock]::ForegroundProperty) 'Danger'; [void]$ui.PanelEnvPlan.Children.Add($t) }
-    foreach ($w in @($Plan.PSObject.Properties['Warnings'] | ForEach-Object { $_.Value })) { $t = New-Object System.Windows.Controls.TextBlock; $t.Text = "Note: $w"; $t.TextWrapping = 'Wrap'; $t.Margin = '0,4,0,4'; Set-Brush $t ([System.Windows.Controls.TextBlock]::ForegroundProperty) 'Warning'; [void]$ui.PanelEnvPlan.Children.Add($t) }
+    foreach ($b in @($Plan.PSObject.Properties['Blocked'] | ForEach-Object { $_.Value })) { $t = New-Object System.Windows.Controls.TextBlock; $t.Text = (T 'env.blocked' $b); $t.TextWrapping = 'Wrap'; $t.Margin = '0,4,0,4'; Set-Brush $t ([System.Windows.Controls.TextBlock]::ForegroundProperty) 'Danger'; [void]$ui.PanelEnvPlan.Children.Add($t) }
+    foreach ($w in @($Plan.PSObject.Properties['Warnings'] | ForEach-Object { $_.Value })) { $t = New-Object System.Windows.Controls.TextBlock; $t.Text = (T 'ready.row.note' $w); $t.TextWrapping = 'Wrap'; $t.Margin = '0,4,0,4'; Set-Brush $t ([System.Windows.Controls.TextBlock]::ForegroundProperty) 'Warning'; [void]$ui.PanelEnvPlan.Children.Add($t) }
     foreach ($s in @($Plan.Steps)) { [void]$ui.PanelEnvPlan.Children.Add((New-EnvRow $s)) }
 }
 
 function Update-EnvView {
     Initialize-EnvFields
     $a = Get-EnvAnswers
-    if (-not $a) { $ui.TxtEnvState.Text = 'Answer the first-run questions on the Overview first: the identity model decides what is planned here.'; foreach ($b in $ui.BtnEnvPlan, $ui.BtnEnvUndoPlan, $ui.BtnEnvMasterTest, $ui.BtnEnvMasterApply) { $b.IsEnabled = $false }; return }
+    if (-not $a) { $ui.TxtEnvState.Text = (T 'env.needfirstrun'); foreach ($b in $ui.BtnEnvPlan, $ui.BtnEnvUndoPlan, $ui.BtnEnvMasterTest, $ui.BtnEnvMasterApply) { $b.IsEnabled = $false }; return }
     $applies = ([string]$a.Profiles -eq 'AzureFiles')
     foreach ($b in $ui.BtnEnvPlan, $ui.BtnEnvUndoPlan, $ui.BtnEnvMasterTest, $ui.BtnEnvMasterApply) { $b.IsEnabled = ($applies -and -not $script:EnvJob) }   # a running job (#44) keeps them locked until it ends
-    if (-not $applies) { $ui.TxtEnvState.Text = 'Profiles are not on Azure Files (first-run questions): there is nothing to create here.'; return }
+    if (-not $applies) { $ui.TxtEnvState.Text = (T 'env.notazurefiles'); return }
     $identity = Get-EnvIdentity
     $model = Get-AVDTuneEnvIdentityModel -Identity $identity -Identities ([string]$a.Identities)
-    $ui.TxtEnvModel.Text = "Identity: $identity ($($model.DirectoryServiceOptions)). Endpoint: $($a.Endpoint), DNS: $($a.DnsZone). " + (@($model.Notes) -join ' ')
+    $ui.TxtEnvModel.Text = (T 'env.model' $identity $($model.DirectoryServiceOptions) $($a.Endpoint) $($a.DnsZone)) + (@($model.Notes) -join ' ')
     if ($script:EnvFields['SubscriptionId'].Text -eq '') {
         $vm = Get-AVDTuneVmIdentity -Machine $script:Machine
         if ($vm.Available) { $script:EnvFields['SubscriptionId'].Text = $vm.SubscriptionId; $script:EnvFields['ResourceGroup'].Text = $vm.ResourceGroup; $script:EnvFields['Location'].Text = $vm.Location }
     }
-    $ui.TxtEnvState.Text = $(if (Test-AVDTuneWriteAllowed) { 'The snapshot is confirmed: the plan can be carried out.' } else { 'Read only: you can make the plan; creating needs the confirmed snapshot of the Overview.' })
+    $ui.TxtEnvState.Text = $(if (Test-AVDTuneWriteAllowed) { (T 'env.confirmed') } else { (T 'env.readonly') })
 }
 
 # #44: plan, create, undo plan and undo run in a background runspace (New-AVDTunePowerShell), like the writer jobs of the other pages (#66/#72): the window stays
@@ -167,7 +167,7 @@ function Start-EnvJob([string]$Kind, [hashtable]$A) {
     if ($script:EnvJob) { throw 'An environment task is still running. Wait until it is done.' }
     $writes = $Kind -notin $script:EnvReadKinds
     if ($writes) {
-        if (-not (Test-AVDTuneWriteAllowed)) { throw 'Read only: confirm a snapshot of today on the Overview first.' }
+        if (-not (Test-AVDTuneWriteAllowed)) { throw (T 'ready.err.readonly') }
         Assert-NoOtherWriter
     }
     $sync = [hashtable]::Synchronized(@{ Text = '' })
@@ -222,9 +222,9 @@ function Complete-EnvJob {
     switch ($job.Kind) {
         'Plan' {
             $script:EnvPlan = $r
-            Show-EnvPlan $r "Plan (hash $($r.Hash))"
+            Show-EnvPlan $r (T 'env.plan.hash' $r.Hash)
             $ui.BtnEnvApply.IsEnabled = ($r.Changes -gt 0 -and $r.Blocked.Count -eq 0)
-            $ui.TxtEnvResult.Text = "$($r.Changes) resource(s) to create or change; nothing was written."
+            $ui.TxtEnvResult.Text = (T 'env.planned' $($r.Changes))
         }
         'Apply' {
             foreach ($x in @($r.Results)) { Register-StepResult ([pscustomobject]@{ Id = $x.Id; Section = 'FSLogix'; Title = $x.Title; Mode = 'Apply'; Status = $x.Status; Message = $x.Message; At = (Get-Date).ToString('o') }) }
@@ -234,9 +234,9 @@ function Complete-EnvJob {
         }
         'UndoPlan' {
             $script:EnvUndoPlan = $r
-            Show-EnvPlan ([pscustomobject]@{ Steps = @($r.Steps) }) 'What AVDTune may take back'
+            Show-EnvPlan ([pscustomobject]@{ Steps = @($r.Steps) }) (T 'env.plan.undo')
             $ui.BtnEnvUndo.IsEnabled = ($r.Count -gt 0)
-            $ui.TxtEnvResult.Text = "$($r.Count) step(s) can be taken back. A share with profile data and an account whose share is not verified empty always stay."
+            $ui.TxtEnvResult.Text = (T 'env.undoable' $($r.Count))
         }
         'Undo' {
             $ui.TxtEnvResult.Text = [string]$r.Message
@@ -256,10 +256,10 @@ Add-Click $ui.BtnEnvPlan {
 }
 Add-Click $ui.BtnEnvApply {
     if (-not $script:EnvPlan) { throw 'Make the plan first.' }
-    if (-not (Test-AVDTuneWriteAllowed)) { throw 'Read only: confirm a snapshot of today on the Overview first.' }; Assert-NoOtherWriter
+    if (-not (Test-AVDTuneWriteAllowed)) { throw (T 'ready.err.readonly') }; Assert-NoOtherWriter
     $p = $script:EnvPlan
     $lines = @($p.Steps | Where-Object { $_.Action -in 'Create', 'Update' } | ForEach-Object { "$($_.Action): $($_.Title)" }) -join "`n"
-    if (-not (Confirm-Action "Create or change exactly these Azure resources?`n`n$lines`n`nPlan $($p.Hash)" 'Environment')) { return }
+    if (-not (Confirm-Action (T 'env.ask.apply' $lines $($p.Hash)) 'Environment')) { return }
     $a = Get-EnvAnswers
     Start-EnvJob 'Apply' @{ Token = (Get-EnvJobToken); Spec = $p.Spec; Identity = $p.Identity; Identities = [string]$a.Identities; Hash = $p.Hash; User = (Get-EnvUser); SnapshotId = (Get-EnvGateSnapshot) }
 }
@@ -267,11 +267,11 @@ Add-Click $ui.BtnEnvUndoPlan {
     Start-EnvJob 'UndoPlan' @{ Token = (Get-EnvJobToken); User = (Get-EnvUser) }
 }
 Add-Click $ui.BtnEnvUndo {
-    if (-not $script:EnvUndoPlan) { throw 'Show what can be taken back first.' }
-    if (-not (Test-AVDTuneWriteAllowed)) { throw 'Read only: confirm a snapshot of today on the Overview first.' }; Assert-NoOtherWriter
+    if (-not $script:EnvUndoPlan) { throw (T 'env.err.undofirst') }
+    if (-not (Test-AVDTuneWriteAllowed)) { throw (T 'ready.err.readonly') }; Assert-NoOtherWriter
     $p = $script:EnvUndoPlan
     $lines = @($p.Steps | Where-Object { $_.Action -in 'Delete', 'Restore' } | ForEach-Object { "$($_.Action): $($_.Id)" }) -join "`n"
-    if (-not (Confirm-Action "Take back exactly this?`n`n$lines`n`nPlan $($p.Hash)" 'Environment')) { return }
+    if (-not (Confirm-Action (T 'env.ask.undo' $lines $($p.Hash)) 'Environment')) { return }
     Start-EnvJob 'Undo' @{ Token = (Get-EnvJobToken); Hash = $p.Hash; User = (Get-EnvUser); SnapshotId = (Get-EnvGateSnapshot) }
 }
 function Get-EnvPlanned {
@@ -285,9 +285,9 @@ Add-Click $ui.BtnEnvMasterTest {
     $ui.TxtEnvMaster.Text = (@($r | ForEach-Object { $_.Results } | ForEach-Object { "$($_.Title): $($_.Status)" })) -join '; '
 }
 Add-Click $ui.BtnEnvMasterApply {
-    if (-not (Test-AVDTuneWriteAllowed)) { throw 'Read only: confirm a snapshot of today on the Overview first.' }; Assert-NoOtherWriter
+    if (-not (Test-AVDTuneWriteAllowed)) { throw (T 'ready.err.readonly') }; Assert-NoOtherWriter
     $pl = Get-EnvPlanned
-    if (-not (Confirm-Action "Write these FSLogix settings to the registry of this master?`n`nEnabled = 1`nVHDLocations = $(Get-AVDTuneEnvVhdLocation $pl.Spec)$(if ($pl.Identity -eq 'EntraKerberos') { '`nCloudKerberosTicketRetrievalEnabled = 1' })" 'Environment')) { return }
+    if (-not (Confirm-Action (T 'env.ask.fslogix' $(Get-AVDTuneEnvVhdLocation $pl.Spec) $(if ($pl.Identity -eq 'EntraKerberos') { '`nCloudKerberosTicketRetrievalEnabled = 1' })) 'Environment')) { return }
     $r = @(Set-AVDTuneEnvMaster -Machine $script:Machine -Spec $pl.Spec -Identity $pl.Identity -Root $script:StateRoot -User (Get-EnvUser) -SnapshotId (Get-EnvGateSnapshot))
     foreach ($run in $r) { foreach ($x in @($run.Results)) { Register-StepResult $x } }
     $ui.TxtEnvMaster.Text = (@($r | ForEach-Object { $_.Results } | ForEach-Object { "$($_.Title): $($_.Status)" })) -join '; '

@@ -22,7 +22,7 @@ function Get-OffFormConfig {
     }
 }
 function Add-OffLanguageCheck([string]$Id) {
-    $cb = New-Object System.Windows.Controls.CheckBox; $cb.Content = $(if ($Id -eq 'MatchOS') { 'MatchOS (language of Windows)' } else { $Id }); $cb.Margin = '0,0,14,4'
+    $cb = New-Object System.Windows.Controls.CheckBox; $cb.Content = $(if ($Id -eq 'MatchOS') { (T 'off.matchos') } else { $Id }); $cb.Margin = '0,0,14,4'
     [System.Windows.Automation.AutomationProperties]::SetName($cb, "Language $Id")
     $cb.Add_Click({ try { Update-OffPreview } catch { } })
     $script:OffLangChecks[$Id] = $cb; [void]$ui.PanelOffLanguages.Children.Add($cb)
@@ -43,17 +43,17 @@ function Set-OffForm($Config) {
 }
 function Update-OffPreview {
     try { $ui.TxtOffPreview.Text = New-AVDTuneOfficeXml -Config (Get-OffFormConfig) -Mode Install -LogPath (Join-Path $script:StateRoot 'logs\office') }
-    catch { $ui.TxtOffPreview.Text = "Not valid yet: $($_.Exception.Message)" }
+    catch { $ui.TxtOffPreview.Text = (T 'off.notvalid' $($_.Exception.Message)) }
 }
 function New-OffResultRow($Row) {
     # The row of the FSLogix page plus, on a red row that has a one-click fix, a Fix button (DataContext = the fix: the style of the buttons draws Tag as an icon)
     $grid = New-FslResultRow $Row
     if ($Row.FixAction) {
         $c = New-Object System.Windows.Controls.ColumnDefinition; $c.Width = 'Auto'; [void]$grid.ColumnDefinitions.Add($c)
-        $b = New-Object System.Windows.Controls.Button; $b.Content = 'Fix'; $b.DataContext = [string]$Row.FixAction; $b.Margin = '10,0,0,0'; $b.Padding = '14,4,14,4'; $b.VerticalAlignment = 'Center'
+        $b = New-Object System.Windows.Controls.Button; $b.Content = (T 'ready.fix'); $b.DataContext = [string]$Row.FixAction; $b.Margin = '10,0,0,0'; $b.Padding = '14,4,14,4'; $b.VerticalAlignment = 'Center'
         $b.SetValue([System.Windows.Controls.Grid]::ColumnProperty, 3)
         [System.Windows.Automation.AutomationProperties]::SetName($b, "Fix: $($Row.Title)")
-        $b.ToolTip = "Sets only this setting; asks first. Source: $($Row.Source)"; [void](Set-AVDTuneWriterButton $b)   # #49: locked while a writer runs
+        $b.ToolTip = (T 'off.fix.tip' $($Row.Source)); [void](Set-AVDTuneWriterButton $b)   # #49: locked while a writer runs
         $b.Add_Click({ param($src) try { Invoke-OffFix ([string]$src.DataContext) } catch { Show-Error $_.Exception.Message } })
         [void]$grid.Children.Add($b)
     }
@@ -82,12 +82,12 @@ function Invoke-OffFix([string]$Name) {
     # One setting only, no ODT run: dry run first, confirmation, then the step behind the write gate
     Assert-FslWrite
     $dry = Set-AVDTuneOfficeFix -Machine $script:Machine -Name $Name -Root $script:StateRoot -WhatIf
-    if (@($dry.Results | Where-Object { $_.Status -eq 'WhatIf' }).Count -eq 0) { $ui.TxtOffState.Text = 'This setting is already right.'; Update-OffView; return }
+    if (@($dry.Results | Where-Object { $_.Status -eq 'WhatIf' }).Count -eq 0) { $ui.TxtOffState.Text = (T 'off.fix.already'); Update-OffView; return }
     if (-not (Confirm-Action (Get-AVDTuneOfficeFixText $Name) 'Office')) { return }
     $run = Set-AVDTuneOfficeFix -Machine $script:Machine -Name $Name -Root $script:StateRoot -User (Get-FslUser) -SnapshotId (Get-FslGateSnapshot)
     foreach ($r in @($run.Results)) { Register-StepResult $r }
     $failed = @($run.Results | Where-Object Status -eq 'Failed')
-    $ui.TxtOffState.Text = $(if ($failed.Count) { "Fix failed: $($failed[0].Message)" } else { "Fix done: $(@($run.Results | Where-Object Status -eq 'Changed').Count) value changed.$(if (@($run.Results | Where-Object { $_.Reboot -and $_.Status -eq 'Changed' }).Count) { ' Restart the master before you go on.' })" })
+    $ui.TxtOffState.Text = $(if ($failed.Count) { (T 'off.fix.failed' $($failed[0].Message)) } else { (T 'off.fix.done' $(@($run.Results | Where-Object Status -eq 'Changed').Count) $(if (@($run.Results | Where-Object { $_.Reboot -and $_.Status -eq 'Changed' }).Count) { (T 'off.restartfirst') })) })
     Show-Toast $ui.TxtOffState.Text; Start-OverviewRefresh; Update-OffView
 }
 function Set-OffBusy([bool]$Busy) {
@@ -147,9 +147,9 @@ function Complete-OffJob {
         finally { $job.PS.Dispose() }
     }
     Set-OffBusy $false
-    if ($err -or -not $result) { Complete-AVDTuneUiTask $job.Task -Failed -Summary "Office failed: $err"; $ui.TxtOffState.Text = "Office failed: $err"; Show-Error $ui.TxtOffState.Text; Update-OffView; return }
+    if ($err -or -not $result) { Complete-AVDTuneUiTask $job.Task -Failed -Summary "Office failed: $err"; $ui.TxtOffState.Text = (T 'off.failed' $err); Show-Error $ui.TxtOffState.Text; Update-OffView; return }
     Register-StepResult $result.Result
-    $ui.TxtOffState.Text = "Office: $($result.Setup.Status). $($result.Setup.Message)$(if ($result.Result.Reboot) { ' Restart the master before you go on.' })"
+    $ui.TxtOffState.Text = (T 'off.result' $($result.Setup.Status) $($result.Setup.Message) $(if ($result.Result.Reboot) { (T 'off.restartfirst') }))
     Complete-AVDTuneUiTask $job.Task -Failed:([bool]($result.Setup.Status -eq 'Failed')) -Summary $ui.TxtOffState.Text
     Show-Toast $ui.TxtOffState.Text
     Start-OverviewRefresh
@@ -157,20 +157,20 @@ function Complete-OffJob {
 }
 $script:Timer.Add_Tick({ try { Complete-OffJob } catch { Show-Error $_.Exception.Message } })
 
-Add-Click $ui.BtnOffTest { Update-OffView; $ui.TxtOffState.Text = 'Tested: nothing was changed.' }
-Add-Click $ui.BtnOffSave { [void](Set-AVDTuneOfficeConfig -Root $script:StateRoot -Config (Get-OffFormConfig)); $ui.TxtOffState.Text = 'Settings saved (no change of the master).'; Update-OffView }
+Add-Click $ui.BtnOffTest { Update-OffView; $ui.TxtOffState.Text = (T 'off.tested') }
+Add-Click $ui.BtnOffSave { [void](Set-AVDTuneOfficeConfig -Root $script:StateRoot -Config (Get-OffFormConfig)); $ui.TxtOffState.Text = (T 'off.saved'); Update-OffView }
 Add-Click $ui.BtnOffInstall {
     Assert-FslWrite
     $cfg = Get-OffFormConfig
     $problems = @(Test-AVDTuneOfficeConfig $cfg); if ($problems.Count -gt 0) { throw ($problems -join ' ') }
-    if (-not (Confirm-Action 'Download the Office Deployment Tool from Microsoft, check its signature and install or reconfigure Microsoft 365 Apps with the shown configuration? This takes several minutes and a restart may follow.' 'Office')) { return }
+    if (-not (Confirm-Action (T 'off.ask.install') 'Office')) { return }
     [void](Set-AVDTuneOfficeConfig -Root $script:StateRoot -Config $cfg)
-    Start-OffJob 'Install' $cfg; $ui.TxtOffState.Text = 'Looking up the Office Deployment Tool ...'
+    Start-OffJob 'Install' $cfg; $ui.TxtOffState.Text = (T 'off.lookingup')
 }
 Add-Click $ui.BtnOffRemove {
     Assert-FslWrite
     if (-not (Confirm-Action (Get-AVDTuneOfficeRemoveText -Machine $script:Machine) 'Office')) { return }
-    Start-OffJob 'Remove' $null; $ui.TxtOffState.Text = 'Removing Microsoft 365 Apps ...'
+    Start-OffJob 'Remove' $null; $ui.TxtOffState.Text = (T 'off.removing')
 }
 Add-Click $ui.BtnOffUndo {
     Assert-FslWrite
@@ -178,30 +178,30 @@ Add-Click $ui.BtnOffUndo {
     $drift = Get-AVDTuneOfficeUndoDrift -Machine $script:Machine -Root $script:StateRoot
     $kind = 'Undo'
     if ($drift) { if (-not (Confirm-Action (($drift) + ' Go on anyway?') 'Office')) { return }; $kind = 'UndoAccept' }
-    Start-OffJob $kind $null; $ui.TxtOffState.Text = 'Undoing the Office change ...'
+    Start-OffJob $kind $null; $ui.TxtOffState.Text = (T 'off.undoing')
 }
 Add-Click $ui.BtnOffPolicies {
     Assert-FslWrite
     $dry = Set-AVDTuneOfficePolicies -Machine $script:Machine -Root $script:StateRoot -WhatIf
     $n = @($dry.Results | Where-Object { $_.Status -eq 'WhatIf' }).Count
-    if ($n -eq 0) { $ui.TxtOffState.Text = 'The update policies are already set.'; return }
-    if (-not (Confirm-Action "Set $n Office update policy value(s) in the registry of this master?" 'Office')) { return }
+    if ($n -eq 0) { $ui.TxtOffState.Text = (T 'off.policies.already'); return }
+    if (-not (Confirm-Action (T 'off.ask.policies' $n) 'Office')) { return }
     $run = Set-AVDTuneOfficePolicies -Machine $script:Machine -Root $script:StateRoot -User (Get-FslUser) -SnapshotId (Get-FslGateSnapshot)
     foreach ($r in @($run.Results)) { Register-StepResult $r }
-    $ui.TxtOffState.Text = "Office update policies: $(@($run.Results | Where-Object Status -eq 'Changed').Count) changed."; Show-Toast $ui.TxtOffState.Text; Start-OverviewRefresh; Update-OffView
+    $ui.TxtOffState.Text = (T 'off.policies.changed' $(@($run.Results | Where-Object Status -eq 'Changed').Count)); Show-Toast $ui.TxtOffState.Text; Start-OverviewRefresh; Update-OffView
 }
 Add-Click $ui.BtnOffPoliciesUndo {
     Assert-FslWrite
-    if (-not (Confirm-Action 'Put back the Office update policy values found before the change?' 'Office')) { return }
+    if (-not (Confirm-Action (T 'off.ask.undopolicies') 'Office')) { return }
     $run = Undo-AVDTuneOfficePolicies -Machine $script:Machine -Root $script:StateRoot -User (Get-FslUser) -SnapshotId (Get-FslGateSnapshot)
     foreach ($r in @($run.Results)) { Register-StepResult $r }
-    $ui.TxtOffState.Text = 'Office update policies: undone.'; Show-Toast $ui.TxtOffState.Text; Start-OverviewRefresh; Update-OffView
+    $ui.TxtOffState.Text = (T 'off.policies.undone'); Show-Toast $ui.TxtOffState.Text; Start-OverviewRefresh; Update-OffView
 }
 Add-Click $ui.BtnOffFixUndo {
     Assert-FslWrite
     $names = @(Get-AVDTuneOfficeFixRecorded -Root $script:StateRoot)
-    if ($names.Count -eq 0) { $ui.TxtOffState.Text = 'No one-click fix of this page is recorded: nothing to undo.'; return }
-    if (-not (Confirm-Action "Put back the values found before the one-click fix(es) ($($names -join ', '))? Undo does not restart the master and does not restore reset activations." 'Office')) { return }
+    if ($names.Count -eq 0) { $ui.TxtOffState.Text = (T 'off.fix.noundo'); return }
+    if (-not (Confirm-Action (T 'off.ask.undofix' $($names -join ', ')) 'Office')) { return }
     $lines = @()
     foreach ($n in $names) {
         try {
@@ -213,5 +213,5 @@ Add-Click $ui.BtnOffFixUndo {
         }
         catch { $lines += "$n Failed ($($_.Exception.Message))" }
     }
-    $ui.TxtOffState.Text = "Office one-click fix undo: $($lines -join '; ')"; Show-Toast $ui.TxtOffState.Text; Start-OverviewRefresh; Update-OffView
+    $ui.TxtOffState.Text = (T 'off.fix.undo' $($lines -join '; ')); Show-Toast $ui.TxtOffState.Text; Start-OverviewRefresh; Update-OffView
 }

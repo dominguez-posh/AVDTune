@@ -32,7 +32,7 @@ try {
     if ($Kind -ne 'Undo') {
         # the print servers published in AD, over the pinned LDAPS connection of the start sequence (H1: only these are used)
         $Sync.Text = 'ad'
-        if (-not $Account) { throw 'Enter the password of the domain account.' }
+        if (-not $Account) { throw (T 'prn.err.password') }
         if ($FakeDir) { $ldap = $SharedLdap; $conn = 'c' }
         else {
             $ldap = New-AVDTuneLdapAdapter

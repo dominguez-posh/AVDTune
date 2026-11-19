@@ -251,51 +251,51 @@
                                     <Grid>
                                         <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
                                         <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-                                        <TextBlock Text="Updates" Style="{DynamicResource PageTitle}"/>
-                                        <TextBlock x:Name="TxtUpdSubtitle" Grid.Row="1" Grid.ColumnSpan="2" Style="{DynamicResource Subtitle}" Text="One list for Windows, Microsoft 365 Apps, Edge, Teams, OneDrive, FSLogix, Defender and your apps. A run lifts the update block for itself and puts it back."/>
+                                        <TextBlock Uid="nav.updates" Style="{DynamicResource PageTitle}"/>
+                                        <TextBlock Uid="upd.x.subtitle" x:Name="TxtUpdSubtitle" Grid.Row="1" Grid.ColumnSpan="2" Style="{DynamicResource Subtitle}"/>
                                         <StackPanel x:Name="PanelUpdHead" Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center" Margin="24,0,0,0">
-                                            <Button x:Name="BtnUpdScan" Content="Search" Margin="0,0,8,0" AutomationProperties.Name="Search for updates"/>
-                                            <Button x:Name="BtnUpdSelected" Content="Update selected" Margin="0,0,8,0" AutomationProperties.Name="Update the selected items"/>
-                                            <Button x:Name="BtnUpdAll" Style="{DynamicResource PrimaryButton}" Content="Update all" AutomationProperties.Name="Update all items"/>
+                                            <Button Uid="upd.x.scan" x:Name="BtnUpdScan" Margin="0,0,8,0"/>
+                                            <Button Uid="upd.x.selected" x:Name="BtnUpdSelected" Margin="0,0,8,0"/>
+                                            <Button Uid="upd.x.all" x:Name="BtnUpdAll" Style="{DynamicResource PrimaryButton}"/>
                                         </StackPanel>
                                     </Grid>
                                     <TextBlock x:Name="TxtUpdState" Style="{DynamicResource Hint}" Margin="0,12,0,0" TextWrapping="Wrap"/>
                                     <Border x:Name="BoxUpdRepair" Visibility="Collapsed" Style="{DynamicResource CardBox}" Margin="0,16,0,0" Background="{DynamicResource WarningBg}" Padding="20,14">
                                         <StackPanel>
-                                            <TextBlock Text="An update failed in a way that a repair can fix" FontWeight="SemiBold" Foreground="{DynamicResource Warning}"/>
-                                            <TextBlock Text="DISM /RestoreHealth repairs the component store, sfc checks the system files. Both take a while." TextWrapping="Wrap" Margin="0,4,0,0"/>
+                                            <TextBlock Uid="upd.x.anupdatefailed" FontWeight="SemiBold" Foreground="{DynamicResource Warning}"/>
+                                            <TextBlock Uid="upd.x.dismrestorehealthrepairs" TextWrapping="Wrap" Margin="0,4,0,0"/>
                                             <StackPanel Orientation="Horizontal" Margin="0,10,0,0">
-                                                <Button x:Name="BtnRepairDism" Content="Run DISM /RestoreHealth" Margin="0,0,8,0"/>
-                                                <Button x:Name="BtnRepairSfc" Content="Run sfc /scannow"/>
+                                                <Button Uid="upd.x.repairdism" x:Name="BtnRepairDism" Margin="0,0,8,0"/>
+                                                <Button Uid="upd.x.repairsfc" x:Name="BtnRepairSfc"/>
                                             </StackPanel>
                                         </StackPanel>
                                     </Border>
                                     <Border Style="{DynamicResource CardBox}" Margin="0,16,0,0" Background="{DynamicResource Card}" Padding="20,16">
                                         <StackPanel>
-                                            <TextBlock Text="Available" Style="{DynamicResource CardTitle}"/>
+                                            <TextBlock Uid="upd.x.available" Style="{DynamicResource CardTitle}"/>
                                             <StackPanel x:Name="PanelUpdItems" Margin="0,6,0,0"/>
                                             <TextBlock x:Name="TxtUpdNotes" Style="{DynamicResource Hint}" Margin="0,10,0,0" TextWrapping="Wrap"/>
                                         </StackPanel>
                                     </Border>
                                     <Border Style="{DynamicResource CardBox}" Margin="0,16,0,0" Background="{DynamicResource Card}" Padding="20,16">
                                         <StackPanel>
-                                            <TextBlock Text="Settings" Style="{DynamicResource CardTitle}"/>
+                                            <TextBlock Uid="upd.x.settings" Style="{DynamicResource CardTitle}"/>
                                             <StackPanel Margin="0,8,0,0">
-                                                <CheckBox x:Name="ChkUpdDrivers" Content="Include drivers (off by default)" Margin="0,2,0,2"/>
-                                                <CheckBox x:Name="ChkUpdPreviews" Content="Include preview updates (off by default)" Margin="0,2,0,2"/>
-                                                <CheckBox x:Name="ChkUpdMicrosoft" Content="Updates for other Microsoft products (.NET and more, registers Microsoft Update)" Margin="0,2,0,2"/>
+                                                <CheckBox Uid="upd.x.drivers" x:Name="ChkUpdDrivers" Margin="0,2,0,2"/>
+                                                <CheckBox Uid="upd.x.previews" x:Name="ChkUpdPreviews" Margin="0,2,0,2"/>
+                                                <CheckBox Uid="upd.x.microsoft" x:Name="ChkUpdMicrosoft" Margin="0,2,0,2"/>
                                                 <Grid Margin="0,8,0,0">
                                                     <Grid.ColumnDefinitions><ColumnDefinition Width="250"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
-                                                    <TextBlock Text="KB exclude list" VerticalAlignment="Center"/>
-                                                    <TextBox x:Name="TxtUpdKbs" Grid.Column="1" Padding="8,6" AutomationProperties.Name="KB numbers to exclude, separated by commas"/>
+                                                    <TextBlock Uid="upd.x.kbexcludelist" VerticalAlignment="Center"/>
+                                                    <TextBox Uid="upd.x.kbs" x:Name="TxtUpdKbs" Grid.Column="1" Padding="8,6"/>
                                                 </Grid>
-                                                <Button x:Name="BtnUpdSave" Content="Save settings" HorizontalAlignment="Left" Margin="0,12,0,0"/>
+                                                <Button Uid="upd.x.save" x:Name="BtnUpdSave" HorizontalAlignment="Left" Margin="0,12,0,0"/>
                                             </StackPanel>
                                         </StackPanel>
                                     </Border>
                                     <Border Style="{DynamicResource CardBox}" Margin="0,16,0,0" Background="{DynamicResource Card}" Padding="20,16">
                                         <StackPanel>
-                                            <TextBlock Text="History" Style="{DynamicResource CardTitle}"/>
+                                            <TextBlock Uid="upd.x.history" Style="{DynamicResource CardTitle}"/>
                                             <StackPanel x:Name="PanelUpdHistory" Margin="0,6,0,0"/>
                                         </StackPanel>
                                     </Border>
@@ -310,63 +310,63 @@
                                     <Grid>
                                         <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
                                         <StackPanel>
-                                            <TextBlock Text="Office" Style="{DynamicResource PageTitle}"/>
-                                            <TextBlock Style="{DynamicResource Subtitle}" Text="Install or reconfigure Microsoft 365 Apps with the Office Deployment Tool for a multi-user host: shared computer activation on, automatic updates off. The tool comes from Microsoft only and is checked before it runs. Everything that changes the master is behind the snapshot gate."/>
+                                            <TextBlock Uid="nav.office" Style="{DynamicResource PageTitle}"/>
+                                            <TextBlock Uid="off.x.installorreconfigure" Style="{DynamicResource Subtitle}"/>
                                         </StackPanel>
-                                        <Button x:Name="BtnOffTest" Grid.Column="1" Style="{DynamicResource PrimaryButton}" Content="Test" VerticalAlignment="Center" Margin="24,0,0,0" AutomationProperties.Name="Test the state of Office against the configuration"/>
+                                        <Button Uid="off.x.test" x:Name="BtnOffTest" Grid.Column="1" Style="{DynamicResource PrimaryButton}" VerticalAlignment="Center" Margin="24,0,0,0"/>
                                     </Grid>
                                     <TextBlock x:Name="TxtOffState" Style="{DynamicResource Hint}" Margin="0,12,0,0" TextWrapping="Wrap"/>
 
                                     <Border Style="{DynamicResource CardBox}" Margin="0,16,0,0" Background="{DynamicResource Card}" Padding="20,16">
                                         <StackPanel>
-                                            <TextBlock Text="State of this master" Style="{DynamicResource CardTitle}"/>
+                                            <TextBlock Uid="off.x.stateofthis" Style="{DynamicResource CardTitle}"/>
                                             <StackPanel x:Name="PanelOffRows" Margin="0,8,0,0"/>
                                         </StackPanel>
                                     </Border>
 
                                     <Border Style="{DynamicResource CardBox}" Margin="0,16,0,0" Background="{DynamicResource Card}" Padding="20,16">
                                         <StackPanel>
-                                            <TextBlock Text="Configuration" Style="{DynamicResource CardTitle}"/>
-                                            <TextBlock Style="{DynamicResource Hint}" Margin="0,4,0,0" TextWrapping="Wrap" Text="Shared computer activation (SharedComputerLicensing = 1) and Updates Enabled = FALSE are fixed: Windows multi-session needs both. Preset: the sample of the Microsoft AVD article with the best-practice apps."/>
+                                            <TextBlock Uid="off.x.configuration" Style="{DynamicResource CardTitle}"/>
+                                            <TextBlock Uid="off.x.sharedcomputeractivation" Style="{DynamicResource Hint}" Margin="0,4,0,0" TextWrapping="Wrap"/>
                                             <Grid Margin="0,10,0,0">
                                                 <Grid.ColumnDefinitions><ColumnDefinition Width="160"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
                                                 <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
-                                                <TextBlock Text="Channel" VerticalAlignment="Center" Margin="0,4"/>
-                                                <ComboBox x:Name="CmbOffChannel" Grid.Column="1" Margin="0,4" AutomationProperties.Name="Update channel"/>
-                                                <TextBlock Grid.Row="1" Text="32 or 64 bit" VerticalAlignment="Center" Margin="0,4"/>
-                                                <ComboBox x:Name="CmbOffEdition" Grid.Row="1" Grid.Column="1" Margin="0,4" AutomationProperties.Name="32 or 64 bit"/>
-                                                <TextBlock Grid.Row="2" Text="Licence" VerticalAlignment="Center" Margin="0,4"/>
-                                                <ComboBox x:Name="CmbOffLicense" Grid.Row="2" Grid.Column="1" Margin="0,4" DisplayMemberPath="Name" SelectedValuePath="Key" AutomationProperties.Name="Licence of the users (decides the Microsoft 365 Apps product)"/>
+                                                <TextBlock Uid="off.x.channel" VerticalAlignment="Center" Margin="0,4"/>
+                                                <ComboBox Uid="off.x.channel2" x:Name="CmbOffChannel" Grid.Column="1" Margin="0,4"/>
+                                                <TextBlock Uid="off.x.32or64" Grid.Row="1" VerticalAlignment="Center" Margin="0,4"/>
+                                                <ComboBox Uid="off.x.edition" x:Name="CmbOffEdition" Grid.Row="1" Grid.Column="1" Margin="0,4"/>
+                                                <TextBlock Uid="off.x.licence" Grid.Row="2" VerticalAlignment="Center" Margin="0,4"/>
+                                                <ComboBox Uid="off.x.license" x:Name="CmbOffLicense" Grid.Row="2" Grid.Column="1" Margin="0,4" DisplayMemberPath="Name" SelectedValuePath="Key"/>
                                                 <TextBlock x:Name="TxtOffLicenseHint" Grid.Row="3" Grid.Column="1" Style="{DynamicResource Hint}" TextWrapping="Wrap" Margin="0,0,0,6"/>
-                                                <TextBlock Grid.Row="4" Text="Outlook" VerticalAlignment="Center" Margin="0,4"/>
-                                                <ComboBox x:Name="CmbOffOutlook" Grid.Row="4" Grid.Column="1" Margin="0,4" DisplayMemberPath="Name" SelectedValuePath="Key" AutomationProperties.Name="Outlook (classic), Outlook (new) or both"/>
+                                                <TextBlock Uid="off.x.outlook" Grid.Row="4" VerticalAlignment="Center" Margin="0,4"/>
+                                                <ComboBox Uid="off.x.outlook2" x:Name="CmbOffOutlook" Grid.Row="4" Grid.Column="1" Margin="0,4" DisplayMemberPath="Name" SelectedValuePath="Key"/>
                                                 <TextBlock x:Name="TxtOffOutlookHint" Grid.Row="5" Grid.Column="1" Style="{DynamicResource Hint}" TextWrapping="Wrap" Margin="0,0,0,6"/>
-                                                <TextBlock Grid.Row="6" Text="Languages" VerticalAlignment="Top" Margin="0,8"/>
+                                                <TextBlock Uid="off.x.languages" Grid.Row="6" VerticalAlignment="Top" Margin="0,8"/>
                                                 <WrapPanel x:Name="PanelOffLanguages" Grid.Row="6" Grid.Column="1" Margin="0,4"/>
-                                                <TextBlock Grid.Row="7" Text="Install" VerticalAlignment="Top" Margin="0,8"/>
+                                                <TextBlock Uid="off.x.install" Grid.Row="7" VerticalAlignment="Top" Margin="0,8"/>
                                                 <WrapPanel x:Name="PanelOffInstall" Grid.Row="7" Grid.Column="1" Margin="0,4"/>
                                                 <TextBlock x:Name="TxtOffAppsHint" Grid.Row="8" Grid.Column="1" Style="{DynamicResource Hint}" TextWrapping="Wrap" Margin="0,0,0,4"/>
                                             </Grid>
-                                            <CheckBox x:Name="ChkOffMsi" Content="Remove older Office versions installed with Windows Installer (RemoveMSI)" Margin="0,8,0,0"/>
-                                            <TextBlock Text="configuration.xml (preview, this is what the ODT gets)" Style="{DynamicResource Hint}" Margin="0,12,0,4"/>
-                                            <TextBox x:Name="TxtOffPreview" IsReadOnly="True" FontFamily="Consolas" Padding="8" TextWrapping="NoWrap" HorizontalScrollBarVisibility="Auto" MinHeight="120" AutomationProperties.Name="Preview of configuration.xml"/>
+                                            <CheckBox Uid="off.x.msi" x:Name="ChkOffMsi" Margin="0,8,0,0"/>
+                                            <TextBlock Uid="off.x.configurationxmlpreview" Style="{DynamicResource Hint}" Margin="0,12,0,4"/>
+                                            <TextBox Uid="off.x.preview" x:Name="TxtOffPreview" IsReadOnly="True" FontFamily="Consolas" Padding="8" TextWrapping="NoWrap" HorizontalScrollBarVisibility="Auto" MinHeight="120"/>
                                             <StackPanel Orientation="Horizontal" Margin="0,12,0,0">
-                                                <Button x:Name="BtnOffSave" Content="Save settings" Margin="0,0,8,0" AutomationProperties.Name="Save the configuration"/>
-                                                <Button x:Name="BtnOffInstall" Style="{DynamicResource PrimaryButton}" Content="Install or reconfigure" Margin="0,0,8,0" AutomationProperties.Name="Install or reconfigure Microsoft 365 Apps"/>
-                                                <Button x:Name="BtnOffUndo" Content="Back to saved configuration" Margin="0,0,8,0" AutomationProperties.Name="Go back to the saved earlier Office configuration (build, languages and RemoveMSI are not restored)"/>
-                                                <Button x:Name="BtnOffRemove" Content="Remove all Office products" AutomationProperties.Name="Remove all Click-to-Run Office products from this master"/>
+                                                <Button Uid="off.x.save" x:Name="BtnOffSave" Margin="0,0,8,0"/>
+                                                <Button Uid="off.x.install2" x:Name="BtnOffInstall" Style="{DynamicResource PrimaryButton}" Margin="0,0,8,0"/>
+                                                <Button Uid="off.x.undo" x:Name="BtnOffUndo" Margin="0,0,8,0"/>
+                                                <Button Uid="off.x.remove" x:Name="BtnOffRemove"/>
                                             </StackPanel>
                                         </StackPanel>
                                     </Border>
 
                                     <Border Style="{DynamicResource CardBox}" Margin="0,16,0,0" Background="{DynamicResource Card}" Padding="20,16">
                                         <StackPanel>
-                                            <TextBlock Text="Update notifications for users" Style="{DynamicResource CardTitle}"/>
-                                            <TextBlock Style="{DynamicResource Hint}" Margin="0,4,0,0" TextWrapping="Wrap" Text="Hides the Office update notifications and the update button for all users (two machine policies of the AVD article). Press Test to see the state; Apply asks first."/>
+                                            <TextBlock Uid="off.x.updatenotificationsfor" Style="{DynamicResource CardTitle}"/>
+                                            <TextBlock Uid="off.x.hidestheoffice" Style="{DynamicResource Hint}" Margin="0,4,0,0" TextWrapping="Wrap"/>
                                             <StackPanel Orientation="Horizontal" Margin="0,12,0,0">
-                                                <Button x:Name="BtnOffPolicies" Content="Set update policies" Margin="0,0,8,0" AutomationProperties.Name="Hide Office update notifications for users"/>
-                                                <Button x:Name="BtnOffPoliciesUndo" Content="Undo policies" Margin="0,0,8,0" AutomationProperties.Name="Put the Office policy values back"/>
-                                                <Button x:Name="BtnOffFixUndo" Content="Undo one-click fixes" AutomationProperties.Name="Put back the values that the Fix buttons of the state list changed"/>
+                                                <Button Uid="off.x.policies" x:Name="BtnOffPolicies" Margin="0,0,8,0"/>
+                                                <Button Uid="off.x.policiesundo" x:Name="BtnOffPoliciesUndo" Margin="0,0,8,0"/>
+                                                <Button Uid="off.x.fixundo" x:Name="BtnOffFixUndo"/>
                                             </StackPanel>
                                         </StackPanel>
                                     </Border>
@@ -381,37 +381,37 @@
                                     <Grid>
                                         <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
                                         <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-                                        <TextBlock Text="FSLogix" Style="{DynamicResource PageTitle}"/>
-                                        <TextBlock x:Name="TxtFslSubtitle" Grid.Row="1" Grid.ColumnSpan="2" Style="{DynamicResource Subtitle}" Text="Install and update FSLogix, set the profile container with Microsoft's recommended values, edit redirections.xml, set the Defender exclusions and test that profiles will work. Everything that changes the master is behind the snapshot gate."/>
+                                        <TextBlock Uid="nav.fslogix" Style="{DynamicResource PageTitle}"/>
+                                        <TextBlock Uid="fsl.subtitle" x:Name="TxtFslSubtitle" Grid.Row="1" Grid.ColumnSpan="2" Style="{DynamicResource Subtitle}"/>
                                         <StackPanel x:Name="PanelFslHead" Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center" Margin="24,0,0,0">
-                                            <Button x:Name="BtnFslTestWrite" Content="Test with write tests" Margin="0,0,8,0" AutomationProperties.Name="Run the function test including the write tests on the share"/>
-                                            <Button x:Name="BtnFslTest" Style="{DynamicResource PrimaryButton}" Content="Run test" AutomationProperties.Name="Run the FSLogix function test"/>
+                                            <Button Uid="fsl.x.testwrite" x:Name="BtnFslTestWrite" Margin="0,0,8,0"/>
+                                            <Button Uid="fsl.x.test" x:Name="BtnFslTest" Style="{DynamicResource PrimaryButton}"/>
                                         </StackPanel>
                                     </Grid>
                                     <TextBlock x:Name="TxtFslState" Style="{DynamicResource Hint}" Margin="0,12,0,0" TextWrapping="Wrap"/>
 
                                     <Border Style="{DynamicResource CardBox}" Margin="0,16,0,0" Background="{DynamicResource Card}" Padding="20,16">
                                         <StackPanel>
-                                            <TextBlock Text="Installation" Style="{DynamicResource CardTitle}"/>
+                                            <TextBlock Uid="fsl.x.installation" Style="{DynamicResource CardTitle}"/>
                                             <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
                                                 <Border x:Name="PillFslInstall" Style="{DynamicResource Pill}" Padding="10,2" VerticalAlignment="Center"><TextBlock x:Name="TxtFslInstallPill" FontSize="12" FontWeight="SemiBold"/></Border>
                                                 <TextBlock x:Name="TxtFslVersion" Margin="12,0,0,0" VerticalAlignment="Center" TextWrapping="Wrap"/>
                                             </StackPanel>
                                             <TextBlock x:Name="TxtFslLatest" Style="{DynamicResource Hint}" Margin="0,8,0,0" TextWrapping="Wrap"/>
-                                            <Button x:Name="BtnFslInstall" Content="Install or update FSLogix" HorizontalAlignment="Left" Margin="0,12,0,0" AutomationProperties.Name="Install or update FSLogix from Microsoft"/>
+                                            <Button Uid="fsl.x.install" x:Name="BtnFslInstall" HorizontalAlignment="Left" Margin="0,12,0,0"/>
                                         </StackPanel>
                                     </Border>
 
                                     <Border Style="{DynamicResource CardBox}" Margin="0,16,0,0" Background="{DynamicResource Card}" Padding="20,16">
                                         <StackPanel>
-                                            <TextBlock Text="Profile container settings" Style="{DynamicResource CardTitle}"/>
-                                            <TextBlock Style="{DynamicResource Hint}" Margin="0,4,0,0" TextWrapping="Wrap" Text="Each value has Microsoft's recommendation and a reason. A value left empty is not touched. Press Test first: it shows what would change and writes nothing."/>
+                                            <TextBlock Uid="fsl.x.profilecontainersettings" Style="{DynamicResource CardTitle}"/>
+                                            <TextBlock Uid="fsl.x.eachvaluehas" Style="{DynamicResource Hint}" Margin="0,4,0,0" TextWrapping="Wrap"/>
                                             <StackPanel x:Name="PanelFslSettings" Margin="0,10,0,0"/>
                                             <StackPanel Orientation="Horizontal" Margin="0,12,0,0">
-                                                <Button x:Name="BtnFslFill" Content="Fill in recommended" Margin="0,0,8,0" AutomationProperties.Name="Fill in Microsoft's recommended values"/>
-                                                <Button x:Name="BtnFslSettingsTest" Content="Test" Margin="0,0,8,0" AutomationProperties.Name="Show what would change"/>
-                                                <Button x:Name="BtnFslSettingsApply" Style="{DynamicResource PrimaryButton}" Content="Apply" Margin="0,0,8,0" AutomationProperties.Name="Write the settings"/>
-                                                <Button x:Name="BtnFslSettingsUndo" Content="Undo last change" AutomationProperties.Name="Put the previous values back"/>
+                                                <Button Uid="fsl.x.fill" x:Name="BtnFslFill" Margin="0,0,8,0"/>
+                                                <Button Uid="fsl.x.settingstest" x:Name="BtnFslSettingsTest" Margin="0,0,8,0"/>
+                                                <Button Uid="fsl.x.settingsapply" x:Name="BtnFslSettingsApply" Style="{DynamicResource PrimaryButton}" Margin="0,0,8,0"/>
+                                                <Button Uid="fsl.x.settingsundo" x:Name="BtnFslSettingsUndo"/>
                                             </StackPanel>
                                             <TextBlock x:Name="TxtFslSettingsState" Style="{DynamicResource Hint}" Margin="0,10,0,0" TextWrapping="Wrap"/>
                                         </StackPanel>
@@ -419,20 +419,20 @@
 
                                     <Border Style="{DynamicResource CardBox}" Margin="0,16,0,0" Background="{DynamicResource Card}" Padding="20,16">
                                         <StackPanel>
-                                            <TextBlock Text="Include and exclude lists" Style="{DynamicResource CardTitle}"/>
-                                            <TextBlock Style="{DynamicResource Hint}" Margin="0,4,0,0" TextWrapping="Wrap" Text="Local groups that decide who FSLogix processes. Recommended: include Everyone, exclude the local Administrators and (with a domain) Domain Admins, so that an admin sign-in does not lock a container. Members are set by SID; entries that are already there stay. Applying the settings above sets these lists too."/>
-                                            <TextBox x:Name="TxtFslGroups" Style="{DynamicResource SelectableText}" Margin="0,8,0,0" Height="80" AcceptsReturn="True" VerticalScrollBarVisibility="Auto" FontFamily="Cascadia Mono, Consolas" FontSize="12" Padding="10,8" Foreground="{DynamicResource Text}" AutomationProperties.Name="Members of the include and exclude lists"/>
+                                            <TextBlock Uid="fsl.x.includeandexclude" Style="{DynamicResource CardTitle}"/>
+                                            <TextBlock Uid="fsl.x.localgroupsthat" Style="{DynamicResource Hint}" Margin="0,4,0,0" TextWrapping="Wrap"/>
+                                            <TextBox Uid="fsl.x.groups" x:Name="TxtFslGroups" Style="{DynamicResource SelectableText}" Margin="0,8,0,0" Height="80" AcceptsReturn="True" VerticalScrollBarVisibility="Auto" FontFamily="Cascadia Mono, Consolas" FontSize="12" Padding="10,8" Foreground="{DynamicResource Text}"/>
                                             <StackPanel Orientation="Horizontal" Margin="0,10,0,0">
-                                                <Button x:Name="BtnFslListsApply" Content="Apply recommended lists" Margin="0,0,8,0" AutomationProperties.Name="Set the recommended include and exclude lists in one step"/>
-                                                <Button x:Name="BtnFslListsUndo" Content="Undo recommended lists" AutomationProperties.Name="Remove the members that the last Apply recommended lists added"/>
+                                                <Button Uid="fsl.x.listsapply" x:Name="BtnFslListsApply" Margin="0,0,8,0"/>
+                                                <Button Uid="fsl.x.listsundo" x:Name="BtnFslListsUndo"/>
                                             </StackPanel>
                                             <TextBlock x:Name="TxtFslListsNotice" Style="{DynamicResource Hint}" Margin="0,8,0,0" TextWrapping="Wrap"/>
                                             <StackPanel Orientation="Horizontal" Margin="0,10,0,0">
-                                                <ComboBox x:Name="CmbFslList" Width="110" Margin="0,0,8,0" AutomationProperties.Name="Which list"/>
-                                                <ComboBox x:Name="CmbFslGroup" Width="260" Margin="0,0,8,0" IsEditable="True" AutomationProperties.Name="Group from the domain, or a SID"/>
-                                                <Button x:Name="BtnFslGroupAdd" Content="Add" Margin="0,0,8,0"/>
-                                                <Button x:Name="BtnFslGroupRemove" Content="Remove" Margin="0,0,8,0"/>
-                                                <Button x:Name="BtnFslExcludeAdmins" Content="Exclude local administrators" AutomationProperties.Name="Put the local Administrators group into the exclude list"/>
+                                                <ComboBox Uid="fsl.x.list" x:Name="CmbFslList" Width="110" Margin="0,0,8,0"/>
+                                                <ComboBox Uid="fsl.x.group" x:Name="CmbFslGroup" Width="260" Margin="0,0,8,0" IsEditable="True"/>
+                                                <Button Uid="fsl.x.groupadd" x:Name="BtnFslGroupAdd" Margin="0,0,8,0"/>
+                                                <Button Uid="cust.btn.remove" x:Name="BtnFslGroupRemove" Margin="0,0,8,0"/>
+                                                <Button Uid="fsl.x.excludeadmins" x:Name="BtnFslExcludeAdmins"/>
                                             </StackPanel>
                                             <TextBlock x:Name="TxtFslGroupHint" Style="{DynamicResource Hint}" Margin="0,8,0,0" TextWrapping="Wrap"/>
                                         </StackPanel>
@@ -440,20 +440,20 @@
 
                                     <Border Style="{DynamicResource CardBox}" Margin="0,16,0,0" Background="{DynamicResource Card}" Padding="20,16">
                                         <StackPanel>
-                                            <TextBlock Text="redirections.xml" Style="{DynamicResource CardTitle}"/>
-                                            <TextBlock Style="{DynamicResource Hint}" Margin="0,4,0,0" TextWrapping="Wrap" Text="Keeps cache folders out of the profile container. Single sign-on folders (the token broker, WAM) are never excluded: that breaks sign-in. Only Teams comes from Microsoft Learn; the other groups are the usual cache folders and are marked."/>
+                                            <TextBlock Uid="fsl.x.redirectionsxml" Style="{DynamicResource CardTitle}"/>
+                                            <TextBlock Uid="fsl.x.keepscachefolders" Style="{DynamicResource Hint}" Margin="0,4,0,0" TextWrapping="Wrap"/>
                                             <Grid Margin="0,10,0,0">
                                                 <Grid.ColumnDefinitions><ColumnDefinition Width="250"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
-                                                <TextBlock Text="Folder of the file (RedirXMLSourceFolder)" VerticalAlignment="Center" TextWrapping="Wrap"/>
-                                                <TextBox x:Name="TxtFslRedirFolder" Grid.Column="1" Padding="8,6" AutomationProperties.Name="Folder that holds redirections.xml"/>
+                                                <TextBlock Uid="fsl.x.folderofthe" VerticalAlignment="Center" TextWrapping="Wrap"/>
+                                                <TextBox Uid="fsl.x.redirfolder" x:Name="TxtFslRedirFolder" Grid.Column="1" Padding="8,6"/>
                                             </Grid>
                                             <StackPanel x:Name="PanelFslTemplate" Margin="0,10,0,0"/>
-                                            <TextBox x:Name="TxtFslRedirXml" Style="{DynamicResource SelectableText}" Margin="0,10,0,0" Height="200" AcceptsReturn="True" IsReadOnly="False" VerticalScrollBarVisibility="Auto" FontFamily="Cascadia Mono, Consolas" FontSize="12" Padding="10,8" Foreground="{DynamicResource Text}" AutomationProperties.Name="redirections.xml text"/>
+                                            <TextBox Uid="fsl.x.redirxml" x:Name="TxtFslRedirXml" Style="{DynamicResource SelectableText}" Margin="0,10,0,0" Height="200" AcceptsReturn="True" IsReadOnly="False" VerticalScrollBarVisibility="Auto" FontFamily="Cascadia Mono, Consolas" FontSize="12" Padding="10,8" Foreground="{DynamicResource Text}"/>
                                             <StackPanel Orientation="Horizontal" Margin="0,10,0,0">
-                                                <Button x:Name="BtnFslRedirGenerate" Content="Generate from template" Margin="0,0,8,0"/>
-                                                <Button x:Name="BtnFslRedirValidate" Content="Validate" Margin="0,0,8,0"/>
-                                                <Button x:Name="BtnFslRedirSave" Style="{DynamicResource PrimaryButton}" Content="Save to the folder" Margin="0,0,8,0"/>
-                                                <Button x:Name="BtnFslRedirUndo" Content="Undo last save"/>
+                                                <Button Uid="fsl.x.redirgenerate" x:Name="BtnFslRedirGenerate" Margin="0,0,8,0"/>
+                                                <Button Uid="fsl.x.redirvalidate" x:Name="BtnFslRedirValidate" Margin="0,0,8,0"/>
+                                                <Button Uid="fsl.x.redirsave" x:Name="BtnFslRedirSave" Style="{DynamicResource PrimaryButton}" Margin="0,0,8,0"/>
+                                                <Button Uid="fsl.x.redirundo" x:Name="BtnFslRedirUndo"/>
                                             </StackPanel>
                                             <TextBlock x:Name="TxtFslRedirState" Style="{DynamicResource Hint}" Margin="0,10,0,0" TextWrapping="Wrap"/>
                                         </StackPanel>
@@ -461,12 +461,12 @@
 
                                     <Border Style="{DynamicResource CardBox}" Margin="0,16,0,0" Background="{DynamicResource Card}" Padding="20,16">
                                         <StackPanel>
-                                            <TextBlock Text="Microsoft Defender exclusions" Style="{DynamicResource CardTitle}"/>
-                                            <TextBlock Style="{DynamicResource Hint}" Margin="0,4,0,0" TextWrapping="Wrap" Text="Microsoft's list for FSLogix (Learn, prerequisites). Registry keys and the mount points are on that list but are not Defender exclusion types: they are for other antivirus or DLP tools."/>
+                                            <TextBlock Uid="fsl.x.microsoftdefenderexclusi" Style="{DynamicResource CardTitle}"/>
+                                            <TextBlock Uid="fsl.x.microsoftslist" Style="{DynamicResource Hint}" Margin="0,4,0,0" TextWrapping="Wrap"/>
                                             <StackPanel x:Name="PanelFslDefender" Margin="0,8,0,0"/>
                                             <StackPanel Orientation="Horizontal" Margin="0,10,0,0">
-                                                <Button x:Name="BtnFslDefAdd" Style="{DynamicResource PrimaryButton}" Content="Add the missing exclusions" Margin="0,0,8,0"/>
-                                                <Button x:Name="BtnFslDefUndo" Content="Undo"/>
+                                                <Button Uid="fsl.x.defadd" x:Name="BtnFslDefAdd" Style="{DynamicResource PrimaryButton}" Margin="0,0,8,0"/>
+                                                <Button Uid="cust.btn.undo" x:Name="BtnFslDefUndo"/>
                                             </StackPanel>
                                             <TextBlock x:Name="TxtFslDefState" Style="{DynamicResource Hint}" Margin="0,10,0,0" TextWrapping="Wrap"/>
                                         </StackPanel>
@@ -474,47 +474,47 @@
 
                                     <Border Style="{DynamicResource CardBox}" Margin="0,16,0,0" Background="{DynamicResource Card}" Padding="20,16">
                                         <StackPanel>
-                                            <TextBlock Text="Function test" Style="{DynamicResource CardTitle}"/>
+                                            <TextBlock Uid="fsl.x.functiontest" Style="{DynamicResource CardTitle}"/>
                                             <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
                                                 <Border x:Name="PillFslTest" Style="{DynamicResource Pill}" Padding="10,2" VerticalAlignment="Center"><TextBlock x:Name="TxtFslTestPill" FontSize="12" FontWeight="SemiBold"/></Border>
                                                 <TextBlock x:Name="TxtFslTestSummary" Margin="12,0,0,0" VerticalAlignment="Center" TextWrapping="Wrap"/>
                                             </StackPanel>
                                             <StackPanel x:Name="PanelFslTest" Margin="0,8,0,0"/>
-                                            <TextBlock Style="{DynamicResource Hint}" Margin="0,8,0,0" TextWrapping="Wrap" Text="The test is part of the healthcheck: a master with a red or missing FSLogix test cannot be finished."/>
+                                            <TextBlock Uid="fsl.x.thetestis" Style="{DynamicResource Hint}" Margin="0,8,0,0" TextWrapping="Wrap"/>
                                         </StackPanel>
                                     </Border>
 
                                     <Border Style="{DynamicResource CardBox}" Margin="0,16,0,0" Background="{DynamicResource Card}" Padding="20,16">
                                         <StackPanel>
-                                            <TextBlock Text="Storage check (Azure)" Style="{DynamicResource CardTitle}"/>
-                                            <TextBlock Style="{DynamicResource Hint}" Margin="0,4,0,0" TextWrapping="Wrap" Text="Reads the storage account behind VHDLocations with your Azure sign-in (no key): identity, SMB settings, private endpoint, roles and the NTFS rights of the share root. The domain account is used for the comparison with the domain controller and for the access test as a domain user; its password stays in memory."/>
+                                            <TextBlock Uid="fsl.x.storagecheckazure" Style="{DynamicResource CardTitle}"/>
+                                            <TextBlock Uid="fsl.x.readsthestorage" Style="{DynamicResource Hint}" Margin="0,4,0,0" TextWrapping="Wrap"/>
                                             <Grid Margin="0,10,0,0">
                                                 <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
                                                 <Grid.ColumnDefinitions><ColumnDefinition Width="250"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
-                                                <TextBlock Text="Subscription ids (comma separated)" VerticalAlignment="Center" Margin="0,3,0,3"/>
-                                                <TextBox x:Name="TxtFslSubs" Grid.Column="1" Padding="8,6" Margin="0,3,0,3" AutomationProperties.Name="Subscription ids to search for the storage account"/>
-                                                <TextBlock Grid.Row="1" Text="Users group / administrators group" VerticalAlignment="Center" Margin="0,3,0,3"/>
+                                                <TextBlock Uid="fsl.x.subscriptionidscomma" VerticalAlignment="Center" Margin="0,3,0,3"/>
+                                                <TextBox Uid="fsl.x.subs" x:Name="TxtFslSubs" Grid.Column="1" Padding="8,6" Margin="0,3,0,3"/>
+                                                <TextBlock Uid="fsl.x.usersgroupadministrators" Grid.Row="1" VerticalAlignment="Center" Margin="0,3,0,3"/>
                                                 <StackPanel Grid.Row="1" Grid.Column="1" Orientation="Horizontal" Margin="0,3,0,3">
-                                                    <ComboBox x:Name="CmbFslUsersGroup" Width="230" IsEditable="True" Margin="0,0,8,0" AutomationProperties.Name="Users group (name or SID)"/>
-                                                    <ComboBox x:Name="CmbFslAdminsGroup" Width="230" IsEditable="True" AutomationProperties.Name="Administrators group (name or SID)"/>
+                                                    <ComboBox Uid="fsl.x.usersgroup" x:Name="CmbFslUsersGroup" Width="230" IsEditable="True" Margin="0,0,8,0"/>
+                                                    <ComboBox Uid="fsl.x.adminsgroup" x:Name="CmbFslAdminsGroup" Width="230" IsEditable="True"/>
                                                 </StackPanel>
-                                                <TextBlock Grid.Row="2" Text="Domain controller" VerticalAlignment="Center" Margin="0,3,0,3"/>
-                                                <TextBox x:Name="TxtFslDc" Grid.Row="2" Grid.Column="1" Padding="8,6" Margin="0,3,0,3" AutomationProperties.Name="Domain controller"/>
-                                                <TextBlock Grid.Row="3" Text="Domain account (test user)" VerticalAlignment="Center" Margin="0,3,0,3"/>
+                                                <TextBlock Uid="stage.title.domain" Grid.Row="2" VerticalAlignment="Center" Margin="0,3,0,3"/>
+                                                <TextBox Uid="fsl.x.fsldc" x:Name="TxtFslDc" Grid.Row="2" Grid.Column="1" Padding="8,6" Margin="0,3,0,3"/>
+                                                <TextBlock Uid="fsl.x.domainaccounttest" Grid.Row="3" VerticalAlignment="Center" Margin="0,3,0,3"/>
                                                 <StackPanel Grid.Row="3" Grid.Column="1" Orientation="Horizontal" Margin="0,3,0,3">
-                                                    <TextBox x:Name="TxtFslUser" Width="230" Padding="8,6" Margin="0,0,8,0" AutomationProperties.Name="Domain account"/>
-                                                    <PasswordBox x:Name="PwdFslPassword" Width="230" Padding="8,6" AutomationProperties.Name="Password of the domain account"/>
+                                                    <TextBox Uid="fsl.x.user" x:Name="TxtFslUser" Width="230" Padding="8,6" Margin="0,0,8,0"/>
+                                                    <PasswordBox Uid="fsl.x.password" x:Name="PwdFslPassword" Width="230" Padding="8,6"/>
                                                 </StackPanel>
-                                                <CheckBox x:Name="ChkFslKey" Grid.Row="4" Grid.ColumnSpan="2" Margin="0,6,0,0" Content="Allow the storage account key for this run, only if the role for the ACL is missing (full access; used in memory only, never saved)"/>
+                                                <CheckBox Uid="fsl.x.key" x:Name="ChkFslKey" Grid.Row="4" Grid.ColumnSpan="2" Margin="0,6,0,0"/>
                                             </Grid>
                                             <StackPanel Orientation="Horizontal" Margin="0,12,0,0">
-                                                <Button x:Name="BtnFslStorage" Style="{DynamicResource PrimaryButton}" Content="Run storage check" Margin="0,0,8,0" AutomationProperties.Name="Run the storage check"/>
-                                                <Button x:Name="BtnFslAclSet" Content="Set the recommended ACL" Visibility="Collapsed" AutomationProperties.Name="Set the recommended ACL on the share root" Margin="0,0,8,0"/>
-                                                <Button x:Name="BtnFslAclUndo" Content="Undo the ACL" Visibility="Collapsed" AutomationProperties.Name="Put back the ACL the share root had before AVDTune set it"/>
+                                                <Button Uid="fsl.x.storage" x:Name="BtnFslStorage" Style="{DynamicResource PrimaryButton}" Margin="0,0,8,0"/>
+                                                <Button Uid="fsl.x.aclset" x:Name="BtnFslAclSet" Visibility="Collapsed" Margin="0,0,8,0"/>
+                                                <Button Uid="fsl.x.aclundo" x:Name="BtnFslAclUndo" Visibility="Collapsed"/>
                                             </StackPanel>
                                             <TextBlock x:Name="TxtFslStorageSummary" Margin="0,10,0,0" TextWrapping="Wrap"/>
                                             <StackPanel x:Name="PanelFslStorage" Margin="0,8,0,0"/>
-                                            <TextBox x:Name="TxtFslAclDiff" Style="{DynamicResource SelectableText}" Margin="0,10,0,0" Height="120" AcceptsReturn="True" VerticalScrollBarVisibility="Auto" FontFamily="Cascadia Mono, Consolas" FontSize="12" Padding="10,8" Foreground="{DynamicResource Text}" Visibility="Collapsed" AutomationProperties.Name="ACL diff"/>
+                                            <TextBox Uid="fsl.x.acldiff" x:Name="TxtFslAclDiff" Style="{DynamicResource SelectableText}" Margin="0,10,0,0" Height="120" AcceptsReturn="True" VerticalScrollBarVisibility="Auto" FontFamily="Cascadia Mono, Consolas" FontSize="12" Padding="10,8" Foreground="{DynamicResource Text}" Visibility="Collapsed"/>
                                         </StackPanel>
                                     </Border>
                                 </StackPanel>
@@ -528,11 +528,11 @@
                                     <Grid>
                                         <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
                                         <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-                                        <TextBlock Text="Update block" Style="{DynamicResource PageTitle}"/>
-                                        <TextBlock x:Name="TxtBlockSubtitle" Grid.Row="1" Grid.ColumnSpan="2" Style="{DynamicResource Subtitle}" Text="Everything that offers or runs updates is hidden and off for users. Maintenance mode lifts it for the own AVDTune run only."/>
+                                        <TextBlock Uid="nav.updateblock" Style="{DynamicResource PageTitle}"/>
+                                        <TextBlock Uid="ublk.x.blocksubtitle" x:Name="TxtBlockSubtitle" Grid.Row="1" Grid.ColumnSpan="2" Style="{DynamicResource Subtitle}"/>
                                         <StackPanel x:Name="PanelBlockHead" Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center" Margin="24,0,0,0">
-                                            <Button x:Name="BtnBlockOff" Content="Switch off" Margin="0,0,8,0" AutomationProperties.Name="Switch the update block off"/>
-                                            <Button x:Name="BtnBlockOn" Style="{DynamicResource PrimaryButton}" Content="Switch on" AutomationProperties.Name="Switch the update block on"/>
+                                            <Button Uid="ublk.x.blockoff" x:Name="BtnBlockOff" Margin="0,0,8,0"/>
+                                            <Button Uid="ublk.x.blockon" x:Name="BtnBlockOn" Style="{DynamicResource PrimaryButton}"/>
                                         </StackPanel>
                                     </Grid>
                                     <Border Style="{DynamicResource CardBox}" Margin="0,16,0,0" Background="{DynamicResource Card}" Padding="20,16">
@@ -546,14 +546,14 @@
                                     </Border>
                                     <Border x:Name="BoxBlockCrash" Visibility="Collapsed" Style="{DynamicResource CardBox}" Margin="0,16,0,0" Background="{DynamicResource ErrorBg}" Padding="20,14">
                                         <StackPanel>
-                                            <TextBlock Text="Maintenance mode did not end properly" FontWeight="SemiBold" Foreground="{DynamicResource Danger}"/>
+                                            <TextBlock Uid="ublk.x.maintenancemodedid" FontWeight="SemiBold" Foreground="{DynamicResource Danger}"/>
                                             <TextBlock x:Name="TxtBlockCrash" TextWrapping="Wrap" Margin="0,4,0,0"/>
-                                            <Button x:Name="BtnBlockRepair" Content="Repair the update block" HorizontalAlignment="Left" Margin="0,10,0,0"/>
+                                            <Button Uid="ublk.x.blockrepair" x:Name="BtnBlockRepair" HorizontalAlignment="Left" Margin="0,10,0,0"/>
                                         </StackPanel>
                                     </Border>
                                     <Border Style="{DynamicResource CardBox}" Margin="0,16,0,0" Background="{DynamicResource Card}" Padding="20,16">
                                         <StackPanel>
-                                            <TextBlock Text="Settings of the block" Style="{DynamicResource CardTitle}"/>
+                                            <TextBlock Uid="ublk.x.settingsofthe" Style="{DynamicResource CardTitle}"/>
                                             <StackPanel x:Name="PanelBlockItems" Margin="0,6,0,0"/>
                                         </StackPanel>
                                     </Border>
@@ -568,16 +568,16 @@
                                     <Grid>
                                         <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
                                         <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-                                        <TextBlock Text="User experience" Style="{DynamicResource PageTitle}"/>
-                                        <TextBlock x:Name="TxtUxSubtitle" Grid.Row="1" Grid.ColumnSpan="2" Style="{DynamicResource Subtitle}" Text="What users see on the desktop of the image. Now: the watermark for pilot hosts. Wallpaper, Start layout and shortcuts follow."/>
+                                        <TextBlock Uid="nav.userexperience" Style="{DynamicResource PageTitle}"/>
+                                        <TextBlock Uid="ux.x.subtitle" x:Name="TxtUxSubtitle" Grid.Row="1" Grid.ColumnSpan="2" Style="{DynamicResource Subtitle}"/>
                                         <StackPanel x:Name="PanelUxHead" Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center" Margin="24,0,0,0">
-                                            <Button x:Name="BtnWmRemove" Content="Remove from this master" Margin="0,0,8,0" AutomationProperties.Name="Remove the watermark from this master"/>
-                                            <Button x:Name="BtnWmInstall" Style="{DynamicResource PrimaryButton}" Content="Install on this master" AutomationProperties.Name="Install the watermark on this master"/>
+                                            <Button Uid="ux.x.remove" x:Name="BtnWmRemove" Margin="0,0,8,0"/>
+                                            <Button Uid="ux.x.install" x:Name="BtnWmInstall" Style="{DynamicResource PrimaryButton}"/>
                                         </StackPanel>
                                     </Grid>
                                     <Border Style="{DynamicResource CardBox}" Margin="0,16,0,0" Background="{DynamicResource Card}" Padding="20,16">
                                         <StackPanel>
-                                            <TextBlock Text="Watermark" Style="{DynamicResource CardTitle}"/>
+                                            <TextBlock Uid="ux.x.watermark" Style="{DynamicResource CardTitle}"/>
                                             <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
                                                 <Border x:Name="PillWm" Style="{DynamicResource Pill}" Padding="10,2" VerticalAlignment="Center"><TextBlock x:Name="TxtWmPill" FontSize="12" FontWeight="SemiBold"/></Border>
                                                 <TextBlock x:Name="TxtWmSummary" Margin="12,0,0,0" VerticalAlignment="Center" TextWrapping="Wrap"/>
@@ -587,58 +587,58 @@
                                     </Border>
                                     <Border x:Name="BoxWmLegacy" Visibility="Collapsed" Style="{DynamicResource CardBox}" Margin="0,16,0,0" Background="{DynamicResource WarningBg}" Padding="20,14">
                                         <StackPanel>
-                                            <TextBlock Text="The old overlay is still on this master" FontWeight="SemiBold" Foreground="{DynamicResource Warning}"/>
+                                            <TextBlock Uid="ux.x.theoldoverlay" FontWeight="SemiBold" Foreground="{DynamicResource Warning}"/>
                                             <TextBlock x:Name="TxtWmLegacy" TextWrapping="Wrap" Margin="0,4,0,0"/>
-                                            <Button x:Name="BtnWmLegacy" Content="Remove the old overlay" HorizontalAlignment="Left" Margin="0,10,0,0" AutomationProperties.Name="Remove the old overlay"/>
+                                            <Button Uid="ux.x.legacy" x:Name="BtnWmLegacy" HorizontalAlignment="Left" Margin="0,10,0,0"/>
                                         </StackPanel>
                                     </Border>
                                     <Grid Margin="0,16,0,0">
                                         <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="16"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
                                         <Border Style="{DynamicResource CardBox}" Background="{DynamicResource Card}" Padding="20,16">
                                             <StackPanel>
-                                                <TextBlock Text="Settings" Style="{DynamicResource CardTitle}"/>
+                                                <TextBlock Uid="upd.x.settings" Style="{DynamicResource CardTitle}"/>
                                                 <Grid Margin="0,10,0,0">
                                                     <Grid.ColumnDefinitions><ColumnDefinition Width="140"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
                                                     <Grid.RowDefinitions>
                                                         <RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/>
                                                         <RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/>
                                                     </Grid.RowDefinitions>
-                                                    <TextBlock Text="Computer name pattern" VerticalAlignment="Center" Margin="0,0,0,8" TextWrapping="Wrap"/>
-                                                    <TextBox x:Name="TxtWmPattern" Grid.Column="1" Padding="8,6" Margin="0,0,0,8" AutomationProperties.Name="Computer name pattern, a regular expression"/>
-                                                    <TextBlock Text="Try a name" Grid.Row="1" VerticalAlignment="Center" Margin="0,0,0,2"/>
-                                                    <TextBox x:Name="TxtWmTryName" Grid.Row="1" Grid.Column="1" Padding="8,6" Margin="0,0,0,2" AutomationProperties.Name="Computer name to try the pattern on"/>
+                                                    <TextBlock Uid="ux.x.computernamepattern" VerticalAlignment="Center" Margin="0,0,0,8" TextWrapping="Wrap"/>
+                                                    <TextBox Uid="ux.x.pattern" x:Name="TxtWmPattern" Grid.Column="1" Padding="8,6" Margin="0,0,0,8"/>
+                                                    <TextBlock Uid="ux.x.tryaname" Grid.Row="1" VerticalAlignment="Center" Margin="0,0,0,2"/>
+                                                    <TextBox Uid="ux.x.tryname" x:Name="TxtWmTryName" Grid.Row="1" Grid.Column="1" Padding="8,6" Margin="0,0,0,2"/>
                                                     <TextBlock x:Name="TxtWmMatch" Grid.Row="2" Grid.ColumnSpan="2" Style="{DynamicResource Hint}" TextWrapping="Wrap" Margin="0,0,0,10"/>
-                                                    <TextBlock Text="Text" Grid.Row="3" VerticalAlignment="Center" Margin="0,0,0,8"/>
-                                                    <TextBox x:Name="TxtWmText" Grid.Row="3" Grid.Column="1" Padding="8,6" Margin="0,0,0,8" AutomationProperties.Name="Watermark text"/>
-                                                    <TextBlock Text="Colour" Grid.Row="4" VerticalAlignment="Center" Margin="0,0,0,8"/>
+                                                    <TextBlock Uid="ux.x.text" Grid.Row="3" VerticalAlignment="Center" Margin="0,0,0,8"/>
+                                                    <TextBox Uid="ux.x.text2" x:Name="TxtWmText" Grid.Row="3" Grid.Column="1" Padding="8,6" Margin="0,0,0,8"/>
+                                                    <TextBlock Uid="ux.x.colour" Grid.Row="4" VerticalAlignment="Center" Margin="0,0,0,8"/>
                                                     <StackPanel Grid.Row="4" Grid.Column="1" Orientation="Horizontal" Margin="0,0,0,8">
-                                                        <TextBox x:Name="TxtWmColor" Width="110" Padding="8,6" AutomationProperties.Name="Colour as #RRGGBB"/>
+                                                        <TextBox Uid="ux.x.color" x:Name="TxtWmColor" Width="110" Padding="8,6"/>
                                                         <Border x:Name="BoxWmSwatch" Width="28" Height="28" CornerRadius="4" Margin="10,0,0,0" BorderThickness="1" BorderBrush="{DynamicResource Border}"/>
                                                     </StackPanel>
-                                                    <TextBlock Text="Opacity (10-100 %)" Grid.Row="5" VerticalAlignment="Center" Margin="0,0,0,8"/>
-                                                    <TextBox x:Name="TxtWmOpacity" Grid.Row="5" Grid.Column="1" Width="110" HorizontalAlignment="Left" Padding="8,6" Margin="0,0,0,8" AutomationProperties.Name="Opacity in percent"/>
-                                                    <TextBlock Text="Font size (8-96)" Grid.Row="6" VerticalAlignment="Center" Margin="0,0,0,8"/>
-                                                    <TextBox x:Name="TxtWmSize" Grid.Row="6" Grid.Column="1" Width="110" HorizontalAlignment="Left" Padding="8,6" Margin="0,0,0,8" AutomationProperties.Name="Font size"/>
-                                                    <TextBlock Text="Corner" Grid.Row="7" VerticalAlignment="Center" Margin="0,0,0,8"/>
-                                                    <ComboBox x:Name="CmbWmCorner" Grid.Row="7" Grid.Column="1" Width="170" HorizontalAlignment="Left" Margin="0,0,0,8" AutomationProperties.Name="Corner of every monitor"/>
-                                                    <TextBlock Text="Distance (0-500 px)" Grid.Row="8" VerticalAlignment="Center" Margin="0,0,0,8"/>
-                                                    <TextBox x:Name="TxtWmMargin" Grid.Row="8" Grid.Column="1" Width="110" HorizontalAlignment="Left" Padding="8,6" Margin="0,0,0,8" AutomationProperties.Name="Distance from the edge in pixels"/>
+                                                    <TextBlock Uid="ux.x.opacity10100" Grid.Row="5" VerticalAlignment="Center" Margin="0,0,0,8"/>
+                                                    <TextBox Uid="ux.x.opacity" x:Name="TxtWmOpacity" Grid.Row="5" Grid.Column="1" Width="110" HorizontalAlignment="Left" Padding="8,6" Margin="0,0,0,8"/>
+                                                    <TextBlock Uid="ux.x.fontsize8" Grid.Row="6" VerticalAlignment="Center" Margin="0,0,0,8"/>
+                                                    <TextBox Uid="ux.x.size" x:Name="TxtWmSize" Grid.Row="6" Grid.Column="1" Width="110" HorizontalAlignment="Left" Padding="8,6" Margin="0,0,0,8"/>
+                                                    <TextBlock Uid="ux.x.corner" Grid.Row="7" VerticalAlignment="Center" Margin="0,0,0,8"/>
+                                                    <ComboBox Uid="ux.x.corner2" x:Name="CmbWmCorner" Grid.Row="7" Grid.Column="1" Width="170" HorizontalAlignment="Left" Margin="0,0,0,8"/>
+                                                    <TextBlock Uid="ux.x.distance0500" Grid.Row="8" VerticalAlignment="Center" Margin="0,0,0,8"/>
+                                                    <TextBox Uid="ux.x.margin" x:Name="TxtWmMargin" Grid.Row="8" Grid.Column="1" Width="110" HorizontalAlignment="Left" Padding="8,6" Margin="0,0,0,8"/>
                                                 </Grid>
-                                                <CheckBox x:Name="ChkWmHeadless" Content="Start without any console window flash (conhost --headless)" Margin="0,6,0,2"/>
-                                                <TextBlock Text="powershell.exe -WindowStyle Hidden opens its console window before it hides it, so one can flash for a moment at logon. conhost --headless avoids that on current Windows 10 and 11, but Microsoft does not document it and some security tools flag it. Off by default." Style="{DynamicResource Hint}" TextWrapping="Wrap" Margin="24,0,0,8"/>
-                                                <CheckBox x:Name="ChkWmMs" Content="Also switch on the Microsoft QR code watermark (connection ID in every remote session)" Margin="0,6,0,2"/>
-                                                <TextBlock Text="For forensics: a photo of the screen can be traced to a session. Once it is on, only clients that support watermarking can connect (the others fail with an unspecific error); RemoteApp is not marked." Style="{DynamicResource Hint}" TextWrapping="Wrap" Margin="24,0,0,8"/>
+                                                <CheckBox Uid="ux.x.headless" x:Name="ChkWmHeadless" Margin="0,6,0,2"/>
+                                                <TextBlock Uid="ux.x.powershellexewindowstyle" Style="{DynamicResource Hint}" TextWrapping="Wrap" Margin="24,0,0,8"/>
+                                                <CheckBox Uid="ux.x.wmms" x:Name="ChkWmMs" Margin="0,6,0,2"/>
+                                                <TextBlock Uid="ux.x.forforensicsa" Style="{DynamicResource Hint}" TextWrapping="Wrap" Margin="24,0,0,8"/>
                                                 <TextBlock x:Name="TxtWmErrors" Foreground="{DynamicResource Danger}" TextWrapping="Wrap" Margin="0,4,0,0"/>
-                                                <Button x:Name="BtnWmSave" Content="Save settings" HorizontalAlignment="Left" Margin="0,10,0,0"/>
+                                                <Button Uid="off.x.save" x:Name="BtnWmSave" HorizontalAlignment="Left" Margin="0,10,0,0"/>
                                             </StackPanel>
                                         </Border>
                                         <Border Grid.Column="2" Style="{DynamicResource CardBox}" Background="{DynamicResource Card}" Padding="16" VerticalAlignment="Top">
                                             <StackPanel>
-                                                <TextBlock Text="Preview" Style="{DynamicResource CardTitle}"/>
-                                                <Border x:Name="BoxWmDesktop" Width="480" Height="270" Margin="0,10,0,0" Background="#FF3E5C8A" ClipToBounds="True" AutomationProperties.Name="Preview of one monitor">
+                                                <TextBlock Uid="ux.x.preview" Style="{DynamicResource CardTitle}"/>
+                                                <Border Uid="ux.x.desktop" x:Name="BoxWmDesktop" Width="480" Height="270" Margin="0,10,0,0" Background="#FF3E5C8A" ClipToBounds="True">
                                                     <Canvas x:Name="CanvasWm">
                                                         <Rectangle x:Name="RectWmTaskbar" Width="480" Height="8" Fill="#CC101820" Canvas.Top="262"/>
-                                                        <TextBlock x:Name="TxtWmPreview" FontWeight="Bold" Canvas.Left="0" Canvas.Top="0" AutomationProperties.Name="Watermark preview"/>
+                                                        <TextBlock Uid="ux.x.preview2" x:Name="TxtWmPreview" FontWeight="Bold" Canvas.Left="0" Canvas.Top="0"/>
                                                     </Canvas>
                                                 </Border>
                                                 <TextBlock x:Name="TxtWmPreviewNote" Style="{DynamicResource Hint}" TextWrapping="Wrap" Width="480" Margin="0,8,0,0"/>
@@ -647,7 +647,7 @@
                                     </Grid>
                                     <Border Style="{DynamicResource CardBox}" Margin="0,16,0,0" Background="{DynamicResource Card}" Padding="20,16">
                                         <StackPanel>
-                                            <TextBlock Text="On this master" Style="{DynamicResource CardTitle}"/>
+                                            <TextBlock Uid="ux.x.onthismaster" Style="{DynamicResource CardTitle}"/>
                                             <StackPanel x:Name="PanelWmItems" Margin="0,6,0,0"/>
                                             <TextBlock x:Name="TxtWmNotes" Style="{DynamicResource Hint}" Margin="0,10,0,0" TextWrapping="Wrap"/>
                                         </StackPanel>
@@ -663,11 +663,11 @@
                                     <Grid>
                                         <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
                                         <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-                                        <TextBlock Text="Benchmark" Style="{DynamicResource PageTitle}"/>
-                                        <TextBlock Grid.Row="1" Grid.ColumnSpan="2" Style="{DynamicResource Subtitle}" Text="Measures CPU, memory, OS disk, remote display and network of this master and compares it with the baseline. Nothing on the master is changed; Windows Update and the indexer are paused during the run and started again."/>
+                                        <TextBlock Uid="health.title.benchmark" Style="{DynamicResource PageTitle}"/>
+                                        <TextBlock Uid="bench.x.measurescpumemory" Grid.Row="1" Grid.ColumnSpan="2" Style="{DynamicResource Subtitle}"/>
                                         <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center" Margin="24,0,0,0">
-                                            <Button x:Name="BtnBenchQuick" Content="Quick run" Margin="0,0,8,0" AutomationProperties.Name="Start a quick benchmark"/>
-                                            <Button x:Name="BtnBenchFull" Style="{DynamicResource PrimaryButton}" Content="Full run" AutomationProperties.Name="Start a full benchmark"/>
+                                            <Button Uid="bench.x.quick" x:Name="BtnBenchQuick" Margin="0,0,8,0"/>
+                                            <Button Uid="bench.x.full" x:Name="BtnBenchFull" Style="{DynamicResource PrimaryButton}"/>
                                         </StackPanel>
                                     </Grid>
                                     <Border x:Name="BoxBenchIntegrity" Style="{DynamicResource CardBox}" Margin="0,16,0,0" Background="{DynamicResource Card}" Padding="20,12">
@@ -697,19 +697,19 @@
                                     </Border>
                                     <Border x:Name="BoxBenchCrash" Visibility="Collapsed" Style="{DynamicResource CardBox}" Margin="0,16,0,0" Background="{DynamicResource ErrorBg}" Padding="20,14">
                                         <StackPanel>
-                                            <TextBlock Text="A benchmark did not end properly" FontWeight="SemiBold" Foreground="{DynamicResource Danger}"/>
+                                            <TextBlock Uid="bench.x.abenchmarkdid" FontWeight="SemiBold" Foreground="{DynamicResource Danger}"/>
                                             <TextBlock x:Name="TxtBenchCrash" TextWrapping="Wrap" Margin="0,4,0,0"/>
-                                            <Button x:Name="BtnBenchRepair" Content="Restore Windows Update and the indexer" HorizontalAlignment="Left" Margin="0,10,0,0"/>
+                                            <Button Uid="bench.x.repair" x:Name="BtnBenchRepair" HorizontalAlignment="Left" Margin="0,10,0,0"/>
                                         </StackPanel>
                                     </Border>
                                     <TextBlock x:Name="TxtBenchState" Style="{DynamicResource Hint}" Margin="0,12,0,0" TextWrapping="Wrap"/>
-                                    <ProgressBar x:Name="BarBench" Height="6" Minimum="0" Maximum="100" Margin="0,8,0,0" Visibility="Collapsed" AutomationProperties.Name="Benchmark progress"/>
+                                    <ProgressBar Uid="bench.x.bench" x:Name="BarBench" Height="6" Minimum="0" Maximum="100" Margin="0,8,0,0" Visibility="Collapsed"/>
                                     <Border x:Name="BoxBenchProvisional" Visibility="Collapsed" Style="{DynamicResource CardBox}" Margin="0,16,0,0" Background="{DynamicResource WarningBg}" Padding="20,12">
                                         <TextBlock x:Name="TxtBenchProvisional" TextWrapping="Wrap"/>
                                     </Border>
                                     <Border Style="{DynamicResource CardBox}" Margin="0,16,0,0" Background="{DynamicResource Card}" Padding="20,16">
                                         <StackPanel>
-                                            <TextBlock x:Name="TxtBenchTitle" Text="Result" Style="{DynamicResource CardTitle}"/>
+                                            <TextBlock Uid="bench.result" x:Name="TxtBenchTitle" Style="{DynamicResource CardTitle}"/>
                                             <TextBlock x:Name="TxtBenchScore" FontSize="32" FontWeight="SemiBold" Margin="0,6,0,0"/>
                                             <TextBlock x:Name="TxtBenchMeta" Style="{DynamicResource Hint}" Margin="0,4,0,0" TextWrapping="Wrap"/>
                                             <StackPanel x:Name="PanelBenchCats" Margin="0,12,0,0"/>
@@ -734,7 +734,7 @@
                                     </Border>
                                     <Border Style="{DynamicResource CardBox}" Margin="0,16,0,0" Background="{DynamicResource Card}" Padding="20,16">
                                         <StackPanel>
-                                            <TextBlock Text="Earlier runs" Style="{DynamicResource CardTitle}"/>
+                                            <TextBlock Uid="bench.x.earlierruns" Style="{DynamicResource CardTitle}"/>
                                             <StackPanel x:Name="PanelBenchHistory" Margin="0,6,0,0"/>
                                         </StackPanel>
                                     </Border>
@@ -749,9 +749,9 @@
                                     <Grid>
                                         <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
                                         <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-                                        <TextBlock Text="Cleanup and finish" Style="{DynamicResource PageTitle}"/>
-                                        <TextBlock x:Name="TxtSealSubtitle" Grid.Row="1" Grid.ColumnSpan="2" Style="{DynamicResource Subtitle}" Text="The last button of an image version. The master is never sysprepped: AVDTune cleans up, puts the update block in its end state, removes every token and closes the version; the image is made by your imaging tool afterwards."/>
-                                        <Button x:Name="BtnSealRun" Grid.Column="1" Style="{DynamicResource PrimaryButton}" Content="Finish" VerticalAlignment="Center" Margin="24,0,0,0" AutomationProperties.Name="Finish this image version"/>
+                                        <TextBlock Uid="nav.seal" Style="{DynamicResource PageTitle}"/>
+                                        <TextBlock Uid="seal.x.subtitle" x:Name="TxtSealSubtitle" Grid.Row="1" Grid.ColumnSpan="2" Style="{DynamicResource Subtitle}"/>
+                                        <Button Uid="seal.x.run" x:Name="BtnSealRun" Grid.Column="1" Style="{DynamicResource PrimaryButton}" VerticalAlignment="Center" Margin="24,0,0,0"/>
                                     </Grid>
                                     <StackPanel Orientation="Horizontal" Margin="0,12,0,0">
                                         <TextBlock Uid="seal.end.label" VerticalAlignment="Center" Margin="0,0,8,0"/>
@@ -773,14 +773,14 @@
                                     </Border>
                                     <Border x:Name="BoxSealCrash" Visibility="Collapsed" Style="{DynamicResource CardBox}" Margin="0,16,0,0" Background="{DynamicResource ErrorBg}" Padding="20,14">
                                         <StackPanel>
-                                            <TextBlock Text="The last finish did not end properly" FontWeight="SemiBold" Foreground="{DynamicResource Danger}"/>
+                                            <TextBlock Uid="seal.x.thelastfinish" FontWeight="SemiBold" Foreground="{DynamicResource Danger}"/>
                                             <TextBlock x:Name="TxtSealCrash" TextWrapping="Wrap" Margin="0,4,0,0"/>
-                                            <Button x:Name="BtnSealRepair" Content="Repair" HorizontalAlignment="Left" Margin="0,10,0,0" AutomationProperties.Name="Repair the interrupted finish"/>
+                                            <Button Uid="seal.x.repair" x:Name="BtnSealRepair" HorizontalAlignment="Left" Margin="0,10,0,0"/>
                                         </StackPanel>
                                     </Border>
                                     <Border Style="{DynamicResource CardBox}" Margin="0,16,0,0" Background="{DynamicResource Card}" Padding="20,16">
                                         <StackPanel>
-                                            <TextBlock Text="What the finish does" Style="{DynamicResource CardTitle}"/>
+                                            <TextBlock Uid="seal.x.whatthefinish" Style="{DynamicResource CardTitle}"/>
                                             <StackPanel x:Name="PanelSealSteps" Margin="0,6,0,0"/>
                                             <TextBlock x:Name="TxtSealLater" Style="{DynamicResource Hint}" Margin="0,10,0,0" TextWrapping="Wrap"/>
                                         </StackPanel>
@@ -799,9 +799,9 @@
                                     </Border>
                                     <Border Style="{DynamicResource CardBox}" Background="{DynamicResource Card}" Margin="0,20,0,0" Padding="20,16">
                                         <StackPanel>
-                                            <TextBlock Text="What this page will do" Style="{DynamicResource CardTitle}"/>
+                                            <TextBlock Uid="ph.x.whatthispage" Style="{DynamicResource CardTitle}"/>
                                             <TextBlock x:Name="TxtPhText" TextWrapping="Wrap" Margin="0,8,0,0" Foreground="{DynamicResource Text}"/>
-                                            <TextBlock x:Name="TxtPhNote" Style="{DynamicResource Hint}" Margin="0,14,0,0" Text="Not built yet. Nothing on this page changes the master."/>
+                                            <TextBlock Uid="ph.x.note" x:Name="TxtPhNote" Style="{DynamicResource Hint}" Margin="0,14,0,0"/>
                                         </StackPanel>
                                     </Border>
                                 </StackPanel>

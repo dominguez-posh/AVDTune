@@ -783,6 +783,7 @@ try {
     $script:Answers = New-Object System.Collections.Queue
     function Set-Brush($Element, $Property, [string]$Key) { }
     function ConvertTo-Vis([bool]$On) { if ($On) { 'Visible' } else { 'Collapsed' } }
+    . (Join-Path $repo 'AVDTune-UiText.ps1'); [void](Initialize-AVDTuneLanguage -Folder (Join-Path $repo 'UI'))   # the page asks for its texts (T, #70)
     function New-Text([string]$Text, [string]$Style, [string]$Margin = '0,0,0,0') { $t = New-Object System.Windows.Controls.TextBlock; $t.Text = $Text; $t }
     function New-UpdGroupHead([string]$Text) { New-Text $Text }
     function Add-Click($Control, [scriptblock]$Action) { }
